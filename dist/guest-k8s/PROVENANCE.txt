@@ -1,0 +1,46 @@
+Morbstack Kubernetes payload provenance
+=======================================
+
+This directory holds the OPTIONAL Kubernetes payload. It is NOT baked into
+the initramfs: Kubernetes is off by default, and a 118 MB payload in the
+initramfs would be paid for in guest RAM on every boot including the common
+one where nobody wants a cluster. Instead morbstackd reads the copy under
+${MORBSTACK_HOME}/data/k8s and streams it into the guest over vsock port
+2377 the first time `morb k8s enable` runs, where morbinit writes it to the
+persistent ext4 disk. A guest that has never been enabled reports
+Kubernetes as "not-installed" and carries none of these bytes.
+
+File: k3s
+Source: https://github.com/k3s-io/k3s/releases/download/v1.36.2%2Bk3s1/k3s-arm64
+Version: v1.36.2+k3s1
+sha256: 1dc5fc17f15c28fa0a3f011cee28ad613f918c3d967a426e5a05d43ddb239817
+Verification: sha256 pinned in scripts/fetch-guest-assets.sh AND re-checked
+on every fetch against upstream's own release sidecar
+(https://github.com/k3s-io/k3s/releases/download/v1.36.2%2Bk3s1/sha256sum-arm64.txt, the "k3s-arm64" line).
+
+File: cri-dockerd
+Source: https://github.com/Mirantis/cri-dockerd/releases/download/v0.4.4/cri-dockerd-0.4.4.arm64.tgz
+Version: v0.4.4
+Archive sha256: 4f96b4e9b7fcb1c90f78470325c2197a67fa28c0e0c901509437b791f5588a37
+Member: cri-dockerd/cri-dockerd
+Final sha256: d52b7a79376560d7dcb5490e16dcb78578bd0f040c1e70dec220824fae74ae7e
+Verification: both the archive and the single extracted binary are pinned.
+Mirantis publishes no sha256 sidecar for these assets, so unlike k3s there
+is no upstream-provided second opinion to cross-check against.
+
+Why two binaries rather than k3s's embedded shim
+------------------------------------------------
+k3s vendors cri-dockerd and can run it in-process (`k3s server --docker`),
+which would save ~49 MB. Morbstack deliberately ships the standalone binary
+instead: morbinit supervises cri-dockerd as a service in its own right, with
+its own SIGTERM/SIGKILL ladder and its own restart backoff, so a shim that
+wedges is restarted on its own instead of taking the control plane with it.
+
+Why cri-dockerd at all
+----------------------
+The cluster is wired to the SAME dockerd the Docker socket relay serves, so
+an image produced by `docker build` is immediately runnable in the cluster
+with no registry push and no `kind load`. That is the whole reason this is
+not just an embedded containerd.
+
+Fetched by scripts/fetch-guest-assets.sh (--k8s-only).

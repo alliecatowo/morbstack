@@ -1,0 +1,31 @@
+# mise configuration for Morbstack.
+#
+# Pins the toolchain so `mise install` gives every contributor (and CI) the
+# same Rust compiler for the guest-side `morbinit` binary. Swift is not
+# managed here: it comes from the Xcode toolchain (macOS 26.4 / Swift 6.3).
+
+[tools]
+rust = "stable"
+
+# `mise run <task>` (or `mise <task>`) shells out to the matching `make`
+# target, so `make` remains the single source of truth for build logic and
+# `mise.toml` stays a thin, easily-audited entry point.
+[tasks.build]
+run = "make build"
+description = "Build the mac daemon/CLI and the guest morbinit binary"
+
+[tasks.build-mac]
+run = "make build-mac"
+description = "Build morbstackd and morb (Swift)"
+
+[tasks.build-guest]
+run = "make build-guest"
+description = "Build morbinit (Rust, guest PID 1)"
+
+[tasks.test]
+run = "make test"
+description = "Run the Swift and Rust test suites"
+
+[tasks.clean]
+run = "make clean"
+description = "Remove build outputs"

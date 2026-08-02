@@ -1,0 +1,25 @@
+Morbstack base rootfs provenance
+==================================
+
+File: alpine-minirootfs.tar.gz
+Source: https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/aarch64/alpine-minirootfs-3.24.1-aarch64.tar.gz
+Alpine version: 3.24.1 (latest-stable aarch64 minirootfs at time of fetch;
+                3.24.0 was also present in the directory, chose the newer
+                3.24.1 point release)
+Size: 4023732 bytes
+
+sha256: f55a90f69052c5bd6f92cb09a8f47065970830b194c917a006fb94028e721259
+sha512: c056b9b716330d4562a9ab43bbbd2c4a6e468f49fae65b5d4a62c06aa9032e231d4f1405771a163f7de835f3bed5e8addc3589edb022b791b4ef4bddccfa7b6e
+
+Verification: BOTH sha256 and sha512 were fetched from Alpine's own CDN
+sidecar checksum files:
+  https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/aarch64/alpine-minirootfs-3.24.1-aarch64.tar.gz.sha256
+  https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/aarch64/alpine-minirootfs-3.24.1-aarch64.tar.gz.sha512
+and both matched the locally computed hashes exactly (full match, not
+truncated/prefix match).
+
+Status: downloaded and verified only. NOT extracted/unpacked and NOT
+grafted with morbinit or the Docker binaries yet, per task instructions
+(morbinit isn't compiled yet). This tarball is the intended base layer:
+future work should extract it, then overlay guest/morbinit (once built,
+see dist/CROSS_COMPILE.md) and the binaries in dist/guest-bin/ on top.

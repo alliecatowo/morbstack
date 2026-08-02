@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+		com.apple.security.virtualization is required to create a
+		VZVirtualMachine. morbstackd must be signed with it before it can boot
+		the guest; "make sign" does that with an ad-hoc signature.
+
+		Keep this file free of angle brackets outside real tags, including
+		inside comments. codesign hands entitlements to AMFI's own XML parser,
+		which is stricter than plutil: a placeholder such as an angle-bracketed
+		word in a comment makes it fail with "AMFIUnserializeXML: syntax error".
+	-->
+	<key>com.apple.security.virtualization</key>
+	<true/>
+</dict>
+</plist>

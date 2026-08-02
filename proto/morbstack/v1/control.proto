@@ -1,0 +1,203 @@
+// Copyright 2026 The Morbstack Authors.
+// SPDX-License-Identifier: Apache-2.0
+//
+// This is the v1 contract for the Morbstack guest control plane.
+//
+// M0 does NOT implement this service over gRPC. M0 ships the "MRB0"
+// framed-JSON subset documented in docs/protocol.md, running directly over
+// the vsock control channel (port 1024) between morbstackd and morbinit.
+// That subset is a deliberate, hand-rolled stand-in for the RPCs defined
+// here: {"type":"ping"} / {"type":"pong",...} correspond to Ping/PingReply,
+// {"type":"info"} to Info/InfoReply, {"type":"clock_sync",...} to
+// ClockSync/ClockSyncReply, and {"type":"shutdown"} to Shutdown/ShutdownReply.
+// There is no MRB0 equivalent of StreamEvents in M0.
+//
+// A second, unrelated vsock protocol exists alongside MRB0 as of M0: the
+// stream-dial handshake on vsock port 2376 (docs/protocol.md §3.2), used to
+// reach published container ports from the host. It has no RPC here and no
+// gRPC equivalent planned — it is a thin connection-establishment preamble,
+// not a control-plane message exchange, so it does not belong in this
+// service definition even once the swap below happens.
+//
+// One fidelity note on where MRB0's behavior today falls short of what the
+// ClockSync RPC doc comment below describes as the target (see
+// docs/protocol.md §1 for the full detail): ClockSync is observe-and-log
+// only in the MRB0 subset. morbinit logs the host/guest delta and does not
+// call clock_settime(2). The "so the guest clock does not drift" framing on
+// the RPC below is the reason this RPC exists, not a description of M0's
+// guest behavior yet.
+//
+// gRPC lands once the Swift and Rust gRPC toolchains are vendored for
+// offline builds (Morbstack ships zero external package dependencies as of
+// M0 — see repo root mise.toml and Package.swift / Cargo.toml). Until then,
+// this file exists so the shape of the eventual wire contract is reviewed
+// and stable ahead of the implementation swap. Field numbers and names in
+// this file are the ones the MRB0 JSON payloads are expected to map onto
+// 1:1 when the swap happens.
+
+syntax = "proto3";
+
+package morbstack.v1;
+
+option swift_prefix = "Morb";
+
+// GuestControl is implemented by morbinit (guest PID 1) and called by
+// morbstackd (host) over the vsock control channel, vsock port 1024.
+service GuestControl {
+  // Liveness check. Cheap, side-effect-free, safe to poll.
+  rpc Ping(PingRequest) returns (PingReply);
+
+  // Static and near-static facts about the guest environment.
+  rpc Info(InfoRequest) returns (InfoReply);
+
+  // Pushes the host's notion of current time into the guest so the guest
+  // clock does not drift after suspend/resume (the VM has no independent
+  // RTC source it can trust across a suspend-to-zero cycle).
+  rpc ClockSync(ClockSyncRequest) returns (ClockSyncReply);
+
+  // Requests an orderly guest shutdown (stop dockerd/containerd/buildkitd,
+  // sync filesystems, power off). morbinit acknowledges before it begins
+  // tearing the guest down. M0 note: buildkitd is not yet a supervised
+  // service (`supervisor.rs`'s default_services lists only containerd and
+  // dockerd — see docs/architecture.md, Guest side), so today's MRB0
+  // `shutdown` only stops those two; this RPC's doc comment describes the
+  // target once buildkitd is bundled (M1).
+  rpc Shutdown(ShutdownRequest) returns (ShutdownReply);
+
+  // Long-lived server-streaming feed of guest-side events: service state
+  // transitions (dockerd/containerd/buildkitd up/down/crashed), selected
+  // log lines worth surfacing in the host UI, and OOM notifications from
+  // the guest kernel. Not present in the M0 MRB0 subset. Same buildkitd
+  // caveat as Shutdown above: only containerd/dockerd exist to report
+  // state transitions for until M1.
+  rpc StreamEvents(EventsRequest) returns (stream Event);
+}
+
+message PingRequest {}
+
+message PingReply {
+  // Milliseconds since morbinit took over PID 1 in the current boot.
+  // Resets to zero on every cold boot; does NOT reset on suspend/resume
+  // (suspend-to-zero preserves guest state, including uptime).
+  uint64 uptime_ms = 1;
+}
+
+message InfoRequest {}
+
+message InfoReply {
+  // Version of morbinit itself, e.g. "0.1.0-m0" — semver with the milestone
+  // as a prerelease suffix. Matches `morbinit --version`.
+  string morbinit_version = 1;
+
+  // `uname -r` (or equivalent) of the running guest kernel, e.g.
+  // "6.18.15" for the M0 kata-containers kernel currently shipped (see
+  // docs/architecture.md, Guest side / Kernel). Earlier drafts of this
+  // comment used a "-morbstack" suffix implying a custom kernel build;
+  // M0 boots a stock, unmodified upstream kernel, so the string here is
+  // whatever that kernel's own release reports, with no added suffix.
+  string kernel = 2;
+
+  // Guest CPU architecture as reported by the kernel, e.g. "arm64" or
+  // "x86_64" (the latter only when running under Rosetta/qemu/FEX-Emu
+  // translation on Apple silicon hosts).
+  //
+  // Not yet populated by the MRB0 `info` reply as of M0 (control.rs does
+  // not report it); reserved here so the field number is settled ahead of
+  // the gRPC swap.
+  string arch = 3;
+
+  // Whether dockerd's Unix socket (/var/run/docker.sock) has accepted a
+  // connection yet — i.e. whether the Docker Engine API behind the vsock
+  // 2375 relay is actually usable, as opposed to merely "the guest control
+  // channel answered." Present on the MRB0 `info` reply as of M0
+  // (guest/morbinit/src/control.rs, backed by a readiness-monitor thread
+  // that flips it false->true once and never back), and parsed host-side
+  // by mac/Sources/MorbstackKit/GuestControl.swift's `GuestReply` — this
+  // field number reservation exists so the eventual gRPC `InfoReply` and
+  // today's MRB0 JSON field agree without a renumbering.
+  bool docker_ready = 4;
+
+  // Whether /var/lib/docker is backed by the formatted virtio disk
+  // (/dev/vda) rather than the guest's tmpfs fallback — i.e. whether
+  // anything pulled or built this boot will survive a stop/restart, not
+  // just whether the guest itself is reachable. Present on the MRB0
+  // `info` reply as of M0 (guest/morbinit/src/control.rs, decided once at
+  // boot by disk::provision) and parsed host-side the same way as
+  // docker_ready above. No MRB0 field number equivalent existed before
+  // this reservation; docker_data_on_disk is new relative to earlier
+  // drafts of this file, which only listed morbinit_version/kernel/arch/
+  // docker_ready here.
+  bool docker_data_on_disk = 5;
+}
+
+message ClockSyncRequest {
+  // Host wall-clock time at the moment this request was sent, expressed
+  // as nanoseconds since the Unix epoch (UTC).
+  int64 unix_nanos = 1;
+}
+
+message ClockSyncReply {}
+
+message ShutdownRequest {}
+
+message ShutdownReply {}
+
+message EventsRequest {}
+
+// A single event emitted by the guest. Exactly one of the oneof fields is
+// set per event.
+message Event {
+  // Monotonic-ish wall clock timestamp assigned by morbinit when the event
+  // was produced, nanoseconds since the Unix epoch (UTC).
+  int64 unix_nanos = 1;
+
+  oneof payload {
+    ServiceState service_state = 2;
+    LogLine log_line = 3;
+    Oom oom = 4;
+  }
+}
+
+// Reported whenever a guest-managed service transitions state. Services
+// supervised as of M0: "dockerd", "containerd" (see `supervisor.rs`'s
+// default_services). "buildkitd" is the M1 addition this field name list
+// is already sized for.
+message ServiceState {
+  enum State {
+    STATE_UNSPECIFIED = 0;
+    STARTING = 1;
+    RUNNING = 2;
+    STOPPING = 3;
+    STOPPED = 4;
+    CRASHED = 5;
+  }
+
+  // Service name, e.g. "dockerd".
+  string service = 1;
+
+  State state = 2;
+
+  // Populated only when state == CRASHED; last known exit code, if any.
+  optional int32 exit_code = 3;
+}
+
+// A single log line from a guest-managed service, forwarded to the host
+// for surfacing in daemon.log / the future host UI. Not every log line is
+// forwarded — only lines the guest judges worth surfacing (errors,
+// warnings, and lifecycle milestones).
+message LogLine {
+  // Originating service name, e.g. "dockerd".
+  string service = 1;
+
+  string line = 2;
+}
+
+// Reported when the guest kernel's OOM killer fires, so the host can
+// surface a diagnostic (and, longer term, adjust the memory balloon).
+message Oom {
+  // Name of the process the kernel selected as its OOM victim, if known.
+  string victim_process = 1;
+
+  // PID of the killed process, if known.
+  uint32 victim_pid = 2;
+}

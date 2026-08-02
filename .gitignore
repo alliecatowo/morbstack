@@ -1,0 +1,29 @@
+# Swift
+.build/
+.swiftpm/
+*.xcodeproj
+DerivedData/
+
+# Rust
+target/
+
+# Morbstack build/dev artifacts.
+#
+# dist/ holds vendored guest payloads: the upstream aarch64 Docker/containerd
+# binaries and the Alpine rootfs tarball (~220 MB). Those are large and
+# re-fetchable, so they stay out of git — but the provenance notes recording
+# exactly what was downloaded, from where, and with which hash must be
+# tracked, since they are the only durable record of that.
+dist/*
+!dist/*/
+!dist/CROSS_COMPILE.md
+dist/*/*
+!dist/*/PROVENANCE.txt
+
+.mise.local.toml
+
+# OS
+.DS_Store
+
+# Runtime data (never commit disk images or VM state)
+*.img

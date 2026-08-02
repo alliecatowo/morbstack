@@ -1,0 +1,9 @@
+Morbstack
+Copyright 2026 The Morbstack Authors
+
+This product includes software developed by The Morbstack Authors and
+licensed under the Apache License, Version 2.0. Morbstack runs unmodified
+upstream Moby (dockerd/containerd) binaries inside a guest Linux virtual
+machine; those components are separate works distributed under their own
+licenses and are not covered by this NOTICE. See each component's own
+distribution for its license and attribution requirements.

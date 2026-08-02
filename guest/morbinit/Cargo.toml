@@ -1,0 +1,22 @@
+[package]
+name = "morbinit"
+# Milestone-suffixed per the shared contract: everything in Morbstack is
+# 0.1.0-m0. src/main.rs reads this via CARGO_PKG_VERSION.
+version = "0.1.0-m0"
+edition = "2021"
+description = "Morbstack guest PID 1 (Linux init) — mounts, service supervisor, vsock control server."
+license = "Apache-2.0"
+
+[dependencies]
+# Intentionally empty: morbinit must build fully offline with only std +
+# hand-rolled FFI to system libc. See guest/morbinit/src/sys.rs.
+
+# Real deployment target is aarch64-unknown-linux-musl (a static, tiny
+# binary that runs as PID 1 inside the Morbstack guest VM). Size matters
+# because this binary ships inside the guest disk image / initramfs.
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+codegen-units = 1
+panic = "abort"

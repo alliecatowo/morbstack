@@ -1,0 +1,16 @@
+# Reproducible cross-compile for the real deployment target.
+#
+# morbinit ships inside the Morbstack guest initramfs as a static
+# aarch64-linux binary; the host toolchain is macOS/arm64. The linker below
+# comes from the messense/macos-cross-toolchains Homebrew tap — see
+# dist/CROSS_COMPILE.md for the one-time setup:
+#
+#   rustup target add aarch64-unknown-linux-musl
+#   brew tap messense/macos-cross-toolchains
+#   brew install messense/macos-cross-toolchains/aarch64-unknown-linux-musl
+#
+# The absolute path is deliberate: it makes
+# `cargo build --release --target aarch64-unknown-linux-musl` work without
+# anyone having to remember to put the toolchain's bin/ on PATH first.
+[target.aarch64-unknown-linux-musl]
+linker = "/opt/homebrew/opt/aarch64-unknown-linux-musl/bin/aarch64-unknown-linux-musl-gcc"

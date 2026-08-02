@@ -1,0 +1,107 @@
+Morbstack guest filesystem/networking tool apk provenance
+============================================================
+
+Source repo: https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/
+Index:       APKINDEX.tar.gz from that same directory (fetched over HTTPS,
+             used only to resolve exact version/release + the transitive
+             `so:`-dependency closure below; not shipped).
+
+Purpose: give the guest mkfs.btrfs / mkfs.ext4 (for formatting /dev/vda on
+first boot, see the persistence design) and legacy iptables/ip6tables (so
+dockerd can program bridge NAT). Requested roots were `btrfs-progs`,
+`e2fsprogs`, and `iptables`/`ip6tables`; the actual package set below is
+the full transitive `so:` dependency closure of those roots (minus `musl`
+and `zlib`, which are already present in dist/rootfs/alpine-minirootfs.tar.gz
+as /lib/libc.musl-aarch64.so.1 and /usr/lib/libz.so.1.3.2 respectively —
+confirmed by inspecting that tarball directly, not assumed).
+
+iptables note: Alpine 3.24's plain `iptables` apk is the nft-backed
+variant — its `D:` line pulls in so:libnftnl.so.11 and so:libmnl.so.0, and
+its `p:` (provides) line only advertises cmd:iptables-nft*, cmd:ip6tables-nft*
+etc, NOT a plain `iptables`/`ip6tables` command. Per task instructions
+("prefer the legacy binaries... avoids needing nft userspace"), this repo
+instead fetches `iptables-legacy`, which depends on so:libip4tc.so.2 /
+so:libip6tc.so.2 (the classic xtables-legacy libiptc, not libnftnl) and
+ships a single `xtables-legacy-multi` busybox-style multi-call binary at
+usr/sbin/xtables-legacy-multi, symlinked *only* as:
+  usr/sbin/iptables-legacy, usr/sbin/iptables-legacy-restore,
+  usr/sbin/iptables-legacy-save, usr/sbin/ip6tables-legacy(-restore|-save),
+  usr/bin/iptables-xml
+i.e. it does NOT ship anything literally named `iptables` or `ip6tables`
+(that naming is reserved for the nft package's alternatives system, which
+we don't install). scripts/mkinitramfs.sh therefore creates the plain
+names itself as symlinks -> xtables-legacy-multi when staging the
+initramfs (see the "iptables-legacy" section of that script) so dockerd
+(which execs a program literally named "iptables"/"ip6tables" on PATH)
+finds the legacy implementation.
+
+iptables note, part 2 (added after live testing): the plain `iptables`
+apk IS fetched after all, but only as the carrier for one directory —
+usr/lib/xtables/. That directory holds the 112 match/target extension
+modules (libxt_addrtype.so, libxt_MASQUERADE.so, libxt_conntrack.so,
+libxt_comment.so, libxt_multiport.so, ...) that libxtables dlopen()s at
+rule-parse time, and Alpine ships them in the main package and nowhere
+else. The legacy frontend needs them exactly as much as the nft one does:
+they are backend-agnostic, and their entire DT_NEEDED closure is
+{libc.musl-aarch64.so.1, libxtables.so.12} — both already present — so
+taking them adds no new dependency and does not reopen the nft question.
+scripts/mkinitramfs.sh stages `./usr/lib/xtables` out of this apk and
+drops its usr/sbin on the floor; that usr/sbin is the nft frontend
+(xtables-nft-multi, needing libnftnl/libmnl, which we still do not ship)
+and would additionally clobber the iptables/ip6tables symlinks described
+above. Shipping iptables-legacy without these modules was a shell with no
+ammunition: `iptables` resolved on PATH, then dockerd died on its very
+first NAT rule with
+
+  iptables v1.8.13 (legacy): Couldn't load match `addrtype':
+  No such file or directory
+
+leaving dockerd in a crash-restart loop and the whole engine unusable.
+Found by running the functional gate ladder against a real VM.
+
+Verification: each apk was downloaded once over HTTPS from
+dl-cdn.alpinelinux.org and its sha256 recorded below at fetch time
+(archive-hash-pinned for future reproducibility/tamper-detection), the
+same approach dist/guest-bin/PROVENANCE.txt uses for the Docker static
+binaries — Alpine does not publish a per-apk detached checksum sidecar
+the way it does for the minirootfs tarball (dist/rootfs/PROVENANCE.txt),
+and the in-index `C:` checksum uses apk-tools' own hashing convention
+(sha1 over the control+data tar streams, excluding the signature stream)
+rather than a plain whole-file digest, so it is not directly comparable
+to `sha256sum <file>` and was not used here.
+
+Cached under dist/apks/ (fetched once, re-fetched by
+scripts/fetch-guest-assets.sh --fsutils-only only if a cached file's
+hash no longer matches).
+
+  package             version    repo  sha256                                                            role
+  -------             -------    ----  ------                                                            ----
+  btrfs-progs         6.17.1-r1  main  56af3270c687b8e819566ff1c0f88c9e24cb4666d57c703d63d4283cb90fea88  mkfs.btrfs, btrfs, btrfsck, fsck.btrfs (sbin/)
+  e2fsprogs           1.47.4-r0  main  52fd401e79ce6b0ff7648733ba4de3135083cd0132543534e72106e7ea767a00  mke2fs, mkfs.ext2/3/4, e2fsck, fsck.ext2/3/4 (sbin/)
+  e2fsprogs-libs      1.47.4-r0  main  52124971ae397d599aadd79263fcd68fc9e271922ccf8185b124f35fe24c60c8  libe2p.so.2, libext2fs.so.2, libss.so.2
+  eudev-libs          3.2.14-r6  main  330022dcf23de371d8df9b08f9bf9c9e98ced062b7352b518ee977dcaf977956  libudev.so.1 (btrfs-progs dep)
+  iptables            1.8.13-r0  main  9d22aef2e74346e9d537f6dc964786ab14b35580e3ccc0e4001dc3a725e8fe77  usr/lib/xtables/libxt_*.so ONLY (112 extension modules); usr/sbin (nft frontend) deliberately not staged
+  iptables-legacy     1.8.13-r0  main  9fa392fcd54aa737c8d998a8bbec39c376a58f6587755726532ac6075f557409  xtables-legacy-multi + iptables-legacy/ip6tables-legacy symlinks (usr/sbin/, usr/bin/)
+  libblkid            2.42.1-r0  main  5de536dd5f80772946aebf99211695a1f4ad033568d5c9ebd0d7d1dead33de44  libblkid.so.1
+  libcom_err          1.47.4-r0  main  a75b5955ff57046e33fc2842cfe466dc77d8e68305d5c86c6646b38a069490a2  libcom_err.so.2 (e2fsprogs dep)
+  libeconf            0.8.3-r0   main  cf0899d49ded0a6891e3cdf1b37887f2ecd77293afe1d8f3cb8937763c83f183  libeconf.so.0 (libblkid dep)
+  libip4tc            1.8.13-r0  main  09d044b760836e8b26056a91e8794349fedf6c7ddeeed4e95640e4fe67cb9d66  libip4tc.so.2 (iptables-legacy dep)
+  libip6tc            1.8.13-r0  main  c5f41026c9ed74b1575d203ba9773cfebffd790ea84ef16ae9a4c030cb56ba94  libip6tc.so.2 (iptables-legacy dep)
+  libuuid             2.42.1-r0  main  d2f69552b05184ba205dbc8aa0e79f8a080fcf746ec5e5e25eb89d66fbbe6db6  libuuid.so.1
+  libxtables          1.8.13-r0  main  7535f18d9c7229178bc5e3809e5fea171033e33dfa054d88846512e1f25eefa8  libxtables.so.12 (iptables-legacy dep)
+  lzo                 2.10-r5    main  a4d2dc5c6174527784244aff061c330f5c66f28d45fa8588c8076d83f0d2822c  liblzo2.so.2 (btrfs-progs dep)
+  zstd-libs           1.5.7-r2   main  2bb5136c89f5b0bbe1554c8915a3b520d5aa63ae2a51d4d821eb81698db5a818  libzstd.so.1 (btrfs-progs dep)
+
+Explicitly NOT fetched (already present in dist/rootfs/alpine-minirootfs.tar.gz):
+  musl   1.2.6-r2  -> /lib/libc.musl-aarch64.so.1, /lib/ld-musl-aarch64.so.1
+  zlib   1.3.2-r0  -> /usr/lib/libz.so.1.3.2 (version matches exactly)
+
+Each .apk is a concatenation of gzip streams (signature.tar.gz +
+control.tar.gz + data.tar.gz per the apk v2 format); a plain `tar xzf`
+transparently decompresses all of them and interleaves their members,
+which is all scripts/mkinitramfs.sh needs — it extracts each apk into a
+scratch dir and copies over everything except `.PKGINFO` and `.SIGN.*`
+(the control-tar metadata/signature files, not part of the installed
+package).
+
+Fetched by scripts/fetch-guest-assets.sh (--fsutils-only).

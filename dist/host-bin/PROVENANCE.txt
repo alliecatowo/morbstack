@@ -1,0 +1,31 @@
+Morbstack host docker-compose CLI plugin provenance
+=====================================================
+
+File: docker-compose
+Source: https://github.com/docker/compose/releases/download/v5.3.1/docker-compose-darwin-aarch64
+Release: docker/compose v5.3.1 (latest release at time of fetch)
+Platform: darwin-aarch64 (host Mac, arm64 — this is a host CLI plugin
+          binary, not a guest asset; it never enters the VM/initramfs)
+sha256: 32691ba1196d819fa68cbdc0aad9a5569e730a35ae40c6fdd8458110ecd69488
+
+Verification: sha256 fetched from GitHub Release's own per-asset sidecar
+file (docker-compose-darwin-aarch64.sha256, published alongside the
+binary in the same release) and matched the locally computed hash
+exactly.
+
+`file` confirms: Mach-O 64-bit executable arm64. Runs standalone
+(`./docker-compose version` -> "Docker Compose version v5.3.1") on this
+host without needing `docker` on PATH first.
+
+Purpose: gate G4 (`docker compose up -d` via the standard compose CLI
+plugin) needs the `docker compose` subcommand, which the docker CLI
+resolves via its cli-plugins mechanism. This binary is fetched and cached
+here so the repo doesn't depend on the user having Docker Desktop (which
+normally ships its own copy) — but it is NOT installed into
+~/.docker/cli-plugins/ by this repo's tooling. Per task instructions, do
+not touch the user's dotfiles; the docs should tell users to symlink it
+themselves:
+  mkdir -p ~/.docker/cli-plugins
+  ln -sf "$(pwd)/dist/host-bin/docker-compose" ~/.docker/cli-plugins/docker-compose
+
+Fetched by scripts/fetch-guest-assets.sh (--compose-only).

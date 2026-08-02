@@ -1,0 +1,49 @@
+Morbstack guest Docker engine binaries provenance
+===================================================
+
+Source: https://download.docker.com/linux/static/stable/aarch64/
+Archive: docker-29.7.1.tgz  (latest available in that directory at time of
+         fetch; directory listing showed versions from docker-17.x era up
+         through 29.7.1 for the "stable" aarch64 channel)
+Archive sha256: 4eb4d1b21131897ed3990aac31039161bf4bdd07fcfb733e996010319ff4e069
+Archive size:   77317619 bytes
+Docker version: 29.7.1
+
+NOTE on checksum verification: download.docker.com's static binary
+directory does NOT publish a companion .sha256/.sha256sum/.asc file next
+to the tgz (checked docker-29.7.1.tgz.sha256, .sha256sum, .asc — all
+404). The sha256 above is what this download actually hashed to, recorded
+for future reproducibility/tamper-detection, but it is NOT independently
+verified against a Docker-published checksum (unlike GitHub-release
+artifacts which usually ship a checksums file). If stronger verification
+is needed later, cross-check against Docker's install script
+(get.docker.com) or docker/docker-install repo which sometimes pins
+hashes, or verify the extracted `docker` binary's `docker version`
+output/build metadata against the official release notes.
+
+docker-rootless-extras-29.7.1.tgz exists in the same directory but was
+intentionally SKIPPED per task instructions (not needed — rootless mode
+is irrelevant to Morbstack's single-VM-guest dockerd-as-root design).
+
+Extracted binaries (from docker/ inside the tgz) -> dist/guest-bin/:
+
+  file                        sha256                                                            arch/type
+  ----                        ------                                                            ---------
+  containerd                  9afba5d84c3de5cba841aab3645efec2f131ddb0b167682727c2af560d59dc33  ELF aarch64, statically linked (Go), stripped
+  containerd-shim-runc-v2     5068a6b0f28fb306204184109b0235c6c49f898cfc9f5fd5a1453935ceb9d6b7  ELF aarch64, statically linked (Go), stripped
+  ctr                         010d17a83c3b4777d249d748837afbf5f0c8a51a176d69051feb00ee775ae5a7  ELF aarch64, statically linked (Go), stripped
+  docker                      5cb021bfd638cdba5c96bfcc539b26c3d916387c76b0849fb0bed4e6c76d4ec0  ELF aarch64, statically linked (Go), with debug_info, not stripped
+  docker-init                 ab2244312e069c6c97bece2437f61fb01db474eae5b0f1ce006162e212eae5b0  ELF aarch64, statically linked, stripped (tini)
+  docker-proxy                a8c30594c9cd02db6d934987cff295d30474a1a63ac65b43342acb572c27e5cc  ELF aarch64, statically linked (Go), not stripped
+  dockerd                     c21f09a3e626b478d7aba9e0c0852e5468c87bc3616ca3774f4595d173a883bc  ELF aarch64, statically linked, not stripped
+  runc                        3e7ba3d1f270ec4253d689e39da6732a70b441eeae9910aedb07d6e566d8624a  ELF aarch64, static-pie linked, with debug_info, not stripped
+
+All 8 binaries verified via `file` to be ARM aarch64 and statically
+linked (no dynamic ELF interpreter), so they should run in a minimal
+guest rootfs (e.g. the Alpine minirootfs in dist/rootfs/) without needing
+matching libc/shared libraries.
+
+Download command used:
+  curl -L -o docker-29.7.1.tgz \
+    https://download.docker.com/linux/static/stable/aarch64/docker-29.7.1.tgz
+  tar xzf docker-29.7.1.tgz   # produces docker/{docker,dockerd,containerd,...}

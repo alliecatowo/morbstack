@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Copyright 2026 The Morbstack Authors.
+  Licensed under the Apache License, Version 2.0 (the "License").
+
+  Info.plist for Morbstack.app, assembled by `make app`.
+
+  Hand-written rather than generated: SwiftPM does not build app bundles, so the
+  Makefile lays the bundle out itself and this is the only place the bundle's identity
+  is declared.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+
+	<key>CFBundleExecutable</key>
+	<string>MorbstackApp</string>
+
+	<key>CFBundleIdentifier</key>
+	<string>dev.morbstack.app</string>
+
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+
+	<key>CFBundleName</key>
+	<string>Morbstack</string>
+
+	<key>CFBundleDisplayName</key>
+	<string>Morbstack</string>
+
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+
+	<key>CFBundleSignature</key>
+	<string>????</string>
+
+	<!-- Kept in step with MorbVersion.string by `make app`, which rewrites both
+	     version keys from the Swift source at assembly time. -->
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>0.1.0</string>
+
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+
+	<key>LSMinimumSystemVersion</key>
+	<string>15.0</string>
+
+	<!-- Morbstack has a real main window and belongs in the Dock and the app
+	     switcher. The MenuBarExtra is an addition to that, not a replacement for
+	     it: an agent app would be the wrong shape for something you spend time
+	     reading logs in. -->
+	<key>LSUIElement</key>
+	<false/>
+
+	<!-- The daemon owns the VM and outlives the UI, so quitting the last window
+	     should quit the app rather than leave an empty process in the Dock. -->
+	<key>NSSupportsAutomaticTermination</key>
+	<true/>
+	<key>NSSupportsSuddenTermination</key>
+	<false/>
+
+	<!-- Do not keep windows across a quit.
+
+	     Not a style preference — a bug fix. macOS keeps a per-bundle-identifier window
+	     restoration store, and on at least one machine that store got wedged: the launch
+	     logged hasPersistentStateToRestore=1, so AppKit expected restoration to produce
+	     the windows and SwiftUI's WindowGroup made none, and then restoration produced
+	     none either. The result is an app in the Dock with no window and no way to get
+	     one. The identical binary under a different bundle identifier showed a window on
+	     every launch, which is what pins it to the store rather than to the code.
+
+	     This key stops the app feeding that store. AppLaunchRescue.swift handles the
+	     other half: noticing a windowless launch, forcing a window open, and deleting the
+	     app's own saved-state directory so the next launch starts clean. Morbstack has
+	     nothing worth restoring anyway — the window shows live daemon state, which is
+	     re-read at launch regardless. -->
+	<key>NSQuitAlwaysKeepsWindows</key>
+	<false/>
+
+	<key>NSHighResolutionCapable</key>
+	<true/>
+
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright © 2026 The Morbstack Authors. Licensed under the Apache License, Version 2.0.</string>
+
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+</dict>
+</plist>

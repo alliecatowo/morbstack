@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: jdx/mise-action@v2
+
+      # Also exercises the documented first-run path. `mise trust` is what
+      # makes this work on a fresh checkout: mise refuses to read a config
+      # file it has not been told to trust.
+      - name: Set up toolchain
+        run: make setup
+
+      - name: Build
+        run: make build
+
+      - name: Test
+        run: make test
