@@ -132,17 +132,64 @@ echo "Using morbinit: ${MORBINIT_BIN}"
 # Stage the rootfs
 # ---------------------------------------------------------------------------
 
-STAGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/morbstack-initramfs.XXXXXX")"
+# The staging area has to be CASE-SENSITIVE, and a plain mktemp -d is not:
+# it lands on the Mac's boot volume, which is APFS in its default
+# case-INsensitive mode. That silently corrupts one specific package later
+# in this script — Alpine's iptables apk ships both
+# usr/lib/xtables/libxt_MARK.so (the MARK jump target kube-proxy's
+# iptables-restore needs) and usr/lib/xtables/libxt_mark.so (the unrelated
+# `-m mark` match module) in the same directory. Extracted onto a
+# case-insensitive filesystem, the second write silently clobbers the first
+# under the hood — `tar` reports no error, `ls` shows a plausible-looking
+# xtables/ directory, and the initramfs builds and boots fine. The failure
+# only surfaces minutes later and two layers away, as kube-proxy's
+# `iptables-restore` rejecting its own generated rules with "unknown option
+# `--xor-mark`" forever, thirty seconds at a time — which silently breaks
+# every ClusterIP, NodePort and LoadBalancer Service in the cluster while
+# `docker build`, plain containers and even the node's own Ready status stay
+# completely unaffected. A case-sensitive volume is the general fix: it is
+# correct for this pair today and for whatever the next case-colliding
+# pair turns out to be, rather than special-casing these two filenames.
+CASE_SENSITIVE_DMG="$(mktemp "${TMPDIR:-/tmp}/morbstack-initramfs-vol.XXXXXX.sparseimage")"
+rm -f "${CASE_SENSITIVE_DMG}"  # hdiutil creates the file itself; mktemp only reserves the name
+VOLUME_NAME="morbstack-initramfs-$$"
+if ! hdiutil create -size 2g -fs "Case-sensitive APFS" -volname "${VOLUME_NAME}" \
+	-type SPARSE -quiet "${CASE_SENSITIVE_DMG}"; then
+	echo "error: could not create a case-sensitive scratch volume with hdiutil" >&2
+	exit 1
+fi
+# hdiutil writes exactly the path it was given above (the mktemp template
+# already ends in .sparseimage) — it does not append a second copy of the
+# extension, so CASE_SENSITIVE_DMG stays as-is from here on.
+MOUNT_PLIST="$(mktemp "${TMPDIR:-/tmp}/morbstack-initramfs-mount.XXXXXX.plist")"
+if ! hdiutil attach "${CASE_SENSITIVE_DMG}" -nobrowse -quiet -plist >"${MOUNT_PLIST}"; then
+	echo "error: could not attach the case-sensitive scratch volume" >&2
+	rm -f "${CASE_SENSITIVE_DMG}" "${MOUNT_PLIST}"
+	exit 1
+fi
+CASE_SENSITIVE_MOUNT="/Volumes/${VOLUME_NAME}"
+rm -f "${MOUNT_PLIST}"
+if [ ! -d "${CASE_SENSITIVE_MOUNT}" ]; then
+	echo "error: expected the scratch volume mounted at ${CASE_SENSITIVE_MOUNT}" >&2
+	hdiutil detach "${CASE_SENSITIVE_MOUNT}" -quiet 2>/dev/null || true
+	rm -f "${CASE_SENSITIVE_DMG}"
+	exit 1
+fi
+
+STAGE_DIR="${CASE_SENSITIVE_MOUNT}/stage"
+mkdir -p "${STAGE_DIR}"
 TMP_OUT=""
 cleanup() {
 	rm -rf "${STAGE_DIR}"
 	if [ -n "${TMP_OUT}" ]; then
 		rm -f "${TMP_OUT}"
 	fi
+	hdiutil detach "${CASE_SENSITIVE_MOUNT}" -quiet 2>/dev/null || true
+	rm -f "${CASE_SENSITIVE_DMG}"
 }
 trap cleanup EXIT
 
-echo "Staging rootfs in ${STAGE_DIR}..."
+echo "Staging rootfs in ${STAGE_DIR} (case-sensitive scratch volume, see comment above)..."
 
 # Extract as the current (unprivileged) user. Device nodes can't be created
 # without root, and we don't need them baked in anyway — devtmpfs covers
@@ -189,7 +236,11 @@ done
 # ---------------------------------------------------------------------------
 
 echo "Staging fsutils apks (btrfs-progs, e2fsprogs, iptables-legacy)..."
-APK_EXTRACT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/morbstack-apk-extract.XXXXXX")"
+# On the same case-sensitive scratch volume as STAGE_DIR, and for the same
+# reason: the iptables apk's libxt_MARK.so / libxt_mark.so collision (see the
+# comment by STAGE_DIR's creation above) happens right here, at the initial
+# `tar -xzf` of that apk, before a single file is copied into STAGE_DIR.
+APK_EXTRACT_DIR="$(mktemp -d "${CASE_SENSITIVE_MOUNT}/apk-extract.XXXXXX")"
 for apk in "${APKS_DIR}"/*.apk; do
 	base="$(basename "${apk}")"
 	pkg_extract="${APK_EXTRACT_DIR}/${base%.apk}"

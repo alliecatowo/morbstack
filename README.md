@@ -8,15 +8,17 @@ shared, lightweight Linux VM powered by `Virtualization.framework` — and
 everything else is thin, native, mac-side glue. Fast to boot, light on
 battery and memory, no license nags, no accounts, no telemetry.
 
-## Status: pre-alpha (milestone M0) — the hello-world gate and all four functional gates pass
+## Status: pre-alpha (past milestone M0, Kubernetes support landed) — the hello-world gate, the four functional gates, and Kubernetes all pass
 
 M0's goal (per [`docs/roadmap.md`](docs/roadmap.md)) is "prove the core bet
 — unmodified Docker Engine, one shared VM, fast boot — actually works
-before investing in the surrounding product." **That gate is now passed**,
-and so are the four functional gates added on top of it: published ports,
+before investing in the surrounding product." **That gate is passed**, so
+are the four functional gates added on top of it — published ports,
 container outbound networking, disk persistence across a restart, and
-`docker compose up -d` against a two-service project. All are proven end
-to end, from the Mac, against a cold-started daemon:
+`docker compose up -d` against a two-service project — and so, as of this
+pass, is a local Kubernetes cluster (`morb k8s`, pulled forward from M2;
+see [`docs/k8s.md`](docs/k8s.md)). All are proven end to end, from the
+Mac, against a cold-started daemon:
 
 ```sh
 DOCKER_HOST=unix://$HOME/.morbstack/run/docker.sock docker run --rm hello-world
@@ -31,14 +33,18 @@ dist/images/hello-world-oci.tar` on a VM with no network use) pass
 independently.
 
 It is still not something you run containers with day to day: there is no
-host app, no `morb.local` DNS, no bind-mount filesystem sharing, and no
-UDP port forwarding yet (see "What doesn't work yet" below).
+host app yet, no `morb.local` DNS, and no UDP port forwarding (see "What
+doesn't work yet" below). Bind-mount filesystem sharing does work (see the
+VirtioFS bullet below) but has real, documented limits — no inotify across
+the mount, and a fixed host-user-maps-to-container-root ownership model —
+covered in [`docs/sharing.md`](docs/sharing.md) rather than glossed over
+here.
 
 **What works today:**
 
 - The repo builds end to end (`make build`) with no external dependencies —
   Swift std/Foundation and Rust std only, so it builds offline.
-  `make test` runs both suites (93 Swift tests, 98 Rust tests as of this
+  `make test` runs both suites (617 Swift tests, 190 Rust tests as of this
   writing) with zero failures, `cargo clippy` clean, no warnings.
 - `morbstackd`, the host daemon: `Virtualization.framework` VM lifecycle
   management (boot, stop, suspend, resume) and socket-activation-style
@@ -154,7 +160,24 @@ UDP port forwarding yet (see "What doesn't work yet" below).
   "the process started": `mysql:5.7`, which publishes *no* arm64 manifest,
   boots a real server and its `SHA2('morbstack',256)` comes out
   bit-identical to the host's `shasum`. `morb rosetta` reports the state
-  and `morb rosetta install` sets it up. See [`docs/amd64.md`](docs/amd64.md).
+  and `morb rosetta install` sets it up. Measured cost: no container-start
+  penalty, roughly 1.8-2x slower for general-purpose compute, and up to
+  ~5x slower for code that leans on CPU-specific instructions (e.g. AES/SHA
+  extensions) that native arm64 has and translated amd64 does not. See
+  [`docs/amd64.md`](docs/amd64.md).
+- **A local Kubernetes cluster, on the same Docker Engine.** `morb k8s
+  enable` streams the k3s + cri-dockerd payload into the guest
+  (sha256-verified, skipped if already present) and starts a single-node
+  cluster wired to the same `dockerd` every other Morbstack workload
+  already uses — a `docker build` is immediately deployable with
+  `imagePullPolicy: IfNotPresent`, no registry push. Off by default and
+  zero-cost until enabled. Measured: 8.3s cold enable-to-Ready (about 4s
+  once the payload is already installed), a `LoadBalancer` Service
+  reachable from the Mac with `curl`, a clean `morb k8s disable` that
+  leaves the engine working, and an idle cost of roughly +480 MB guest
+  memory and +20 points of host VM-process CPU while enabled with nothing
+  deployed. Kubeconfig goes to `~/.morbstack/kubeconfig`, never silently
+  merged into `~/.kube/config`. See [`docs/k8s.md`](docs/k8s.md).
 
 **What doesn't work yet:**
 
@@ -172,7 +195,10 @@ UDP port forwarding yet (see "What doesn't work yet" below).
 - **No synced-share filesystem tier.** Sharing is live VirtioFS (tier 1)
   only; the opt-in synced-copy mode for workloads that do not suit
   VirtioFS's consistency model is M1/M2 per the roadmap.
-- No `k3s` integration yet.
+- **No inotify across a VirtioFS bind mount.** A host-side edit is
+  correct the instant you read it, but the change-notification event
+  that a hot-reload watcher (`webpack --watch`, `nodemon`, etc.) depends
+  on does not cross the boundary. See [`docs/sharing.md`](docs/sharing.md).
 
 See [`docs/roadmap.md`](docs/roadmap.md) for the full list and milestone
 sequencing.
@@ -197,7 +223,9 @@ sequencing.
 └──────────┼─────────────┼─────────────┼─────────────┼───────────────┘
            │             │             │  vsock port 1024: guest control (MRB0 framed JSON)
            │             │             │  vsock port 2375: Docker Engine API relay
-           │             │             │  vsock port 2376: stream-dial (published ports)
+           │             │             │  vsock port 2376: stream-dial (published ports,
+           │             │             │                    and the Kubernetes API server)
+           │             │             │  vsock port 2377: bulk payload install (k3s payload)
 ┌──────────▼─────────────▼─────────────▼─────────────────────────────┐
 │                          guest Linux VM                            │
 │                                                                    │
@@ -362,6 +390,9 @@ from 5 s to a maximum of 60 s between attempts.
   and what the qemu fallback does not yet cover.
 - [`docs/protocol.md`](docs/protocol.md) — the vsock wire protocols.
 - [`docs/compat.md`](docs/compat.md) — Docker API surface coverage.
+- [`docs/k8s.md`](docs/k8s.md) — the local Kubernetes cluster: how it
+  works, what was measured, and the case-sensitivity build bug this pass
+  found and fixed.
 - [`docs/roadmap.md`](docs/roadmap.md) — milestones.
 
 ## Roadmap

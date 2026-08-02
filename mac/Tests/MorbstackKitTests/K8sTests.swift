@@ -380,9 +380,10 @@ final class K8sTests: XCTestCase {
         // enable either re-streams 122 MB every time (harmless but slow) or asks the
         // guest to prove a hash nothing will ever have (a hard failure).
         let repoRoot = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()  // MorbstackKitTests
-            .deletingLastPathComponent()  // Tests
-            .deletingLastPathComponent()  // mac
+            .deletingLastPathComponent()  // K8sTests.swift -> MorbstackKitTests/
+            .deletingLastPathComponent()  // MorbstackKitTests -> Tests/
+            .deletingLastPathComponent()  // Tests -> mac/
+            .deletingLastPathComponent()  // mac -> repo root
         let script = repoRoot.appendingPathComponent("scripts/fetch-guest-assets.sh")
         guard let text = try? String(contentsOf: script, encoding: .utf8) else {
             throw XCTSkip("fetch-guest-assets.sh not found; not a source checkout")

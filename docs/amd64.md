@@ -128,10 +128,29 @@ Images list badges every image that is not native to this Mac.
 
 ## Prefer arm64 anyway
 
-Translation works and it is not free: slower start, slower execution, and a
-long tail of runtimes that misbehave under it — JITs especially, plus
-anything reading `/proc/cpuinfo` or depending on AVX. If the publisher
-ships an arm64 variant, use it.
+Translation works and it is not free. Measured directly, both inside the
+same guest, same session:
+
+- **No measurable container-start penalty.** `docker run --rm
+  --platform linux/amd64 alpine true` and the arm64 equivalent both
+  settle to ~0.3s once the image is warm on disk — the `exec format
+  error` case aside, starting a translated container is not the slow
+  part.
+- **Roughly 1.8-2x slower for general-purpose compute.** A pure-Python
+  prime-counting microbenchmark (no crypto/SIMD instructions) averaged
+  ~0.33s natively vs ~0.63s under Rosetta, across three runs each.
+- **Much worse for code that leans on CPU-specific instructions.**
+  `openssl speed sha256`, which uses Apple silicon's hardware SHA
+  extensions natively, measured roughly **5x** slower under Rosetta —
+  the ISA-specific fast path native arm64 gets simply is not there once
+  the binary is amd64, regardless of Rosetta's translation quality.
+  Treat any number as workload-dependent rather than a single constant;
+  crypto- and SIMD-heavy amd64 code will feel this the most.
+
+On top of the raw numbers there is a long tail of runtimes that misbehave
+under any x86-on-ARM translation — JITs especially, plus anything reading
+`/proc/cpuinfo` or depending on AVX. If the publisher ships an arm64
+variant, use it.
 
 The Images screen badges this rather than leaving it to be discovered:
 

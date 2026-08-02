@@ -92,8 +92,17 @@ Morbstack to make specific, checkable performance claims publicly.
 - Synced shares (filesystem tier 2) available as an alternative to
   VirtioFS bind mounts.
 - FSEvents -> inotify bridge reaches GA (out of tier-1 filesystem beta).
-- `k3s` + `cri-dockerd` supported, for users who want a local Kubernetes
-  story on top of the same Docker Engine.
+- ~~`k3s` + `cri-dockerd` supported, for users who want a local Kubernetes
+  story on top of the same Docker Engine.~~ **Done** — pulled forward
+  from M2, off by default and zero-cost until `morb k8s enable`. `k3s`
+  is wired to the same `dockerd` every other Morbstack workload uses via
+  `cri-dockerd`, so a `docker build` is immediately deployable with
+  `imagePullPolicy: IfNotPresent` and no registry push — verified live,
+  along with a cold enable-to-Ready time, a `LoadBalancer` Service
+  reachable from the Mac, a clean disable, and the idle CPU/memory cost
+  of leaving it on. See [`k8s.md`](k8s.md) for the numbers and
+  [`protocol.md`](protocol.md) §3.3 for the payload-install wire
+  protocol (vsock port 2377).
 - `syft`/`grype` integration for image scanning.
 - `morb debug` — a bundle-the-diagnostics command for bug reports.
 - MCP server ships (host integration domain).

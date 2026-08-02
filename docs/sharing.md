@@ -108,6 +108,51 @@ live state, and a warning chip appears in the status footer whenever a
 configured root is not mounted — but only while the engine is running,
 since a stopped VM has nothing mounted and that is not a problem.
 
+## Ownership: the host user maps to container root
+
+VirtioFS presents every shared file with a single, fixed identity in each
+direction — there is no per-file uid/gid mapping table. Verified directly:
+
+- A file created on the Mac by your own user (`allie:wheel` on this host)
+  shows up inside a container as **`root:root`**, regardless of which
+  user the container process runs as.
+- A file created inside a container — by `root` or by any other
+  container-side uid — shows up back on the Mac owned by **your own host
+  user**, not by whatever uid created it.
+- **`chown` inside a container against a bind-mounted file is accepted
+  and silently discarded.** `chown 1000:1000 /data/hostfile.txt` returns
+  exit code 0 and prints nothing, but a follow-up `ls -l` in the same
+  container still shows `root:root` — the ownership never actually
+  changed. A script that `chown`s a shared path and trusts the exit code
+  will not find out it didn't work.
+
+Practically: this is fine for the common case (a container reading and
+writing files a build or a dev server owns) and a real trap for anything
+that checks ownership as a precondition — a container that refuses to
+start unless a config file is owned by a specific non-root uid will not
+work against a VirtioFS bind mount today, because that ownership can
+never actually be set. Move that file into a named volume instead, where
+`dockerd`'s own storage driver owns uid/gid mapping normally.
+
+## No inotify across the bind mount
+
+**A host-side edit to a file under a bind mount does not fire inotify
+events inside the guest.** VirtioFS does not currently forward
+filesystem-change notifications across the host/guest boundary, so any
+tool that depends on inotify to notice a change — a dev server's
+hot-reload watcher, `webpack --watch`, `nodemon`, `air`, and similar —
+will not see edits made on the Mac side of a bind mount.
+
+The file itself is correct and up to date the moment you read it (this is
+a live mount, not a sync — see above); what is missing is the *event*
+that would otherwise tell a watcher to re-read it. A process that polls
+instead of watching, or one that is manually restarted after an edit,
+still works exactly as expected. There is no workaround today short of
+polling; do not rely on hot-reload working through a Morbstack bind mount
+until this is closed (tracked as an inotify/FSEvents bridge, see
+[`roadmap.md`](roadmap.md) — a known gap, not a design decision, and nothing
+here should be read as a hot-reload capability claim).
+
 ## The failure mode this exists for
 
 **A bind mount whose host path is not shared does not produce an error.**
