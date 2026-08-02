@@ -1,13 +1,18 @@
 // Copyright 2026 The Morbstack Authors.
 // Licensed under the Apache License, Version 2.0 (the "License").
 //
-// Shared chrome for the Track D surfaces: menu bar, command palette, settings,
-// stacks and the two roadmap placeholders.
+// Shared chrome for the Track D surfaces: menu bar, command palette, settings and the
+// one remaining roadmap placeholder.
 //
 // `TrackD`-prefixed on purpose. These are conveniences for one track's screens, not a
 // bid to become the app's design system — when the same need appears in a third track
 // the right move is to promote a real component into Theme.swift and delete the copy
-// here, not to widen this file.
+// here, not to widen this file. Several already made that move during the Liquid Glass
+// rewrite: the dot, the icon button, the section header and the empty state that used
+// to live here are now ``MorbStatusDot``, ``MorbIconButton``, ``MorbSectionHeader`` and
+// ``MorbEmptyState`` in `Design/`. What is left is what genuinely does not generalise —
+// `TrackDTone`'s mapping from a container/engine state to a colour, the popover's own
+// hover/focus row style, and the path row Settings uses six times.
 
 import AppKit
 import MorbstackKit
@@ -59,48 +64,6 @@ enum TrackDTone: Hashable {
     }
 }
 
-// MARK: - Dots and pills
-
-/// The status dot, in ``TrackDTone`` terms.
-///
-/// Same geometry and the same hairline ring as ``StatusDot`` — this exists only so the
-/// Track D surfaces can pass a `TrackDTone` without converting at every call site.
-struct TrackDStatusDot: View {
-    var tone: TrackDTone
-    var size: CGFloat = 7
-    /// Set for transitional states; a slow pulse says "this is still moving".
-    var pulsing: Bool = false
-
-    @State private var pulse = false
-
-    var body: some View {
-        Circle()
-            .fill(tone.color)
-            .frame(width: size, height: size)
-            .overlay {
-                Circle().strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.5)
-            }
-            .opacity(pulsing && pulse ? 0.35 : 1)
-            .animation(
-                pulsing ? .easeInOut(duration: 0.9).repeatForever(autoreverses: true) : .default,
-                value: pulse
-            )
-            .onAppear { if pulsing { pulse = true } }
-            .padding(1)
-    }
-}
-
-/// A small pill for counts and states — ``Chip`` with a `TrackDTone`.
-struct TrackDBadge: View {
-    let text: String
-    var symbol: String?
-    var tone: TrackDTone = .neutral
-
-    var body: some View {
-        Chip(text: text, tone: tone.color, symbol: symbol)
-    }
-}
-
 // MARK: - Buttons
 
 /// A full-width row that lights up on hover and on keyboard focus.
@@ -108,10 +71,15 @@ struct TrackDBadge: View {
 /// Focus gets the accent wash rather than the system focus ring: inside a menu-bar
 /// popover the ring is clipped by the window's rounded corner and reads as a glitch,
 /// while a filled row reads the way a highlighted menu item does.
+///
+/// `verticalPadding` defaults to zero on purpose: every row this style is applied to
+/// already declares its own exact height via `.frame(height: Theme.rowCompact)`, so a
+/// style-level vertical pad would silently re-inflate the 24pt rhythm the popover was
+/// rebuilt to have — which is exactly how it grew to 80pt rows the first time.
 struct TrackDRowButtonStyle: ButtonStyle {
-    var cornerRadius: CGFloat = 6
-    var horizontalPadding: CGFloat = 8
-    var verticalPadding: CGFloat = 5
+    var cornerRadius: CGFloat = Theme.radiusChip + 1
+    var horizontalPadding: CGFloat = Theme.space3
+    var verticalPadding: CGFloat = 0
 
     func makeBody(configuration: Configuration) -> some View {
         TrackDRowButtonBody(
@@ -155,93 +123,6 @@ private struct TrackDRowButtonBody: View {
     }
 }
 
-/// A borderless icon button sized for a 20pt row — used for the per-row stop/start
-/// affordances that appear on hover.
-struct TrackDIconButton: View {
-    let symbol: String
-    let help: String
-    var tone: TrackDTone = .neutral
-    let action: () -> Void
-
-    @State private var hovering = false
-
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: symbol)
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(hovering ? AnyShapeStyle(tone.color) : AnyShapeStyle(.secondary))
-                .frame(width: 20, height: 18)
-                .background(
-                    (tone == .neutral ? Color.secondary : tone.color).opacity(hovering ? 0.16 : 0),
-                    in: .rect(cornerRadius: 5, style: .continuous))
-                .contentShape(.rect)
-        }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
-        .help(help)
-    }
-}
-
-// MARK: - Section headers
-
-/// The all-caps micro heading that separates popover and card sections, with an
-/// optional count on the right.
-struct TrackDSectionHeader: View {
-    let title: String
-    var trailing: String?
-
-    var body: some View {
-        HStack(spacing: 6) {
-            SectionLabel(text: title)
-            Spacer(minLength: 4)
-            if let trailing {
-                Text(trailing)
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.tertiary)
-            }
-        }
-    }
-}
-
-// MARK: - Empty state
-
-/// The centred "nothing here yet" block, shared by Stacks and the placeholders.
-struct TrackDEmptyState<Accessory: View>: View {
-    let symbol: String
-    let title: String
-    let message: String
-    @ViewBuilder var accessory: Accessory
-
-    var body: some View {
-        VStack(spacing: 12) {
-            Image(systemName: symbol)
-                .font(.system(size: 38, weight: .ultraLight))
-                .foregroundStyle(.tertiary)
-                .symbolRenderingMode(.hierarchical)
-            VStack(spacing: 5) {
-                Text(title)
-                    .font(.headline)
-                Text(message)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: 380)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            accessory
-                .padding(.top, 2)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(40)
-    }
-}
-
-extension TrackDEmptyState where Accessory == EmptyView {
-    init(symbol: String, title: String, message: String) {
-        self.init(symbol: symbol, title: title, message: message, accessory: { EmptyView() })
-    }
-}
-
 // MARK: - Monospaced path row
 
 /// A path with a copy button — used all over Settings' Advanced tab.
@@ -253,8 +134,8 @@ struct TrackDPathRow: View {
     @State private var copied = false
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
+        HStack(alignment: .firstTextBaseline, spacing: Theme.space3) {
+            VStack(alignment: .leading, spacing: Theme.space1) {
                 Text(label)
                     .font(.callout)
                 Text(path)
@@ -264,7 +145,7 @@ struct TrackDPathRow: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
-            Spacer(minLength: 8)
+            Spacer(minLength: Theme.space3)
             Button {
                 trackDCopy(path)
                 copied = true

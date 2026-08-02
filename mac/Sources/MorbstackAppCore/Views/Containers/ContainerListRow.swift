@@ -2,6 +2,13 @@
 // Licensed under the Apache License, Version 2.0 (the "License").
 //
 // One container in the list, and the compose project header above a group of them.
+//
+// The row is fixed at `Theme.rowRich` (44pt) regardless of how many ports a container
+// publishes — the previous build swelled from 70pt to 100pt per row, which is why the
+// list could not be counted by eye. The trailing column is a single fixed-width slot:
+// CPU and memory when the container is running, the first published port plus an
+// overflow chip for the rest, and the lifecycle actions on hover. Nothing in it can make
+// the row taller.
 
 import AppKit
 import SwiftUI
@@ -16,6 +23,10 @@ struct ContainerListRow: View {
     let isBusy: Bool
     let onAction: (ContainerAction) -> Void
     let onRequestRemove: () -> Void
+    /// Defaults to `false` so the offscreen screenshot harness's own copy of this call
+    /// site (`Shots/ShotScenes.swift`, which predates this parameter) keeps compiling.
+    /// The shipping list — `ContainersRootView` — passes the real selection state.
+    var isSelected: Bool = false
 
     @State private var hovering = false
     @State private var probe: TrackBStatsProbe?
@@ -28,27 +39,28 @@ struct ContainerListRow: View {
     /// `onAppear` never fires, so `probe` stays `nil` and the hub is the only source.
     private var activeProbe: TrackBStatsProbe? { probe ?? hub.existingProbe(container.id) }
 
-    var body: some View {
-        HStack(alignment: .top, spacing: 9) {
-            TrackBStatusDot(state: container.state, unhealthy: container.isUnhealthy)
-                .padding(.top, 3)
+    private var tone: StatusTone { StatusTone.forContainer(state: container.state, unhealthy: container.isUnhealthy) }
 
-            VStack(alignment: .leading, spacing: 3) {
+    var body: some View {
+        HStack(spacing: Theme.space3) {
+            MorbStatusDot(tone: tone, pulsing: tone.isTransitional)
+
+            VStack(alignment: .leading, spacing: Theme.space1) {
                 titleLine
-                subtitleLine
-                if !container.ports.isEmpty { portLine }
+                Text(container.image)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
             }
 
-            Spacer(minLength: 8)
+            Spacer(minLength: Theme.space3)
 
             trailing
         }
-        .padding(.vertical, 7)
-        .padding(.trailing, 2)
-        .contentShape(Rectangle())
+        .morbRow(.rich, isSelected: isSelected, showsHover: true)
         .onHover { hovering = $0 }
-        .contextMenu { contextMenu }
-        .help(container.status.isEmpty ? container.state : container.status)
+        .help(tooltip)
         .onAppear(perform: subscribe)
         .onDisappear(perform: unsubscribe)
         .onChange(of: container.isRunning) { _, _ in
@@ -57,92 +69,35 @@ struct ContainerListRow: View {
         }
     }
 
-    // MARK: Lines
+    // MARK: Title
 
     private var titleLine: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: Theme.space2) {
             Text(container.displayName)
-                .font(.headline)
+                .font(.body.weight(.medium))
                 .lineLimit(1)
                 .truncationMode(.middle)
 
             if let service = container.composeService, service != container.displayName {
-                // Neutral, not accent. The accent means "this is a thing you can click"
-                // — the port chip one line below opens a browser. A service name is a
-                // label, and when eleven rows each carry a tinted label the accent stops
-                // meaning anything and simply becomes the loudest colour on the screen,
-                // ahead of the status dots that are the reason to look at the list.
-                TrackBBadge(text: service, tone: .neutral)
+                MorbChip(service, rank: .quiet)
             }
             if container.isUnhealthy {
-                TrackBBadge(text: "unhealthy", tone: .danger, symbol: "heart.slash")
-            }
-            if container.state == "paused" {
-                TrackBBadge(text: "paused", tone: .warning, symbol: "pause.fill")
-            }
-        }
-    }
-
-    private var subtitleLine: some View {
-        HStack(spacing: 6) {
-            Text(container.image)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-
-            if container.isRunning, let sample = activeProbe?.latest {
-                Text(verbatim: "·").font(.caption).foregroundStyle(.quaternary)
-                metrics(sample)
-            } else if !container.isRunning {
-                Text(verbatim: "·").font(.caption).foregroundStyle(.quaternary)
-                Text(shortStatus)
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
+                MorbChip("unhealthy", symbol: "exclamationmark.octagon.fill", rank: .status(.bad))
+            } else if container.state == "paused" {
+                MorbChip("paused", symbol: "pause.fill", rank: .status(.paused))
             }
         }
     }
 
-    /// The live microtext. Monospaced digits so the row does not shimmy sideways twice
-    /// a second as the numbers change width.
-    private func metrics(_ sample: StatsSample) -> some View {
-        HStack(spacing: 8) {
-            Label {
-                Text(Formatters.percent(sample.cpuPercent))
-            } icon: {
-                Image(systemName: "cpu")
-            }
-            Label {
-                Text(Formatters.bytesString(sample.memBytes))
-            } icon: {
-                Image(systemName: "memorychip")
-            }
-        }
-        .font(.caption.monospacedDigit())
-        .foregroundStyle(.secondary)
-        .labelStyle(TrackBTightLabelStyle())
-        .transition(.opacity)
-    }
-
-    private var portLine: some View {
-        // A row with a dozen published ports should not push the actions off screen, so
-        // the overflow collapses into a count rather than wrapping onto a third line.
-        HStack(spacing: 4) {
-            ForEach(container.ports.prefix(4)) { port in
-                TrackBPortChip(port: port)
-            }
-            if container.ports.count > 4 {
-                Text("+\(container.ports.count - 4)")
-                    .font(.system(size: 10, weight: .medium).monospacedDigit())
-                    .foregroundStyle(.tertiary)
-                    .help(container.ports.map(\.label).joined(separator: ", "))
-            }
-        }
-        .padding(.top, 1)
+    private var tooltip: String {
+        let base = container.status.isEmpty ? container.state : container.status
+        guard container.isRunning else { return base }
+        return "\(base) · up \(Formatters.compactDuration(since: container.createdAt))"
     }
 
     // MARK: Trailing
+
+    private static let trailingWidth: CGFloat = 168
 
     @ViewBuilder
     private var trailing: some View {
@@ -150,60 +105,68 @@ struct ContainerListRow: View {
             ProgressView()
                 .controlSize(.small)
                 .scaleEffect(0.65)
-                .frame(width: 24, height: 22)
+                .frame(width: Self.trailingWidth, alignment: .trailing)
         } else if hovering {
-            HStack(spacing: 1) {
-                if container.isRunning {
-                    TrackBIconButton(symbol: "stop.fill", help: "Stop", tint: .orange) {
-                        onAction(.stop)
-                    }
-                    TrackBIconButton(symbol: "arrow.clockwise", help: "Restart", tint: Theme.accent) {
-                        onAction(.restart)
-                    }
-                } else if container.state == "paused" {
-                    TrackBIconButton(symbol: "play.fill", help: "Resume", tint: .green) {
-                        onAction(.unpause)
-                    }
-                } else {
-                    TrackBIconButton(symbol: "play.fill", help: "Start", tint: .green) {
-                        onAction(.start)
-                    }
-                }
-                TrackBIconButton(symbol: "trash", help: "Remove", tint: .red) {
-                    onRequestRemove()
-                }
-            }
-            .transition(.opacity)
+            hoverActions
+                .frame(width: Self.trailingWidth, alignment: .trailing)
         } else {
-            Text(uptimeText)
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.tertiary)
-                .frame(minWidth: 30, alignment: .trailing)
+            restingTrailing
+                .frame(width: Self.trailingWidth, alignment: .trailing)
         }
     }
 
-    // MARK: Menu
+    @ViewBuilder
+    private var restingTrailing: some View {
+        VStack(alignment: .trailing, spacing: Theme.space1) {
+            metricsLine
+            portsLine
+        }
+    }
 
     @ViewBuilder
-    private var contextMenu: some View {
-        if container.isRunning {
-            Button("Stop") { onAction(.stop) }
-            Button("Restart") { onAction(.restart) }
-            Button("Pause") { onAction(.pause) }
-        } else if container.state == "paused" {
-            Button("Resume") { onAction(.unpause) }
-            Button("Stop") { onAction(.stop) }
+    private var metricsLine: some View {
+        if container.isRunning, let sample = activeProbe?.latest {
+            HStack(spacing: Theme.space2) {
+                MorbNumber(Formatters.percent(sample.cpuPercent), width: 42)
+                MorbNumber(Formatters.bytesString(sample.memBytes), width: 60)
+            }
         } else {
-            Button("Start") { onAction(.start) }
+            Text(shortStatus)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
         }
-        Divider()
-        Button("Copy name") { TrackBClipboard.copy(container.displayName) }
-        Button("Copy container ID") { TrackBClipboard.copy(container.id) }
-        if let url = container.ports.compactMap(\.url).first {
-            Button("Open \(url.absoluteString)") { NSWorkspace.shared.open(url) }
+    }
+
+    @ViewBuilder
+    private var portsLine: some View {
+        if let first = container.ports.first {
+            HStack(spacing: Theme.space1 + 1) {
+                if container.ports.count > 1 {
+                    MorbOverflowChip(
+                        hidden: container.ports.count - 1,
+                        detail: container.ports.dropFirst().map(\.label).joined(separator: ", "))
+                }
+                MorbPortChip(
+                    host: first.hostPort.map(String.init) ?? first.label,
+                    container: "\(first.containerPort)/\(first.proto)",
+                    isOpenable: first.url != nil)
+            }
         }
-        Divider()
-        Button("Remove…", role: .destructive) { onRequestRemove() }
+    }
+
+    private var hoverActions: some View {
+        HStack(spacing: Theme.space1) {
+            if container.isRunning {
+                MorbIconButton("stop.fill", help: "Stop") { onAction(.stop) }
+                MorbIconButton("arrow.clockwise", help: "Restart") { onAction(.restart) }
+            } else if container.state == "paused" {
+                MorbIconButton("play.fill", help: "Resume") { onAction(.unpause) }
+            } else {
+                MorbIconButton("play.fill", help: "Start") { onAction(.start) }
+            }
+            MorbIconButton("trash", help: "Remove", role: .destructive) { onRequestRemove() }
+        }
     }
 
     // MARK: Text
@@ -212,10 +175,6 @@ struct ContainerListRow: View {
     /// repetition of the state that the dot already shows.
     private var shortStatus: String {
         container.status.isEmpty ? container.state : container.status
-    }
-
-    private var uptimeText: String {
-        container.isRunning ? Formatters.compactDuration(since: container.createdAt) : ""
     }
 
     // MARK: Stats subscription
@@ -235,17 +194,6 @@ struct ContainerListRow: View {
         guard probe != nil else { return }
         probe = nil
         hub.release(container.id)
-    }
-}
-
-/// `Label` with the icon tucked right against the text — the default spacing is built
-/// for menus and is far too airy for a metric read at caption size.
-struct TrackBTightLabelStyle: LabelStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        HStack(spacing: 3) {
-            configuration.icon.font(.system(size: 9))
-            configuration.title
-        }
     }
 }
 
@@ -270,54 +218,35 @@ struct ComposeGroupHeader: View {
     private var allRunning: Bool { group.isFullyRunning }
     private var noneRunning: Bool { group.runningCount == 0 }
 
-    private var aggregateColor: Color {
-        if allRunning { return .green }
-        if noneRunning { return .secondary }
-        return .orange
+    private var state: MorbGroupState {
+        MorbGroupState.from(running: group.runningCount, total: group.containers.count,
+                            transitioning: busyCount)
     }
 
     var body: some View {
-        HStack(spacing: 7) {
-            Image(systemName: group.project == nil ? "square.dashed" : "square.stack.3d.up.fill")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(group.project == nil ? Color.secondary : aggregateColor)
-
-            Text(group.title)
-                .font(.system(size: 11, weight: .semibold))
-                .lineLimit(1)
-
-            Text("\(group.runningCount)/\(group.containers.count)")
-                .font(.system(size: 10, weight: .medium).monospacedDigit())
-                .foregroundStyle(aggregateColor)
-                .padding(.horizontal, 5)
-                .padding(.vertical, 1)
-                .background(aggregateColor.opacity(0.14), in: Capsule())
-
-            Spacer(minLength: 6)
-
+        MorbGroupHeader(
+            group.title,
+            state: state,
+            running: group.runningCount,
+            total: group.containers.count,
+            symbol: group.project == nil ? nil : "square.3.layers.3d"
+        ) {
             if busyCount > 0 {
                 ProgressView().controlSize(.small).scaleEffect(0.6).frame(width: 20)
             } else if group.project != nil, hovering {
-                HStack(spacing: 1) {
-                    TrackBIconButton(
-                        symbol: "play.fill",
-                        help: "Start every service in \(group.title)",
-                        tint: .green,
-                        action: onUp)
+                HStack(spacing: Theme.space1) {
+                    MorbIconButton("play.fill", help: "Start every service in \(group.title)") {
+                        onUp()
+                    }
                     .disabled(allRunning)
-                    TrackBIconButton(
-                        symbol: "stop.fill",
-                        help: "Stop every service in \(group.title)",
-                        tint: .orange,
-                        action: onDown)
+                    MorbIconButton("stop.fill", help: "Stop every service in \(group.title)") {
+                        onDown()
+                    }
                     .disabled(noneRunning)
                 }
-                .transition(.opacity)
             }
         }
-        .padding(.vertical, 2)
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.12), value: hovering)
     }
 }

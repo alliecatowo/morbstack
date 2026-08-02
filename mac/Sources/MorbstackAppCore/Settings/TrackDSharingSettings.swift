@@ -116,7 +116,7 @@ struct TrackDSharingSettings: View {
         + "normally, with none of your files in it — which is why this pane exists."
 
     private var sharingExplanation: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: Theme.space3) {
             Text(Self.sharingScopeText)
             Text(Self.samePathText)
             Text(Self.silentFailureText)
@@ -135,7 +135,7 @@ struct TrackDSharingSettings: View {
     }
 
     private var sharingActions: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: Theme.space4) {
             Button("Edit config.toml") {
                 NSWorkspace.shared.activateFileViewerSelecting([store.url])
             }
@@ -149,7 +149,7 @@ struct TrackDSharingSettings: View {
     }
 
     private var rosettaExplanation: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: Theme.space2) {
             Text(
                 "Rosetta lets the VM run `amd64` (x86-64) container images on Apple silicon by "
                     + "translating their binaries. Images built for `arm64` do not need it and "
@@ -176,7 +176,7 @@ struct TrackDSharingSettings: View {
 
     private var rosettaRow: some View {
         LabeledContent {
-            HStack(spacing: 6) {
+            HStack(spacing: Theme.space2) {
                 TrackCStatusDot(tone: rosettaTone)
                 Text(model.rosetta.summary)
                     .font(.callout)
@@ -226,12 +226,12 @@ struct TrackDShareRow: View {
     }
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
+        HStack(alignment: .firstTextBaseline, spacing: Theme.space3) {
             TrackCStatusDot(tone: summary.tone)
                 .padding(.top, 3)
 
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
+            VStack(alignment: .leading, spacing: Theme.space1) {
+                HStack(spacing: Theme.space2) {
                     Text(share.path)
                         .font(.callout.monospaced())
                         .lineLimit(1)
@@ -254,7 +254,7 @@ struct TrackDShareRow: View {
                 }
             }
 
-            Spacer(minLength: 8)
+            Spacer(minLength: Theme.space3)
 
             Button {
                 NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: share.path)])
@@ -265,6 +265,6 @@ struct TrackDShareRow: View {
             .foregroundStyle(.secondary)
             .help("Reveal \(share.path) in Finder")
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, Theme.space1)
     }
 }

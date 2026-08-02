@@ -3,10 +3,10 @@
 //
 // The "here is exactly what you are about to delete" sheet.
 //
-// Shared by the Disk screen's four prune buttons and the Volumes screen's Remove Unused.
-// A prune is irreversible, silent, and reported only as a byte count afterwards — the
-// one moment a user can still change their mind is before it runs, and that moment
-// deserves an itemised list rather than a yes/no alert.
+// Shared by the Disk screen's four prune buttons and the Volumes/Networks screens'
+// "Remove Unused". A prune is irreversible, silent, and reported only as a byte count
+// afterwards — the one moment a user can still change their mind is before it runs, and
+// that moment deserves an itemised list rather than a yes/no alert.
 
 import SwiftUI
 
@@ -50,12 +50,12 @@ struct TrackCConfirmSheet: View {
     }
 
     private var header: some View {
-        HStack(alignment: .top, spacing: 12) {
+        HStack(alignment: .top, spacing: Theme.space4) {
             Image(systemName: symbol)
                 .font(.system(size: 22, weight: .regular))
-                .foregroundStyle(.tint)
+                .foregroundStyle(Theme.brand)
                 .frame(width: 28)
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: Theme.space2) {
                 Text(title)
                     .font(.headline)
                 Text(explanation)
@@ -64,22 +64,14 @@ struct TrackCConfirmSheet: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(TrackCMetrics.gutter)
+        .padding(Theme.pagePadding)
     }
 
     @ViewBuilder
     private var body_: some View {
         if items.isEmpty && kept.isEmpty {
-            VStack(spacing: 8) {
-                Image(systemName: "sparkles")
-                    .font(.system(size: 26, weight: .light))
-                    .foregroundStyle(.tertiary)
-                Text("Already clean")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .padding(28)
+            MorbEmptyState("Already clean", systemImage: "sparkles")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             List {
                 if !items.isEmpty {
@@ -93,34 +85,34 @@ struct TrackCConfirmSheet: View {
                     Section {
                         ForEach(kept) { item in row(item, spared: true) }
                     } header: {
-                        sectionHeader("Kept", count: kept.count, tone: .good)
+                        sectionHeader("Kept", count: kept.count, tone: .running)
                     }
                 }
             }
             .listStyle(.inset)
             .alternatingRowBackgrounds()
-            .environment(\.defaultMinListRowHeight, 30)
+            .environment(\.defaultMinListRowHeight, Theme.rowStandard - Theme.space2)
         }
     }
 
-    private func sectionHeader(_ text: String, count: Int, tone: TrackCTone) -> some View {
-        HStack(spacing: 6) {
+    private func sectionHeader(_ text: String, count: Int, tone: StatusTone) -> some View {
+        HStack(spacing: Theme.space2) {
             Text(text).font(.caption.weight(.semibold))
-            TrackCBadge(text: "\(count)", tone: tone)
+            MorbChip("\(count)", rank: .status(tone), monospaced: true)
             Spacer()
         }
         .foregroundStyle(.secondary)
     }
 
     private func row(_ item: TrackCPruneItem, spared: Bool) -> some View {
-        HStack(spacing: 10) {
+        HStack(spacing: Theme.space3) {
             Image(systemName: spared ? "lock.fill" : "minus.circle")
                 .font(.system(size: 10))
-                .foregroundStyle(spared ? AnyShapeStyle(Color.green) : AnyShapeStyle(.tertiary))
+                .foregroundStyle(spared ? AnyShapeStyle(Theme.statusRunning) : AnyShapeStyle(.tertiary))
                 .frame(width: 14)
-            VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: .leading, spacing: Theme.space1) {
                 Text(item.title)
-                    .font(.callout.monospaced())
+                    .font(.system(.callout, design: .monospaced))
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Text(item.detail)
@@ -129,18 +121,18 @@ struct TrackCConfirmSheet: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
-            Spacer(minLength: 8)
+            Spacer(minLength: Theme.space3)
             Text(item.bytes.map(Formatters.bytesString) ?? "—")
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(item.bytes == nil ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.secondary))
         }
         .opacity(spared ? 0.75 : 1)
-        .padding(.vertical, 2)
+        .padding(.vertical, Theme.space1)
     }
 
     private var footer: some View {
-        HStack(spacing: 10) {
-            VStack(alignment: .leading, spacing: 1) {
+        HStack(spacing: Theme.space4) {
+            VStack(alignment: .leading, spacing: Theme.space1) {
                 Text(estimateLabel)
                     .font(.callout.weight(.medium))
                     .monospacedDigit()
@@ -150,7 +142,7 @@ struct TrackCConfirmSheet: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            Spacer(minLength: 12)
+            Spacer(minLength: Theme.space4)
             Button("Cancel", role: .cancel) { dismiss() }
                 .keyboardShortcut(.cancelAction)
             Button(confirmTitle, role: .destructive) {
@@ -160,6 +152,6 @@ struct TrackCConfirmSheet: View {
             .keyboardShortcut(.defaultAction)
             .disabled(items.isEmpty)
         }
-        .padding(TrackCMetrics.gutter)
+        .padding(Theme.pagePadding)
     }
 }

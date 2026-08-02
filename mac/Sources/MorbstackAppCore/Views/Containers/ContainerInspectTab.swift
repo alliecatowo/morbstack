@@ -143,50 +143,34 @@ struct ContainerInspectTab: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            toolbar
-            Divider()
-            content
-        }
-        .background(TrackBPalette.logSurface)
-        .task(id: json) { prepare() }
-        .onChange(of: query) { _, _ in recomputeMatches() }
+        content
+            .background(TrackBPalette.logSurface)
+            .toolbar { toolbarContent }
+            .searchable(text: $query, placement: .toolbar, prompt: "Search document")
+            .task(id: json) { prepare() }
+            .onChange(of: query) { _, _ in recomputeMatches() }
     }
 
     // MARK: Toolbar
 
-    private var toolbar: some View {
-        HStack(spacing: 8) {
-            TrackBSearchField(
-                text: $query,
-                prompt: "Search document",
-                width: 220,
-                caption: query.isEmpty ? nil : matchCaption)
-
-            if !matches.isEmpty {
-                HStack(spacing: 1) {
-                    TrackBIconButton(symbol: "chevron.up", help: "Previous match") {
-                        step(-1)
-                    }
-                    TrackBIconButton(symbol: "chevron.down", help: "Next match") {
-                        step(1)
-                    }
-                }
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        if !matches.isEmpty {
+            ToolbarItem(id: "prev", placement: MorbToolbarGroup.navigation) {
+                MorbIconButton("chevron.up", help: "Previous match") { step(-1) }
             }
-
-            Spacer(minLength: 8)
-
-            Text("\(lines.count) lines")
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.tertiary)
-
-            Divider().frame(height: 14)
-
-            TrackBIconButton(
-                symbol: didCopy ? "checkmark" : "doc.on.doc",
-                help: "Copy the whole document",
-                tint: didCopy ? .green : .primary
-            ) {
+            ToolbarItem(id: "next", placement: MorbToolbarGroup.navigation) {
+                MorbIconButton("chevron.down", help: "Next match") { step(1) }
+            }
+            MorbToolbarStatus(id: "match-count") {
+                MorbNumber(matchCaption)
+            }
+        }
+        MorbToolbarStatus(id: "line-count") {
+            MorbNumber("\(lines.count) lines")
+        }
+        ToolbarItem(id: "copy", placement: MorbToolbarGroup.actions) {
+            MorbIconButton(didCopy ? "checkmark" : "doc.on.doc", help: "Copy the whole document") {
                 TrackBClipboard.copy(json)
                 didCopy = true
                 Task {
@@ -195,9 +179,6 @@ struct ContainerInspectTab: View {
                 }
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .background(.bar)
     }
 
     private var matchCaption: String {
@@ -210,20 +191,16 @@ struct ContainerInspectTab: View {
     private var content: some View {
         if let errorText {
             TrackBInlineError(text: errorText)
-                .padding(18)
+                .padding(Theme.pagePadding)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         } else if isLoading && lines.isEmpty {
-            ProgressView()
-                .controlSize(.small)
+            MorbLoading()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if lines.isEmpty {
-            TrackBEmptyState(
-                symbols: ["curlybraces"],
-                title: "Nothing to inspect",
-                message: "The engine did not return a document for this container."
-            ) {
-                EmptyView()
-            }
+            MorbEmptyState(
+                "Nothing to inspect",
+                systemImage: "curlybraces",
+                description: "The engine did not return a document for this container.")
         } else {
             ScrollViewReader { proxy in
                 ScrollView([.vertical, .horizontal]) {
@@ -241,7 +218,7 @@ struct ContainerInspectTab: View {
                             .id(line.id)
                         }
                     }
-                    .padding(.vertical, 6)
+                    .padding(.vertical, Theme.space3)
                     // A horizontally scrollable `ScrollView` proposes *no* width to its
                     // content, and `maxWidth: .infinity` against an unspecified proposal
                     // resolves to the minimum — which for a `Text` is one character. The
@@ -322,8 +299,8 @@ struct TrackBJSONRow: View {
             // not a paragraph. Without it a long `Env` entry reflows and the line
             // numbers stop meaning anything.
             .lineLimit(1)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 0.5)
+            .padding(.horizontal, Theme.space4)
+            .padding(.vertical, 1)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(background)
     }

@@ -94,6 +94,13 @@ public struct MorbstackMainApp: App {
         .commands {
             MorbCommands(model: model, isPalettePresented: $isPalettePresented)
         }
+        // A short titlebar that merges with the toolbar rather than a separate strip
+        // above it — the single scene-level change that makes every screen's
+        // `.morbScreen` toolbar look like it belongs to the window instead of floating
+        // under a second header. `showsTitle: false` because the sidebar already names
+        // the app and the detail pane's `.navigationTitle` already names the screen;
+        // a third "Morbstack" in the titlebar would be the same word twice.
+        .windowToolbarStyle(.unifiedCompact(showsTitle: false))
 
         // `.window` rather than the default `.menu`: the popover is a laid-out SwiftUI
         // view with its own header, rows and footer, and `.menu` would try to render it
@@ -175,6 +182,12 @@ struct RootWindow: View {
 
     @Environment(\.openWindow) private var openWindow
 
+    /// How far the command palette sits from the top of the window — a Spotlight-ish
+    /// ~22% on the window sizes the app actually opens at, not dead centre. Matches the
+    /// offset the screenshot harness's `paletteScene()` uses, so the real app and
+    /// `command-palette-*.png` agree.
+    private static let paletteTopInset: CGFloat = 96
+
     var body: some View {
         NavigationSplitView {
             Sidebar(model: model)
@@ -193,7 +206,20 @@ struct RootWindow: View {
         .background(WindowConfigurator(size: options.windowSize))
         .task { await model.bootstrap() }
         .sheet(isPresented: $isPalettePresented) {
-            CommandPalette(model: model, isPresented: $isPalettePresented)
+            // `CommandPalette`'s own root is just the sized panel — the merge-owned
+            // screenshot harness composes it the same way for `paletteScene()`, so the
+            // scrim and the top anchor live here rather than inside the palette itself.
+            // `.presentationBackground(.clear)`, applied inside `CommandPalette`, is a
+            // presentation-preference modifier and reaches the sheet from here just the
+            // same, so the scrim below is the only thing behind the panel.
+            ZStack(alignment: .top) {
+                Color.black.opacity(0.18)
+                    .ignoresSafeArea()
+                    .onTapGesture { isPalettePresented = false }
+                CommandPalette(model: model, isPresented: $isPalettePresented)
+                    .padding(.top, Self.paletteTopInset)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         // The two cross-track hooks Track D asked for. Installed from the window rather
         // than from `init` because `openWindow` is an environment action and only exists
@@ -207,25 +233,51 @@ struct RootWindow: View {
 
 // MARK: - Sidebar
 
+/// The one section boundary in the app that reflects how someone actually thinks about
+/// the product: things you run, and things that back them.
+private enum SidebarSection: String, CaseIterable, Identifiable {
+    case workloads = "Workloads"
+    case resources = "Resources"
+
+    var id: String { rawValue }
+
+    var items: [Nav] {
+        switch self {
+        case .workloads: return [.containers, .stacks, .kubernetes]
+        case .resources: return [.images, .volumes, .networks, .builds, .disk]
+        }
+    }
+}
+
 struct Sidebar: View {
 
     @Bindable var model: AppModel
 
     var body: some View {
         VStack(spacing: 0) {
+            MorbSidebarHeader(version: model.engine.version.map { "v\($0)" })
             List(selection: $model.selection) {
-                Section {
-                    ForEach(Nav.allCases) { nav in
-                        NavRow(nav: nav, badge: badge(for: nav))
-                            .tag(nav)
+                ForEach(SidebarSection.allCases) { section in
+                    Section(section.rawValue) {
+                        ForEach(section.items) { nav in
+                            NavRow(
+                                nav: nav,
+                                badge: badge(for: nav),
+                                isSelected: model.selection == nav,
+                                isEnabled: model.engine.isRunning)
+                                .tag(nav)
+                                .listRowInsets(EdgeInsets())
+                                .listRowBackground(Color.clear)
+                        }
                     }
                 }
             }
             .listStyle(.sidebar)
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                EnginePill(model: model)
-            }
         }
+        // `.morbBottomBar`, not `.safeAreaInset`: on macOS 26 this is what gets the pill
+        // the system's own bar treatment (glass plus the scroll-edge effect) for free,
+        // and it degrades to `safeAreaInset` below that — see `Design/MorbGlass.swift`.
+        .safeAreaInset(edge: .bottom, spacing: 0) { EnginePill(model: model) }
     }
 
     /// The count shown on the right of a row, when there is a number worth knowing.
@@ -245,32 +297,38 @@ struct Sidebar: View {
 }
 
 /// One sidebar row.
+///
+/// Selection is drawn by ``MorbRow`` — `Theme.selectionFill` plus the 3pt brand rail —
+/// rather than by `List`'s own neutral-grey highlight, which is the single biggest
+/// reason a screenshot of the old sidebar had no colour identity at all. The `List`'s
+/// `selection:` binding still does the real work (click, arrow-key navigation,
+/// accessibility); this only replaces what it paints.
 private struct NavRow: View {
 
     let nav: Nav
     let badge: Int?
+    let isSelected: Bool
+    let isEnabled: Bool
 
     var body: some View {
-        Label {
-            HStack(spacing: 6) {
-                Text(nav.title)
-                Spacer(minLength: 4)
-                if let badge {
-                    Text("\(badge)")
-                        .font(.caption2.weight(.semibold))
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        .background(.quaternary, in: Capsule())
-                        .transition(.opacity.combined(with: .scale(scale: 0.7)))
-                }
-            }
-        } icon: {
+        HStack(spacing: Theme.space3) {
             Image(systemName: nav.symbol)
+                .frame(width: 18)
+            Text(nav.title)
+            Spacer(minLength: Theme.space2)
+            if nav == .builds {
+                MorbChip("Soon", rank: .quiet)
+            } else if let badge {
+                MorbCountBadge(count: badge)
+                    .transition(.opacity.combined(with: .scale(scale: 0.7)))
+            }
         }
-        .animation(Theme.springSubtle, value: badge)
-        .help("\(nav.title) (⌘\(nav.shortcutIndex))")
+        .morbRow(.standard, isSelected: isSelected)
+        .opacity(isEnabled ? 1 : 0.5)
+        .morbAnimation(.subtle, value: badge)
+        .help(isEnabled
+            ? "\(nav.title) (⌘\(nav.shortcutIndex))"
+            : "\(nav.title) — start the engine to see this")
     }
 }
 
@@ -292,8 +350,10 @@ struct EnginePill: View {
     var body: some View {
         VStack(spacing: 0) {
             Divider()
-            HStack(spacing: 8) {
-                StatusDot(tone: tone, size: 9, animated: model.engine.isTransitional || model.isEngineBusy)
+            HStack(spacing: Theme.space3) {
+                MorbStatusDot(
+                    tone: tone, size: 9,
+                    pulsing: model.engine.isTransitional || model.isEngineBusy)
 
                 VStack(alignment: .leading, spacing: 1) {
                     Text(model.engine.headline)
@@ -303,6 +363,7 @@ struct EnginePill: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
+                        .contentTransition(.numericText())
                 }
 
                 Spacer(minLength: 0)
@@ -325,13 +386,15 @@ struct EnginePill: View {
                     .opacity(isHovering ? 1 : 0)
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 9)
+            .padding(.horizontal, Theme.space4)
+            .padding(.vertical, Theme.space3 + 1)
             .contentShape(Rectangle())
             .onHover { isHovering = $0 }
-            .animation(Theme.fade, value: isHovering)
-            .animation(Theme.springSubtle, value: model.engine)
+            .morbAnimation(.fade, value: isHovering)
+            .morbAnimation(.subtle, value: model.engine)
         }
+        // Floating chrome over the scrolling sidebar list, per `docs/design/IDENTITY.md`
+        // §5.1 — `.bar` role, flush with the sidebar's edges so `radius: 0`.
         .background(.thinMaterial)
         .help(tooltip)
     }
@@ -350,22 +413,12 @@ struct EnginePill: View {
     private var sharingWarning: some View {
         if let chip = model.fileSharingChip {
             SettingsLink {
-                HStack(spacing: 4) {
-                    Image(systemName: chip.symbol)
-                        .font(.system(size: 10, weight: .semibold))
-                    Text(chip.text)
-                        .font(.caption2.weight(.medium))
-                        .lineLimit(1)
-                }
-                .foregroundStyle(chip.tone.color)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 3)
-                .background(chip.tone.color.opacity(0.14), in: Capsule())
+                MorbChip(chip.text, symbol: chip.symbol, tone: chip.tone.color)
             }
             .buttonStyle(.plain)
             .help(chip.detail)
             .transition(.opacity.combined(with: .scale(scale: 0.8)))
-            .animation(Theme.springSubtle, value: chip)
+            .morbAnimation(.subtle, value: chip)
         }
     }
 
@@ -428,21 +481,22 @@ struct DetailHost: View {
         case .volumes: VolumesRootView(model: model)
         case .networks: NetworksRootView(model: model)
         case .disk: DiskRootView(model: model)
-        case .builds, .kubernetes: PlaceholderView(nav: model.selection)
+        case .kubernetes: KubernetesRootView(model: model)
+        case .builds: PlaceholderView(nav: model.selection)
         }
     }
 
     @ViewBuilder
     private var errorBanner: some View {
         if let message = model.lastError {
-            HStack(spacing: 10) {
+            HStack(spacing: Theme.space3) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(Theme.statusBad)
                 Text(message)
                     .font(.callout)
                     .lineLimit(2)
                     .textSelection(.enabled)
-                Spacer(minLength: 8)
+                Spacer(minLength: Theme.space3)
                 Button {
                     model.dismissError()
                 } label: {
@@ -451,8 +505,8 @@ struct DetailHost: View {
                 .buttonStyle(.borderless)
                 .foregroundStyle(.secondary)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
+            .padding(.horizontal, Theme.space4)
+            .padding(.vertical, Theme.space3)
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: Theme.cornerRadius, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: Theme.cornerRadius, style: .continuous)
@@ -491,61 +545,30 @@ struct EngineStoppedView: View {
     private var isStarting: Bool { model.isEngineBusy || model.engine.isTransitional }
 
     var body: some View {
-        VStack(spacing: 0) {
-            Spacer()
-
-            ZStack {
-                Circle()
-                    .fill(Theme.brandGradient)
-                    .frame(width: 84, height: 84)
-                    .opacity(isStarting ? 0.9 : 0.16)
-                    .blur(radius: isStarting ? 0 : 0.5)
-                Image(systemName: isStarting ? "gearshape.2" : "shippingbox")
-                    .font(.system(size: 34, weight: .light))
-                    .foregroundStyle(isStarting ? AnyShapeStyle(.white) : AnyShapeStyle(Theme.brand))
-                    .symbolEffect(.pulse, isActive: isStarting)
-            }
-            .animation(Theme.springSubtle, value: isStarting)
-
-            Text(title)
-                .font(.title2.weight(.semibold))
-                .padding(.top, 20)
-
-            Text(explanation)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 380)
-                .padding(.top, 6)
-
+        MorbEmptyState(
+            title,
+            systemImage: isStarting ? "gearshape.2" : "shippingbox",
+            description: explanation,
+            footnote: "Morbstack runs Docker in a lightweight virtual machine."
+        ) {
             if isStarting {
                 ProgressView()
                     .controlSize(.small)
-                    .padding(.top, 22)
             } else {
                 Button {
                     Task { await model.engineAction(.start) }
                 } label: {
-                    Label(model.engine.state == "suspended" ? "Resume Engine" : "Start Engine",
-                          systemImage: "play.fill")
+                    Label(
+                        model.engine.state == "suspended" ? "Resume Engine" : "Start Engine",
+                        systemImage: "play.fill")
                         .frame(minWidth: 132)
                 }
-                .buttonStyle(.borderedProminent)
+                .morbButton(.primary)
                 .controlSize(.large)
-                .tint(Theme.brand)
                 .keyboardShortcut(.return, modifiers: [])
-                .padding(.top, 22)
             }
-
-            Spacer()
-
-            Text("Morbstack runs Docker in a lightweight virtual machine.")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-                .padding(.bottom, Theme.pagePadding)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(Theme.pagePadding)
     }
 
     private var title: String {
@@ -565,7 +588,7 @@ struct EngineStoppedView: View {
         case "suspended":
             return "The virtual machine is saved to disk. Resuming restores it exactly where it left off — your containers are still there."
         case "error":
-            return "Morbstack could not bring the virtual machine up. Run `morb doctor` in a terminal for a full diagnosis."
+            return "Morbstack could not bring the virtual machine up. Run morb doctor in a terminal for a full diagnosis."
         default:
             return "Start it to see your containers, images and volumes. Nothing runs on your Mac until you do."
         }

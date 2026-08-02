@@ -129,8 +129,8 @@ struct MorbSettingsView: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .fixedSize()
-            .padding(.top, 12)
-            .padding(.bottom, 10)
+            .padding(.top, Theme.space4)
+            .padding(.bottom, Theme.space3)
             .frame(maxWidth: .infinity)
             .background(Color(nsColor: .windowBackgroundColor))
 
@@ -201,84 +201,86 @@ private struct TrackDResourceSettings: View {
     let store: TrackDSettingsStore
 
     var body: some View {
-        VStack(spacing: 0) {
-            Form {
-                if let error = store.loadError {
-                    Section {
-                        TrackDInlineNotice(
-                            symbol: "exclamationmark.triangle.fill",
-                            tone: .warn,
-                            title: "config.toml could not be read",
-                            message: error)
-                    }
-                }
-
-                if store.needsEngineRestart && model.engine.isRunning {
-                    Section {
-                        TrackDInlineNotice(
-                            symbol: "arrow.clockwise.circle.fill",
-                            tone: .accent,
-                            title: "Restart the engine to apply",
-                            message: store.restartSummary
-                        ) {
-                            Button("Restart engine") { restartEngine() }
-                                .buttonStyle(.borderedProminent)
-                                .controlSize(.small)
-                                .tint(Theme.accent)
-                        }
-                    }
-                }
-
+        Form {
+            if let error = store.loadError {
                 Section {
-                    cpuRow
-                } header: {
-                    Text("Processors")
-                }
-
-                Section {
-                    memoryRow
-                } header: {
-                    Text("Memory")
-                }
-
-                Section {
-                    suspendRow
-                } header: {
-                    Text("Idle behaviour")
-                }
-
-                Section {
-                    LabeledContent("Root disk") {
-                        Text("\(store.draft.diskSizeGiB) GiB")
-                            .monospacedDigit()
-                            .foregroundStyle(.secondary)
-                    }
-                    Text(
-                        "Applied when the sparse disk image is first created. Changing it later "
-                            + "has no effect on an existing image, so it is not editable here."
-                    )
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                } header: {
-                    Text("Storage")
+                    TrackDInlineNotice(
+                        symbol: "exclamationmark.triangle.fill",
+                        tone: .warn,
+                        title: "config.toml could not be read",
+                        message: error)
                 }
             }
-            .formStyle(.grouped)
-            .scrollContentBackground(.hidden)
 
-            // The form scrolls under a pinned footer, so it needs an edge: without one
-            // the last card is simply cut off mid-corner and the buttons look like they
-            // are floating on top of it.
-            Divider()
-            footer
+            if let error = store.saveError {
+                Section {
+                    TrackDInlineNotice(
+                        symbol: "exclamationmark.triangle.fill",
+                        tone: .bad,
+                        title: "Could not save",
+                        message: error)
+                }
+            }
+
+            if store.needsEngineRestart && model.engine.isRunning {
+                Section {
+                    TrackDInlineNotice(
+                        symbol: "arrow.clockwise.circle.fill",
+                        tone: .accent,
+                        title: "Restart the engine to apply",
+                        message: store.restartSummary
+                    ) {
+                        Button("Restart engine") { restartEngine() }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                            .tint(Theme.accent)
+                    }
+                }
+            }
+
+            Section {
+                cpuRow
+            } header: {
+                Text("Processors")
+            }
+
+            Section {
+                memoryRow
+            } header: {
+                Text("Memory")
+            }
+
+            Section {
+                suspendRow
+            } header: {
+                Text("Idle behaviour")
+            }
+
+            Section {
+                LabeledContent("Root disk") {
+                    Text("\(store.draft.diskSizeGiB) GiB")
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+                Text(
+                    "Applied when the sparse disk image is first created. Changing it later "
+                        + "has no effect on an existing image, so it is not editable here."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            } header: {
+                Text("Storage")
+            }
         }
+        .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
     }
 
     // MARK: Rows
 
     private var cpuRow: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: Theme.space2) {
             HStack {
                 Text("Virtual CPUs")
                 Spacer()
@@ -287,6 +289,9 @@ private struct TrackDResourceSettings: View {
                     .foregroundStyle(.secondary)
                     .contentTransition(.numericText())
             }
+            // macOS settings apply on change — no Save button, so the write happens
+            // when the drag ends (`onEditingChanged`) rather than on every tick, which
+            // would otherwise spam the config file dozens of times per drag.
             Slider(
                 value: Binding(
                     get: { TrackDConfigEditor.cpuSliderValue(store.draft, limits: store.limits) },
@@ -300,15 +305,18 @@ private struct TrackDResourceSettings: View {
                 Text("1").font(.caption2).foregroundStyle(.tertiary)
             } maximumValueLabel: {
                 Text("\(store.limits.hostCores)").font(.caption2).foregroundStyle(.tertiary)
+            } onEditingChanged: { editing in
+                if !editing { store.save() }
             }
 
-            HStack(spacing: 6) {
+            HStack(spacing: Theme.space2) {
                 Text("This Mac has \(store.limits.hostCores) cores.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 if !TrackDConfigEditor.isTrackingHostCores(store.draft) {
                     Button("Match host") {
                         TrackDConfigEditor.matchHostCores(&store.draft)
+                        store.save()
                     }
                     .buttonStyle(.link)
                     .font(.caption)
@@ -316,7 +324,7 @@ private struct TrackDResourceSettings: View {
                 }
             }
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, Theme.space1)
     }
 
     private var cpuValueText: String {
@@ -327,7 +335,7 @@ private struct TrackDResourceSettings: View {
     }
 
     private var memoryRow: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: Theme.space2) {
             HStack {
                 Text("Memory")
                 Spacer()
@@ -349,6 +357,8 @@ private struct TrackDResourceSettings: View {
                 Text("1").font(.caption2).foregroundStyle(.tertiary)
             } maximumValueLabel: {
                 Text("\(store.limits.hostMemoryGiB)").font(.caption2).foregroundStyle(.tertiary)
+            } onEditingChanged: { editing in
+                if !editing { store.save() }
             }
             Text(
                 "A cap, not an allocation. The VM only takes the memory the guest actually "
@@ -358,15 +368,21 @@ private struct TrackDResourceSettings: View {
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, Theme.space1)
     }
 
     private var suspendRow: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: Theme.space2) {
             Stepper(
                 value: Binding(
                     get: { store.draft.autoSuspendMinutes },
-                    set: { TrackDConfigEditor.applyAutoSuspend($0, to: &store.draft) }
+                    set: {
+                        TrackDConfigEditor.applyAutoSuspend($0, to: &store.draft)
+                        // A stepper's steps are discrete clicks, not a continuous drag,
+                        // so each one is its own committed change — unlike the sliders
+                        // above, there is no "still editing" moment to wait out.
+                        store.save()
+                    }
                 ),
                 in: TrackDConfigEditor.autoSuspendRange,
                 step: 5
@@ -388,48 +404,7 @@ private struct TrackDResourceSettings: View {
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(.vertical, 2)
-    }
-
-    // MARK: Footer
-
-    private var footer: some View {
-        HStack(spacing: 10) {
-            if let error = store.saveError {
-                Label(error, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .lineLimit(2)
-            } else if store.isDirty {
-                Text("Unsaved changes")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 8)
-            Button("Revert") { store.revert() }
-                .disabled(!store.isDirty)
-            Button("Save") { store.save() }
-                .keyboardShortcut(.defaultAction)
-                // A default button is filled by AppKit whether or not it is enabled, and
-                // the fill comes from the tint. Indigo while there is something to save;
-                // the standard control face when there is not, so it reads as an
-                // inactive button rather than a faded coloured slab.
-                //
-                // Not `nil` for the inactive case: passing no tint does not mean "no
-                // colour", it means "fall back to `NSColor.controlAccentColor`" — which
-                // is the machine's accent, the exact thing this app does not use for its
-                // own chrome. On a Mac set to pink, a disabled Save came out pink.
-                .tint(store.isDirty ? Theme.accent : Color(nsColor: .controlColor))
-                .disabled(!store.isDirty)
-        }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 12)
-        // The material, over an opaque window background. The second layer is invisible
-        // in the app — the window is already that colour behind it — and is what stops
-        // the form's last card showing through the buttons when this view is rasterised
-        // offscreen, where a material has no backdrop to sample and draws nothing.
-        .background(.bar)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .padding(.vertical, Theme.space1)
     }
 
     private func restartEngine() {
@@ -465,7 +440,7 @@ private struct TrackDAdvancedSettings: View {
             } header: {
                 Text("Locations")
             } footer: {
-                HStack(spacing: 12) {
+                HStack(spacing: Theme.space4) {
                     Button("Reveal in Finder") {
                         NSWorkspace.shared.activateFileViewerSelecting([store.url])
                     }
@@ -537,12 +512,12 @@ struct TrackDInlineNotice<Accessory: View>: View {
     @ViewBuilder var accessory: Accessory
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
+        HStack(alignment: .top, spacing: Theme.space3) {
             Image(systemName: symbol)
                 .font(.callout)
                 .foregroundStyle(tone.color)
                 .symbolRenderingMode(.hierarchical)
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: Theme.space1) {
                 Text(title)
                     .font(.callout.weight(.medium))
                 Text(message)
@@ -550,10 +525,10 @@ struct TrackDInlineNotice<Accessory: View>: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            Spacer(minLength: 8)
+            Spacer(minLength: Theme.space3)
             accessory
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, Theme.space2)
     }
 }
 

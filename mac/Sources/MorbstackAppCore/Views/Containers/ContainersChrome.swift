@@ -1,13 +1,16 @@
 // Copyright 2026 The Morbstack Authors.
 // Licensed under the Apache License, Version 2.0 (the "License").
 //
-// The small vocabulary of controls the Containers screens are built from: status dots,
-// badges, port chips, the page header, the empty states.
-//
-// These are `TrackB`-prefixed rather than shared because the app contract gives shared
-// chrome to Track A's `Theme.swift`; when that lands, most of this file becomes a set
-// of thin aliases. Until then it keeps the Containers views free of ad-hoc padding
-// numbers and one-off colours, which is the only way a screen this dense stays coherent.
+// What is left of the Containers screens' own vocabulary once the shared `Design/`
+// system covers status, chips, rows, cards and empty states: the ANSI/log palette (kept
+// exactly as it was — it is the terminal's contract with the program that wrote the
+// bytes, not a UI colour), the All/Running scope, a clipboard helper, and two small
+// legacy views (`TrackBPageHeader`, `TrackBSearchField`) that the offscreen screenshot
+// harness (`Shots/ShotScenes.swift`, owned by the merge) still constructs directly for
+// its own tab-specific compositions. They are restyled onto `Theme` tokens here so they
+// stay visually coherent with the rest of the redesign, but the *shipping* Containers
+// screen no longer uses either — see `ContainersRootView`'s real `.toolbar` +
+// `.searchable` instead.
 
 import AppKit
 import SwiftUI
@@ -28,39 +31,11 @@ enum TrackBPalette {
         })
     }
 
-    // MARK: Container state
-
-    /// The dot colour for a container state, following the contract's mapping:
-    /// running green, exited secondary, restarting orange, dead or unhealthy red.
-    static func stateColor(_ state: String, unhealthy: Bool = false) -> Color {
-        if unhealthy { return .red }
-        switch state {
-        case "running": return .green
-        case "paused": return .blue
-        case "restarting": return .orange
-        case "created": return .teal
-        case "dead": return .red
-        case "removing": return .orange
-        default: return .secondary
-        }
-    }
-
-    static func stateSymbol(_ state: String, unhealthy: Bool = false) -> String {
-        if unhealthy { return "exclamationmark.triangle.fill" }
-        switch state {
-        case "running": return "circle.fill"
-        case "paused": return "pause.circle.fill"
-        case "restarting": return "arrow.triangle.2.circlepath"
-        case "dead": return "xmark.octagon.fill"
-        default: return "circle"
-        }
-    }
-
     // MARK: Log surface
 
     /// The log viewer's background. A touch off the window's own colour so the
     /// monospaced block reads as a distinct surface without becoming a black box in
-    /// light mode.
+    /// light mode. Flat, never a material — see `docs/design/IDENTITY.md` §5.
     static let logSurface = adaptive(
         light: NSColor(calibratedWhite: 0.99, alpha: 1),
         dark: NSColor(calibratedWhite: 0.10, alpha: 1))
@@ -75,6 +50,9 @@ enum TrackBPalette {
     /// gives unreadable yellow and near-invisible bright-white. The light column is
     /// therefore darkened to hold roughly 4.5:1 against the light log surface, and the
     /// dark column brightened for the same reason in reverse.
+    ///
+    /// Not restyled as part of this pass: the ANSI palette is the terminal's contract
+    /// with the program that wrote the bytes, not a Morbstack UI colour.
     static func ansi(_ color: TrackBAnsiColor) -> Color {
         switch color {
         case .black:
@@ -129,144 +107,33 @@ enum TrackBPalette {
     }
 }
 
-// MARK: - Status dot
+// MARK: - Scope
 
-/// The state indicator that leads every container row.
-///
-/// A dot alone is not enough — colour is the fastest signal but it is also the one some
-/// users cannot read — so restarting spins, paused shows its glyph, and unhealthy is a
-/// triangle. Everything still reads correctly in greyscale.
-struct TrackBStatusDot: View {
+/// The All / Running filter.
+enum TrackBScope: String, CaseIterable, Identifiable {
+    case all, running
 
-    let state: String
-    var unhealthy: Bool = false
-    var size: CGFloat = 8
+    var id: String { rawValue }
 
-    @State private var spinning = false
-
-    private var color: Color { TrackBPalette.stateColor(state, unhealthy: unhealthy) }
-
-    var body: some View {
-        Group {
-            switch state {
-            case "restarting":
-                Image(systemName: "arrow.triangle.2.circlepath")
-                    .font(.system(size: size + 3, weight: .semibold))
-                    .rotationEffect(.degrees(spinning ? 360 : 0))
-                    .animation(
-                        .linear(duration: 1.6).repeatForever(autoreverses: false),
-                        value: spinning)
-                    .onAppear { spinning = true }
-            case _ where unhealthy:
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: size + 2))
-            case "paused":
-                Image(systemName: "pause.fill")
-                    .font(.system(size: size, weight: .bold))
-            case "running":
-                Circle()
-                    .frame(width: size, height: size)
-                    // A soft halo reads as "live" at a glance without animating, which
-                    // matters when twenty rows are on screen at once.
-                    .shadow(color: color.opacity(0.55), radius: 3)
-            default:
-                Circle()
-                    .strokeBorder(lineWidth: 1.5)
-                    .frame(width: size, height: size)
-            }
-        }
-        .foregroundStyle(color)
-        .frame(width: size + 5, height: size + 5)
-        .accessibilityLabel(unhealthy ? "unhealthy" : state)
-    }
-}
-
-// MARK: - Badges and chips
-
-enum TrackBBadgeTone {
-    case neutral, accent, warning, danger, success
-
-    var tint: Color {
+    var title: String {
         switch self {
-        case .neutral: return .secondary
-        case .accent: return Theme.accent
-        case .warning: return .orange
-        case .danger: return .red
-        case .success: return .green
+        case .all: return "All"
+        case .running: return "Running"
         }
     }
 }
 
-/// A small capsule label — compose service names, health, "paused".
-struct TrackBBadge: View {
+// MARK: - Legacy header (screenshot-harness compatibility only)
 
-    let text: String
-    var tone: TrackBBadgeTone = .neutral
-    var symbol: String?
-
-    var body: some View {
-        HStack(spacing: 3) {
-            if let symbol {
-                Image(systemName: symbol).font(.system(size: 8, weight: .bold))
-            }
-            Text(text)
-                .font(.system(size: 10, weight: .medium))
-                .lineLimit(1)
-        }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 2)
-        .background(tone.tint.opacity(0.14), in: Capsule())
-        .foregroundStyle(tone.tint)
-    }
-}
-
-/// A published port, clickable when there is something a browser could open.
+/// The page header the screen used to draw inside its own content, before the toolbar.
 ///
-/// UDP and unpublished ports render as plain text rather than as a dead link: a chip
-/// that looks tappable and does nothing is worse than one that never invited the click.
-struct TrackBPortChip: View {
-
-    let port: PortMapping
-    @State private var hovering = false
-
-    var body: some View {
-        if let url = port.url {
-            Button {
-                NSWorkspace.shared.open(url)
-            } label: {
-                HStack(spacing: 3) {
-                    Image(systemName: "arrow.up.forward.app")
-                        .font(.system(size: 8, weight: .semibold))
-                    Text(port.label).font(.system(size: 10, design: .monospaced))
-                }
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(
-                    Theme.accent.opacity(hovering ? 0.25 : 0.13), in: Capsule())
-                .foregroundStyle(Theme.accent)
-            }
-            .buttonStyle(.plain)
-            .onHover { hovering = $0 }
-            .help("Open \(url.absoluteString)")
-            .accessibilityLabel("Open port \(port.hostPort ?? port.containerPort) in browser")
-        } else {
-            Text(port.label)
-                .font(.system(size: 10, design: .monospaced))
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.secondary.opacity(0.12), in: Capsule())
-                .foregroundStyle(.secondary)
-        }
-    }
-}
-
-// MARK: - Header
-
-/// The page header: title, subtitle, and whatever controls the screen needs.
-///
-/// Lives inside the view rather than in the window toolbar so that the Containers
-/// screen owns its own chrome — the window toolbar belongs to the app shell, and two
-/// tracks writing into it is how toolbars end up with three search fields.
+/// `ContainersRootView` no longer uses this — its title, subtitle, search field and
+/// scope control are real `.navigationTitle` / `.navigationSubtitle` / `.searchable` /
+/// `Picker(.segmented)` content inside a `.toolbar`, per `docs/design/COMPONENTS.md` §8.
+/// This type stays only because `Shots/ShotScenes.swift` (owned by the merge) builds a
+/// standalone copy of the containers split to photograph a specific detail tab, and
+/// constructs this directly. Restyled onto `Theme` tokens so it does not look like a
+/// regression in the screenshots that still show it.
 struct TrackBPageHeader<Trailing: View>: View {
 
     let title: String
@@ -274,8 +141,8 @@ struct TrackBPageHeader<Trailing: View>: View {
     @ViewBuilder var trailing: Trailing
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            VStack(alignment: .leading, spacing: 1) {
+        HStack(alignment: .firstTextBaseline, spacing: Theme.space4) {
+            VStack(alignment: .leading, spacing: Theme.space1) {
                 Text(title).font(.title2.weight(.semibold))
                 if let subtitle {
                     Text(subtitle)
@@ -284,16 +151,19 @@ struct TrackBPageHeader<Trailing: View>: View {
                         .monospacedDigit()
                 }
             }
-            Spacer(minLength: 12)
+            Spacer(minLength: Theme.space4)
             trailing
         }
-        .padding(.horizontal, 20)
-        .padding(.top, 16)
-        .padding(.bottom, 12)
+        .padding(.horizontal, Theme.pagePadding)
+        .padding(.top, Theme.space5)
+        .padding(.bottom, Theme.space4)
     }
 }
 
 /// A search field that does not need a `.searchable` container.
+///
+/// Superseded in the shipping screen by `.searchable(text:placement:prompt:)`; kept for
+/// the same reason as `TrackBPageHeader` above.
 struct TrackBSearchField: View {
 
     @Binding var text: String
@@ -311,7 +181,7 @@ struct TrackBSearchField: View {
     private var isFocused: Bool { externalFocus?.wrappedValue ?? internalFocus }
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: Theme.space3) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.secondary)
@@ -341,126 +211,15 @@ struct TrackBSearchField: View {
                 .accessibilityLabel("Clear search")
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
-        .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .padding(.horizontal, Theme.space3)
+        .padding(.vertical, Theme.space2 + 1)
+        .background(.quaternary.opacity(0.6),
+                    in: RoundedRectangle(cornerRadius: Theme.radiusControl, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .strokeBorder(Theme.accent.opacity(isFocused ? 0.8 : 0), lineWidth: 2))
+            RoundedRectangle(cornerRadius: Theme.radiusControl, style: .continuous)
+                .strokeBorder(Theme.brand.opacity(isFocused ? 0.8 : 0), lineWidth: 2))
         .frame(width: width)
-        .animation(.easeOut(duration: 0.12), value: isFocused)
-    }
-}
-
-// MARK: - Empty states
-
-/// The "nothing here yet" screen, built out of SF Symbols rather than an image asset.
-struct TrackBEmptyState<Actions: View>: View {
-
-    let symbols: [String]
-    let title: String
-    let message: String
-    /// A shell command the user can copy to get somewhere.
-    var snippet: String?
-    @ViewBuilder var actions: Actions
-
-    var body: some View {
-        VStack(spacing: 16) {
-            TrackBSymbolStack(symbols: symbols)
-                .padding(.bottom, 4)
-
-            VStack(spacing: 6) {
-                Text(title).font(.title3.weight(.semibold))
-                Text(message)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: 380)
-            }
-
-            if let snippet {
-                TrackBSnippet(command: snippet)
-            }
-
-            actions
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(40)
-    }
-}
-
-/// Three symbols fanned out behind each other — the closest thing to illustration that
-/// stays honest about being made of system glyphs.
-struct TrackBSymbolStack: View {
-
-    let symbols: [String]
-    @State private var appeared = false
-
-    var body: some View {
-        ZStack {
-            ForEach(Array(symbols.enumerated()), id: \.offset) { index, symbol in
-                let middle = Double(symbols.count - 1) / 2
-                let offset = Double(index) - middle
-                Image(systemName: symbol)
-                    .font(.system(size: index == Int(middle.rounded()) ? 46 : 34, weight: .light))
-                    .foregroundStyle(
-                        index == Int(middle.rounded())
-                            ? AnyShapeStyle(Theme.accent.gradient)
-                            : AnyShapeStyle(Color.secondary.opacity(0.35)))
-                    .rotationEffect(.degrees(offset * 12))
-                    .offset(x: offset * 46, y: abs(offset) * 8)
-                    .scaleEffect(appeared ? 1 : 0.82)
-                    .opacity(appeared ? 1 : 0)
-                    .animation(
-                        .spring(response: 0.45, dampingFraction: 0.75)
-                            .delay(Double(index) * 0.06),
-                        value: appeared)
-            }
-        }
-        .frame(height: 74)
-        .onAppear { appeared = true }
-    }
-}
-
-/// A copyable one-line shell command.
-struct TrackBSnippet: View {
-
-    let command: String
-    @State private var copied = false
-    @State private var hovering = false
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Text(verbatim: "$")
-                .font(.system(size: 11.5, design: .monospaced))
-                .foregroundStyle(.tertiary)
-            Text(command)
-                .font(.system(size: 11.5, design: .monospaced))
-                .textSelection(.enabled)
-            Button {
-                TrackBClipboard.copy(command)
-                copied = true
-                Task {
-                    try? await Task.sleep(for: .seconds(1.6))
-                    copied = false
-                }
-            } label: {
-                Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(copied ? Color.green : Theme.accent)
-                    .contentTransition(.symbolEffect(.replace))
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Copy command")
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(.quaternary.opacity(hovering ? 0.8 : 0.5),
-                    in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .strokeBorder(.separator, lineWidth: 0.5))
-        .onHover { hovering = $0 }
+        .morbAnimation(.snappy, value: isFocused)
     }
 }
 
@@ -471,122 +230,5 @@ enum TrackBClipboard {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(string, forType: .string)
-    }
-}
-
-/// One row of a key/value table, used by the Overview tab.
-struct TrackBFieldRow<Value: View>: View {
-
-    let label: String
-    var labelWidth: CGFloat = 116
-    @ViewBuilder var value: Value
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            Text(label)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(width: labelWidth, alignment: .trailing)
-            value
-                .font(.callout)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-}
-
-/// A titled group of rows, with the hairline card treatment used across the detail pane.
-struct TrackBSection<Content: View>: View {
-
-    let title: String
-    var symbol: String?
-    var count: Int?
-    @ViewBuilder var content: Content
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
-                if let symbol {
-                    Image(systemName: symbol)
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.tertiary)
-                }
-                Text(title.uppercased())
-                    .font(.system(size: 10, weight: .semibold))
-                    .kerning(0.6)
-                    .foregroundStyle(.secondary)
-                if let count {
-                    Text("\(count)")
-                        .font(.system(size: 10, weight: .semibold).monospacedDigit())
-                        .foregroundStyle(.tertiary)
-                }
-            }
-            content
-        }
-    }
-}
-
-/// Text that never wraps and shows the whole value on hover — paths, image digests,
-/// command lines, all the things that are too long for the pane but must stay exact.
-struct TrackBMonoText: View {
-
-    let text: String
-    var size: CGFloat = 11.5
-    var tint: Color = .primary
-
-    var body: some View {
-        Text(text)
-            .font(.system(size: size, design: .monospaced))
-            .foregroundStyle(tint)
-            .textSelection(.enabled)
-            .lineLimit(1)
-            .truncationMode(.middle)
-            .help(text)
-    }
-}
-
-/// A compact, borderless icon button — the hover actions on a row and the little
-/// controls in the log toolbar.
-struct TrackBIconButton: View {
-
-    let symbol: String
-    let help: String
-    var tint: Color = .primary
-    var isProminent: Bool = false
-    var shortcut: KeyEquivalent?
-    var modifiers: EventModifiers = .command
-    let action: () -> Void
-
-    @State private var hovering = false
-
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: symbol)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(hovering || isProminent ? tint : Color.secondary)
-                .frame(width: 24, height: 22)
-                .background(
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .fill(tint.opacity(hovering ? 0.16 : 0)))
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
-        .help(help)
-        .accessibilityLabel(help)
-        .modifier(TrackBOptionalShortcut(key: shortcut, modifiers: modifiers))
-    }
-}
-
-/// `keyboardShortcut` has no "maybe" form, so this supplies one.
-private struct TrackBOptionalShortcut: ViewModifier {
-    let key: KeyEquivalent?
-    let modifiers: EventModifiers
-
-    func body(content: Content) -> some View {
-        if let key {
-            content.keyboardShortcut(key, modifiers: modifiers)
-        } else {
-            content
-        }
     }
 }

@@ -7,25 +7,21 @@
 // you watch logs while you restart something, and you compare two rows by clicking
 // between them. `HSplitView` also gives the divider drag for free, which is the one
 // piece of window management a screen like this genuinely needs.
+//
+// The title, subtitle, search field, All/Running scope and Prune action all live in a
+// real `.toolbar` now rather than in a hand-drawn header `HStack`: that is what gives
+// the window something to drag by, a scroll-edge effect above the first row, and Liquid
+// Glass grouping for free on macOS 26. See `docs/design/COMPONENTS.md` §8.
+//
+// Note for whoever next touches the offscreen screenshot harness: `NSHostingView`
+// rendered without an enclosing `NavigationSplitView` does not composite `.toolbar` or
+// `.inspector` content at all (verified empirically — both render as nothing, not as a
+// degraded fallback). `Shots/ShotScenes.swift`'s `ShotWindow` is a plain `HStack`, so the
+// toolbar built here is invisible in `dist/shots`; the list and detail panes below it are
+// exactly what ships. See this track's handoff notes for the full writeup.
 
 import AppKit
 import SwiftUI
-
-// MARK: - Scope
-
-/// The All / Running filter.
-enum TrackBScope: String, CaseIterable, Identifiable {
-    case all, running
-
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .all: return "All"
-        case .running: return "Running"
-        }
-    }
-}
 
 // MARK: - Root
 
@@ -63,7 +59,6 @@ struct ContainersRootView: View {
     @State private var isPruning = false
     @State private var removalTarget: ContainerSummary?
     @State private var notice: TrackBNotice?
-    @FocusState private var searchFocused: Bool
 
     // MARK: Derived
 
@@ -111,68 +106,51 @@ struct ContainersRootView: View {
     // MARK: Body
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            Divider()
-            content
-        }
-        .background(.background)
-        .overlay(alignment: .bottom) { noticeBar }
-        .confirmationDialog(
-            removalTarget.map { "Remove “\($0.displayName)”?" } ?? "Remove container?",
-            isPresented: Binding(
-                get: { removalTarget != nil },
-                set: { if !$0 { removalTarget = nil } }),
-            titleVisibility: .visible,
-            presenting: removalTarget
-        ) { container in
-            Button("Remove", role: .destructive) {
-                let id = container.id
-                removalTarget = nil
-                perform(.remove, on: id)
+        content
+            .background(.background)
+            .overlay(alignment: .bottom) { noticeBar }
+            .morbScreen(title: "Containers", subtitle: subtitle, edge: .hard)
+            .searchable(text: $search, placement: .toolbar, prompt: "Name, image, project")
+            .toolbar { toolbarContent }
+            .confirmationDialog(
+                removalTarget.map { "Remove “\($0.displayName)”?" } ?? "Remove container?",
+                isPresented: Binding(
+                    get: { removalTarget != nil },
+                    set: { if !$0 { removalTarget = nil } }),
+                titleVisibility: .visible,
+                presenting: removalTarget
+            ) { container in
+                Button("Remove", role: .destructive) {
+                    let id = container.id
+                    removalTarget = nil
+                    perform(.remove, on: id)
+                }
+                Button("Cancel", role: .cancel) { removalTarget = nil }
+            } message: { container in
+                Text(container.isRunning
+                     ? "It is still running. Removing it stops the container and deletes its writable layer and anonymous volumes."
+                     : "This deletes its writable layer and anonymous volumes. Named volumes are kept.")
             }
-            Button("Cancel", role: .cancel) { removalTarget = nil }
-        } message: { container in
-            Text(container.isRunning
-                 ? "It is still running. Removing it stops the container and deletes its writable layer and anonymous volumes."
-                 : "This deletes its writable layer and anonymous volumes. Named volumes are kept.")
-        }
-        .onDisappear { hub.stopAll() }
+            .onDisappear { hub.stopAll() }
     }
 
-    // MARK: Header
+    // MARK: Toolbar
 
-    private var header: some View {
-        TrackBPageHeader(title: "Containers", subtitle: subtitle) {
-            HStack(spacing: 10) {
-                TrackBSearchField(
-                    text: $search,
-                    prompt: "Name, image, project",
-                    width: 240,
-                    externalFocus: $searchFocused)
-
-                Picker("", selection: $scope) {
-                    ForEach(TrackBScope.allCases) { item in
-                        Text(item.title).tag(item)
-                    }
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        ToolbarItem(id: "scope", placement: MorbToolbarGroup.navigation) {
+            Picker("Scope", selection: $scope) {
+                ForEach(TrackBScope.allCases) { item in
+                    Text(item.title).tag(item)
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .fixedSize()
-                .help("Show all containers or only running ones")
-
-                pruneButton
             }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+            .help("Show all containers or only running ones")
         }
-        // ⌘F focuses search from anywhere on the screen; the button is invisible and
-        // zero-sized, which is the only way to bind a shortcut to a non-menu action
-        // without owning the window's command set.
-        .background {
-            Button("Search") { searchFocused = true }
-                .keyboardShortcut("f", modifiers: .command)
-                .opacity(0)
-                .frame(width: 0, height: 0)
-                .accessibilityHidden(true)
+        ToolbarItem(id: "prune", placement: MorbToolbarGroup.actions) {
+            pruneButton
         }
     }
 
@@ -180,7 +158,7 @@ struct ContainersRootView: View {
         Button {
             pruneStopped()
         } label: {
-            HStack(spacing: 5) {
+            HStack(spacing: Theme.space2) {
                 if isPruning {
                     ProgressView().controlSize(.small).scaleEffect(0.7).frame(width: 12)
                 } else {
@@ -188,11 +166,7 @@ struct ContainersRootView: View {
                 }
                 Text("Prune stopped")
                 if stoppedCount > 0 {
-                    Text("\(stoppedCount)")
-                        .font(.caption2.weight(.semibold).monospacedDigit())
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        .background(Color.secondary.opacity(0.2), in: Capsule())
+                    MorbCountBadge(count: stoppedCount)
                 }
             }
         }
@@ -228,22 +202,9 @@ struct ContainersRootView: View {
     @ViewBuilder
     private var listPane: some View {
         if filtered.isEmpty {
-            TrackBEmptyState(
-                symbols: ["magnifyingglass"],
-                title: "No matches",
-                message: scope == .running
-                    ? "Nothing running matches “\(search)”."
-                    : "No container matches “\(search)”.",
-                snippet: nil
-            ) {
-                Button("Clear filters") {
-                    search = ""
-                    scope = .all
-                }
-                .buttonStyle(.borderless)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(.background)
+            MorbNoMatches(query: search)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(.background)
         } else {
             List(selection: selectionBinding) {
                 ForEach(groups) { group in
@@ -255,8 +216,11 @@ struct ContainersRootView: View {
                                 client: model.client,
                                 isBusy: busy.contains(container.id),
                                 onAction: { perform($0, on: container.id) },
-                                onRequestRemove: { removalTarget = container })
-                            .tag(container.id)
+                                onRequestRemove: { removalTarget = container },
+                                isSelected: model.selectedContainerID == container.id)
+                                .tag(container.id)
+                                .listRowInsets(EdgeInsets())
+                                .listRowBackground(Color.clear)
                         }
                     } header: {
                         if showsHeader(for: group) {
@@ -265,14 +229,44 @@ struct ContainersRootView: View {
                                 busyCount: group.containers.filter { busy.contains($0.id) }.count,
                                 onUp: { startAll(in: group) },
                                 onDown: { stopAll(in: group) })
+                                .listRowInsets(EdgeInsets())
                         }
                     }
                 }
             }
             .listStyle(.inset)
-            .environment(\.defaultMinListRowHeight, 30)
+            .environment(\.defaultMinListRowHeight, Theme.rowRich)
             .scrollContentBackground(.hidden)
             .background(.background)
+            .contextMenu(forSelectionType: String.self) { ids in
+                contextMenu(for: ids)
+            } primaryAction: { ids in
+                if let id = ids.first { model.selectedContainerID = id }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func contextMenu(for ids: Set<String>) -> some View {
+        if let id = ids.first, let container = model.containers.first(where: { $0.id == id }) {
+            if container.isRunning {
+                Button("Stop") { perform(.stop, on: id) }
+                Button("Restart") { perform(.restart, on: id) }
+                Button("Pause") { perform(.pause, on: id) }
+            } else if container.state == "paused" {
+                Button("Resume") { perform(.unpause, on: id) }
+                Button("Stop") { perform(.stop, on: id) }
+            } else {
+                Button("Start") { perform(.start, on: id) }
+            }
+            Divider()
+            Button("Copy name") { TrackBClipboard.copy(container.displayName) }
+            Button("Copy container ID") { TrackBClipboard.copy(container.id) }
+            if let url = container.ports.compactMap(\.url).first {
+                Button("Open \(url.absoluteString)") { NSWorkspace.shared.open(url) }
+            }
+            Divider()
+            Button("Remove…", role: .destructive) { removalTarget = container }
         }
     }
 
@@ -294,52 +288,38 @@ struct ContainersRootView: View {
                 onRequestRemove: { removalTarget = selected })
             .id(selected.id)
         } else {
-            TrackBEmptyState(
-                symbols: ["shippingbox", "sidebar.right", "text.alignleft"],
-                title: "Select a container",
-                message: "Pick a container to see its configuration, follow its logs, watch CPU and memory, or read the full inspect document.",
-                snippet: nil
-            ) {
-                EmptyView()
-            }
-            .background(.background.secondary)
+            MorbEmptyState(
+                "Select a container",
+                systemImage: "shippingbox",
+                description: "Pick a container to see its configuration, follow its logs, watch CPU and memory, or read the full inspect document."
+            )
+            .background(Theme.contentBackground)
         }
     }
 
     // MARK: Empty states
 
     private var engineEmptyState: some View {
-        TrackBEmptyState(
-            symbols: ["bolt.horizontal", "shippingbox", "power"],
-            title: "The engine is not running",
-            message: "Morbstack's VM is \(model.engine.reachable ? model.engine.state : "stopped"). Start it to see and manage containers.",
-            snippet: nil
+        MorbEmptyState(
+            "The engine isn’t running",
+            systemImage: "bolt.horizontal",
+            description: "Morbstack's VM is \(model.engine.reachable ? model.engine.state : "stopped"). Start it to see and manage containers.",
+            footnote: "Morbstack runs Docker in a lightweight virtual machine.",
+            actionTitle: "Start Engine"
         ) {
-            Button {
-                Task { await model.engineAction(.start) }
-            } label: {
-                Label("Start engine", systemImage: "play.fill")
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .tint(Theme.brand)
-            .disabled(model.engine.isTransitional)
+            Task { await model.engineAction(.start) }
         }
+        .disabled(model.engine.isTransitional)
     }
 
     private var noContainersEmptyState: some View {
-        TrackBEmptyState(
-            symbols: ["cube.transparent", "shippingbox.fill", "cube.transparent"],
-            title: "No containers yet",
-            message: "Nothing is running on this engine. Start something from a terminal and it will show up here the moment it exists.",
-            snippet: "docker run -d -p 8080:80 nginx"
+        MorbEmptyState(
+            "No containers yet",
+            systemImage: "shippingbox",
+            description: "Nothing is running on this engine. Start something from a terminal and it will show up here the moment it exists.",
+            actionTitle: "Refresh"
         ) {
-            Button {
-                Task { await model.refreshAll() }
-            } label: {
-                Label("Refresh", systemImage: "arrow.clockwise")
-            }
-            .buttonStyle(.bordered)
+            Task { await model.refreshAll() }
         }
     }
 
@@ -348,11 +328,11 @@ struct ContainersRootView: View {
     @ViewBuilder
     private var noticeBar: some View {
         if let notice {
-            HStack(spacing: 8) {
+            HStack(spacing: Theme.space3) {
                 Image(systemName: notice.symbol)
-                    .foregroundStyle(notice.isError ? Color.red : Color.green)
+                    .foregroundStyle(notice.isError ? Theme.statusBad : Theme.statusRunning)
                 Text(notice.text).font(.callout)
-                Spacer(minLength: 8)
+                Spacer(minLength: Theme.space3)
                 Button {
                     self.notice = nil
                 } label: {
@@ -361,28 +341,24 @@ struct ContainersRootView: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
+            .padding(.horizontal, Theme.space4)
+            .padding(.vertical, Theme.space3)
             .frame(maxWidth: 460)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(.separator, lineWidth: 0.5))
-            .shadow(color: .black.opacity(0.18), radius: 12, y: 4)
-            .padding(.bottom, 18)
+            .morbGlass(.control, radius: Theme.radiusCard)
+            .padding(.bottom, Theme.space5)
             .transition(.move(edge: .bottom).combined(with: .opacity))
         }
     }
 
     private func show(_ text: String, isError: Bool = false) {
         let notice = TrackBNotice(text: text, isError: isError)
-        withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+        withAnimation(Theme.springSubtle) {
             self.notice = notice
         }
         Task {
             try? await Task.sleep(for: .seconds(isError ? 6 : 3))
             if self.notice?.id == notice.id {
-                withAnimation(.easeOut(duration: 0.2)) { self.notice = nil }
+                withAnimation(Theme.fade) { self.notice = nil }
             }
         }
     }

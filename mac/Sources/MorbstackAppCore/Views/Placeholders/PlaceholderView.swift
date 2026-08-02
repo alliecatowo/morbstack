@@ -18,9 +18,9 @@ struct PlaceholderView: View {
     @State private var copied = false
 
     var body: some View {
-        TrackDEmptyState(symbol: nav.symbol, title: nav.title, message: copy) {
-            VStack(spacing: 12) {
-                TrackDBadge(text: milestone, symbol: "signpost.right", tone: .accent)
+        MorbEmptyState(nav.title, systemImage: nav.symbol, description: copy) {
+            VStack(spacing: Theme.space4) {
+                MorbChip(milestone, symbol: "signpost.right", rank: .actionable)
                 roadmapAffordance
             }
         }
@@ -34,8 +34,6 @@ struct PlaceholderView: View {
         switch nav {
         case .builds:
             return "BuildKit history lands in M2."
-        case .kubernetes:
-            return "k3s one-toggle Kubernetes lands in M2."
         default:
             return "\(nav.title) is not part of this build yet."
         }
@@ -43,7 +41,7 @@ struct PlaceholderView: View {
 
     private var milestone: String {
         switch nav {
-        case .builds, .kubernetes: return "Milestone M2"
+        case .builds: return "Milestone M2"
         default: return "Not scheduled"
         }
     }
@@ -69,7 +67,7 @@ struct PlaceholderView: View {
                 trackDCopy("docs/roadmap.md")
                 copied = true
             } label: {
-                HStack(spacing: 5) {
+                HStack(spacing: Theme.space2) {
                     Image(systemName: copied ? "checkmark" : "doc.on.doc")
                         .font(.caption2)
                         .contentTransition(.symbolEffect(.replace))

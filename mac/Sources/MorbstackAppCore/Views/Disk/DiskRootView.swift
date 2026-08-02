@@ -4,14 +4,17 @@
 // The Disk screen.
 //
 // One question, asked and answered above the fold: *where did my disk go, and how much
-// of it can I have back?* A stacked bar answers the first at a glance, a hatched overlay
-// answers the second in the same pixels, and four prune buttons act on it — each behind
-// a sheet that names what it is about to delete.
+// of it can I have back?* A stacked bar answers the first at a glance, a same-hue dimmed
+// tail answers the second in the same pixels, and four prune buttons act on it — each
+// behind a sheet that names what it is about to delete.
 //
 // A sunburst was the obvious first idea and the wrong one: four categories with a
 // three-orders-of-magnitude spread render as one circle and three invisible slivers, and
 // a ring cannot show "of this, that much is garbage" without a second ring nobody can
-// read. A single bar with a reclaimable hatch shows both facts in one shape.
+// read. A single bar with a dimmed tail shows both facts in one shape, and — per
+// `docs/design/IDENTITY.md` §2.5 — without the diagonal hatching the previous build used,
+// which reads as a moiré artefact rather than as "reclaimable" at the sizes this bar
+// actually renders at.
 //
 // All the arithmetic lives in `TrackCDiskMath`; this file is only the drawing.
 
@@ -82,39 +85,30 @@ struct DiskRootView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            TrackCPageHeader(title: "Disk", subtitle: subtitle) {
-                Button {
-                    Task { await refresh() }
-                } label: {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
-                .disabled(busy)
-                .help("Recalculate disk usage — the engine walks every layer, so this is not instant")
-            }
-
-            Divider()
-
+        Group {
             if model.disk == nil {
-                TrackCEmptyState(
-                    title: "No usage data yet",
-                    message: "Disk usage comes from the engine. Start it and this fills in — the first "
-                        + "calculation walks every layer, so give it a moment.",
-                    symbol: "chart.pie")
+                MorbEmptyState(
+                    "No usage data yet",
+                    systemImage: "chart.pie",
+                    description: "Disk usage comes from the engine. Start it and this fills in — the first "
+                        + "calculation walks every layer, so give it a moment.")
             } else {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 20) {
+                    VStack(alignment: .leading, spacing: Theme.space6) {
                         barCard
                         legend
                         biggest
                         footnote
                     }
-                    .padding(.horizontal, TrackCMetrics.gutter)
-                    .padding(.top, 16)
-                    .padding(.bottom, 24)
+                    .padding(.horizontal, Theme.pagePadding)
+                    .padding(.top, Theme.space5)
+                    .padding(.bottom, Theme.space6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
         }
+        .morbScreen(title: "Disk", subtitle: subtitle, edge: .soft)
+        .toolbar { toolbarContent }
         .trackCToast($toast)
         .sheet(item: $pruning) { target in
             let preview = TrackCDiskMath.prunePreview(
@@ -140,254 +134,248 @@ struct DiskRootView: View {
         }
     }
 
+    // MARK: Toolbar
+
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        ToolbarItem(id: "refresh", placement: MorbToolbarGroup.actions) {
+            Button {
+                Task { await refresh() }
+            } label: {
+                Label("Refresh", systemImage: "arrow.clockwise")
+            }
+            .disabled(busy)
+            .help("Recalculate disk usage — the engine walks every layer, so this is not instant")
+        }
+    }
+
     // MARK: The bar
 
     private var barCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(Formatters.bytesString(usage.total))
-                    .font(.system(size: 30, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                    .contentTransition(.numericText())
-                Text("used by Docker")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                Spacer(minLength: 12)
-                if usage.reclaimable > 0 {
-                    HStack(spacing: 6) {
-                        TrackCHatchSwatch()
-                        Text("\(Formatters.bytesString(usage.reclaimable)) reclaimable")
-                            .font(.callout.weight(.medium))
-                            .monospacedDigit()
-                            .foregroundStyle(.secondary)
+        MorbCard(padding: Theme.space5) {
+            VStack(alignment: .leading, spacing: Theme.space4) {
+                HStack(alignment: .firstTextBaseline, spacing: Theme.space6) {
+                    let total = splitBytes(usage.total)
+                    MorbMetric(value: total.value, unit: total.unit, caption: "used by Docker", emphasis: .leading)
+                    if usage.reclaimable > 0 {
+                        let reclaim = splitBytes(usage.reclaimable)
+                        MorbMetric(value: reclaim.value, unit: reclaim.unit, caption: "reclaimable", tone: Theme.statusBusy)
                     }
+                    Spacer(minLength: Theme.space3)
+                }
+
+                TrackCStackedBar(segments: segments, highlighted: highlighted)
+                    .frame(height: 36)
+                    .morbAnimation(.fade, value: highlighted)
+
+                HStack(spacing: Theme.space2) {
+                    Text("Layers on disk")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                    MorbNumber(Formatters.bytesString(usage.layersSize), font: .caption2)
+                    Text("— shared base layers are counted once, so this is smaller than the sum of image sizes.")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                    Spacer()
                 }
             }
-
-            TrackCStackedBar(segments: segments, highlighted: highlighted)
-                .frame(height: 36)
-                .animation(.easeOut(duration: 0.18), value: highlighted)
-
-            HStack(spacing: 4) {
-                Text("Layers on disk")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                Text(Formatters.bytesString(usage.layersSize))
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                Text("— shared base layers are counted once, so this is smaller than the sum of image sizes.")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                Spacer()
-            }
-        }
-        .padding(TrackCMetrics.gutter)
-        .background(.quaternary.opacity(0.16), in: .rect(cornerRadius: 12, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(.separator.opacity(0.5), lineWidth: 0.5)
         }
     }
 
     // MARK: Legend
 
     private var legend: some View {
-        VStack(spacing: 0) {
-            ForEach(segments) { segment in
-                TrackCLegendRow(
-                    segment: segment,
-                    total: usage.total,
-                    isHighlighted: highlighted == segment.category,
-                    isBusy: busy,
-                    onPrune: { pruning = segment.category.pruneTarget })
-                    .onHover { hovering in
-                        highlighted = hovering ? segment.category : (highlighted == segment.category ? nil : highlighted)
+        MorbCard(padding: 0) {
+            VStack(spacing: 0) {
+                ForEach(segments) { segment in
+                    legendRow(segment)
+                    if segment.id != segments.last?.id {
+                        MorbRowDivider(rowClass: .rich)
                     }
-                if segment.id != segments.last?.id {
-                    Divider().padding(.leading, 26)
                 }
             }
         }
-        .padding(.vertical, 4)
-        .background(.quaternary.opacity(0.12), in: .rect(cornerRadius: 12, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(.separator.opacity(0.5), lineWidth: 0.5)
+    }
+
+    private func legendRow(_ segment: TrackCDiskSegment) -> some View {
+        HStack(spacing: Theme.space3) {
+            RoundedRectangle(cornerRadius: Theme.radiusChip, style: .continuous)
+                .fill(segment.category.color)
+                .frame(width: Theme.dotSize, height: Theme.dotSize)
+
+            VStack(alignment: .leading, spacing: Theme.space1) {
+                Text(segment.category.title)
+                    .font(.body.weight(.medium))
+                HStack(spacing: Theme.space2) {
+                    Text(shareText(segment))
+                        .monospacedDigit()
+                    if segment.reclaimableBytes > 0 {
+                        Text("·")
+                        Text(
+                            "\(Formatters.bytesString(segment.reclaimableBytes)) reclaimable"
+                            + (segment.isEstimate ? " (approx.)" : ""))
+                            .monospacedDigit()
+                    }
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: Theme.space3)
+
+            MorbNumber(Formatters.bytesString(segment.bytes), tone: .primary, font: .callout)
+
+            Button("Prune", role: .destructive) {
+                pruning = segment.category.pruneTarget
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(busy)
+            .help(segment.category.pruneSummary)
         }
+        .padding(.horizontal, Theme.space4)
+        .frame(height: Theme.rowRich)
+        .background(highlighted == segment.category ? Theme.rowHover : .clear)
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            highlighted = hovering ? segment.category : (highlighted == segment.category ? nil : highlighted)
+        }
+    }
+
+    private func shareText(_ segment: TrackCDiskSegment) -> String {
+        guard usage.total > 0 else { return "0%" }
+        return Formatters.percent(segment.fraction(of: usage.total) * 100)
     }
 
     // MARK: Biggest items
 
     /// The named offenders behind two of the four bars.
     ///
-    /// The categories answer *where* the disk went; they cannot answer *what to delete*,
-    /// which is the question anybody who opened this screen actually has. "Volumes,
-    /// 13.26 GB" is a fact you can do nothing with. "shopfront_uploads, 3.22 GB" is a
-    /// decision.
+    /// The categories answer *where* the disk went; they cannot answer *what to delete*.
+    /// "Volumes, 13.26 GB" is a fact you can do nothing with. "shopfront_uploads, 3.22 GB"
+    /// is a decision. Images and volumes only: containers and build cache are aggregates
+    /// the engine reports as a lump.
     ///
-    /// Images and volumes only: containers and build cache are aggregates the engine
-    /// reports as a lump, and inventing a per-item breakdown for them would mean
-    /// inventing the numbers.
+    /// Both columns share one `MorbMeter` denominator — the larger of the two peaks — so
+    /// a 3.22 GB volume draws a longer bar than a 1.49 GB image, which the previous
+    /// per-column scale could not promise.
     @ViewBuilder
     private var biggest: some View {
         let topImages = TrackCDiskMath.largestImages(model.images, limit: Self.biggestRows)
         let topVolumes = TrackCDiskMath.largestVolumes(model.volumes, limit: Self.biggestRows)
+        let peak = Double(max(1, (topImages + topVolumes).map(\.bytes).max() ?? 1))
 
         if !topImages.isEmpty || !topVolumes.isEmpty {
-            HStack(alignment: .top, spacing: 20) {
+            HStack(alignment: .top, spacing: Theme.space5) {
                 if !topImages.isEmpty {
-                    biggestColumn(
-                        title: "Largest images",
-                        symbol: "shippingbox",
-                        tint: TrackCPalette.images,
-                        items: topImages)
+                    biggestCard(title: "Largest images", symbol: "shippingbox",
+                                tint: TrackCPalette.images, items: topImages, peak: peak)
                 }
                 if !topVolumes.isEmpty {
-                    biggestColumn(
-                        title: "Largest volumes",
-                        symbol: "externaldrive",
-                        tint: TrackCPalette.volumes,
-                        items: topVolumes)
+                    biggestCard(title: "Largest volumes", symbol: "externaldrive",
+                                tint: TrackCPalette.volumes, items: topVolumes, peak: peak)
                 }
             }
         }
     }
 
-    /// How many rows each column shows. Five is what fits beside the other three cards
-    /// in the shortest window the app allows without the page starting to scroll.
+    /// How many rows each column shows. Five is what fits beside the other three cards in
+    /// the shortest window the app allows without the page starting to scroll.
     private static let biggestRows = 5
 
-    private func biggestColumn(
-        title: String,
-        symbol: String,
-        tint: Color,
-        items: [TrackCNamedSize]
+    private func biggestCard(
+        title: String, symbol: String, tint: Color, items: [TrackCNamedSize], peak: Double
     ) -> some View {
-        // Scaled against the largest item *in this column*, not against the disk total:
-        // a bar that is 4% wide for every row conveys nothing, and the absolute figure
-        // is already printed beside it for anyone who wants the real proportion.
-        let peak = max(1, items.map(\.bytes).max() ?? 1)
-
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 6) {
-                Image(systemName: symbol)
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(tint)
-                Text(title.uppercased())
-                    .font(.caption2.weight(.semibold))
-                    .kerning(0.6)
-                    .foregroundStyle(.secondary)
-            }
-
-            VStack(alignment: .leading, spacing: 9) {
+        MorbCard(title, symbol: symbol) {
+            VStack(alignment: .leading, spacing: Theme.space4) {
                 ForEach(items) { item in
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    VStack(alignment: .leading, spacing: Theme.space2) {
+                        HStack(alignment: .firstTextBaseline, spacing: Theme.space3) {
                             Text(item.label)
                                 .font(.caption)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                                 .help(item.detail ?? item.label)
-                            Spacer(minLength: 8)
-                            Text(Formatters.bytesString(item.bytes))
-                                .font(.caption.monospacedDigit())
-                                .foregroundStyle(.secondary)
+                            Spacer(minLength: Theme.space3)
+                            MorbNumber(Formatters.bytesString(item.bytes), font: .caption)
                         }
-                        GeometryReader { geometry in
-                            ZStack(alignment: .leading) {
-                                Capsule().fill(tint.opacity(0.14))
-                                Capsule()
-                                    .fill(tint)
-                                    .frame(
-                                        width: max(
-                                            2,
-                                            geometry.size.width
-                                                * CGFloat(Double(item.bytes) / Double(peak))))
-                            }
-                        }
-                        .frame(height: 4)
+                        MorbMeter(value: Double(item.bytes), total: peak, tone: tint, height: 4)
                     }
                 }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(TrackCMetrics.gutter)
-        .background(.quaternary.opacity(0.12), in: .rect(cornerRadius: 12, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(.separator.opacity(0.5), lineWidth: 0.5)
-        }
     }
 
     // MARK: Footnote
 
     @ViewBuilder
     private var footnote: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("VM disk image")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .textCase(.uppercase)
-
+        MorbCard("VM disk image", symbol: "internaldrive") {
             if let footprint {
-                HStack(alignment: .top, spacing: 16) {
-                    figure("Apparent", Formatters.bytesString(footprint.apparentBytes), tone: .secondary)
-                    figure("Actual on APFS", Formatters.bytesString(footprint.actualBytes), tone: .primary)
-                    figure(
-                        "Allocated",
-                        Formatters.percent(footprint.occupancy * 100),
-                        tone: .secondary)
-                    Spacer(minLength: 8)
+                VStack(alignment: .leading, spacing: Theme.space4) {
+                    HStack(alignment: .firstTextBaseline, spacing: Theme.space6) {
+                        let apparent = splitBytes(footprint.apparentBytes)
+                        let actual = splitBytes(footprint.actualBytes)
+                        MorbMetric(value: apparent.value, unit: apparent.unit, caption: "Apparent")
+                        MorbMetric(value: actual.value, unit: actual.unit, caption: "Actual on APFS", emphasis: .leading)
+                        MorbMetric(value: Formatters.percent(footprint.occupancy * 100), caption: "Allocated")
+                        Spacer(minLength: Theme.space3)
+                    }
+
+                    footnoteExplanation(footprint)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Text(footprint.path)
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                        .padding(.horizontal, Theme.space2)
+                        .padding(.vertical, Theme.space1)
+                        .background(.quaternary, in: RoundedRectangle(cornerRadius: Theme.radiusChip, style: .continuous))
                 }
-
-                Text(footnoteExplanation(footprint))
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                Text(footprint.path)
-                    .font(.caption2.monospaced())
-                    .foregroundStyle(.quaternary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .textSelection(.enabled)
             } else {
                 Text("No disk image yet — one is created the first time the engine starts.")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(TrackCMetrics.gutter)
-        .background(.quaternary.opacity(0.1), in: .rect(cornerRadius: 12, style: .continuous))
     }
 
-    private func footnoteExplanation(_ footprint: TrackCDiskImageFootprint) -> String {
-        if footprint.isSparse {
-            return """
-                The image is a sparse file: it is created at its full size but only consumes blocks the \
-                guest has written. Finder, `ls -l` and `du --apparent-size` all report the apparent \
-                figure — the actual one is `st_blocks × 512`, and it is \
-                \(Formatters.bytesString(footprint.savedBytes)) smaller right now.
-                """
+    /// Inline code rendered as a monospaced run rather than as literal backtick
+    /// characters — see `docs/design/IDENTITY.md` §3.3. Built as one `Text`
+    /// concatenation so the whole paragraph still wraps as a single block.
+    private func footnoteExplanation(_ footprint: TrackCDiskImageFootprint) -> Text {
+        func plain(_ string: String) -> Text {
+            Text(string).font(.caption).foregroundColor(.secondary)
         }
-        return """
-            This image is close to fully allocated, so the apparent and actual figures agree. Space \
-            freed inside the guest is not automatically returned to APFS — the file keeps its blocks \
-            until it is trimmed or recreated.
-            """
+        func code(_ string: String) -> Text {
+            Text(string).font(.system(.caption, design: .monospaced)).foregroundColor(.primary)
+        }
+        guard footprint.isSparse else {
+            return plain(
+                "This image is close to fully allocated, so the apparent and actual figures agree. "
+                + "Space freed inside the guest is not automatically returned to APFS — the file keeps "
+                + "its blocks until it is trimmed or recreated.")
+        }
+        return plain("The image is a sparse file: it is created at its full size but only consumes blocks "
+                      + "the guest has written. Finder, ")
+            + code("ls -l")
+            + plain(" and ")
+            + code("du --apparent-size")
+            + plain(" all report the apparent figure — the actual one is ")
+            + code("st_blocks × 512")
+            + plain(", and it is \(Formatters.bytesString(footprint.savedBytes)) smaller right now.")
     }
 
-    private func figure(_ label: String, _ value: String, tone: HierarchicalShapeStyle) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            Text(label)
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-            Text(value)
-                .font(.title3.weight(.medium))
-                .monospacedDigit()
-                .foregroundStyle(tone)
-        }
+    /// Splits a formatted byte string (`"25.15 GB"`) at its last space so the value and
+    /// unit can be handed to `MorbMetric` at their two different type ranks.
+    private func splitBytes(_ bytes: Int64) -> (value: String, unit: String?) {
+        let full = Formatters.bytesString(bytes)
+        guard let space = full.lastIndex(of: " ") else { return (full, nil) }
+        return (String(full[full.startIndex..<space]), String(full[full.index(after: space)...]))
     }
 
     // MARK: Operations
@@ -441,9 +429,9 @@ struct DiskRootView: View {
 
 /// The stacked usage bar, drawn in one `Canvas` pass.
 ///
-/// A `Canvas` rather than an `HStack` of rectangles: the reclaimable hatch has to be
-/// clipped to a sub-rectangle of each segment and drawn with a stroke pattern, which is
-/// a dozen views and two mask layers in SwiftUI primitives and about fifteen lines here.
+/// A `Canvas` rather than an `HStack` of rectangles: the reclaimable tail has to sit
+/// flush against its segment's trailing edge with a hairline between neighbours, which is
+/// fiddlier to get pixel-exact in SwiftUI layout primitives than in fifteen lines here.
 struct TrackCStackedBar: View {
 
     let segments: [TrackCDiskSegment]
@@ -451,7 +439,7 @@ struct TrackCStackedBar: View {
 
     /// Corner radius of the whole bar. The bar is clipped to this, so segments never
     /// need rounding of their own.
-    private let radius: CGFloat = 9
+    private let radius: CGFloat = Theme.radiusControl + 1
 
     var body: some View {
         Canvas { context, size in
@@ -478,20 +466,29 @@ struct TrackCStackedBar: View {
                 x += width
 
                 let dimmed = highlighted != nil && highlighted != segment.category
-                let fill = segment.category.color.opacity(dimmed ? 0.34 : 1)
-                context.fill(Path(rect), with: .color(fill))
 
-                // The reclaimable share sits at the tail of its own segment, so the eye
-                // reads "this much of *this* is garbage" rather than having to compare
-                // against a separate bar.
-                if segment.reclaimableBytes > 0, segment.bytes > 0 {
-                    let share = min(1, Double(segment.reclaimableBytes) / Double(segment.bytes))
-                    let hatchWidth = width * CGFloat(share)
-                    if hatchWidth > 0.5 {
-                        let hatchRect = CGRect(
-                            x: rect.maxX - hatchWidth, y: 0, width: hatchWidth, height: size.height)
-                        drawHatch(in: hatchRect, context: &context, dimmed: dimmed)
-                    }
+                // The reclaimable share is drawn as its own disjoint rectangle at the
+                // tail, at `Theme.seriesDimAlpha`, rather than as an overlay on top of an
+                // already-opaque fill of the same hue — translucent colour composited
+                // over an opaque fill of the *same* colour is a no-op regardless of
+                // alpha, which is why the previous drawing used a hatch texture instead.
+                // Disjoint rects make the dimming actually visible against the card
+                // behind the bar.
+                let reclaimShare = segment.bytes > 0
+                    ? min(1, Double(segment.reclaimableBytes) / Double(segment.bytes)) : 0
+                let reclaimWidth = width * CGFloat(reclaimShare)
+                let solidWidth = width - reclaimWidth
+
+                let baseAlpha: CGFloat = dimmed ? 0.34 : 1
+                if solidWidth > 0 {
+                    let solidRect = CGRect(x: rect.minX, y: 0, width: solidWidth, height: size.height)
+                    context.fill(Path(solidRect), with: .color(segment.category.color.opacity(baseAlpha)))
+                }
+                if reclaimWidth > 0.5 {
+                    let reclaimRect = CGRect(x: rect.maxX - reclaimWidth, y: 0, width: reclaimWidth, height: size.height)
+                    context.fill(
+                        Path(reclaimRect),
+                        with: .color(segment.category.color.opacity(Theme.seriesDimAlpha * baseAlpha)))
                 }
 
                 // A hairline between neighbours, so two similar colours never merge.
@@ -502,9 +499,10 @@ struct TrackCStackedBar: View {
                 }
             }
         }
+        .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: radius, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: radius, style: .continuous)
-                .strokeBorder(.separator.opacity(0.6), lineWidth: 0.5)
+                .strokeBorder(Theme.hairline, lineWidth: 0.5)
         }
         .accessibilityElement()
         .accessibilityLabel("Disk usage by category")
@@ -513,109 +511,5 @@ struct TrackCStackedBar: View {
                 .filter { $0.bytes > 0 }
                 .map { "\($0.category.title) \(Formatters.bytesString($0.bytes))" }
                 .joined(separator: ", "))
-    }
-
-    /// Diagonal 45° hatching, the conventional "this is slack" texture.
-    ///
-    /// Drawn in its own layer so the clip does not leak into the next segment, and in
-    /// white-over-black pairs so it stays visible on both the light and the dark end of
-    /// every segment colour.
-    private func drawHatch(in rect: CGRect, context: inout GraphicsContext, dimmed: Bool) {
-        context.drawLayer { layer in
-            layer.clip(to: Path(rect))
-            let spacing: CGFloat = 7
-            let alpha = dimmed ? 0.16 : 0.42
-            var offset = rect.minX - rect.height
-            while offset < rect.maxX {
-                var stripe = Path()
-                stripe.move(to: CGPoint(x: offset, y: rect.maxY))
-                stripe.addLine(to: CGPoint(x: offset + rect.height, y: rect.minY))
-                layer.stroke(stripe, with: .color(.white.opacity(alpha)), lineWidth: 1.6)
-                offset += spacing
-            }
-        }
-    }
-}
-
-/// A tiny hatched square, so the legend's word "reclaimable" is tied to the texture in
-/// the bar rather than left to be guessed at.
-struct TrackCHatchSwatch: View {
-    var body: some View {
-        Canvas { context, size in
-            let rect = CGRect(origin: .zero, size: size)
-            context.fill(
-                Path(roundedRect: rect, cornerRadius: 2.5, style: .continuous),
-                with: .color(.secondary.opacity(0.35)))
-            context.drawLayer { layer in
-                layer.clip(to: Path(roundedRect: rect, cornerRadius: 2.5, style: .continuous))
-                var offset = -size.height
-                while offset < size.width {
-                    var stripe = Path()
-                    stripe.move(to: CGPoint(x: offset, y: size.height))
-                    stripe.addLine(to: CGPoint(x: offset + size.height, y: 0))
-                    layer.stroke(stripe, with: .color(.primary.opacity(0.55)), lineWidth: 1.2)
-                    offset += 4
-                }
-            }
-        }
-        .frame(width: 12, height: 12)
-    }
-}
-
-// MARK: - Legend row
-
-private struct TrackCLegendRow: View {
-
-    let segment: TrackCDiskSegment
-    let total: Int64
-    let isHighlighted: Bool
-    let isBusy: Bool
-    let onPrune: () -> Void
-
-    private var shareText: String {
-        guard total > 0 else { return "0%" }
-        return Formatters.percent(segment.fraction(of: total) * 100)
-    }
-
-    var body: some View {
-        HStack(spacing: 10) {
-            RoundedRectangle(cornerRadius: 3, style: .continuous)
-                .fill(segment.category.color)
-                .frame(width: 10, height: 10)
-
-            VStack(alignment: .leading, spacing: 1) {
-                Text(segment.category.title)
-                    .font(.callout.weight(.medium))
-                HStack(spacing: 4) {
-                    Text(shareText)
-                        .font(.caption2.monospacedDigit())
-                    if segment.reclaimableBytes > 0 {
-                        Text("·")
-                            .font(.caption2)
-                        Text(
-                            "\(Formatters.bytesString(segment.reclaimableBytes)) reclaimable"
-                            + (segment.isEstimate ? " (approx.)" : ""))
-                            .font(.caption2.monospacedDigit())
-                    }
-                }
-                .foregroundStyle(.secondary)
-            }
-
-            Spacer(minLength: 12)
-
-            Text(Formatters.bytesString(segment.bytes))
-                .font(.callout.monospacedDigit())
-                .contentTransition(.numericText())
-
-            Button("Prune", action: onPrune)
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .disabled(isBusy)
-                .help(segment.category.pruneSummary)
-        }
-        .padding(.horizontal, TrackCMetrics.gutter)
-        .padding(.vertical, 9)
-        .background(isHighlighted ? AnyShapeStyle(.quaternary.opacity(0.4)) : AnyShapeStyle(.clear))
-        .contentShape(.rect)
     }
 }

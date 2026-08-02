@@ -1,126 +1,15 @@
 // Copyright 2026 The Morbstack Authors.
 // Licensed under the Apache License, Version 2.0 (the "License").
 //
-// One row of the Overview tab's Mounts table, plus the Finder affordance.
+// The Finder affordance for a mount's host path.
 //
-// Split out of `ContainerOverviewTab` because a mount row is no longer four strings: it
-// carries a kind badge, a reveal button whose availability depends on the kind, a
-// warning that spans the whole row, and a context menu. Inline, that is forty lines
-// inside a `ForEach` inside a `TrackBTable` inside a section builder, and the type
-// checker starts timing out long before a human does.
+// The Mounts table itself lives in `ContainerOverviewTab` now — a real `Table`, per
+// `docs/design/COMPONENTS.md` §"What is deliberately NOT here" — but revealing a host
+// path in Finder is real, testable AppKit behaviour that belongs in its own file rather
+// than inline in a `TableColumn` closure.
 
 import AppKit
-import SwiftUI
-
-// MARK: - Row
-
-struct TrackBMountRow: View {
-
-    let row: TrackBMountDisplay
-    let columns: [TrackBTableColumn]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            TrackBTableRow {
-                TrackCBadge(text: row.kindLabel, symbol: row.kind.symbol, tone: row.kind.tone)
-                    .help(row.kind.explanation)
-                    .trackBColumn(columns[0])
-
-                TrackBMonoText(
-                    text: row.source,
-                    size: 11,
-                    tint: row.warning == nil ? .primary : .orange)
-                    .trackBColumn(columns[1])
-
-                Image(systemName: "arrow.right")
-                    .font(.system(size: 8, weight: .semibold))
-                    .foregroundStyle(.tertiary)
-                    .trackBColumn(columns[2])
-
-                TrackBMonoText(text: row.destination, size: 11)
-                    .trackBColumn(columns[3])
-
-                Text(row.accessDescription)
-                    .font(.caption2)
-                    .foregroundStyle(row.readOnly ? .secondary : .primary)
-                    .trackBColumn(columns[4])
-
-                revealButton
-                    .trackBColumn(columns[5])
-            }
-
-            if let warning = row.warning {
-                warningLine(warning)
-            }
-        }
-        .contextMenu {
-            if let hostPath = row.hostPath {
-                Button("Reveal in Finder") { TrackBFinder.reveal(hostPath) }
-                Button("Copy Host Path") { TrackBClipboard.copy(hostPath) }
-                Divider()
-            } else if row.source != "—" {
-                Button(row.kind == .volume ? "Copy Volume Name" : "Copy Source") {
-                    TrackBClipboard.copy(row.source)
-                }
-                Divider()
-            }
-            Button("Copy Container Path") { TrackBClipboard.copy(row.destination) }
-        }
-    }
-
-    // MARK: Reveal
-
-    /// The Finder button, shown only for a mount that corresponds to a real folder on
-    /// this Mac.
-    ///
-    /// A volume's `Source` is a path inside the VM's disk image and a tmpfs has none at
-    /// all, so a button on those rows would open a Finder window on nothing — and,
-    /// worse, imply that `/var/lib/docker/volumes/pgdata/_data` is somewhere the user
-    /// could go looking. The column keeps its width on every row regardless, so the
-    /// table stays in register.
-    @ViewBuilder
-    private var revealButton: some View {
-        if let hostPath = row.hostPath {
-            Button {
-                TrackBFinder.reveal(hostPath)
-            } label: {
-                Image(systemName: "arrow.up.forward.app")
-                    .font(.system(size: 10, weight: .medium))
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .help("Reveal \(hostPath) in Finder")
-            .accessibilityLabel("Reveal in Finder")
-        } else {
-            Color.clear.frame(width: 1, height: 1)
-        }
-    }
-
-    // MARK: Warning
-
-    /// The full-width explanation under a problem row.
-    ///
-    /// Under the row rather than in a tooltip because this is the one failure in the
-    /// table that produces no error anywhere else: the container is running, the mount
-    /// is listed, and the directory is empty. A hover-only affordance would be found by
-    /// exactly the people who already knew.
-    private func warningLine(_ text: String) -> some View {
-        HStack(alignment: .top, spacing: 6) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 9))
-                .foregroundStyle(.orange)
-                .padding(.top, 1)
-            Text(text)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .textSelection(.enabled)
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 10)
-        .padding(.bottom, 6)
-    }
-}
+import Foundation
 
 // MARK: - Finder
 

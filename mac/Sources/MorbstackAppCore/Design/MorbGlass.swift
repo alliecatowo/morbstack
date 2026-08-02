@@ -211,16 +211,25 @@ private struct MorbButtonStyleModifier: ViewModifier {
     func body(content: Content) -> some View {
         // `.buttonStyle(.glass)` and `.glassProminent` are macOS 26.0. The *tinted*
         // form, `.glass(_:)`, resolves to `GlassButtonStyle.init(_:)` which is macOS
-        // **26.1** — so it is deliberately not offered here.
+        // **26.1** — so it is deliberately not offered here. `.tint(_:)` is the ordinary
+        // SwiftUI environment modifier (not a `Glass` API, so nothing to verify against
+        // the SDK) and both `GlassProminentButtonStyle` and `.borderedProminent` read it.
+        //
+        // It is mandatory on `.primary`: neither style has an explicit colour of its own,
+        // so with no `.tint` they fall back to `Color.accentColor` — the user's system
+        // accent, not the product's. `Theme.accent`'s own doc comment already explains
+        // why that is wrong for *content*; the one primary button per screen is exactly
+        // as much "ours" as the sidebar's selection rail, and must carry the same brand
+        // indigo rather than whatever the System Settings pane happens to say today.
         if #available(macOS 26.0, *), contrast != .increased {
             switch emphasis {
-            case .primary: content.buttonStyle(.glassProminent)
+            case .primary: content.buttonStyle(.glassProminent).tint(Theme.brand)
             case .floating: content.buttonStyle(.glass)
             case .standard: content.buttonStyle(.bordered)
             }
         } else {
             switch emphasis {
-            case .primary: content.buttonStyle(.borderedProminent)
+            case .primary: content.buttonStyle(.borderedProminent).tint(Theme.brand)
             case .floating, .standard: content.buttonStyle(.bordered)
             }
         }

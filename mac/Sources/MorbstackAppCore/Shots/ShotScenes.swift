@@ -152,6 +152,9 @@ enum ShotScenes {
             ShotScene(name: "placeholder-builds", size: ShotScene.windowSize) {
                 AnyView(fullWindow(selection: .builds))
             },
+            ShotScene(name: "kubernetes", size: ShotScene.windowSize) {
+                AnyView(fullWindow(selection: .kubernetes))
+            },
             ShotScene(name: "engine-stopped", size: ShotScene.windowSize) {
                 AnyView(fullWindow(engine: ShotFixtures.engineStopped, selection: .containers))
             },
@@ -166,10 +169,14 @@ enum ShotScenes {
                 AnyView(settingsScene(tab: .sharing))
             },
             // Height 0: fit the popover, whose height depends on how many containers and
-            // ports it listed. See `ShotRenderer.render`.
-            ShotScene(name: "menubar-popover", size: CGSize(width: 368, height: 0)) {
-                AnyView(menuBarScene())
-            },
+            // ports it listed. See `ShotRenderer.render`. Settle is longer than the
+            // default: `TrackDMenuBarStats` replays each container's whole stats
+            // history through an animated `.numericText()` transition the instant the
+            // popover appears, and the default 0.35s settle can land mid-transition,
+            // photographing a half-morphed digit.
+            ShotScene(
+                name: "menubar-popover", size: CGSize(width: 368, height: 0),
+                build: { AnyView(menuBarScene()) }, settle: 0.9),
             ShotScene(name: "command-palette", size: ShotScene.windowSize) {
                 AnyView(paletteScene())
             },
@@ -292,6 +299,15 @@ enum ShotScenes {
     }
 
     /// The palette over the window it was summoned from, dimmed the way a sheet dims it.
+    ///
+    /// The panel gets the same opaque stand-in fill the menu-bar popover does, behind
+    /// its own `.morbGlassPanel()` — see `ShotChrome.swift`'s header comment. Without
+    /// it the palette's glass samples nothing (there is no real compositor offscreen)
+    /// and renders fully transparent, which does not just leave the panel looking
+    /// unstyled — it also blanks the scrim layer beneath it for the same reason,
+    /// letting the full-brightness window underneath show straight through the result
+    /// list. Verified empirically; not a claim about the shipping app, which has a real
+    /// window to composite against.
     private static func paletteScene() -> some View {
         let model = model(selection: .containers, selected: "shopfront-web-1")
         return ZStack {
@@ -302,6 +318,9 @@ enum ShotScenes {
                     model: model,
                     isPresented: .constant(true),
                     preloadedQuery: "logs post")
+                    .background(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .fill(ShotChrome.popoverBackground))
                     .padding(.top, 96)
                 Spacer(minLength: 0)
             }
@@ -389,7 +408,8 @@ private struct ShotContainersSplit: View {
                             client: model.client,
                             isBusy: false,
                             onAction: { _ in },
-                            onRequestRemove: {})
+                            onRequestRemove: {},
+                            isSelected: row.id == container.id)
                             .tag(row.id)
                     }
                 } header: {

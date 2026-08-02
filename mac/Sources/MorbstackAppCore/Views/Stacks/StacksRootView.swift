@@ -10,6 +10,12 @@
 // whose containers have all been removed simply stops existing, because nothing else
 // records that it ever did.
 //
+// The list is built on the same `MorbGroupHeader` + fixed-height rich row the Containers
+// screen uses for its compose groups — one row rhythm across the two screens that share
+// the concept — plus a summary strip of aggregate `MorbMetric`s, which is what gives this
+// screen something to justify its space instead of two thin cards on a mostly-empty
+// window (`docs/design/CRITIQUE.md`, `stacks-dark`).
+//
 // The one thing the labels on the list endpoint do *not* carry is the path to the
 // compose file. That lives on the container's full inspect payload, which is why this
 // screen makes one extra call per project and caches the answer.
@@ -71,93 +77,245 @@ struct StacksRootView: View {
     let model: AppModel
 
     @State private var metadata = TrackDComposeMetadata()
+    @State private var query = ""
     @State private var busyProjects: Set<String> = []
+    @State private var toast: TrackCToast?
 
     /// Compose projects only — the standalone bucket belongs on the Containers screen.
     private var stacks: [ComposeGroup] {
         model.containers.groupedByComposeProject().filter { $0.project != nil }
     }
 
-    var body: some View {
-        Group {
-            if stacks.isEmpty {
-                emptyState
-            } else {
-                content
+    private var visibleStacks: [ComposeGroup] {
+        let needle = query.trimmingCharacters(in: .whitespaces)
+        guard !needle.isEmpty else { return stacks }
+        return stacks.filter { group in
+            if group.title.localizedCaseInsensitiveContains(needle) { return true }
+            return group.containers.contains { container in
+                (container.composeService ?? container.displayName).localizedCaseInsensitiveContains(needle)
+                    || container.image.localizedCaseInsensitiveContains(needle)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var totalServices: Int { stacks.reduce(0) { $0 + $1.containers.count } }
+    private var runningServices: Int { stacks.reduce(0) { $0 + $1.runningCount } }
+
+    private var subtitle: String {
+        "\(stacks.count) project\(stacks.count == 1 ? "" : "s") · \(runningServices) of \(totalServices) services running"
+    }
+
+    var body: some View {
+        content
+            .morbScreen(title: "Stacks", subtitle: subtitle, edge: .hard)
+            .searchable(text: $query, placement: .toolbar, prompt: "Project, service, image")
+            .trackCToast($toast)
     }
 
     // MARK: Content
 
+    @ViewBuilder
     private var content: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            header
-            ScrollView {
-                LazyVStack(spacing: 14) {
-                    ForEach(stacks) { stack in
-                        TrackDStackCard(
-                            stack: stack,
-                            model: model,
-                            metadata: metadata,
-                            busy: busyProjects.contains(stack.id),
-                            runProject: { action in run(action, on: stack) })
+        if stacks.isEmpty {
+            emptyState
+        } else if visibleStacks.isEmpty {
+            MorbNoMatches(query: query)
+        } else {
+            VStack(spacing: 0) {
+                summary
+                MorbRowDivider(rowClass: .rich)
+                list
+            }
+        }
+    }
+
+    // MARK: Summary
+
+    /// Three aggregate numbers above the list, so the screen reads as a dashboard rather
+    /// than as two cards floating in the top-left corner of the window.
+    private var summary: some View {
+        HStack(spacing: Theme.space6) {
+            MorbMetric(
+                value: "\(stacks.count)",
+                caption: stacks.count == 1 ? "project" : "projects",
+                emphasis: .leading)
+            MorbMetric(
+                value: "\(runningServices)",
+                unit: "of \(totalServices)",
+                caption: "services running",
+                tone: runningServices == totalServices && totalServices > 0 ? Theme.statusRunning : nil)
+            let degraded = stacks.filter { $0.runningCount > 0 && $0.runningCount < $0.containers.count }.count
+            if degraded > 0 {
+                MorbMetric(value: "\(degraded)", caption: degraded == 1 ? "stack degraded" : "stacks degraded", tone: Theme.statusDegraded)
+            }
+            Spacer(minLength: Theme.space4)
+        }
+        .padding(.horizontal, Theme.pagePadding)
+        .padding(.vertical, Theme.space4)
+    }
+
+    // MARK: List
+
+    private var list: some View {
+        List {
+            ForEach(visibleStacks) { stack in
+                Section {
+                    ForEach(stack.containers) { container in
+                        serviceRow(container, project: stack.title)
+                            .listRowInsets(EdgeInsets())
+                            .listRowBackground(Color.clear)
+                    }
+                } header: {
+                    groupHeader(stack)
+                        .listRowInsets(EdgeInsets())
+                }
+            }
+        }
+        .listStyle(.inset)
+        .environment(\.defaultMinListRowHeight, Theme.rowRich)
+        .scrollContentBackground(.hidden)
+        .background(.background)
+    }
+
+    private func groupHeader(_ stack: ComposeGroup) -> some View {
+        let project = stack.title
+        let busy = busyProjects.contains(stack.id)
+        let state = MorbGroupState.from(
+            running: stack.runningCount, total: stack.containers.count,
+            transitioning: busy ? stack.containers.count : 0)
+
+        return MorbGroupHeader(
+            project, state: state, running: stack.runningCount, total: stack.containers.count,
+            symbol: "square.3.layers.3d"
+        ) {
+            if busy {
+                ProgressView().controlSize(.small).scaleEffect(0.6).frame(width: 20)
+            } else {
+                HStack(spacing: Theme.space1) {
+                    MorbIconButton("play.fill", help: "Start every stopped service in \(project)") {
+                        run(.start, on: stack)
+                    }
+                    .disabled(stack.isFullyRunning)
+                    MorbIconButton("arrow.clockwise", help: "Restart every service in \(project)") {
+                        run(.restart, on: stack)
+                    }
+                    .disabled(stack.runningCount == 0)
+                    MorbIconButton("stop.fill", help: "Stop every running service in \(project)") {
+                        run(.stop, on: stack)
+                    }
+                    .disabled(stack.runningCount == 0)
+                    if let file = configFileLabel(project) {
+                        MorbIconButton("doc.text", help: "Copy the Compose file path\n\(file)") {
+                            trackCCopy(file)
+                        }
                     }
                 }
-                .padding(.horizontal, 16)
-                .padding(.bottom, 20)
             }
-            .scrollBounceBehavior(.basedOnSize)
         }
-        .animation(.spring(response: 0.34, dampingFraction: 0.9), value: stacks.map(\.id))
+        .task(id: stack.id) {
+            guard let first = stack.containers.first else { return }
+            metadata.load(project: project, containerID: first.id, client: model.client)
+        }
     }
 
-    private var header: some View {
-        HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Stacks")
-                    .font(.title2.weight(.semibold))
-                Text(summary)
-                    .font(.caption)
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-                    .contentTransition(.numericText())
-            }
-            Spacer(minLength: 16)
-        }
-        .padding(.horizontal, 16)
-        .padding(.top, 14)
-        .padding(.bottom, 12)
+    /// The compose file, shortened to the last two path components — the full path is in
+    /// the tooltip and on the clipboard, and `…/checkout/docker-compose.yml` is what
+    /// actually tells two projects apart.
+    private func configFileLabel(_ project: String) -> String? {
+        guard let files = metadata.configFiles[project], let first = files.first else { return nil }
+        let parts = first.split(separator: "/")
+        guard parts.count > 2 else { return first }
+        return "…/" + parts.suffix(2).joined(separator: "/")
     }
 
-    private var summary: String {
-        let services = stacks.reduce(0) { $0 + $1.containers.count }
-        let running = stacks.reduce(0) { $0 + $1.runningCount }
-        let projects = stacks.count
-        return "\(projects) project\(projects == 1 ? "" : "s") · \(running) of \(services) services running"
+    // MARK: Service row
+
+    private static let trailingWidth: CGFloat = 168
+
+    private func serviceRow(_ container: ContainerSummary, project: String) -> some View {
+        MorbRichRow(
+            title: container.composeService ?? container.displayName,
+            subtitle: container.image
+        ) {
+            MorbStatusDot(
+                tone: StatusTone.forContainer(state: container.state, unhealthy: container.isUnhealthy),
+                pulsing: container.state == "restarting")
+        } trailing: {
+            serviceTrailing(container)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) {
+            TrackDAppBridge.reveal(containerID: container.id, in: model)
+        }
+        .contextMenu {
+            Button("Open in Containers") {
+                TrackDAppBridge.reveal(containerID: container.id, in: model)
+            }
+            Button("View Logs") {
+                TrackDAppBridge.reveal(containerID: container.id, in: model, showingLogs: true)
+            }
+            Divider()
+            ForEach(container.availableActions, id: \.self) { action in
+                Button(action.title, role: action.isDestructive ? .destructive : nil) {
+                    act(action, container)
+                }
+            }
+        }
     }
+
+    @ViewBuilder
+    private func serviceTrailing(_ container: ContainerSummary) -> some View {
+        HStack(spacing: Theme.space1) {
+            if container.isRunning {
+                MorbIconButton("stop.fill", help: "Stop") { act(.stop, container) }
+                MorbIconButton("arrow.clockwise", help: "Restart") { act(.restart, container) }
+            } else {
+                MorbIconButton("play.fill", help: "Start") { act(.start, container) }
+            }
+            portsLine(container)
+        }
+        .frame(width: Self.trailingWidth, alignment: .trailing)
+    }
+
+    @ViewBuilder
+    private func portsLine(_ container: ContainerSummary) -> some View {
+        let publishable = container.ports.filter { $0.hostPort != nil }
+        if let first = publishable.first {
+            HStack(spacing: Theme.space1 + 1) {
+                if publishable.count > 1 {
+                    MorbOverflowChip(
+                        hidden: publishable.count - 1,
+                        detail: publishable.dropFirst().map(\.label).joined(separator: ", "))
+                }
+                MorbPortChip(
+                    host: first.hostPort.map(String.init) ?? first.label,
+                    container: "\(first.containerPort)/\(first.proto)",
+                    isOpenable: first.url != nil)
+            }
+        }
+    }
+
+    // MARK: Empty state
 
     private var emptyState: some View {
-        TrackDEmptyState(
-            symbol: "square.stack.3d.up",
-            title: "No Compose stacks",
-            message:
-                "Anything started with `docker compose up` against the Morbstack engine shows up "
-                + "here, grouped by project. Morbstack reads the standard Compose labels, so the "
-                + "regular CLI is all you need — point it at the Morbstack socket and run it."
+        MorbEmptyState(
+            "No Compose stacks",
+            systemImage: "square.stack.3d.up",
+            description: "Anything started with docker compose up against the Morbstack engine shows up "
+                + "here, grouped by project. Morbstack reads the standard Compose labels, so the regular "
+                + "CLI is all you need — point it at the Morbstack socket and run it."
         ) {
-            VStack(spacing: 8) {
+            VStack(spacing: Theme.space3) {
                 Button {
-                    trackDCopy(TrackDLinks.dockerContextCommand(socketPath: MorbPaths.dockerSocket.path))
+                    trackCCopy(TrackDLinks.dockerContextCommand(socketPath: MorbPaths.dockerSocket.path))
                 } label: {
                     Label("Copy docker context command", systemImage: "doc.on.doc")
                 }
-                .buttonStyle(.bordered)
+                .morbButton(.standard)
 
                 Text(TrackDLinks.dockerHostExport(socketPath: MorbPaths.dockerSocket.path))
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(.tertiary)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
                     .textSelection(.enabled)
             }
         }
@@ -184,258 +342,6 @@ struct StacksRootView: View {
             }
             busyProjects.remove(stack.id)
         }
-    }
-}
-
-// MARK: - Card
-
-private struct TrackDStackCard: View {
-
-    let stack: ComposeGroup
-    let model: AppModel
-    let metadata: TrackDComposeMetadata
-    let busy: Bool
-    let runProject: (ContainerAction) -> Void
-
-    @State private var hoveredService: String?
-
-    private var project: String { stack.project ?? "" }
-
-    private var tone: TrackDTone {
-        if stack.containers.contains(where: { $0.isUnhealthy || $0.state == "dead" }) { return .bad }
-        if stack.isFullyRunning { return .good }
-        if stack.runningCount > 0 { return .warn }
-        return .neutral
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            cardHeader
-            Divider().opacity(0.6)
-            VStack(spacing: 0) {
-                ForEach(stack.containers) { container in
-                    serviceRow(container)
-                    if container.id != stack.containers.last?.id {
-                        Divider().opacity(0.35).padding(.leading, 26)
-                    }
-                }
-            }
-        }
-        .background(
-            Color(nsColor: .controlBackgroundColor),
-            in: .rect(cornerRadius: 12, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(.separator.opacity(0.65), lineWidth: 0.5)
-        }
-        .opacity(busy ? 0.65 : 1)
-        .animation(.easeOut(duration: 0.18), value: busy)
-        .task(id: stack.id) {
-            guard let first = stack.containers.first else { return }
-            metadata.load(project: project, containerID: first.id, client: model.client)
-        }
-    }
-
-    // MARK: Header
-
-    private var cardHeader: some View {
-        HStack(alignment: .center, spacing: 10) {
-            TrackDStatusDot(tone: tone, size: 9)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(project)
-                    .font(.headline)
-                HStack(spacing: 6) {
-                    Text(statusLine)
-                        .font(.caption)
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                    if let file = configFileLabel {
-                        Text("·").font(.caption).foregroundStyle(.tertiary)
-                        Button {
-                            trackDCopy(file)
-                        } label: {
-                            HStack(spacing: 3) {
-                                Image(systemName: "doc.text")
-                                    .font(.system(size: 9))
-                                Text(file)
-                                    .font(.system(size: 11, design: .monospaced))
-                                    .lineLimit(1)
-                                    .truncationMode(.head)
-                            }
-                            .foregroundStyle(.tertiary)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Copy the Compose file path\n\(file)")
-                    }
-                }
-            }
-
-            Spacer(minLength: 12)
-
-            if busy {
-                ProgressView().controlSize(.small)
-            }
-
-            HStack(spacing: 6) {
-                Button {
-                    runProject(.start)
-                } label: {
-                    Label("Up", systemImage: "play.fill")
-                }
-                .disabled(busy || stack.isFullyRunning)
-                .help("Start every stopped service in \(project)")
-
-                Button {
-                    runProject(.restart)
-                } label: {
-                    Label("Restart", systemImage: "arrow.clockwise")
-                }
-                .disabled(busy || stack.runningCount == 0)
-                .help("Restart every service in \(project)")
-
-                Button {
-                    runProject(.stop)
-                } label: {
-                    Label("Down", systemImage: "stop.fill")
-                }
-                .disabled(busy || stack.runningCount == 0)
-                .help("Stop every running service in \(project)")
-            }
-            .labelStyle(.titleAndIcon)
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-    }
-
-    private var statusLine: String {
-        let total = stack.containers.count
-        if stack.isFullyRunning {
-            return "All \(total) service\(total == 1 ? "" : "s") running"
-        }
-        if stack.runningCount == 0 {
-            return "Stopped · \(total) service\(total == 1 ? "" : "s")"
-        }
-        return "\(stack.runningCount) of \(total) services running"
-    }
-
-    /// The compose file, shortened to the last two path components — the full path is
-    /// in the tooltip and on the clipboard, and `…/checkout/docker-compose.yml` is what
-    /// actually tells two projects apart.
-    private var configFileLabel: String? {
-        guard let files = metadata.configFiles[project], let first = files.first else { return nil }
-        let parts = first.split(separator: "/")
-        guard parts.count > 2 else { return first }
-        return "…/" + parts.suffix(2).joined(separator: "/")
-    }
-
-    // MARK: Services
-
-    private func serviceRow(_ container: ContainerSummary) -> some View {
-        let hovering = hoveredService == container.id
-        let publishable = container.ports.filter { $0.hostPort != nil }
-
-        return HStack(spacing: 9) {
-            TrackDStatusDot(
-                tone: .container(state: container.state, unhealthy: container.isUnhealthy),
-                pulsing: container.state == "restarting")
-
-            VStack(alignment: .leading, spacing: 1) {
-                Text(container.composeService ?? container.displayName)
-                    .font(.callout.weight(.medium))
-                    .lineLimit(1)
-                Text(container.image)
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            // A fixed name column rather than a flexible one. With `Spacer` between the
-            // name and the ports, the chips were pinned to the right edge and a wide
-            // window opened a 600pt river of nothing between a service called `redis`
-            // and the one fact about it worth reading. Fixed width puts every row's
-            // ports on the same left edge, close enough to the name to be read as
-            // belonging to it, and the slack collects at the right where it is quiet.
-            .frame(width: 260, alignment: .leading)
-
-            HStack(spacing: 4) {
-                ForEach(publishable.prefix(3)) { port in
-                    portChip(port)
-                }
-                if publishable.count > 3 {
-                    Text("+\(publishable.count - 3)")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            Text(container.status.isEmpty ? container.state : container.status)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .frame(width: 132, alignment: .trailing)
-
-            HStack(spacing: 2) {
-                if container.isRunning {
-                    TrackDIconButton(symbol: "stop.fill", help: "Stop this service", tone: .warn) {
-                        act(.stop, container)
-                    }
-                    TrackDIconButton(symbol: "arrow.clockwise", help: "Restart this service", tone: .accent) {
-                        act(.restart, container)
-                    }
-                } else {
-                    TrackDIconButton(symbol: "play.fill", help: "Start this service", tone: .good) {
-                        act(.start, container)
-                    }
-                }
-            }
-            .opacity(hovering ? 1 : 0.32)
-            .animation(.easeOut(duration: 0.12), value: hovering)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .contentShape(.rect)
-        .background(hovering ? Color.primary.opacity(0.035) : .clear)
-        .onHover { inside in
-            if inside { hoveredService = container.id } else if hovering { hoveredService = nil }
-        }
-        .onTapGesture(count: 2) {
-            TrackDAppBridge.reveal(containerID: container.id, in: model)
-        }
-        .contextMenu {
-            Button("Open in Containers") {
-                TrackDAppBridge.reveal(containerID: container.id, in: model)
-            }
-            Button("View logs") {
-                TrackDAppBridge.reveal(containerID: container.id, in: model, showingLogs: true)
-            }
-            Divider()
-            ForEach(container.availableActions, id: \.self) { action in
-                Button(action.title, role: action.isDestructive ? .destructive : nil) {
-                    act(action, container)
-                }
-            }
-        }
-    }
-
-    private func portChip(_ port: PortMapping) -> some View {
-        Button {
-            if let url = port.url { trackDOpen(url) }
-        } label: {
-            Text(port.label)
-                .font(.system(size: 10, design: .monospaced))
-                .padding(.horizontal, 5)
-                .padding(.vertical, 1)
-                .background(Theme.accent.opacity(0.14), in: .capsule)
-                .foregroundStyle(port.url == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(Theme.accent))
-        }
-        .buttonStyle(.plain)
-        .disabled(port.url == nil)
-        .help(port.url.map { "Open \($0.absoluteString)" } ?? "Published on \(port.proto.uppercased())")
     }
 
     private func act(_ action: ContainerAction, _ container: ContainerSummary) {

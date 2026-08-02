@@ -49,6 +49,21 @@ final class ShotDockerClient: DockerClient, @unchecked Sendable {
         return ShotFixtures.inspectJSON(for: container)
     }
 
+    /// The base implementation calls the fake socket and throws, which leaves the
+    /// Images detail pane showing "checking…" forever — not a blank the harness can
+    /// tell apart from a slow real request, so it never resolves to a picture of the
+    /// finished state. `shopfront/api` answers `amd64`, deliberately not arm64: every
+    /// other fixture image is native and gets no badge at all (see
+    /// `TrackCImageArch.Badge.isNoteworthy`), so an all-native list would never
+    /// photograph the translated-badge and Rosetta-advice text this screen exists to
+    /// show. Everything else answers the host architecture, i.e. no badge.
+    override func imageArchitecture(id: String) async throws -> ImageArchitecture? {
+        guard let image = ShotFixtures.images.first(where: { $0.id == id }) else { return nil }
+        let arch = image.repoTags.first?.hasPrefix("shopfront/api") == true
+            ? "amd64" : ImageArchitecture.host
+        return ImageArchitecture(os: "linux", arch: arch)
+    }
+
     override func containerHasTTY(id: String) async -> Bool { false }
 
     // MARK: Streams

@@ -2,24 +2,54 @@
 // Licensed under the Apache License, Version 2.0 (the "License").
 //
 // The Images screen: what is on disk, what is pulling, and what can go.
+//
+// A real `Table` — sortable columns, a real `Dangling` section instead of a floating
+// footer band — replaces the hand-rolled grid, the pull field moves off a second bar of
+// its own and into the toolbar's `+` control, and a detail pane carries the digest, the
+// full tag list and the architecture advice that used to live in a popover. The pane is a
+// plain `HSplitView`, not `.inspector(isPresented:)` — see the identical note in
+// `VolumesRootView`.
 
+import AppKit
 import SwiftUI
 
-// MARK: - Layout constants
+// MARK: - Table sort
+//
+// `TrackCImageSortKey` and `TrackCImageList` (search, sort, section split, pull-log
+// collapsing) live in `TrackCImageList.swift`, unchanged — `TrackCResourceListTests`
+// covers them directly. This file adds only the `Table`-facing comparator.
 
-/// Fixed column widths for the Images table.
-///
-/// Repository takes the slack; everything else is fixed so the numeric columns stay in a
-/// straight line down the table and do not twitch as rows come and go. Multiples of two
-/// on an 8pt-ish grid, sized to the widest realistic content (`12 characters` of image
-/// id, `999.9 MB` of size) plus breathing room.
-private enum ImageColumns {
-    static let tag: CGFloat = 118
-    static let identifier: CGFloat = 98
-    static let size: CGFloat = 78
-    static let created: CGFloat = 104
-    static let used: CGFloat = 64
-    static let actions: CGFloat = 74
+/// Table sort, keyed by ``TrackCImageSortKey``.
+struct TrackCImageComparator: SortComparator {
+    var key: TrackCImageSortKey
+    var order: SortOrder = .forward
+
+    func compare(_ lhs: ImageSummary, _ rhs: ImageSummary) -> ComparisonResult {
+        let result: ComparisonResult
+        switch key {
+        case .repository:
+            result = lhs.repository == rhs.repository
+                ? trackCCompareStrings(lhs.tag, rhs.tag)
+                : trackCCompareStrings(lhs.repository, rhs.repository)
+        case .tag:
+            result = lhs.tag == rhs.tag
+                ? trackCCompareStrings(lhs.repository, rhs.repository)
+                : trackCCompareStrings(lhs.tag, rhs.tag)
+        case .size:
+            result = lhs.size == rhs.size
+                ? trackCCompareStrings(lhs.repository, rhs.repository)
+                : (lhs.size < rhs.size ? .orderedAscending : .orderedDescending)
+        case .created:
+            result = lhs.createdAt == rhs.createdAt
+                ? trackCCompareStrings(lhs.repository, rhs.repository)
+                : trackCCompareDate(lhs.createdAt, rhs.createdAt)
+        case .used:
+            result = lhs.containersUsing == rhs.containersUsing
+                ? trackCCompareStrings(lhs.repository, rhs.repository)
+                : trackCCompareInt(lhs.containersUsing, rhs.containersUsing)
+        }
+        return order == .forward ? result : result.reversed
+    }
 }
 
 // MARK: - Removal confirmation
@@ -40,22 +70,24 @@ struct ImagesRootView: View {
     let model: AppModel
 
     @State private var query = ""
-    @State private var sortKey: TrackCImageSortKey = .created
-    @State private var ascending = false
+    @State private var sortOrder: [TrackCImageComparator] = [TrackCImageComparator(key: .created, order: .reverse)]
     @State private var selection: ImageSummary.ID?
 
     @State private var pullReference = ""
     @State private var pullLines: [String] = []
     @State private var isPulling = false
-    @State private var pullLogExpanded = false
+    @State private var showingPull = false
 
     @State private var removal: TrackCImageRemoval?
     @State private var busy = false
     @State private var toast: TrackCToast?
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     private var sections: (tagged: [ImageSummary], dangling: [ImageSummary]) {
-        TrackCImageList.sections(
-            images: model.images, query: query, sortKey: sortKey, ascending: ascending)
+        let key = sortOrder.first?.key ?? .created
+        let ascending = (sortOrder.first?.order ?? .reverse) == .forward
+        return TrackCImageList.sections(images: model.images, query: query, sortKey: key, ascending: ascending)
     }
 
     private var subtitle: String {
@@ -64,8 +96,6 @@ struct ImagesRootView: View {
         var parts = ["\(model.images.count) image\(model.images.count == 1 ? "" : "s")"]
         parts.append(Formatters.bytesString(total))
         if dangling > 0 { parts.append("\(dangling) dangling") }
-        // Only when there is at least one, and never a "0 non-native": the absence of a
-        // problem does not need a counter.
         let nonNative = TrackCImageArch.nonNativeCount(model.images)
         if nonNative > 0 { parts.append("\(nonNative) not native") }
         return parts.joined(separator: " · ")
@@ -75,89 +105,73 @@ struct ImagesRootView: View {
         TrackCImageList.totalSize(model.images.filter { $0.isDangling && $0.containersUsing <= 0 })
     }
 
-    var body: some View {
-        VStack(spacing: 0) {
-            TrackCPageHeader(title: "Images", subtitle: subtitle) {
-                HStack(spacing: 8) {
-                    TrackCSearchField(text: $query, prompt: "Filter images")
-                    pruneDanglingButton
-                }
-            }
-
-            pullBar
-
-            Divider()
-
-            TrackCHeaderBar {
-                TrackCSortHeader(
-                    title: "Repository", key: TrackCImageSortKey.repository,
-                    active: $sortKey, ascending: $ascending)
-                TrackCSortHeader(
-                    title: "Tag", key: TrackCImageSortKey.tag,
-                    active: $sortKey, ascending: $ascending)
-                    .frame(width: ImageColumns.tag)
-                TrackCPlainHeader(title: "Image ID")
-                    .frame(width: ImageColumns.identifier)
-                TrackCSortHeader(
-                    title: "Size", key: TrackCImageSortKey.size,
-                    active: $sortKey, ascending: $ascending, alignment: .trailing)
-                    .frame(width: ImageColumns.size)
-                TrackCSortHeader(
-                    title: "Created", key: TrackCImageSortKey.created,
-                    active: $sortKey, ascending: $ascending, alignment: .trailing)
-                    .frame(width: ImageColumns.created)
-                TrackCSortHeader(
-                    title: "In use", key: TrackCImageSortKey.used,
-                    active: $sortKey, ascending: $ascending, alignment: .trailing)
-                    .frame(width: ImageColumns.used)
-                Color.clear.frame(width: ImageColumns.actions, height: 1)
-            }
-            .padding(.top, 8)
-
-            content
-        }
-        .trackCToast($toast)
-        .alert(
-            removal.map { $0.inUse ? "\($0.label) is in use" : "Remove \($0.label)?" } ?? "",
-            isPresented: Binding(get: { removal != nil }, set: { if !$0 { removal = nil } }),
-            presenting: removal
-        ) { target in
-            Button("Cancel", role: .cancel) {}
-            Button(target.inUse ? "Force Remove" : "Remove", role: .destructive) {
-                Task { await remove(target.image, force: target.inUse) }
-            }
-        } message: { target in
-            if target.inUse {
-                Text(
-                    """
-                    \(target.image.containersUsing) container\(target.image.containersUsing == 1 ? "" : "s") \
-                    still reference this image. Forcing the removal untags it now; the layers are only \
-                    freed once the last container using them is gone.
-                    """)
-            } else {
-                Text("This frees \(Formatters.bytesString(target.image.size)). Any container created from it later will have to pull it again.")
-            }
-        }
-        .onDeleteCommand {
-            guard let selection, let image = model.images.first(where: { $0.id == selection }) else { return }
-            removal = TrackCImageRemoval(image: image)
-        }
-        // The platform for one image, fetched when it is selected.
-        //
-        // `GET /images/json` already carries it for anything pulled from a multi-arch
-        // index, so this only fires for the remainder — locally built images, mostly.
-        // Doing it for the whole list on every refresh would be one inspect per row
-        // through the vsock relay to fill in a column that is already mostly populated.
-        //
-        // Keyed on the selection so arrowing through the list resolves each row as it is
-        // reached and cancels the previous request when it is not.
-        .task(id: selection) {
-            guard let selection else { return }
-            await model.resolveArchitecture(for: selection)
-        }
+    private var selectedImage: ImageSummary? {
+        guard let selection else { return nil }
+        return model.images.first { $0.id == selection }
     }
 
-    // MARK: Header actions
+    var body: some View {
+        content
+            .morbScreen(title: "Images", subtitle: subtitle, edge: .hard)
+            .searchable(text: $query, placement: .toolbar, prompt: "Repository, tag, digest")
+            .toolbar { toolbarContent }
+            .trackCToast($toast)
+            .alert(
+                removal.map { $0.inUse ? "\($0.label) is in use" : "Remove \($0.label)?" } ?? "",
+                isPresented: Binding(get: { removal != nil }, set: { if !$0 { removal = nil } }),
+                presenting: removal
+            ) { target in
+                Button("Cancel", role: .cancel) {}
+                Button(target.inUse ? "Force Remove" : "Remove", role: .destructive) {
+                    Task { await remove(target.image, force: target.inUse) }
+                }
+            } message: { target in
+                if target.inUse {
+                    Text(
+                        """
+                        \(target.image.containersUsing) container\(target.image.containersUsing == 1 ? "" : "s") \
+                        still reference this image. Forcing the removal untags it now; the layers are only \
+                        freed once the last container using them is gone.
+                        """)
+                } else {
+                    Text("This frees \(Formatters.bytesString(target.image.size)). Any container created from it later will have to pull it again.")
+                }
+            }
+            .onDeleteCommand {
+                guard let selection, let image = model.images.first(where: { $0.id == selection }) else { return }
+                removal = TrackCImageRemoval(image: image)
+            }
+            // The platform for one image, fetched when it is selected. `GET /images/json`
+            // already carries it for anything pulled from a multi-arch index; this only
+            // fires for the remainder — locally built images, mostly.
+            .task(id: selection) {
+                guard let selection else { return }
+                await model.resolveArchitecture(for: selection)
+            }
+            // Selects the first row so the inspector opens with something to show — see
+            // the identical note in `VolumesRootView`.
+            .task {
+                if selection == nil { selection = sections.tagged.first?.id ?? sections.dangling.first?.id }
+            }
+    }
+
+    // MARK: Toolbar
+
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        ToolbarItem(id: "pull", placement: MorbToolbarGroup.actions) {
+            Button {
+                showingPull = true
+            } label: {
+                Image(systemName: "plus")
+            }
+            .help("Pull an image")
+            .popover(isPresented: $showingPull, arrowEdge: .bottom) { pullPopover }
+        }
+        ToolbarItem(id: "pruneDangling", placement: MorbToolbarGroup.actions) {
+            pruneDanglingButton
+        }
+    }
 
     @ViewBuilder
     private var pruneDanglingButton: some View {
@@ -165,7 +179,11 @@ struct ImagesRootView: View {
         Button {
             Task { await pruneDangling() }
         } label: {
-            Label("Prune Dangling", systemImage: "wand.and.sparkles")
+            HStack(spacing: Theme.space2) {
+                Image(systemName: "wand.and.sparkles")
+                Text("Prune Dangling")
+                if count > 0 { MorbCountBadge(count: count) }
+            }
         }
         .disabled(count == 0 || busy)
         .help(
@@ -174,100 +192,71 @@ struct ImagesRootView: View {
                 : "Remove \(count) dangling layer\(count == 1 ? "" : "s"), freeing about \(Formatters.bytesString(danglingBytes))")
     }
 
-    // MARK: Pull bar
+    // MARK: Pull popover
 
-    private var pullBar: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 8) {
+    private var pullPopover: some View {
+        VStack(alignment: .leading, spacing: Theme.space4) {
+            Text("Pull an image")
+                .font(.headline)
+
+            HStack(spacing: Theme.space3) {
                 Image(systemName: "arrow.down.circle")
                     .foregroundStyle(.secondary)
-                    .font(.callout)
-
                 TextField("nginx:alpine", text: $pullReference)
                     .textFieldStyle(.plain)
-                    .font(.callout.monospaced())
+                    .font(.system(.callout, design: .monospaced))
                     .disabled(isPulling)
                     .onSubmit { Task { await pull() } }
-
                 if isPulling {
-                    ProgressView()
-                        .controlSize(.small)
-                        .scaleEffect(0.75)
+                    ProgressView().controlSize(.small).scaleEffect(0.75)
                 }
+            }
+            .padding(.horizontal, Theme.space3)
+            .padding(.vertical, Theme.space2 + 1)
+            .background(.quaternary.opacity(0.5),
+                        in: RoundedRectangle(cornerRadius: Theme.radiusControl, style: .continuous))
 
+            if !pullLines.isEmpty {
+                pullLog
+            }
+
+            HStack {
+                Spacer()
                 Button(isPulling ? "Pulling…" : "Pull") {
                     Task { await pull() }
                 }
                 .keyboardShortcut(.return, modifiers: [])
-                // The default button is filled with the accent by AppKit. Tinted so the
-                // one saturated control on the screen is the app's indigo rather than
-                // whatever this Mac is set to.
-                .tint(Theme.accent)
+                .morbButton(.primary)
                 .disabled(isPulling || pullReference.trimmingCharacters(in: .whitespaces).isEmpty)
-
-                if !pullLines.isEmpty {
-                    Button {
-                        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
-                            pullLogExpanded.toggle()
-                        }
-                    } label: {
-                        Image(systemName: pullLogExpanded ? "chevron.up" : "chevron.down")
-                            .font(.system(size: 10, weight: .semibold))
-                    }
-                    .buttonStyle(.borderless)
-                    .foregroundStyle(.secondary)
-                    .help(pullLogExpanded ? "Hide pull output" : "Show pull output")
-                }
-            }
-            .padding(.horizontal, TrackCMetrics.gutter)
-            .padding(.vertical, 8)
-
-            if let latest = pullLines.last, !pullLogExpanded {
-                Text(latest)
-                    .font(.caption2.monospaced())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .padding(.horizontal, TrackCMetrics.gutter + 22)
-                    .padding(.bottom, 8)
-                    .transition(.opacity)
-            }
-
-            if pullLogExpanded, !pullLines.isEmpty {
-                pullLog
-                    .padding(.horizontal, TrackCMetrics.gutter)
-                    .padding(.bottom, 10)
-                    .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
-        .background(.quaternary.opacity(0.18))
+        .padding(Theme.space5)
+        .frame(width: 360)
     }
 
     private var pullLog: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 1) {
+                LazyVStack(alignment: .leading, spacing: Theme.space1) {
                     ForEach(Array(pullLines.enumerated()), id: \.offset) { index, line in
                         Text(line)
-                            .font(.caption2.monospaced())
+                            .font(.system(.caption2, design: .monospaced))
                             .foregroundStyle(.secondary)
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .id(index)
                     }
                 }
-                .padding(8)
+                .padding(Theme.space3)
             }
             .frame(height: 132)
-            .background(.background.opacity(0.5), in: .rect(cornerRadius: 8, style: .continuous))
+            .background(Theme.contentBackground, in: RoundedRectangle(cornerRadius: Theme.radiusControl, style: .continuous))
             .overlay {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .strokeBorder(.separator.opacity(0.6), lineWidth: 0.5)
+                RoundedRectangle(cornerRadius: Theme.radiusControl, style: .continuous)
+                    .strokeBorder(Theme.hairline, lineWidth: 1)
             }
-            // Follow the tail while it grows. Keyed on the count rather than on the
-            // content so a rewritten last line (the per-layer collapse) does not scroll.
             .onChange(of: pullLines.count) {
-                withAnimation(.easeOut(duration: 0.15)) {
+                withAnimation(Theme.animation(.fade, reduceMotion: reduceMotion)) {
                     proxy.scrollTo(pullLines.count - 1, anchor: .bottom)
                 }
             }
@@ -280,74 +269,239 @@ struct ImagesRootView: View {
     private var content: some View {
         let split = sections
         if model.images.isEmpty {
-            TrackCEmptyState(
-                title: "No images yet",
-                message: "Pull one with the field above, or run a container and Morbstack will fetch it for you.",
-                symbol: "square.on.square")
+            MorbEmptyState(
+                "No images yet",
+                systemImage: "square.on.square",
+                description: "Pull one from the toolbar, or run a container and Morbstack will fetch it for you.")
         } else if split.tagged.isEmpty && split.dangling.isEmpty {
-            TrackCEmptyState(
-                title: "No matches",
-                message: "Nothing here matches “\(query)”.",
-                symbol: "magnifyingglass",
-                action: (title: "Clear Filter", run: { query = "" }))
+            MorbNoMatches(query: query)
         } else {
-            List(selection: $selection) {
-                if !split.tagged.isEmpty {
-                    Section {
-                        ForEach(split.tagged) { image in
-                            TrackCImageRow(
-                                image: image,
-                                rosettaAvailable: model.rosetta.availability == .active,
-                                onNeedArchitecture: {
-                                    Task { await model.resolveArchitecture(for: image.id) }
-                                },
-                                onRemove: { removal = TrackCImageRemoval(image: image) })
-                                .tag(image.id)
-                        }
-                    }
-                }
-
-                if !split.dangling.isEmpty {
-                    Section {
-                        ForEach(split.dangling) { image in
-                            TrackCImageRow(
-                                image: image,
-                                rosettaAvailable: model.rosetta.availability == .active,
-                                onNeedArchitecture: {
-                                    Task { await model.resolveArchitecture(for: image.id) }
-                                },
-                                onRemove: { removal = TrackCImageRemoval(image: image) })
-                                .tag(image.id)
-                        }
-                    } header: {
-                        danglingHeader(count: split.dangling.count)
-                    }
-                }
+            // A manual split rather than `.inspector(isPresented:)` — see the identical
+            // note in `VolumesRootView`: the offscreen screenshot harness does not
+            // composite `.inspector` content, only real view hierarchy.
+            HSplitView {
+                table(split)
+                    .frame(minWidth: 520, maxWidth: .infinity)
+                detailPane
+                    .frame(minWidth: Theme.inspectorMinWidth, idealWidth: Theme.inspectorWidth,
+                           maxWidth: Theme.inspectorWidth)
             }
-            .listStyle(.inset)
-            // No `.alternatingRowBackgrounds()`. AppKit stripes the whole viewport, not the
-            // rows that exist, so six networks in a 900pt window are followed by ten empty
-            // bands and the screen reads as a half-loaded skeleton. The hairline separators
-            // `List` draws anyway are enough to track a row across four columns, and they
-            // stop where the data does.
-            .environment(\.defaultMinListRowHeight, TrackCMetrics.rowHeight)
         }
     }
 
-    private func danglingHeader(count: Int) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: "questionmark.square.dashed")
-                .font(.caption2)
-            Text("Dangling")
-                .font(.caption.weight(.semibold))
-            TrackCBadge(text: "\(count)", tone: .warn)
-            Text(Formatters.bytesString(TrackCImageList.totalSize(model.images.filter(\.isDangling))))
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.tertiary)
-            Spacer()
+    private func table(_ split: (tagged: [ImageSummary], dangling: [ImageSummary])) -> some View {
+        Table(of: ImageSummary.self, selection: $selection, sortOrder: $sortOrder) {
+            TableColumn("Repository", sortUsing: TrackCImageComparator(key: .repository)) { image in
+                repositoryCell(image)
+                    .frame(height: Theme.rowStandard, alignment: .leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            TableColumn("Tag", sortUsing: TrackCImageComparator(key: .tag)) { image in
+                Text(image.isDangling ? "—" : image.tag)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(height: Theme.rowStandard, alignment: .leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .width(min: 80, ideal: 110, max: 180)
+            TableColumn("Image ID") { image in
+                Text(image.shortID)
+                    .font(.system(.callout, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                    .frame(height: Theme.rowStandard, alignment: .leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .width(min: 84, ideal: 98, max: 120)
+            TableColumn("Size", sortUsing: TrackCImageComparator(key: .size)) { image in
+                MorbNumber(Formatters.bytesString(image.size), tone: .primary, font: .callout)
+                    .frame(height: Theme.rowStandard, alignment: .trailing)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+            .width(min: 68, ideal: 82, max: 110)
+            TableColumn("Created", sortUsing: TrackCImageComparator(key: .created)) { image in
+                MorbNumber(Formatters.compactDuration(since: image.createdAt), font: .callout)
+                    .frame(height: Theme.rowStandard, alignment: .trailing)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .help(Formatters.absoluteDate(image.createdAt))
+            }
+            .width(min: 80, ideal: 96, max: 130)
+            TableColumn("In use", sortUsing: TrackCImageComparator(key: .used)) { image in
+                usageCell(image)
+                    .frame(height: Theme.rowStandard, alignment: .trailing)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+            .width(min: 56, ideal: 68, max: 90)
+        } rows: {
+            if !split.tagged.isEmpty {
+                Section("Images") {
+                    ForEach(split.tagged) { TableRow($0) }
+                }
+            }
+            if !split.dangling.isEmpty {
+                Section("Dangling · \(Formatters.bytesString(TrackCImageList.totalSize(split.dangling)))") {
+                    ForEach(split.dangling) { TableRow($0) }
+                }
+            }
         }
-        .foregroundStyle(.secondary)
-        .padding(.top, 4)
+        .tableStyle(.inset)
+        .alternatingRowBackgrounds()
+        .contextMenu(forSelectionType: ImageSummary.ID.self) { ids in
+            contextMenu(for: ids)
+        } primaryAction: { ids in
+            if let id = ids.first { selection = id }
+        }
+    }
+
+    private func repositoryCell(_ image: ImageSummary) -> some View {
+        HStack(spacing: Theme.space2) {
+            MorbStatusDot(tone: image.isDangling ? .idle : (image.containersUsing > 0 ? .running : .idle))
+            Text(image.isDangling ? "<none>" : image.repository)
+                .foregroundStyle(image.isDangling ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
+                .lineLimit(1)
+                .truncationMode(.middle)
+            if image.repoTags.count > 1 {
+                MorbChip("+\(image.repoTags.count - 1)", rank: .quiet, monospaced: true)
+            }
+            architectureChip(image)
+        }
+    }
+
+    /// The architecture, sitting inline in the repository column.
+    ///
+    /// A native image gets no chip at all — a badge on every row is wallpaper by the
+    /// second screenful — and only the mismatch that costs something is worth ink.
+    @ViewBuilder
+    private func architectureChip(_ image: ImageSummary) -> some View {
+        if let badge = TrackCImageArch.badge(for: image.architecture), badge.isNoteworthy {
+            MorbChip(badge.text, symbol: badge.symbol, rank: chipRank(for: badge.tone), monospaced: true)
+        }
+    }
+
+    private func chipRank(for tone: TrackCTone) -> MorbChipRank {
+        switch tone {
+        case .neutral: return .quiet
+        case .good: return .status(.running)
+        case .warn: return .status(.busy)
+        case .bad: return .status(.bad)
+        case .accent: return .actionable
+        }
+    }
+
+    @ViewBuilder
+    private func usageCell(_ image: ImageSummary) -> some View {
+        // `-1` is the engine declining to say, which is not the same as zero and should
+        // not be rendered as a confident "unused".
+        if image.containersUsing < 0 {
+            Text("—").foregroundStyle(.tertiary)
+        } else if image.containersUsing == 0 {
+            Text("—").foregroundStyle(.tertiary)
+        } else {
+            MorbCountBadge(count: image.containersUsing, tone: .running)
+        }
+    }
+
+    @ViewBuilder
+    private func contextMenu(for ids: Set<ImageSummary.ID>) -> some View {
+        if let id = ids.first, let image = model.images.first(where: { $0.id == id }) {
+            Button("Copy Image ID") { trackCCopy(image.id) }
+            if let reference = image.repoTags.first {
+                Button("Copy Reference") { trackCCopy(reference) }
+            }
+            Divider()
+            Button("Remove…", role: .destructive) { removal = TrackCImageRemoval(image: image) }
+        }
+    }
+
+    // MARK: Detail pane
+
+    @ViewBuilder
+    private var detailPane: some View {
+        if let image = selectedImage {
+            ScrollView {
+                VStack(alignment: .leading, spacing: Theme.space5) {
+                    VStack(alignment: .leading, spacing: Theme.space2) {
+                        Text(image.repoTags.first ?? "Untagged layer")
+                            .font(.title3.weight(.semibold))
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                        MorbStatusBadge(
+                            tone: image.containersUsing > 0 ? .running : .idle,
+                            title: image.containersUsing > 0
+                                ? "In use by \(image.containersUsing) container\(image.containersUsing == 1 ? "" : "s")"
+                                : "Not in use",
+                            detail: Formatters.bytesString(image.size),
+                            filled: false)
+                    }
+
+                    MorbCard {
+                        VStack(alignment: .leading, spacing: Theme.space4) {
+                            architectureField(image)
+                            MorbKeyValue("Content digest", image.id, monospaced: true)
+                            MorbKeyValue("Created", Formatters.absoluteDate(image.createdAt))
+                        }
+                    }
+
+                    if !image.repoTags.isEmpty {
+                        MorbCard("Repo tags", symbol: "tag", count: image.repoTags.count) {
+                            VStack(alignment: .leading, spacing: Theme.space2) {
+                                ForEach(image.repoTags, id: \.self) { tag in
+                                    Text(tag)
+                                        .font(.system(.callout, design: .monospaced))
+                                        .textSelection(.enabled)
+                                }
+                            }
+                        }
+                    }
+
+                    Button(role: .destructive) {
+                        removal = TrackCImageRemoval(image: image)
+                    } label: {
+                        Label("Remove Image", systemImage: "trash")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .morbButton(.standard)
+                }
+                .padding(Theme.pagePadding)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .background(Theme.contentBackground)
+        } else {
+            MorbEmptyState("No image selected", systemImage: "square.on.square")
+                .background(Theme.contentBackground)
+        }
+    }
+
+    /// The platform row, with the nudge towards an arm64 variant underneath it.
+    @ViewBuilder
+    private func architectureField(_ image: ImageSummary) -> some View {
+        let badge = TrackCImageArch.badge(for: image.architecture)
+        VStack(alignment: .leading, spacing: Theme.space2) {
+            HStack(spacing: Theme.space1) {
+                Text("Architecture").font(.callout).foregroundStyle(.secondary)
+                Spacer(minLength: Theme.space2)
+                if let badge, let architecture = image.architecture {
+                    Text(architecture.platformString)
+                        .font(.system(.callout, design: .monospaced))
+                        .textSelection(.enabled)
+                    if let consequence = badge.consequenceLabel {
+                        MorbChip(consequence, symbol: badge.symbol, rank: chipRank(for: badge.tone))
+                    }
+                } else {
+                    // The lookup is one request and it is in flight; saying "unknown" for
+                    // the half-second it takes would read as a defect rather than latency.
+                    Text("checking…").font(.callout).foregroundStyle(.tertiary)
+                }
+            }
+            if let badge, let advice = TrackCImageArch.advice(
+                for: badge, rosettaAvailable: model.rosetta.availability == .active
+            ) {
+                Text(advice)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 
     // MARK: Operations
@@ -359,7 +513,6 @@ struct ImagesRootView: View {
 
         isPulling = true
         pullLines = []
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { pullLogExpanded = true }
 
         let buffer = TrackCPullBuffer()
         // Drain on a timer rather than hopping every progress line onto the main actor:
@@ -380,6 +533,7 @@ struct ImagesRootView: View {
             pullLines = TrackCPullLog.appending(contentsOf: buffer.drain(), to: pullLines)
             toast = .success("Pulled \(reference)")
             pullReference = ""
+            showingPull = false
             await model.refreshAll()
         } catch {
             pump.cancel()
@@ -400,6 +554,7 @@ struct ImagesRootView: View {
             toast = .success(
                 "Removed \(image.repoTags.first ?? image.shortID)",
                 detail: "Freed up to \(Formatters.bytesString(image.size))")
+            if selection == image.id { selection = nil }
             await model.refreshAll()
         } catch {
             toast = .failure("Could not remove image", detail: trackCErrorText(error))
@@ -418,272 +573,6 @@ struct ImagesRootView: View {
             await model.refreshAll()
         } catch {
             toast = .failure("Prune failed", detail: trackCErrorText(error))
-        }
-    }
-}
-
-// MARK: - Row
-
-private struct TrackCImageRow: View {
-
-    let image: ImageSummary
-    /// Whether an amd64 image on this Mac would actually run. Passed down rather than
-    /// probed here so every row agrees, and so the detail popover can tell "slower" from
-    /// "will not start at all".
-    let rosettaAvailable: Bool
-    /// Resolves this image's platform if it is not known yet. Called when the detail
-    /// popover opens, which is a way of asking about an image that does not go through
-    /// the list's selection.
-    let onNeedArchitecture: () -> Void
-    let onRemove: () -> Void
-
-    @State private var hovering = false
-    @State private var showingDetail = false
-
-    private var extraTagCount: Int { max(0, image.repoTags.count - 1) }
-
-    var body: some View {
-        HStack(spacing: TrackCMetrics.columnGap) {
-            HStack(spacing: 6) {
-                TrackCStatusDot(tone: image.isDangling ? .warn : (image.containersUsing > 0 ? .good : .neutral))
-                Text(image.isDangling ? "<none>" : image.repository)
-                    .font(.callout)
-                    .foregroundStyle(image.isDangling ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                if extraTagCount > 0 {
-                    TrackCBadge(text: "+\(extraTagCount)", tone: .accent)
-                        .help(image.repoTags.dropFirst().joined(separator: "\n"))
-                }
-                architectureCell
-                Spacer(minLength: 0)
-            }
-
-            Text(image.isDangling ? "—" : image.tag)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .frame(width: ImageColumns.tag, alignment: .leading)
-
-            Text(image.shortID)
-                .font(.callout.monospaced())
-                .foregroundStyle(.tertiary)
-                .frame(width: ImageColumns.identifier, alignment: .leading)
-
-            TrackCNumberCell(text: Formatters.bytesString(image.size), emphasised: true)
-                .frame(width: ImageColumns.size)
-
-            TrackCNumberCell(text: Formatters.compactDuration(since: image.createdAt))
-                .frame(width: ImageColumns.created)
-                .help(Formatters.absoluteDate(image.createdAt))
-
-            usageCell
-                .frame(width: ImageColumns.used, alignment: .trailing)
-
-            TrackCHoverActions(revealed: hovering) {
-                TrackCRowButton(symbol: "info.circle", help: "Image details") {
-                    if image.architecture == nil { onNeedArchitecture() }
-                    showingDetail = true
-                }
-                .popover(isPresented: $showingDetail, arrowEdge: .bottom) {
-                    TrackCImageDetail(image: image, rosettaAvailable: rosettaAvailable)
-                }
-                TrackCRowButton(symbol: "trash", help: removeHelp, tone: image.containersUsing > 0 ? .neutral : .bad) {
-                    onRemove()
-                }
-            }
-            .frame(width: ImageColumns.actions)
-        }
-        .frame(height: TrackCMetrics.rowHeight)
-        .contentShape(.rect)
-        .onHover { hovering = $0 }
-        .contextMenu {
-            Button("Copy Image ID") { trackCCopy(image.id) }
-            if let reference = image.repoTags.first {
-                Button("Copy Reference") { trackCCopy(reference) }
-            }
-            Divider()
-            Button("Image Details…") {
-                if image.architecture == nil { onNeedArchitecture() }
-                showingDetail = true
-            }
-            Divider()
-            Button("Remove…", role: .destructive, action: onRemove)
-        }
-    }
-
-    private var removeHelp: String {
-        image.containersUsing > 0
-            ? "In use by \(image.containersUsing) container\(image.containersUsing == 1 ? "" : "s") — removal needs a force"
-            : "Remove this image"
-    }
-
-    /// The architecture, sitting inline in the repository column.
-    ///
-    /// Inline rather than a column of its own because the table's fixed columns already
-    /// add up to more than the detail pane's minimum width; a seventh would squeeze the
-    /// repository name — the thing people actually scan — towards nothing on a narrow
-    /// window. The repository cell is the flexible one, so the badge costs space only
-    /// where there is space to give.
-    ///
-    /// A native image gets plain tertiary text and a non-native one gets a tinted
-    /// capsule. Both are shown, so the column always answers "what is this built for",
-    /// but only the answer that warrants action carries any visual weight — a badge on
-    /// every row is wallpaper by the second screenful.
-    @ViewBuilder
-    private var architectureCell: some View {
-        if let badge = TrackCImageArch.badge(for: image.architecture) {
-            if badge.isNoteworthy {
-                TrackCBadge(text: badge.text, symbol: badge.symbol, tone: badge.tone)
-                    .help(architectureHelp(badge))
-            } else {
-                Text(badge.text)
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .help(image.architecture?.platformString ?? badge.text)
-            }
-        }
-    }
-
-    private func architectureHelp(_ badge: TrackCImageArch.Badge) -> String {
-        var lines = [image.architecture?.platformString ?? badge.text]
-        // The advice is written for the good case; the row cannot see whether Rosetta is
-        // actually available, and the detail popover — which can — says so properly.
-        if let advice = TrackCImageArch.advice(for: badge, rosettaAvailable: true) {
-            lines.append(advice)
-        }
-        return lines.joined(separator: "\n\n")
-    }
-
-    @ViewBuilder
-    private var usageCell: some View {
-        // `-1` is the engine declining to say, which is not the same as zero and should
-        // not be rendered as a confident "unused".
-        if image.containersUsing < 0 {
-            Text("—").font(.callout).foregroundStyle(.tertiary)
-        } else if image.containersUsing == 0 {
-            Text("0").font(.callout.monospacedDigit()).foregroundStyle(.tertiary)
-        } else {
-            TrackCBadge(text: "\(image.containersUsing)", symbol: "shippingbox.fill", tone: .good)
-        }
-    }
-}
-
-// MARK: - Detail popover
-
-private struct TrackCImageDetail: View {
-
-    let image: ImageSummary
-    var rosettaAvailable: Bool = true
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(image.repoTags.first ?? "Untagged layer")
-                    .font(.headline)
-                Text(Formatters.bytesString(image.size))
-                    .font(.caption)
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-            }
-
-            Divider()
-
-            VStack(alignment: .leading, spacing: 8) {
-                architectureField
-                field("Content digest", value: image.id, monospaced: true, copyable: true)
-                field("Created", value: Formatters.absoluteDate(image.createdAt))
-                field(
-                    "In use by",
-                    value: image.containersUsing < 0
-                        ? "unreported"
-                        : "\(image.containersUsing) container\(image.containersUsing == 1 ? "" : "s")")
-
-                if image.repoTags.isEmpty {
-                    field("Repo tags", value: "none — this layer is dangling")
-                } else {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("Repo tags")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .textCase(.uppercase)
-                        ForEach(image.repoTags, id: \.self) { tag in
-                            Text(tag)
-                                .font(.caption.monospaced())
-                                .textSelection(.enabled)
-                        }
-                    }
-                }
-            }
-        }
-        .padding(16)
-        .frame(width: 340, alignment: .leading)
-    }
-
-    /// The platform row, with the nudge towards an arm64 variant underneath it.
-    ///
-    /// This is the one place the advice is spelled out in full. The list row's tooltip
-    /// has to guess that Rosetta is available; here the answer is known, which is the
-    /// difference between "this will be slower" and "this will not start".
-    @ViewBuilder
-    private var architectureField: some View {
-        let badge = TrackCImageArch.badge(for: image.architecture)
-        VStack(alignment: .leading, spacing: 3) {
-            Text("Architecture")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .textCase(.uppercase)
-            if let badge, let architecture = image.architecture {
-                HStack(spacing: 6) {
-                    Text(architecture.platformString)
-                        .font(.caption.monospaced())
-                        .textSelection(.enabled)
-                    if let consequence = badge.consequenceLabel {
-                        TrackCBadge(text: consequence, symbol: badge.symbol, tone: badge.tone)
-                    }
-                }
-                if let advice = TrackCImageArch.advice(for: badge, rosettaAvailable: rosettaAvailable) {
-                    Text(advice)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(.top, 1)
-                }
-            } else {
-                // The lookup is one request and it is in flight; saying "unknown" for the
-                // half-second it takes would read as a defect rather than as latency.
-                Text("checking…")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func field(_ label: String, value: String, monospaced: Bool = false, copyable: Bool = false) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(label)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .textCase(.uppercase)
-            HStack(spacing: 6) {
-                Text(value)
-                    .font(monospaced ? .caption.monospaced() : .caption)
-                    .textSelection(.enabled)
-                    .lineLimit(2)
-                    .truncationMode(.middle)
-                if copyable {
-                    Button {
-                        trackCCopy(value)
-                    } label: {
-                        Image(systemName: "doc.on.doc").font(.system(size: 9))
-                    }
-                    .buttonStyle(.borderless)
-                    .foregroundStyle(.secondary)
-                    .help("Copy")
-                }
-            }
         }
     }
 }

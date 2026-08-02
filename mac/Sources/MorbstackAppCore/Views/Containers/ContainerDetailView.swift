@@ -6,6 +6,14 @@
 // The inspect document is fetched once here and shared by Overview and Inspect. Doing
 // it in the parent rather than in each tab means switching tabs is instantaneous and
 // the two views can never show different snapshots of the same container.
+//
+// The lifecycle actions (Stop / Restart / Pause / Remove) live in a real `.toolbar`
+// rather than four hand-styled buttons in the header — grouped with `MorbToolbarGap` so
+// the destructive one reads as separate from the lifecycle cluster, per
+// `docs/design/COMPONENTS.md` §8. There is deliberately no `.primary` button on this
+// screen: Start/Resume gets the same `.floating` emphasis as Stop/Restart, because
+// nothing here is *the* reason the screen exists the way Start Engine is on the empty
+// state.
 
 import AppKit
 import SwiftUI
@@ -87,15 +95,19 @@ struct ContainerDetailView: View {
         _details = State(initialValue: preloadedInspectJSON.flatMap(TrackBInspectDetails.init(json:)))
     }
 
+    private var tone: StatusTone {
+        StatusTone.forContainer(state: container.state, unhealthy: container.isUnhealthy)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header
-            tabBar
             Divider()
             tabBody(for: tab)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .background(.background)
+        .background(Theme.contentBackground)
+        .toolbar { toolbarContent }
         .task(id: container.id) { await loadInspect() }
         // A restart rewrites the whole document — new PID, new start time, possibly a
         // new exit code — so the snapshot is refetched rather than left to go stale.
@@ -115,123 +127,116 @@ struct ContainerDetailView: View {
     // MARK: Header
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top, spacing: 10) {
-                TrackBStatusDot(
-                    state: container.state,
-                    unhealthy: container.isUnhealthy,
-                    size: 10)
-                .padding(.top, 5)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 6) {
-                        Text(container.displayName)
-                            .font(.title3.weight(.semibold))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .textSelection(.enabled)
-                        if let project = container.composeProject {
-                            TrackBBadge(
-                                text: project,
-                                tone: .accent,
-                                symbol: "square.stack.3d.up.fill")
-                        }
-                    }
-                    HStack(spacing: 6) {
-                        Text(container.status.isEmpty ? container.state : container.status)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Text(verbatim: "·").font(.caption).foregroundStyle(.quaternary)
-                        Text(container.shortID)
-                            .font(.system(size: 10.5, design: .monospaced))
-                            .foregroundStyle(.tertiary)
-                            .textSelection(.enabled)
-                            .help(container.id)
-                    }
+        VStack(alignment: .leading, spacing: Theme.space3) {
+            HStack(spacing: Theme.space3) {
+                Text(container.displayName)
+                    .font(.title3.weight(.semibold))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+                if let project = container.composeProject {
+                    MorbChip(project, symbol: "square.3.layers.3d", rank: .brand)
                 }
-
-                Spacer(minLength: 8)
-
-                actions
+                Spacer(minLength: 0)
             }
+
+            MorbStatusBadge(
+                tone: tone,
+                detail: "\(container.shortID) · \(statusDetail)")
+
             if !container.ports.isEmpty {
-                HStack(spacing: 5) {
+                HStack(spacing: Theme.space2) {
                     ForEach(container.ports) { port in
-                        TrackBPortChip(port: port)
+                        MorbPortChip(
+                            host: port.hostPort.map(String.init) ?? port.label,
+                            container: "\(port.containerPort)/\(port.proto)",
+                            isOpenable: port.url != nil)
                     }
                 }
             }
+
+            tabBar
         }
-        .padding(.horizontal, 18)
-        .padding(.top, 14)
-        .padding(.bottom, 10)
+        .padding(.horizontal, Theme.pagePadding)
+        .padding(.top, Theme.space4)
+        .padding(.bottom, Theme.space3)
     }
 
-    @ViewBuilder
-    private var actions: some View {
-        HStack(spacing: 6) {
-            if isBusy {
-                ProgressView().controlSize(.small).scaleEffect(0.7).frame(width: 26)
-            } else if container.isRunning {
-                Button { onAction(.stop) } label: {
-                    Label("Stop", systemImage: "stop.fill")
-                }
-                Button { onAction(.restart) } label: {
-                    Label("Restart", systemImage: "arrow.clockwise")
-                }
-                Button { onAction(.pause) } label: {
-                    Image(systemName: "pause.fill")
-                }
-                .help("Pause")
-            } else if container.state == "paused" {
-                Button { onAction(.unpause) } label: {
-                    Label("Resume", systemImage: "play.fill")
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(Theme.accent)
-            } else {
-                Button { onAction(.start) } label: {
-                    Label("Start", systemImage: "play.fill")
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(Theme.accent)
-            }
+    private var statusDetail: String {
+        container.status.isEmpty ? container.state : container.status
+    }
 
+    // MARK: Toolbar
+
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        ToolbarItem(id: "lifecycle", placement: MorbToolbarGroup.actions) {
+            lifecycleActions
+        }
+        MorbToolbarGap(placement: MorbToolbarGroup.actions)
+        ToolbarItem(id: "remove", placement: MorbToolbarGroup.actions) {
+            MorbIconButton("trash", help: "Remove container…", role: .destructive) {
+                onRequestRemove()
+            }
+        }
+        ToolbarItem(id: "more", placement: MorbToolbarGroup.overflow) {
             Menu {
                 Button("Copy container ID") { TrackBClipboard.copy(container.id) }
                 Button("Copy image") { TrackBClipboard.copy(container.image) }
                 if !inspectJSON.isEmpty {
                     Button("Copy inspect JSON") { TrackBClipboard.copy(inspectJSON) }
                 }
-                Divider()
-                Button("Remove…", role: .destructive) { onRequestRemove() }
             } label: {
                 Image(systemName: "ellipsis.circle")
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
             .help("More actions")
         }
-        .controlSize(.small)
+    }
+
+    @ViewBuilder
+    private var lifecycleActions: some View {
+        if isBusy {
+            ProgressView().controlSize(.small).scaleEffect(0.7).frame(width: 26)
+        } else {
+            MorbGlassCluster(spacing: Theme.space2) {
+                HStack(spacing: Theme.space2) {
+                    if container.isRunning {
+                        Button { onAction(.stop) } label: {
+                            Label("Stop", systemImage: "stop.fill")
+                        }
+                        .morbButton(.floating)
+                        Button { onAction(.restart) } label: {
+                            Label("Restart", systemImage: "arrow.clockwise")
+                        }
+                        .morbButton(.floating)
+                        MorbIconButton("pause.fill", help: "Pause") { onAction(.pause) }
+                    } else if container.state == "paused" {
+                        Button { onAction(.unpause) } label: {
+                            Label("Resume", systemImage: "play.fill")
+                        }
+                        .morbButton(.floating)
+                    } else {
+                        Button { onAction(.start) } label: {
+                            Label("Start", systemImage: "play.fill")
+                        }
+                        .morbButton(.floating)
+                    }
+                }
+            }
+        }
     }
 
     // MARK: Tab bar
 
     private var tabBar: some View {
-        HStack {
-            Picker("", selection: $tab) {
-                ForEach(TrackBDetailTab.allCases) { item in
-                    Label(item.title, systemImage: item.symbol).tag(item)
-                }
+        Picker("", selection: $tab) {
+            ForEach(TrackBDetailTab.allCases) { item in
+                Label(item.title, systemImage: item.symbol).tag(item)
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .fixedSize()
-            Spacer()
         }
-        .padding(.horizontal, 18)
-        .padding(.bottom, 10)
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .frame(maxWidth: 360)
     }
 
     // MARK: Tab bodies

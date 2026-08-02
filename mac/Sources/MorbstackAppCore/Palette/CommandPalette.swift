@@ -110,9 +110,11 @@ struct CommandPalette: View {
             statusBar
         }
         .frame(width: 620)
-        .background(.ultraThinMaterial, in: .rect(cornerRadius: 16, style: .continuous))
+        // The one surface in the app where opaque is objectively wrong, along with the
+        // menu-bar popover — see `docs/design/IDENTITY.md` §5.1.
+        .morbGlassPanel()
         .overlay {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
+            RoundedRectangle(cornerRadius: Theme.radiusPanel, style: .continuous)
                 .strokeBorder(.separator.opacity(0.8), lineWidth: 0.5)
         }
         .shadow(color: .black.opacity(0.30), radius: 34, y: 14)
@@ -120,7 +122,7 @@ struct CommandPalette: View {
     }
 
     private var searchField: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: Theme.space3) {
             Image(systemName: "command")
                 .font(.system(size: 15, weight: .medium))
                 .foregroundStyle(.tertiary)
@@ -147,8 +149,8 @@ struct CommandPalette: View {
                 .help("Clear")
             }
         }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 15)
+        .padding(.horizontal, Theme.space5)
+        .padding(.vertical, Theme.space4)
         .onChange(of: rebuildKey) { _, _ in rebuild() }
     }
 
@@ -169,8 +171,8 @@ struct CommandPalette: View {
                             }
                     }
                 }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 6)
+                .padding(.horizontal, Theme.space3)
+                .padding(.vertical, Theme.space2)
             }
             .frame(maxHeight: 372)
             .scrollBounceBehavior(.basedOnSize)
@@ -184,7 +186,7 @@ struct CommandPalette: View {
     }
 
     private var emptyResults: some View {
-        VStack(spacing: 5) {
+        VStack(spacing: Theme.space2) {
             Text("No matches")
                 .font(.callout.weight(.medium))
             Text("Nothing in Morbstack matches “\(query)”.")
@@ -192,18 +194,18 @@ struct CommandPalette: View {
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 30)
+        .padding(.vertical, Theme.space6)
     }
 
     private var statusBar: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: Theme.space3) {
             if let status = activity.status {
                 if activity.isBusy {
                     ProgressView().controlSize(.small).scaleEffect(0.7).frame(width: 12, height: 12)
                 } else {
                     Image(systemName: "checkmark.circle")
                         .font(.caption)
-                        .foregroundStyle(.green)
+                        .foregroundStyle(Theme.statusRunning)
                 }
                 Text(status)
                     .font(.caption)
@@ -215,28 +217,28 @@ struct CommandPalette: View {
                 hint("↵", "run")
                 hint("esc", "close")
             }
-            Spacer(minLength: 8)
+            Spacer(minLength: Theme.space3)
             if !results.isEmpty {
                 Text("\(results.count) result\(results.count == 1 ? "" : "s")")
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.tertiary)
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 9)
+        .padding(.horizontal, Theme.space5)
+        .padding(.vertical, Theme.space3)
         .animation(.easeOut(duration: 0.15), value: activity.status)
     }
 
     private func hint(_ key: String, _ label: String) -> some View {
-        HStack(spacing: 4) {
+        HStack(spacing: Theme.space2) {
             Text(key)
                 .font(.system(size: 10, weight: .semibold))
-                .padding(.horizontal, 4)
+                .padding(.horizontal, Theme.space2)
                 .padding(.vertical, 1)
-                .background(.quaternary.opacity(0.7), in: .rect(cornerRadius: 3, style: .continuous))
+                .background(.quaternary.opacity(0.7), in: .rect(cornerRadius: Theme.radiusChip - 2, style: .continuous))
             Text(label)
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -350,56 +352,55 @@ private struct PaletteRow: View {
 
     var body: some View {
         Button(action: activate) {
-            HStack(spacing: 11) {
+            HStack(spacing: Theme.space3) {
+                // The symbol and its tint carry the *command* — what pressing Return
+                // does — not the status of whatever it acts on. Every "View logs of
+                // X" row shares the same glyph no matter which container X is, which
+                // used to be carried instead by a status-coloured tint; that made the
+                // icon column encode neither the command nor the category, since eight
+                // rows for one fuzzy match all wore the identical shape. Only the
+                // destructive rows still earn a colour, because that is the one fact
+                // about a command that is worth a warning colour on the icon itself.
                 Image(systemName: result.command.symbol)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(iconTint)
-                    .frame(width: 26, height: 26)
-                    .background(iconTint.opacity(selected ? 0.20 : 0.12), in: .rect(cornerRadius: 7, style: .continuous))
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(result.command.isDestructive ? Theme.statusBad : .secondary)
+                    .frame(width: 18)
 
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(highlightedTitle)
-                        .font(.body)
+                Text(highlightedTitle)
+                    .font(.callout)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+
+                if let subtitle = result.command.subtitle, !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                         .lineLimit(1)
-                        .truncationMode(.middle)
-                    if let subtitle = result.command.subtitle, !subtitle.isEmpty {
-                        Text(subtitle)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
+                        .truncationMode(.tail)
                 }
 
-                Spacer(minLength: 8)
+                Spacer(minLength: Theme.space3)
 
-                Text(result.command.kind.rawValue)
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                // A chip, not eight repetitions of plain right-aligned text — the
+                // rank system keeps it quiet, so it reads as metadata rather than as
+                // a section header printed once per row.
+                MorbChip(result.command.kind.rawValue, rank: .quiet)
+
                 if selected {
                     Image(systemName: "return")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(.secondary)
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background {
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(Theme.accent.opacity(selected ? 0.18 : 0))
-            }
-            .contentShape(.rect(cornerRadius: 9, style: .continuous))
+            .morbRow(.compact, isSelected: selected, showsHover: false)
         }
         .buttonStyle(.plain)
     }
 
-    private var iconTint: Color {
-        if result.command.isDestructive { return .red }
-        return result.command.tone == .neutral ? .secondary : result.command.tone.color
-    }
-
-    /// The title with the matched characters emboldened in the accent colour.
+    /// The title with the matched characters emboldened — `.primary`, not a second
+    /// accent colour. The selected row's own fill is `Theme.selectionFill`; a brighter
+    /// indigo on the matched characters *inside* that fill is what made the two
+    /// indigos fight on the selected row and left the highlight nearly invisible.
     private var highlightedTitle: AttributedString {
         var attributed = AttributedString(result.command.title)
         guard !result.highlights.isEmpty else { return attributed }
@@ -418,8 +419,7 @@ private struct PaletteRow: View {
             offset += 1
         }
         for range in ranges {
-            attributed[range].font = .body.weight(.bold)
-            attributed[range].foregroundColor = Theme.accent
+            attributed[range].font = .callout.weight(.bold)
         }
         return attributed
     }

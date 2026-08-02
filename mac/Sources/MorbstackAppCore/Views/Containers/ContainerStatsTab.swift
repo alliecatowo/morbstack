@@ -44,6 +44,7 @@ struct ContainerStatsTab: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.contentBackground)
         .task(id: container.id) { subscribe() }
         .onDisappear { unsubscribe() }
         .onChange(of: container.isRunning) { _, running in
@@ -61,7 +62,7 @@ struct ContainerStatsTab: View {
             // them. A sparkline is one of the few things in the app that is strictly
             // better larger: the same series over twice the height resolves detail that
             // a 64pt strip flattens into a ruled line.
-            VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: Theme.space5) {
                 if let failure = probe.failure {
                     TrackBInlineError(text: "Stats stream stopped: \(failure)")
                 } else if !probe.isLive {
@@ -99,19 +100,20 @@ struct ContainerStatsTab: View {
 
                 footnote(probe)
             }
-            .padding(18)
+            .padding(Theme.space5)
             .frame(
                 maxWidth: .infinity,
                 minHeight: viewportHeight > 0 ? viewportHeight : nil,
                 alignment: .topLeading)
         }
+        .morbScrollEdge(.soft, for: .top)
         .onScrollGeometryChange(for: CGFloat.self) { $0.containerSize.height } action: { _, height in
             if abs(height - viewportHeight) > 0.5 { viewportHeight = height }
         }
     }
 
     private var waiting: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: Theme.space3) {
             ProgressView().controlSize(.small)
             Text("Waiting for the first sample…")
                 .font(.callout)
@@ -120,35 +122,23 @@ struct ContainerStatsTab: View {
     }
 
     private var notRunning: some View {
-        TrackBEmptyState(
-            symbols: ["waveform.path.ecg"],
-            title: "No live statistics",
-            message: "The engine only reports CPU and memory for a running container."
-        ) {
-            EmptyView()
-        }
+        MorbEmptyState(
+            "No live statistics",
+            systemImage: "waveform.path.ecg",
+            description: "The engine only reports CPU and memory for a running container.")
     }
 
     private func memoryGauge(_ sample: StatsSample) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: Theme.space3) {
             HStack {
                 Text("Of limit")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text(Formatters.memoryString(used: sample.memBytes, limit: sample.memLimit))
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                MorbNumber(Formatters.memoryString(used: sample.memBytes, limit: sample.memLimit))
             }
-            GeometryReader { geometry in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(.quaternary)
-                    Capsule()
-                        .fill(memoryTint(sample).gradient)
-                        .frame(width: max(3, geometry.size.width * sample.memFraction))
-                }
-            }
-            .frame(height: 6)
+            MorbMeter(value: Double(sample.memBytes), total: Double(sample.memLimit),
+                     tone: memoryTint(sample), height: 6)
         }
     }
 
@@ -177,12 +167,14 @@ struct ContainerStatsTab: View {
             + Formatters.bytesString(sample.memLimit)
     }
 
-    /// Warm colours past the point where a container is the reason the fan is on.
+    /// Status hues past the point where a container is the reason the fan is on. Below
+    /// the warning threshold this is `seriesIndigo`, a plain data colour — CPU is not a
+    /// status until it is close to a problem.
     private func cpuTint(_ value: Double) -> Color {
         switch value {
-        case ..<60: return Theme.accent
-        case ..<85: return .orange
-        default: return .red
+        case ..<60: return Theme.seriesIndigo
+        case ..<85: return Theme.statusDegraded
+        default: return Theme.statusBad
         }
     }
 
@@ -190,10 +182,10 @@ struct ContainerStatsTab: View {
         guard let sample, sample.memLimit > 0 else { return Theme.seriesTeal }
         switch sample.memFraction {
         case ..<0.75: return Theme.seriesTeal
-        case ..<0.92: return .orange
+        case ..<0.92: return Theme.statusDegraded
         // Past ninety-something percent of the limit the kernel is about to OOM-kill
         // this container, which is worth shouting about.
-        default: return .red
+        default: return Theme.statusBad
         }
     }
 
@@ -240,51 +232,43 @@ struct TrackBChartCard: View {
     let axisLabel: (Double) -> String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Image(systemName: symbol)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(tint)
-                Text(title)
-                    .font(.system(size: 11, weight: .semibold))
-                    .kerning(0.4)
-                    .foregroundStyle(.secondary)
+        MorbCard(padding: Theme.space4) {
+            VStack(alignment: .leading, spacing: Theme.space3) {
+                HStack(alignment: .firstTextBaseline, spacing: Theme.space2) {
+                    Image(systemName: symbol)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(tint)
+                    Text(title)
+                        .font(.system(size: 11, weight: .semibold))
+                        .kerning(0.4)
+                        .foregroundStyle(.secondary)
 
-                Spacer()
+                    Spacer()
 
-                Text(reading)
-                    // Monospaced digits are not a nicety here: a proportional font
-                    // reflows the whole reading every time a digit changes, and at one
-                    // update every two seconds that reads as a twitch.
-                    .font(.system(size: 22, weight: .medium, design: .rounded).monospacedDigit())
-                    .foregroundStyle(.primary)
-                    .contentTransition(.numericText())
-                    .animation(.easeOut(duration: 0.25), value: reading)
-            }
+                    Text(reading)
+                        .font(.system(size: 22, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                        .contentTransition(.numericText())
+                        .foregroundStyle(.primary)
+                        .morbAnimation(.fade, value: reading)
+                }
 
-            TrackBSparkline(values: values, upperBound: upperBound, tint: tint)
-                .frame(minHeight: 64, maxHeight: .infinity)
+                TrackBSparkline(values: values, upperBound: upperBound, tint: tint)
+                    .frame(minHeight: 64, maxHeight: .infinity)
 
-            HStack {
-                Text(caption)
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.tertiary)
-                Spacer()
-                // The axis maximum. `.quaternary` put it at roughly 1.8:1 against the
-                // card — technically present, practically invisible, which is the worst
-                // of both worlds for a label that tells you what the top of the chart
-                // means.
-                Text(axisLabel(upperBound))
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.tertiary)
+                HStack {
+                    Text(caption)
+                        .font(.caption2)
+                        .monospacedDigit()
+                        .foregroundStyle(.tertiary)
+                    Spacer()
+                    Text(axisLabel(upperBound))
+                        .font(.caption2)
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
             }
         }
-        .padding(14)
-        .background(.quaternary.opacity(0.32),
-                    in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(.separator, lineWidth: 0.5))
     }
 }
 

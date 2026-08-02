@@ -7,17 +7,17 @@
 // pulled again, so the screen is deliberately more cautious than the others: no prune
 // button in the header without a preview, no size shown as `0 B` when the truth is "not
 // reported", and the mountpoint always one click away.
+//
+// A real `Table` replaces the hand-rolled column grid, and a detail pane replaces the
+// popover: selecting a volume opens its driver, mountpoint and reference count beside the
+// list rather than in a transient bubble, which is also what gives this screen something
+// to show besides a thin thirty-two-point row — the emptiness `CRITIQUE.md` calls out by
+// name. The pane is a plain `HSplitView`, not `.inspector(isPresented:)` — the offscreen
+// screenshot harness's `NSHostingView` does not composite `.inspector` content, only real
+// view hierarchy (see the note on `content` below).
 
+import AppKit
 import SwiftUI
-
-// MARK: - Layout
-
-private enum VolumeColumns {
-    static let driver: CGFloat = 92
-    static let size: CGFloat = 86
-    static let refCount: CGFloat = 78
-    static let actions: CGFloat = 52
-}
 
 // MARK: - Sorting and filtering
 
@@ -106,6 +106,28 @@ enum TrackCVolumeList {
     }
 }
 
+/// Table sort, keyed by ``TrackCVolumeSortKey``.
+struct TrackCVolumeComparator: SortComparator {
+    var key: TrackCVolumeSortKey
+    var order: SortOrder = .forward
+
+    func compare(_ lhs: VolumeSummary, _ rhs: VolumeSummary) -> ComparisonResult {
+        let result: ComparisonResult
+        switch key {
+        case .name: result = trackCCompareStrings(lhs.name, rhs.name)
+        case .driver:
+            result = lhs.driver == rhs.driver
+                ? trackCCompareStrings(lhs.name, rhs.name)
+                : trackCCompareStrings(lhs.driver, rhs.driver)
+        case .size: result = trackCCompareOptionalInt(lhs.size, rhs.size)
+        case .refCount:
+            result = trackCCompareOptionalInt(
+                lhs.refCount.map(Int64.init), rhs.refCount.map(Int64.init))
+        }
+        return order == .forward ? result : result.reversed
+    }
+}
+
 // MARK: - Root
 
 struct VolumesRootView: View {
@@ -113,8 +135,7 @@ struct VolumesRootView: View {
     let model: AppModel
 
     @State private var query = ""
-    @State private var sortKey: TrackCVolumeSortKey = .name
-    @State private var ascending = true
+    @State private var sortOrder: [TrackCVolumeComparator] = [TrackCVolumeComparator(key: .name)]
     @State private var selection: VolumeSummary.ID?
 
     @State private var showingUnusedSheet = false
@@ -123,9 +144,9 @@ struct VolumesRootView: View {
     @State private var toast: TrackCToast?
 
     private var visible: [VolumeSummary] {
-        TrackCVolumeList.sorted(
-            model.volumes.filter { TrackCVolumeList.matches($0, query: query) },
-            by: sortKey, ascending: ascending)
+        model.volumes
+            .filter { TrackCVolumeList.matches($0, query: query) }
+            .sorted(using: sortOrder)
     }
 
     private var unusedCount: Int { model.volumes.filter(\.isUnused).count }
@@ -138,115 +159,253 @@ struct VolumesRootView: View {
         return parts.joined(separator: " · ")
     }
 
+    private var selectedVolume: VolumeSummary? {
+        guard let selection else { return nil }
+        return model.volumes.first { $0.id == selection }
+    }
+
     var body: some View {
-        VStack(spacing: 0) {
-            TrackCPageHeader(title: "Volumes", subtitle: subtitle) {
-                HStack(spacing: 8) {
-                    TrackCSearchField(text: $query, prompt: "Filter volumes")
-                    Button {
-                        showingUnusedSheet = true
-                    } label: {
-                        Label("Remove Unused", systemImage: "trash")
-                    }
-                    .disabled(unusedCount == 0 || busy)
-                    .help(
-                        unusedCount == 0
-                            ? "Every volume is attached to a container"
-                            : "Review and remove \(unusedCount) unused volume\(unusedCount == 1 ? "" : "s")")
+        content
+            .morbScreen(title: "Volumes", subtitle: subtitle, edge: .hard)
+            .searchable(text: $query, placement: .toolbar, prompt: "Name, driver, mount point")
+            .toolbar { toolbarContent }
+            .trackCToast($toast)
+            .sheet(isPresented: $showingUnusedSheet) {
+                let plan = TrackCVolumeList.unusedPlan(model.volumes)
+                TrackCConfirmSheet(
+                    title: "Remove unused volumes",
+                    symbol: "externaldrive.badge.minus",
+                    explanation:
+                        "These volumes are not attached to any container. Their contents are deleted "
+                        + "immediately and cannot be recovered — a database that lives in a named volume "
+                        + "looks exactly like this while its stack is stopped.",
+                    items: plan.items,
+                    knownBytes: plan.knownBytes,
+                    hasUnknownSizes: plan.hasUnknownSizes,
+                    confirmTitle: "Remove \(plan.items.count)",
+                    onConfirm: { Task { await removeUnused(plan.items.map(\.id)) } })
+            }
+            .alert(
+                removal.map { "Remove \($0.name)?" } ?? "",
+                isPresented: Binding(get: { removal != nil }, set: { if !$0 { removal = nil } }),
+                presenting: removal
+            ) { volume in
+                Button("Cancel", role: .cancel) {}
+                Button("Remove", role: .destructive) { Task { await remove(volume) } }
+            } message: { volume in
+                if volume.isUnused {
+                    Text("Everything stored in this volume is deleted permanently.")
+                } else {
+                    Text(
+                        "\(volume.refCount ?? 0) container\((volume.refCount ?? 0) == 1 ? "" : "s") "
+                        + "still use this volume. The engine will refuse unless they are removed first.")
                 }
             }
-
-            Divider()
-
-            TrackCHeaderBar {
-                TrackCSortHeader(
-                    title: "Name", key: TrackCVolumeSortKey.name,
-                    active: $sortKey, ascending: $ascending)
-                TrackCSortHeader(
-                    title: "Driver", key: TrackCVolumeSortKey.driver,
-                    active: $sortKey, ascending: $ascending)
-                    .frame(width: VolumeColumns.driver)
-                TrackCSortHeader(
-                    title: "Size", key: TrackCVolumeSortKey.size,
-                    active: $sortKey, ascending: $ascending, alignment: .trailing)
-                    .frame(width: VolumeColumns.size)
-                TrackCSortHeader(
-                    title: "In use", key: TrackCVolumeSortKey.refCount,
-                    active: $sortKey, ascending: $ascending, alignment: .trailing)
-                    .frame(width: VolumeColumns.refCount)
-                Color.clear.frame(width: VolumeColumns.actions, height: 1)
+            .onDeleteCommand {
+                guard let selection, let volume = model.volumes.first(where: { $0.id == selection }) else { return }
+                removal = volume
             }
-            .padding(.top, 8)
-
-            content
-        }
-        .trackCToast($toast)
-        .sheet(isPresented: $showingUnusedSheet) {
-            let plan = TrackCVolumeList.unusedPlan(model.volumes)
-            TrackCConfirmSheet(
-                title: "Remove unused volumes",
-                symbol: "externaldrive.badge.minus",
-                explanation:
-                    "These volumes are not attached to any container. Their contents are deleted "
-                    + "immediately and cannot be recovered — a database that lives in a named volume "
-                    + "looks exactly like this while its stack is stopped.",
-                items: plan.items,
-                knownBytes: plan.knownBytes,
-                hasUnknownSizes: plan.hasUnknownSizes,
-                confirmTitle: "Remove \(plan.items.count)",
-                onConfirm: { Task { await removeUnused(plan.items.map(\.id)) } })
-        }
-        .alert(
-            removal.map { "Remove \($0.name)?" } ?? "",
-            isPresented: Binding(get: { removal != nil }, set: { if !$0 { removal = nil } }),
-            presenting: removal
-        ) { volume in
-            Button("Cancel", role: .cancel) {}
-            Button("Remove", role: .destructive) { Task { await remove(volume) } }
-        } message: { volume in
-            if volume.isUnused {
-                Text("Everything stored in this volume is deleted permanently.")
-            } else {
-                Text(
-                    "\(volume.refCount ?? 0) container\((volume.refCount ?? 0) == 1 ? "" : "s") "
-                    + "still use this volume. The engine will refuse unless they are removed first.")
+            // Selects the first row so the inspector opens with something to show —
+            // the same "select the first item" convention Mail and Finder use, and the
+            // fix for a resource screen that otherwise reads as half its window empty.
+            .task {
+                if selection == nil { selection = visible.first?.id }
             }
-        }
-        .onDeleteCommand {
-            guard let selection, let volume = model.volumes.first(where: { $0.id == selection }) else { return }
-            removal = volume
+    }
+
+    // MARK: Toolbar
+
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        ToolbarItem(id: "removeUnused", placement: MorbToolbarGroup.actions) {
+            Button {
+                showingUnusedSheet = true
+            } label: {
+                HStack(spacing: Theme.space2) {
+                    Image(systemName: "trash")
+                    Text("Remove Unused")
+                    if unusedCount > 0 { MorbCountBadge(count: unusedCount) }
+                }
+            }
+            .disabled(unusedCount == 0 || busy)
+            .help(
+                unusedCount == 0
+                    ? "Every volume is attached to a container"
+                    : "Review and remove \(unusedCount) unused volume\(unusedCount == 1 ? "" : "s")")
         }
     }
+
+    // MARK: Content
 
     @ViewBuilder
     private var content: some View {
         if model.volumes.isEmpty {
-            TrackCEmptyState(
-                title: "No volumes",
-                message: "Volumes appear here as soon as a container asks for persistent storage — "
-                    + "either a named volume in a compose file or a `-v` flag on `morb run`.",
-                symbol: "externaldrive")
+            MorbEmptyState(
+                "No volumes",
+                systemImage: "externaldrive",
+                description: "Volumes appear here as soon as a container asks for persistent storage — "
+                    + "either a named volume in a compose file or a -v flag on morb run.")
         } else if visible.isEmpty {
-            TrackCEmptyState(
-                title: "No matches",
-                message: "Nothing here matches “\(query)”.",
-                symbol: "magnifyingglass",
-                action: (title: "Clear Filter", run: { query = "" }))
+            MorbNoMatches(query: query)
         } else {
-            List(selection: $selection) {
-                ForEach(visible) { volume in
-                    TrackCVolumeRow(volume: volume, onRemove: { removal = volume })
-                        .tag(volume.id)
-                }
+            // A manual split rather than `.inspector(isPresented:)`: the offscreen
+            // screenshot harness's `NSHostingView` does not composite `.inspector`
+            // content at all (verified empirically, same as `.toolbar` — see
+            // `ContainersRootView`'s note), so an `.inspector` here would render as a
+            // blank pane in every `dist/shots` capture. An `HSplitView` is real content,
+            // draggable, and photographs.
+            HSplitView {
+                table
+                    .frame(minWidth: 480, maxWidth: .infinity)
+                detailPane
+                    .frame(minWidth: Theme.inspectorMinWidth, idealWidth: Theme.inspectorWidth,
+                           maxWidth: Theme.inspectorWidth)
             }
-            .listStyle(.inset)
-            // No `.alternatingRowBackgrounds()`. AppKit stripes the whole viewport, not the
-            // rows that exist, so six networks in a 900pt window are followed by ten empty
-            // bands and the screen reads as a half-loaded skeleton. The hairline separators
-            // `List` draws anyway are enough to track a row across four columns, and they
-            // stop where the data does.
-            .environment(\.defaultMinListRowHeight, TrackCMetrics.rowHeight)
         }
+    }
+
+    private var table: some View {
+        Table(visible, selection: $selection, sortOrder: $sortOrder) {
+            TableColumn("Name", sortUsing: TrackCVolumeComparator(key: .name)) { volume in
+                nameCell(volume)
+                    .frame(height: Theme.rowStandard, alignment: .leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            TableColumn("Driver", sortUsing: TrackCVolumeComparator(key: .driver)) { volume in
+                Text(volume.driver)
+                    .foregroundStyle(.secondary)
+                    .frame(height: Theme.rowStandard, alignment: .leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .width(min: 88, ideal: 108, max: 160)
+            TableColumn("Size", sortUsing: TrackCVolumeComparator(key: .size)) { volume in
+                MorbNumber(volume.size.map(Formatters.bytesString) ?? "—", font: .callout)
+                    .frame(height: Theme.rowStandard, alignment: .trailing)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+            .width(min: 72, ideal: 92, max: 130)
+            TableColumn("In use", sortUsing: TrackCVolumeComparator(key: .refCount)) { volume in
+                refCountCell(volume)
+                    .frame(height: Theme.rowStandard, alignment: .trailing)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+            .width(min: 64, ideal: 88, max: 110)
+        }
+        .tableStyle(.inset)
+        .alternatingRowBackgrounds()
+        .contextMenu(forSelectionType: VolumeSummary.ID.self) { ids in
+            contextMenu(for: ids)
+        } primaryAction: { ids in
+            if let id = ids.first { selection = id }
+        }
+    }
+
+    private func nameCell(_ volume: VolumeSummary) -> some View {
+        HStack(spacing: Theme.space2) {
+            MorbStatusDot(tone: volume.isUnused ? .idle : .running)
+            Text(TrackCDiskMath.volumeDisplayName(volume.name))
+                .lineLimit(1)
+                .truncationMode(.middle)
+            if TrackCDiskMath.isAnonymousVolumeName(volume.name) {
+                MorbChip("anonymous", rank: .quiet)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func refCountCell(_ volume: VolumeSummary) -> some View {
+        // `nil` is "the engine was not asked for usage data", which is a different fact
+        // from "this volume is unused" and must not render as a confident zero.
+        if let count = volume.refCount, count > 0 {
+            MorbCountBadge(count: count, tone: .running)
+        } else if volume.refCount == nil {
+            Text("—").foregroundStyle(.tertiary)
+        } else {
+            Text("unused").font(.caption2).foregroundStyle(.tertiary)
+        }
+    }
+
+    @ViewBuilder
+    private func contextMenu(for ids: Set<VolumeSummary.ID>) -> some View {
+        if let id = ids.first, let volume = model.volumes.first(where: { $0.id == id }) {
+            Button("Copy Name") { trackCCopy(volume.name) }
+            if !volume.mountpoint.isEmpty {
+                Button("Copy Mount Point") { trackCCopy(volume.mountpoint) }
+            }
+            Divider()
+            Button("Remove…", role: .destructive) { removal = volume }
+        }
+    }
+
+    // MARK: Detail pane
+
+    @ViewBuilder
+    private var detailPane: some View {
+        if let volume = selectedVolume {
+            ScrollView {
+                VStack(alignment: .leading, spacing: Theme.space5) {
+                    VStack(alignment: .leading, spacing: Theme.space2) {
+                        Text(TrackCDiskMath.volumeDisplayName(volume.name))
+                            .font(.title3.weight(.semibold))
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                        MorbStatusBadge(
+                            tone: volume.isUnused ? .idle : .running,
+                            title: volume.isUnused ? "Unused" : "In use",
+                            detail: volume.size.map(Formatters.bytesString),
+                            filled: false)
+                    }
+
+                    MorbCard {
+                        VStack(alignment: .leading, spacing: Theme.space4) {
+                            MorbKeyValue("Driver", volume.driver)
+                            MorbKeyValue(
+                                "Mount point",
+                                volume.mountpoint.isEmpty ? "unknown" : volume.mountpoint,
+                                monospaced: true)
+                            MorbKeyValue(
+                                "In use by",
+                                volume.refCount.map { "\($0) container\($0 == 1 ? "" : "s")" } ?? "unreported")
+                            MorbKeyValue(
+                                "Kind",
+                                TrackCDiskMath.isAnonymousVolumeName(volume.name)
+                                    ? "Anonymous — created implicitly, removed by prune"
+                                    : "Named — prune leaves it alone")
+                        }
+                    }
+
+                    VStack(spacing: Theme.space3) {
+                        Button {
+                            revealInFinder(volume)
+                        } label: {
+                            Label("Reveal in Finder", systemImage: "folder")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .morbButton(.standard)
+                        .disabled(volume.mountpoint.isEmpty)
+
+                        Button(role: .destructive) {
+                            removal = volume
+                        } label: {
+                            Label("Remove Volume", systemImage: "trash")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .morbButton(.standard)
+                    }
+                }
+                .padding(Theme.pagePadding)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .background(Theme.contentBackground)
+        } else {
+            MorbEmptyState("No volume selected", systemImage: "externaldrive")
+                .background(Theme.contentBackground)
+        }
+    }
+
+    private func revealInFinder(_ volume: VolumeSummary) {
+        guard !volume.mountpoint.isEmpty else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: volume.mountpoint)])
     }
 
     // MARK: Operations
@@ -258,6 +417,7 @@ struct VolumesRootView: View {
         do {
             try await model.client.removeVolume(name: volume.name)
             toast = .success("Removed \(volume.name)", detail: volume.size.map { "Freed \(Formatters.bytesString($0))" })
+            if selection == volume.id { selection = nil }
             await model.refreshAll()
         } catch {
             toast = .failure("Could not remove \(volume.name)", detail: trackCErrorText(error))
@@ -285,6 +445,7 @@ struct VolumesRootView: View {
                 try await model.client.removeVolume(name: name)
                 removed += 1
                 reclaimed += max(0, sizeByName[name] ?? 0)
+                if selection == name { selection = nil }
             } catch {
                 failures.append(name)
             }
@@ -302,137 +463,5 @@ struct VolumesRootView: View {
             toast = .failure("Nothing could be removed", detail: "The engine still holds every volume in the list.")
         }
         await model.refreshAll()
-    }
-}
-
-// MARK: - Row
-
-private struct TrackCVolumeRow: View {
-
-    let volume: VolumeSummary
-    let onRemove: () -> Void
-
-    @State private var hovering = false
-    @State private var showingDetail = false
-
-    var body: some View {
-        HStack(spacing: TrackCMetrics.columnGap) {
-            HStack(spacing: 6) {
-                TrackCStatusDot(tone: volume.isUnused ? .neutral : .good)
-                Text(TrackCDiskMath.volumeDisplayName(volume.name))
-                    .font(.callout)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .help(volume.mountpoint.isEmpty ? volume.name : "\(volume.name)\n\(volume.mountpoint)")
-                if TrackCDiskMath.isAnonymousVolumeName(volume.name) {
-                    TrackCBadge(text: "anonymous")
-                }
-                Spacer(minLength: 0)
-            }
-
-            Text(volume.driver)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .frame(width: VolumeColumns.driver, alignment: .leading)
-
-            // `nil` is "the engine was not asked for usage data", which is a different
-            // fact from "this volume is empty" and must not render as `0 bytes`.
-            TrackCNumberCell(
-                text: volume.size.map(Formatters.bytesString) ?? "—",
-                emphasised: volume.size != nil)
-                .frame(width: VolumeColumns.size)
-                .help(volume.size == nil ? "Size not reported by the engine" : "On-disk size of this volume")
-
-            refCountCell
-                .frame(width: VolumeColumns.refCount, alignment: .trailing)
-
-            TrackCHoverActions(revealed: hovering) {
-                TrackCRowButton(symbol: "info.circle", help: "Volume details") { showingDetail = true }
-                    .popover(isPresented: $showingDetail, arrowEdge: .bottom) {
-                        TrackCVolumeDetail(volume: volume)
-                    }
-            }
-            .frame(width: VolumeColumns.actions)
-        }
-        .frame(height: TrackCMetrics.rowHeight)
-        .contentShape(.rect)
-        .onHover { hovering = $0 }
-        .contextMenu {
-            Button("Copy Name") { trackCCopy(volume.name) }
-            if !volume.mountpoint.isEmpty {
-                Button("Copy Mount Point") { trackCCopy(volume.mountpoint) }
-            }
-            Divider()
-            Button("Volume Details…") { showingDetail = true }
-            Divider()
-            Button("Remove…", role: .destructive, action: onRemove)
-        }
-    }
-
-    @ViewBuilder
-    private var refCountCell: some View {
-        if let count = volume.refCount, count > 0 {
-            TrackCBadge(text: "\(count)", symbol: "shippingbox.fill", tone: .good)
-        } else if volume.refCount == nil {
-            Text("—").font(.callout).foregroundStyle(.tertiary)
-        } else {
-            Text("unused").font(.caption2).foregroundStyle(.tertiary)
-        }
-    }
-}
-
-// MARK: - Detail popover
-
-private struct TrackCVolumeDetail: View {
-
-    let volume: VolumeSummary
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(volume.name)
-                    .font(.headline)
-                    .lineLimit(2)
-                    .truncationMode(.middle)
-                Text(volume.size.map(Formatters.bytesString) ?? "size not reported")
-                    .font(.caption)
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-            }
-
-            Divider()
-
-            VStack(alignment: .leading, spacing: 8) {
-                labelled("Driver", volume.driver)
-                labelled(
-                    "Mount point",
-                    volume.mountpoint.isEmpty ? "unknown" : volume.mountpoint,
-                    monospaced: true)
-                labelled(
-                    "In use by",
-                    volume.refCount.map { "\($0) container\($0 == 1 ? "" : "s")" } ?? "unreported")
-                labelled(
-                    "Kind",
-                    TrackCDiskMath.isAnonymousVolumeName(volume.name)
-                        ? "Anonymous — created implicitly, removed by prune"
-                        : "Named — prune leaves it alone")
-            }
-        }
-        .padding(16)
-        .frame(width: 360, alignment: .leading)
-    }
-
-    private func labelled(_ label: String, _ value: String, monospaced: Bool = false) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(label)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .textCase(.uppercase)
-            Text(value)
-                .font(monospaced ? .caption.monospaced() : .caption)
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
-        }
     }
 }

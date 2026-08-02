@@ -81,14 +81,15 @@ func drawIcon(in context: CGContext, size: CGFloat) {
 
     // A soft highlight across the top-left, which is what keeps a flat gradient from
     // looking like a swatch. Radial and very low contrast — at 4% it reads as "lit"
-    // rather than as a visible blob.
-    if let sheen = CGGradient(
-        colorsSpace: CGColorSpaceCreateDeviceRGB(),
-        colors: [
-            CGColor(red: 1, green: 1, blue: 1, alpha: 0.22),
-            CGColor(red: 1, green: 1, blue: 1, alpha: 0),
-        ] as CFArray,
-        locations: [0, 1])
+    // rather than as a visible blob. `docs/design/IDENTITY.md` §1.3: only ≥ 64px.
+    if size >= 64,
+        let sheen = CGGradient(
+            colorsSpace: CGColorSpaceCreateDeviceRGB(),
+            colors: [
+                CGColor(red: 1, green: 1, blue: 1, alpha: 0.20),
+                CGColor(red: 1, green: 1, blue: 1, alpha: 0),
+            ] as CFArray,
+            locations: [0, 1])
     {
         context.drawRadialGradient(
             sheen,
@@ -101,76 +102,113 @@ func drawIcon(in context: CGContext, size: CGFloat) {
     context.restoreGState()
 
     // Inner rim: a hairline of white along the top edge, the trick that makes a flat
-    // shape read as a physical object with a lit edge.
-    context.saveGState()
-    context.addPath(plateShape)
-    context.setLineWidth(max(0.75, size * 0.006))
-    context.setStrokeColor(CGColor(red: 1, green: 1, blue: 1, alpha: 0.18))
-    context.strokePath()
-    context.restoreGState()
+    // shape read as a physical object with a lit edge. `docs/design/IDENTITY.md` §1.3:
+    // only ≥ 32px, width and alpha keyed to the *plate*, not the canvas.
+    if size >= 32 {
+        context.saveGState()
+        context.addPath(plateShape)
+        context.setLineWidth(max(0.75, plate.width * 0.006))
+        context.setStrokeColor(CGColor(red: 1, green: 1, blue: 1, alpha: 0.16))
+        context.strokePath()
+        context.restoreGState()
+    }
 
     drawGlyph(in: context, plate: plate, size: size)
 }
 
-/// The mark itself: a white orb with three slats through it.
+/// The mark: a solid orb resting on a stack of full-width slabs, the topmost slab
+/// passing *behind* the orb through a hard gradient-coloured gap.
 ///
-/// It reads as a container — the slats are a crate's boards — and as a sphere, which is
-/// the "one machine holding everything" idea the product is about. Both readings are
-/// intentional, and the shape survives being 16 pixels wide, which most literal
-/// container drawings do not.
+/// Geometry is `docs/design/IDENTITY.md` §1, stated once there and implemented twice —
+/// this file in CoreGraphics for the `.icns`, `Design/MorbBrand.swift` in SwiftUI for
+/// the in-app mark. **CoreGraphics is bottom-left origin**, so every `v` coordinate
+/// below is exactly the value the spec tables give; `MorbBrand.swift` stores `1 − v` to
+/// account for SwiftUI's top-left origin. If this file and that one ever disagree,
+/// `IDENTITY.md` is the tie-breaker.
+///
+/// The gap is rendered by clipping, not by stroking a second time over the slabs: an
+/// even-odd clip to "the plate minus a disc of radius `R + gap`" is applied before the
+/// slabs are filled, so there is no double-drawn edge where the two shapes meet.
 func drawGlyph(in context: CGContext, plate: CGRect, size: CGFloat) {
 
-    let centre = CGPoint(x: plate.midX, y: plate.midY)
-    let orbRadius = plate.width * 0.255
-    let orb = CGRect(
-        x: centre.x - orbRadius, y: centre.y - orbRadius,
+    let plateW = plate.width  // == plate.height
+
+    func px(_ u: CGFloat) -> CGFloat { plate.minX + u * plateW }
+    func py(_ v: CGFloat) -> CGFloat { plate.minY + v * plateW }
+    func ulen(_ f: CGFloat) -> CGFloat { f * plateW }
+
+    // MARK: Orb — §1.5
+
+    let orbCentre = CGPoint(x: px(0.500), y: py(0.650))
+    let orbRadius = ulen(0.235)
+    let orbRect = CGRect(
+        x: orbCentre.x - orbRadius, y: orbCentre.y - orbRadius,
         width: orbRadius * 2, height: orbRadius * 2)
 
-    // Ring rather than disc: a solid white circle at Dock size is a headlight. The
-    // stroke keeps the plate's colour visible through the middle, which is where the
-    // slats then have something to sit on.
-    let ringWidth = orbRadius * 0.30
-    context.saveGState()
-    context.setStrokeColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
-    context.setLineWidth(ringWidth)
-    context.strokeEllipse(in: orb.insetBy(dx: ringWidth / 2, dy: ringWidth / 2))
-    context.restoreGState()
+    // MARK: The gap — §1.6. The 1 device-pixel floor is the whole point: without it the
+    // gap disappears below ~36px and the orb fuses with the slab into a lollipop.
+    let gap = max(1.0, plateW * 0.028)
+    let haloRadius = orbRadius + gap
+    let haloRect = CGRect(
+        x: orbCentre.x - haloRadius, y: orbCentre.y - haloRadius,
+        width: haloRadius * 2, height: haloRadius * 2)
 
-    // Three slats inside the ring.
-    //
-    // Each one's length comes from the circle's own chord at that height, so the outer
-    // two are shorter than the middle and the group traces the sphere — latitude lines,
-    // and equally the boards of a crate seen head on. Clipping a full-width bar to the
-    // circle would produce the same silhouette but with the ends jammed against the
-    // ring; solving for the chord and then pulling in by a margin leaves visible air on
-    // every side, which is the whole difference between "sphere" and "stripes".
-    let innerRadius = orb.width / 2 - ringWidth
-    // Gaps wider than the slats. The other way round the group fills in and the mark
-    // reads as a striped ball rather than as boards with space between them.
-    let slatHeight = innerRadius * 2 * 0.135
-    let gap = innerRadius * 2 * 0.150
-    let offsets: [CGFloat] = [slatHeight + gap, 0, -(slatHeight + gap)]
-    let margin = ringWidth * 0.55
+    // MARK: Slabs — §1.4. Three at ≥ 64px, two below — both occupy the same band so the
+    // silhouette does not jump when the detail level changes.
+    let isFullDetail = size >= 64
+    let slabCount = isFullDetail ? 3 : 2
+    let slabHeight = isFullDetail ? 0.105 : 0.150
+    let slabPitch = isFullDetail ? 0.170 : 0.285
+    let lowestCentre = isFullDetail ? 0.155 : 0.185
+    let slabWidth: CGFloat = 0.860
+    let slabCornerRadius = min(ulen(slabHeight) / 2, plateW * 0.030)
 
+    // 1. Clip to the plate, minus the halo disc — this is the gap. Even-odd with the
+    //    plate as the outer subpath and the halo as the inner one leaves exactly
+    //    "everything outside the halo, inside the plate".
     context.saveGState()
+    context.addPath(CGPath(roundedRect: plate, cornerWidth: plateW * 0.235, cornerHeight: plateW * 0.235, transform: nil))
+    context.addEllipse(in: haloRect)
+    context.clip(using: .evenOdd)
+
+    // 2. The slabs, filled solid white, clipped by the gap above.
     context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
-    for offset in offsets {
-        // Measure the chord at the slat's *outer* edge, so its corners clear the ring
-        // rather than only its centre line.
-        let extreme = abs(offset) + slatHeight / 2
-        let halfChord = (innerRadius * innerRadius - extreme * extreme).squareRoot()
-        guard halfChord.isFinite, halfChord > margin else { continue }
-        let halfWidth = halfChord - margin
-
-        let slat = CGRect(
-            x: centre.x - halfWidth, y: centre.y + offset - slatHeight / 2,
-            width: halfWidth * 2, height: slatHeight)
-        let slatRadius = min(slatHeight / 2, size * 0.024)
+    for i in 0..<slabCount {
+        let centreV = lowestCentre + CGFloat(i) * slabPitch
+        let rect = CGRect(
+            x: px(0.500 - slabWidth / 2), y: py(centreV) - ulen(slabHeight) / 2,
+            width: ulen(slabWidth), height: ulen(slabHeight))
         context.addPath(
             CGPath(
-                roundedRect: slat, cornerWidth: slatRadius, cornerHeight: slatRadius,
+                roundedRect: rect, cornerWidth: slabCornerRadius, cornerHeight: slabCornerRadius,
                 transform: nil))
-        context.fillPath()
+    }
+    context.fillPath()
+    context.restoreGState()
+
+    // 3. The orb itself, on top: a filled disc with a faint lens gradient — a sphere,
+    //    not a ring. White at the disc's top-left to 92% white at its bottom-right.
+    context.saveGState()
+    context.addEllipse(in: orbRect)
+    context.clip()
+    if let lens = CGGradient(
+        colorsSpace: CGColorSpaceCreateDeviceRGB(),
+        colors: [
+            CGColor(red: 1, green: 1, blue: 1, alpha: 1),
+            CGColor(red: 0.92, green: 0.92, blue: 0.92, alpha: 1),
+        ] as CFArray,
+        locations: [0, 1])
+    {
+        // Top-left → bottom-right in this bottom-left-origin space is (minX, maxY) →
+        // (maxX, minY).
+        context.drawLinearGradient(
+            lens,
+            start: CGPoint(x: orbRect.minX, y: orbRect.maxY),
+            end: CGPoint(x: orbRect.maxX, y: orbRect.minY),
+            options: [])
+    } else {
+        context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+        context.fill(orbRect)
     }
     context.restoreGState()
 }
