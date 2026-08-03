@@ -104,6 +104,14 @@ private enum BuildHistoryLogState: Equatable {
     case unavailable(String)
 }
 
+/// Details and output are peer views of one selected completed build. A tab keeps the
+/// factual Form separate from the potentially long raw log instead of compressing both
+/// into one inspector column.
+private enum BuildHistoryInspectorTab: Hashable {
+    case details
+    case log
+}
+
 private enum BuildHistorySortKey: String, CaseIterable, Hashable {
     case name, status, createdAt, duration
 }
@@ -166,6 +174,7 @@ struct BuildsRootView: View {
     @State private var historyDetailTask: Task<Void, Never>?
     @State private var historyLogState: BuildHistoryLogState = .idle
     @State private var historyLogTask: Task<Void, Never>?
+    @State private var historyInspectorTab: BuildHistoryInspectorTab = .details
     @State private var showsInspector = true
     @State private var isRefreshing = false
     @State private var isPruning = false
@@ -458,9 +467,7 @@ struct BuildsRootView: View {
             ContentUnavailableView {
                 Label("No Build Cache", systemImage: "hammer")
             } description: {
-                Text(
-                    "Build an image to see the BuildKit cache it creates. Docker Engine exposes cache "
-                        + "records here, not a durable history of completed builds.")
+                Text("Build an image to create local BuildKit cache records.")
             } actions: {
                 Button {
                     showsBuildSheet = true
@@ -481,8 +488,8 @@ struct BuildsRootView: View {
                 .inspector(isPresented: $showsInspector) {
                     detailPane
                         .inspectorColumnWidth(
-                            min: 280,
-                            ideal: 340,
+                            min: 340,
+                            ideal: 400,
                             max: 460)
                 }
         }
@@ -579,8 +586,8 @@ struct BuildsRootView: View {
                     .inspector(isPresented: $showsInspector) {
                         historyDetailPane
                             .inspectorColumnWidth(
-                                min: 280,
-                                ideal: 340,
+                                min: 340,
+                                ideal: 400,
                                 max: 460)
                     }
             }
@@ -663,32 +670,7 @@ struct BuildsRootView: View {
                         "Last Used",
                         value: record.lastUsedAt.map(Formatters.absoluteDate) ?? "Never")
                     LabeledContent("Used", value: "\(record.usageCount) time\(record.usageCount == 1 ? "" : "s")")
-                    if record.shared {
-                        LabeledContent("Shared") {
-                            Text("Counted once for each image that references it")
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-                Section("Actions") {
-                    Button {
-                        MorbPasteboard.copy(record.id)
-                    } label: {
-                        Label("Copy Record ID", systemImage: "doc.on.doc")
-                    }
-                    if !record.inUse {
-                        LabeledContent("Removal", value: "All unused cache")
-                        Text(
-                            "Docker can only prune every unused cache record at once; it cannot remove the "
-                                + "reviewed record by ID. Use Prune Unused Cache to run that engine-wide cleanup.")
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                Section("Build History") {
-                    Text(
-                        "This is a cache record, not one completed build. Docker Engine does not expose "
-                            + "a durable build-history API; Buildx history is separate builder metadata.")
-                        .foregroundStyle(.secondary)
+                    LabeledContent("Storage", value: record.shared ? "Shared" : "Not shared")
                 }
             }
         } else {
@@ -734,10 +716,24 @@ struct BuildsRootView: View {
                     }
                 }
             case .loaded(let detail):
-                if detail.hasReportableFields {
-                    historyDetailsForm(detail, recordID: record.id)
-                } else {
-                    historyDetailsUnavailable(for: record)
+                // These are two representations of one selected record. The native
+                // TabView owns peer-destination behavior and keeps raw output outside
+                // the factual Form.
+                TabView(selection: $historyInspectorTab) {
+                    Tab(
+                        "Details",
+                        systemImage: "doc.text",
+                        value: BuildHistoryInspectorTab.details)
+                    {
+                        historyDetailsTab(detail)
+                    }
+                    Tab(
+                        "Log",
+                        systemImage: "text.alignleft",
+                        value: BuildHistoryInspectorTab.log)
+                    {
+                        historyLogPane(for: record.id)
+                    }
                 }
             }
         } else {
@@ -748,10 +744,19 @@ struct BuildsRootView: View {
         }
     }
 
-    private func historyDetailsForm(
-        _ detail: BuildxHistoryDetail,
-        recordID: BuildxHistoryRecord.ID
-    ) -> some View {
+    @ViewBuilder
+    private func historyDetailsTab(_ detail: BuildxHistoryDetail) -> some View {
+        if detail.hasReportableFields {
+            historyDetailsForm(detail)
+        } else {
+            ContentUnavailableView(
+                "No Build Details Reported",
+                systemImage: "doc.text.magnifyingglass",
+                description: Text("Buildx returned this record without fields Morbstack can show."))
+        }
+    }
+
+    private func historyDetailsForm(_ detail: BuildxHistoryDetail) -> some View {
         Form {
             if detail.name != nil || detail.reference != nil || detail.status != nil {
                 Section("Build") {
@@ -871,91 +876,72 @@ struct BuildsRootView: View {
                     }
                 }
             }
-            historyLogSection(for: recordID)
         }
     }
 
     @ViewBuilder
-    private func historyDetailsUnavailable(for record: BuildxHistoryRecord) -> some View {
+    private func historyLogPane(for recordID: BuildxHistoryRecord.ID) -> some View {
         switch historyLogState {
-        case .loaded:
-            Form {
-                Section("Build Details") {
-                    Text("Buildx returned this record without metadata Morbstack can show.")
-                        .foregroundStyle(.secondary)
-                }
-                historyLogSection(for: record.id)
-            }
-        case .idle, .loading, .unavailable:
+        case .idle:
             ContentUnavailableView {
-                Label("No Build Details Reported", systemImage: "doc.text.magnifyingglass")
+                Label("Build Log Not Loaded", systemImage: "text.alignleft")
             } description: {
-                Text("Buildx returned this record without fields Morbstack can show.")
+                Text("Load the raw output Buildx reports for this completed build.")
             } actions: {
-                historyLogAction(for: record.id)
+                Button("Load Logs") {
+                    loadHistoryLogs(for: recordID)
+                }
             }
-        }
-    }
-
-    @ViewBuilder
-    private func historyLogSection(for recordID: BuildxHistoryRecord.ID) -> some View {
-        Section("Build Log") {
-            switch historyLogState {
-            case .idle:
-                historyLogAction(for: recordID)
-            case .loading:
+        case .loading:
+            ContentUnavailableView {
+                Label("Loading Build Log", systemImage: "text.alignleft")
+            } description: {
                 ProgressView("Reading the selected Buildx log…")
+            } actions: {
                 Button("Cancel Loading") {
                     historyLogTask?.cancel()
                 }
-            case .unavailable(let detail):
+            }
+        case .unavailable(let detail):
+            ContentUnavailableView {
+                Label("Build Log Unavailable", systemImage: "exclamationmark.triangle")
+            } description: {
                 Text(detail)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
+            } actions: {
                 Button("Load Logs Again") {
                     loadHistoryLogs(for: recordID)
                 }
-            case .loaded(let log):
-                if log.hasOutput {
-                    ScrollView(.vertical) {
-                        Text(log.output)
-                            .font(.system(.callout, design: .monospaced))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .textSelection(.enabled)
-                    }
-                    .frame(minHeight: 160, maxHeight: 280)
-                    if log.isTruncated {
-                        Text("Showing the first 4 MB returned by Buildx.")
-                            .foregroundStyle(.secondary)
-                    }
-                } else {
-                    LabeledContent("Output", value: "Buildx returned no log output.")
-                }
+            }
+        case .loaded(let log):
+            if log.hasOutput {
+                historyLogViewport(log)
+            } else {
+                ContentUnavailableView(
+                    "No Log Output",
+                    systemImage: "text.alignleft",
+                    description: Text("Buildx returned no raw output for this build."))
             }
         }
     }
 
-    @ViewBuilder
-    private func historyLogAction(for recordID: BuildxHistoryRecord.ID) -> some View {
-        switch historyLogState {
-        case .idle:
-            Button("Load Logs") {
-                loadHistoryLogs(for: recordID)
+    private func historyLogViewport(_ log: BuildxHistoryLog) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if log.isTruncated {
+                Text("Showing the first 4 MB returned by Buildx.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding()
+                Divider()
             }
-        case .loading:
-            ProgressView("Reading the selected Buildx log…")
-            Button("Cancel Loading") {
-                historyLogTask?.cancel()
+            ScrollView(.vertical) {
+                Text(log.output)
+                    .font(.system(.callout, design: .monospaced))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+                    .padding()
             }
-        case .unavailable(let detail):
-            Text(detail)
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
-            Button("Load Logs Again") {
-                loadHistoryLogs(for: recordID)
-            }
-        case .loaded:
-            EmptyView()
+            .accessibilityLabel("Build log")
         }
     }
 
@@ -993,6 +979,7 @@ struct BuildsRootView: View {
         historyDetailTask?.cancel()
         historyDetailTask = nil
         historyDetailState = .idle
+        historyInspectorTab = .details
         resetHistoryLogs()
     }
 
@@ -1002,6 +989,7 @@ struct BuildsRootView: View {
               case .loaded = historyDetailState
         else { return }
         historyLogTask?.cancel()
+        historyInspectorTab = .log
         historyLogState = .loading
         let socketPath = MorbPaths.dockerSocket.path
         historyLogTask = Task { @MainActor [recordID, socketPath] in
