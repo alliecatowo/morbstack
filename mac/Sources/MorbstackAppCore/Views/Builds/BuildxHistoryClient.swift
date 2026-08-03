@@ -9,6 +9,7 @@
 // client shows only records that command returned and never fabricates them from cache
 // layers. It does not invoke Buildx history deletion, export, import, or `open`.
 
+import Darwin
 import Foundation
 import MorbstackKit
 
@@ -16,6 +17,7 @@ enum BuildxHistoryClientError: LocalizedError {
     case dockerCLIMissing
     case buildxPluginMissing
     case launchFailed(String)
+    case timedOut(String)
     case failed(String)
     case decoding(String)
 
@@ -25,7 +27,7 @@ enum BuildxHistoryClientError: LocalizedError {
             return "This Morbstack installation does not include its bundled Docker client."
         case .buildxPluginMissing:
             return "This Morbstack installation does not include its bundled Buildx plugin."
-        case .launchFailed(let detail), .failed(let detail), .decoding(let detail):
+        case .launchFailed(let detail), .timedOut(let detail), .failed(let detail), .decoding(let detail):
             return detail
         }
     }
@@ -96,6 +98,10 @@ enum BuildxHistoryClient {
 /// Runs a single read-only Buildx command without a shell or inherited Docker state.
 private final class BuildxHistoryCommand: @unchecked Sendable {
 
+    /// A history read backs a screen refresh, not a build. Keep its failure bounded
+    /// when a builder is unhealthy or a plugin becomes unresponsive.
+    private static let deadline: TimeInterval = 15
+
     private let docker: URL
     private let buildx: URL
     private let socketPath: String
@@ -109,14 +115,25 @@ private final class BuildxHistoryCommand: @unchecked Sendable {
     }
 
     func run() async throws -> Data {
-        try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                self.launch(continuation: continuation)
-            }
-        }
+        let execution = BuildxHistoryExecution()
+        return try await withTaskCancellationHandler(
+            operation: {
+                try Task.checkCancellation()
+                return try await withCheckedThrowingContinuation { continuation in
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        self.launch(continuation: continuation, execution: execution)
+                    }
+                }
+            },
+            onCancel: {
+                execution.cancel()
+            })
     }
 
-    private func launch(continuation: CheckedContinuation<Data, Error>) {
+    private func launch(
+        continuation: CheckedContinuation<Data, Error>,
+        execution: BuildxHistoryExecution
+    ) {
         let environment: BuildxClientEnvironment
         do {
             environment = try BuildxClientEnvironment.prepare(buildx: buildx, socketPath: socketPath)
@@ -129,6 +146,12 @@ private final class BuildxHistoryCommand: @unchecked Sendable {
         let process = Process()
         let stdout = Pipe()
         let stderr = Pipe()
+        defer {
+            try? stdout.fileHandleForWriting.close()
+            try? stderr.fileHandleForWriting.close()
+            try? stdout.fileHandleForReading.close()
+            try? stderr.fileHandleForReading.close()
+        }
         process.executableURL = docker
         process.arguments = arguments
         process.standardInput = FileHandle.nullDevice
@@ -137,11 +160,20 @@ private final class BuildxHistoryCommand: @unchecked Sendable {
         process.environment = environment.environment
 
         do {
-            try process.run()
+            guard try execution.launch(process) else {
+                continuation.resume(throwing: CancellationError())
+                return
+            }
         } catch {
             continuation.resume(throwing: BuildxHistoryClientError.launchFailed(error.localizedDescription))
             return
         }
+
+        // `Process` duplicates these descriptors into the child. Closing the parent
+        // copies is required for the reader queues to receive EOF after Buildx exits.
+        try? stdout.fileHandleForWriting.close()
+        try? stderr.fileHandleForWriting.close()
+        execution.startDeadline(after: Self.deadline)
 
         // Drain both pipes concurrently. Waiting before reading can deadlock when a
         // builder reports enough diagnostics to fill stderr's pipe buffer.
@@ -167,6 +199,18 @@ private final class BuildxHistoryCommand: @unchecked Sendable {
         let (stdoutData, stderrData) = output.contents()
         let failure = String(decoding: stderrData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
 
+        switch execution.finish(process) {
+        case .timedOut:
+            continuation.resume(throwing: BuildxHistoryClientError.timedOut(
+                "Buildx history did not respond within \(Int(Self.deadline)) seconds."))
+            return
+        case .cancelled:
+            continuation.resume(throwing: CancellationError())
+            return
+        case .finished:
+            break
+        }
+
         guard process.terminationStatus == 0 else {
             continuation.resume(throwing: BuildxHistoryClientError.failed(
                 failure.isEmpty
@@ -175,6 +219,78 @@ private final class BuildxHistoryCommand: @unchecked Sendable {
             return
         }
         continuation.resume(returning: stdoutData)
+    }
+}
+
+/// Owns one history child and protects the launch/cancellation/deadline races. The
+/// hard kill is deliberately scoped to this exact Docker client PID; it cannot affect
+/// the daemon or another build.
+private final class BuildxHistoryExecution: @unchecked Sendable {
+    enum Result {
+        case finished
+        case cancelled
+        case timedOut
+    }
+
+    private let lock = NSLock()
+    private var process: Process?
+    private var cancelled = false
+    private var timedOut = false
+
+    /// Starts only when cancellation has not already been requested. Holding the lock
+    /// through `Process.run()` closes the race where a late child could otherwise be
+    /// launched just after a cancelled task observed no PID to terminate.
+    func launch(_ process: Process) throws -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !cancelled else { return false }
+        try process.run()
+        self.process = process
+        return true
+    }
+
+    func startDeadline(after timeout: TimeInterval) {
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout) { [weak self] in
+            self?.timeOut()
+        }
+    }
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        let process = process
+        lock.unlock()
+        terminate(process)
+    }
+
+    func finish(_ process: Process) -> Result {
+        lock.lock()
+        defer { lock.unlock() }
+        self.process = nil
+        if timedOut { return .timedOut }
+        if cancelled { return .cancelled }
+        return .finished
+    }
+
+    private func timeOut() {
+        lock.lock()
+        guard let process, process.isRunning else {
+            lock.unlock()
+            return
+        }
+        timedOut = true
+        lock.unlock()
+        terminate(process)
+    }
+
+    private func terminate(_ process: Process?) {
+        guard let process, process.isRunning else { return }
+        process.terminate()
+        let pid = process.processIdentifier
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) {
+            guard process.isRunning else { return }
+            _ = Darwin.kill(pid, SIGKILL)
+        }
     }
 }
 
