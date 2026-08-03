@@ -168,6 +168,26 @@ retrying a restore known to fail — see "VM lifecycle" below),
   package group, not part of the earlier Docker/Alpine/kernel asset
   classes.
 
+  **Capacity changes are deliberately grow-only and not implemented as a
+  host-file shortcut.** `disk.img` is a RAW
+  [Virtualization disk-image attachment](https://developer.apple.com/documentation/virtualization/vzdiskimagestoragedeviceattachment):
+  its file length maps one-to-one to the guest block device, but extending
+  that file does not extend the ext4 or btrfs filesystem mounted inside the
+  guest. `disk_size_gib` consequently remains a first-creation setting.
+  `morb disk status` and Settings use `MorbDiskCapacity` to report the
+  current RAW capacity and explicitly flag a larger configuration as
+  requiring a guest resize; they never mutate the image. A future grow
+  operation must (1) prove the VM and any saved state have been released,
+  (2) grow the RAW image only, (3) identify the mounted guest filesystem,
+  and (4) receive a successful in-guest resize confirmation before it
+  reports the capacity changed. ext4's kernel interface requires a resize
+  operation beyond exposing more blocks, and btrfs documents its mounted
+  `filesystem resize max` operation separately
+  ([ext4](https://docs.kernel.org/admin-guide/ext4.html),
+  [btrfs](https://btrfs.readthedocs.io/en/stable/btrfs-filesystem.html)).
+  Shrinking is out of scope permanently: it can relocate or discard live
+  filesystem data, so Morbstack will never truncate an existing disk image.
+
   Once mounted, dockerd runs with `--storage-driver overlay2`
   (`supervisor::default_services(docker_data_on_disk)` switches on exactly
   this flag). If no usable disk is available at all — the attach failed,

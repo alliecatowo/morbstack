@@ -137,6 +137,7 @@ private struct TrackDResourceSettings: View {
 
     let model: AppModel
     let store: TrackDSettingsStore
+    @State private var diskCapacity: MorbDiskCapacity.Status?
 
     var body: some View {
         Form {
@@ -173,18 +174,41 @@ private struct TrackDResourceSettings: View {
             }
 
             Section("Storage") {
-                LabeledContent("Root disk") {
-                    Text("\(store.draft.diskSizeGiB) GiB")
-                        .monospacedDigit()
+                if let diskCapacity {
+                    LabeledContent("New disk capacity") {
+                        Text("\(diskCapacity.configuredGiB) GiB")
+                            .monospacedDigit()
+                    }
+                    if let currentBytes = diskCapacity.currentBytes {
+                        LabeledContent("Current capacity") {
+                            Text(Formatters.bytesString(currentBytes))
+                                .monospacedDigit()
+                        }
+                    }
+                    Text(diskCapacity.summary)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    if let inspectionError = diskCapacity.inspectionError {
+                        Text(inspectionError)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                } else {
+                    LabeledContent("New disk capacity") {
+                        Text("\(store.draft.diskSizeGiB) GiB")
+                            .monospacedDigit()
+                    }
+                    Text("Checking the existing disk image…")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
-                Text(
-                    "This value is used only when the sparse disk image is created. Changing it doesn’t affect an existing image."
-                )
-                .font(.footnote)
-                .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
+        .task(id: store.draft.diskSizeGiB) {
+            diskCapacity = MorbDiskCapacity.inspect(configuredGiB: store.draft.diskSizeGiB)
+        }
     }
 
     @ViewBuilder
