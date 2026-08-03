@@ -45,9 +45,10 @@ the reviewer must decide “not applicable” rather than introduce a bespoke lo
 
 Each row must reach **implemented + explicitly scoped live-window verification** before
 the native migration is complete. “System component present” alone is not enough; the
-system component must be performing the behavior described by the HIG. “Native rewrite
-staged” means source is being migrated in the worktree; it is explicitly **not** visual
-acceptance, typecheck evidence, or proof that a real daemon workflow works.
+system component must be performing the behavior described by the HIG. “Native source
+implementation” means the route's source was inspected for the system semantic pattern;
+it is explicitly **not** visual acceptance, typecheck evidence, or proof that a real
+daemon workflow works.
 
 The dark-mode Computer Use record below is completed evidence only for its listed,
 normal-width safe interactions. It does not establish route-wide acceptance, light
@@ -55,6 +56,38 @@ appearance, minimum-width behavior, keyboard/focus or VoiceOver traversal, Incre
 Contrast/Reduce Transparency behavior, XCUITest coverage, or a real Engine mutation.
 Those lanes are pending per route and must be serialized safely; builds and UI automation
 are not categorically prohibited.
+
+### Current real-window evidence ledger
+
+The following observations are intentionally narrow. They establish that a real,
+normal-width dark-mode application window displayed the named native system pattern
+against local data; they do not approve unexercised actions or substitute for light,
+narrow-width, keyboard, VoiceOver, contrast/transparency, motion, XCUITest, or mutation
+evidence.
+
+| Route | Safe real-window observation | Still required before acceptance |
+| --- | --- | --- |
+| App frame | System sidebar collapse/reveal and engine-off recovery presentation | All appearance, keyboard/accessibility, diagnostics and recovery workflows |
+| Containers | Selected stopped container in table and Overview inspector | Statistics/logs, lifecycle/menus/destructive workflows and broader checks |
+| Images | Local image table/inspector; Pull sheet opened then dismissed | Search, export, pull, destructive workflows and broader checks |
+| Builds | Empty cache state; Build sheet opened then dismissed | Cache selection, review/progress/cancel/retry and broader checks |
+| Volumes | Local volume table selection and inspector wording | Archive/removal workflows and broader checks |
+| Networks | Built-in network selection and managed inspector state | Search, context/destructive workflows and broader checks |
+| Stacks | Actual project/service outline selection | Lifecycle/destructive workflows and broader checks |
+| Kubernetes | Off-state diagnosis; Enable confirmation opened then cancelled | Enabled-cluster table/inspector/log/event workflows and broader checks |
+| Disk | Storage table and review affordance | Confirmation/mutation and broader checks |
+| Migration | Docker Desktop inventory table and inspector, read only | Reprepare/review/transfer flows and broader checks |
+
+### Source-reconciliation note
+
+Several table cells below retain the earlier phrase **“Native rewrite staged.”** That is
+a historical progress label, not an assertion that a different visual system remains in
+the worktree. Source review has since confirmed the principal routes use direct system
+patterns (`NavigationSplitView`, sidebar `List`, `Table`/outline, `.inspector`, `Form`,
+`LabeledContent`, `.searchable`, and `ContentUnavailableView`). Their acceptance state
+remains pending until the evidence named in each row exists. The former `Theme.swift`
+and `Design/**` visual system was removed in `c6f7825`; source discovery finds no
+replacement Theme, Design, Style, or Appearance rendering module.
 
 | Route/source | Semantics that must be reviewed | State | Current direction |
 | --- | --- | --- | --- |
