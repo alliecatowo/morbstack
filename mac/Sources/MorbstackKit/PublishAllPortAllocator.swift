@@ -186,7 +186,9 @@ final class PublishAllPortAllocator {
                 }
                 guard read == 1 else { throw MorbError.io("could not read the guest publish-all allocator") }
                 if byte == 0x0A { return String(decoding: bytes, as: UTF8.self) }
-                guard byte != 0x0D, byte.isASCII else {
+                // Keep the wire protocol intentionally printable-ASCII only. Swift's
+                // UInt8 API does not expose `isASCII` on every supported toolchain.
+                guard (0x20...0x7E).contains(byte) else {
                     throw MorbError.protocolViolation("the guest publish-all allocator sent an invalid line")
                 }
                 bytes.append(byte)
