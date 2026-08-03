@@ -7,6 +7,7 @@
 
 import Foundation
 import MorbFeatures
+import MorbstackKit
 
 enum DebugCLI {
 
@@ -17,8 +18,8 @@ enum DebugCLI {
         case .success(.help):
             printUsage()
             return 0
-        case .success(.check):
-            return check(json: json)
+        case .success(.check(let manifestURL)):
+            return check(manifestURL: manifestURL, json: json)
         case .success(.plan(let container)):
             return plan(container: container, json: json)
         }
@@ -27,8 +28,11 @@ enum DebugCLI {
     // MARK: - Read-only availability
 
     /// Reports the static contract without accessing the Docker socket or network.
-    private static func check(json: Bool) -> Int32 {
-        let readiness = DebugToolboxPlanner.readiness()
+    /// The optional descriptor is untrusted local input and can only establish a
+    /// declaration, never a verified, executable toolbox asset.
+    private static func check(manifestURL: URL?, json: Bool) -> Int32 {
+        let readiness = DebugToolboxPlanner.readiness(
+            manifestURL: manifestURL ?? MorbPaths.debugToolboxManifest)
         if json {
             emitJSON(readinessJSON(readiness, mode: "check"))
         } else {
@@ -36,6 +40,7 @@ enum DebugCLI {
             out("  status     unavailable")
             out("  engine     \(readiness.engineAccess)")
             out("  network    \(readiness.networkAccess)")
+            renderAssetAssessment(readiness.assetAssessment)
             renderMissingRequirements(readiness)
         }
         return 2
@@ -61,7 +66,7 @@ enum DebugCLI {
 
     private enum Command {
         case help
-        case check
+        case check(manifestURL: URL?)
         case plan(String)
     }
 
@@ -74,7 +79,14 @@ enum DebugCLI {
             return .success(.help)
         }
         if arguments == ["check"] || arguments == ["--check"] {
-            return .success(.check)
+            return .success(.check(manifestURL: nil))
+        }
+        if arguments.count == 3,
+           (arguments[0] == "check" || arguments[0] == "--check"),
+           arguments[1] == "--manifest",
+           !arguments[2].isEmpty {
+            let path = (arguments[2] as NSString).expandingTildeInPath
+            return .success(.check(manifestURL: URL(fileURLWithPath: path)))
         }
         if arguments.count == 2, arguments.first == "plan", let container = arguments.last,
            !container.hasPrefix("-") {
@@ -92,7 +104,7 @@ enum DebugCLI {
         if arguments.isEmpty {
             return .failure(ArgumentError(message: "a container name or ID is required (or pass check)"))
         }
-        return .failure(ArgumentError(message: "expected `check` or one container name/ID"))
+        return .failure(ArgumentError(message: "expected `check [--manifest <path>]` or one container name/ID"))
     }
 
     // MARK: - Presentation
@@ -105,6 +117,7 @@ enum DebugCLI {
         out("  image ID        \(plan.target.imageID ?? "-")")
         out("  state           \(plan.target.state ?? "-")")
         out("  running         \(plan.target.isRunning.map { $0 ? "yes" : "no" } ?? "-")")
+        renderAssetAssessment(plan.readiness.assetAssessment)
         out()
         out("Read-only engine request:")
         for request in plan.engineRequests { out("  \(request)") }
@@ -112,6 +125,22 @@ enum DebugCLI {
         out("No operation was performed:")
         for nonAction in plan.nonActions { out("  - \(nonAction)") }
         renderMissingRequirements(plan.readiness)
+    }
+
+    private static func renderAssetAssessment(_ assessment: DebugToolboxAssetAssessment) {
+        out()
+        out("Toolbox asset descriptor (local declaration only):")
+        out("  status          \(assessment.status)")
+        out("  manifest path   \(terminalSafe(assessment.path))")
+        out("  assessment      \(assessment.detail)")
+        guard let manifest = assessment.manifest else { return }
+        out("  asset ID        \(manifest.assetID)")
+        out("  image reference \(manifest.imageReference)")
+        out("  image digest    \(manifest.imageDigest)")
+        out("  platforms       \(manifest.platforms.map(\.identifier).joined(separator: ", "))")
+        out("  provenance      \(manifest.provenance.method) from \(manifest.provenance.issuer)")
+        out("  valid through   \(manifest.validThrough)")
+        out("  verification    not performed; this descriptor does not make a toolbox available")
     }
 
     private static func renderMissingRequirements(_ readiness: DebugToolboxReadiness) {
@@ -126,7 +155,7 @@ enum DebugCLI {
 
     private static func usageError(_ message: String, json: Bool) -> Int32 {
         if json {
-            emitJSON(["error": message, "usage": "morb debug check | morb debug [plan] <container>"])
+            emitJSON(["error": message, "usage": "morb debug check [--manifest <path>] | morb debug [plan] <container>"])
         } else {
             FileHandle.standardError.write(Data(("morb debug: \(message)\n\n").utf8))
             printUsage(to: .standardError)
@@ -136,13 +165,15 @@ enum DebugCLI {
 
     private static func printUsage(to output: FileHandle = .standardOutput) {
         let text = """
-        Usage: morb debug check
+        Usage: morb debug check [--manifest <path>]
                morb debug [plan] <container>
 
         Inspect whether Morbstack can safely offer a toolbox session for a container.
-        `check` only reports local capability state: it does not contact Docker or a
-        network. The default and `plan` forms issue one read-only Docker container
-        inspect request, then list the exact actions they did not perform.
+        `check` only reads one local toolbox descriptor (if present): it does not
+        contact Docker or a network. A descriptor is untrusted declarative policy,
+        not image or signature verification, and cannot make a toolbox available.
+        `morb debug [plan] <container>` issues one read-only Docker container
+        inspect request, then lists the exact actions it did not perform.
 
         A toolbox shell for a distroless container is not implemented. Morbstack does
         not equate a regular `docker exec` with a toolbox: no pinned and verified
@@ -158,6 +189,7 @@ enum DebugCLI {
             "mode": mode,
             "engine": readiness.engineAccess,
             "network": readiness.networkAccess,
+            "asset": assetJSON(readiness.assetAssessment),
             "missing_requirements": readiness.missingRequirements.map { $0.rawValue },
             "non_actions": [
                 "did not create or start a toolbox container",
@@ -166,6 +198,28 @@ enum DebugCLI {
                 "did not attach a terminal",
             ],
         ]
+    }
+
+    private static func assetJSON(_ assessment: DebugToolboxAssetAssessment) -> [String: Any] {
+        var output: [String: Any] = [
+            "status": assessment.status,
+            "manifest_path": assessment.path,
+            "detail": assessment.detail,
+        ]
+        guard let manifest = assessment.manifest else { return output }
+        output["asset_id"] = manifest.assetID
+        output["image_reference"] = manifest.imageReference
+        output["image_digest"] = manifest.imageDigest
+        output["platforms"] = manifest.platforms.map(\.identifier)
+        output["provenance"] = [
+            "method": manifest.provenance.method,
+            "issuer": manifest.provenance.issuer,
+            "identity": manifest.provenance.identity,
+            "bundle_digest": manifest.provenance.bundleDigest,
+        ]
+        output["valid_through"] = manifest.validThrough
+        output["verified"] = false
+        return output
     }
 
     private static func planJSON(_ plan: DebugToolboxPlan) -> [String: Any] {
@@ -216,6 +270,15 @@ enum DebugCLI {
     private static func out(_ message: String = "") { print(message) }
 
     private static func jsonValue(_ value: Any?) -> Any { value ?? NSNull() }
+
+    /// A caller may explicitly pass any readable manifest path. JSON output receives
+    /// the original path (and escapes it correctly); human output must not allow a
+    /// control character in that path to alter the terminal.
+    private static func terminalSafe(_ value: String) -> String {
+        value.unicodeScalars.map {
+            CharacterSet.controlCharacters.contains($0) ? "�" : String($0)
+        }.joined()
+    }
 
     private static func emitJSON(_ value: Any) {
         guard JSONSerialization.isValidJSONObject(value),

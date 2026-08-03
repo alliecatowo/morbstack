@@ -8,15 +8,65 @@ that problem.
 ## Current commands
 
 ```console
-morb debug check
+morb debug check [--manifest <path>]
 morb debug [plan] <container>
 ```
 
-`morb debug check` reads only the local feature contract. It does not open the
-Docker socket, start the daemon, pull an image, or access a network.
+`morb debug check` reads one local asset-manifest descriptor, if present. By
+default its location is
+`~/.morbstack/data/debug-toolbox/asset-manifest.json` (or the matching path
+below `MORBSTACK_HOME`). `--manifest <path>` selects a different local file for
+an offline diagnostic. Neither form creates a directory, opens the Docker
+socket, starts the daemon, pulls an image, or accesses a network.
+
+The descriptor is deliberately **untrusted declarative policy**, not proof that
+an image is present or safe. `check` reports one of these asset states:
+
+- `absent` — no descriptor exists at the selected local path.
+- `invalid` — it cannot be read or decoded, or it fails the structural schema
+  or compatibility validation.
+- `expired` — its declared provenance-policy expiry is in the past.
+- `declared-but-unverified` — it is structurally valid and current, but no
+  image digest, image-index platform, certificate, signature, or provenance
+  bundle has been verified.
+
+All four states leave the toolbox unavailable and exit with status `2`.
+
+### Asset-manifest v1
+
+The future acquisition flow may write one v1 descriptor after explicit user
+consent. It must contain a digest-pinned image reference, the same image digest
+separately, a `linux/arm64` platform declaration, a Sigstore verification
+policy, and an ISO-8601 UTC policy expiry. The values below are inert example
+values, not a shipped or approved toolbox asset:
+
+```json
+{
+  "schema_version": 1,
+  "asset_id": "morbstack-debug-toolbox",
+  "image_reference": "ghcr.io/morbstack/debug-toolbox@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "image_digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "platforms": [
+    { "os": "linux", "architecture": "arm64" }
+  ],
+  "provenance": {
+    "method": "sigstore",
+    "issuer": "https://token.actions.githubusercontent.com",
+    "identity": "https://github.com/morbstack/morbstack/.github/workflows/release.yml@refs/heads/main",
+    "bundle_digest": "sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+  },
+  "valid_through": "2030-01-01T00:00:00Z"
+}
+```
+
+This structural pass intentionally does **not** inspect a local Docker image,
+resolve an OCI index, validate the `linux/arm64` entry, retrieve anything, or
+verify the declared Sigstore bundle/certificate/identity. It therefore never
+removes `verified_pinned_toolbox_asset` from the readiness gate. This keeps a
+convenient local manifest from becoming a confused authorization mechanism.
 
 `morb debug <container>` (also spelled `morb debug plan <container>`) makes one
-read-only Docker Engine request:
+read-only Docker Engine request, after the same default local descriptor check:
 
 ```text
 GET /containers/{id-or-name}/json
@@ -48,9 +98,11 @@ with different security and failure semantics.
 No `run` action or native-app Debug button may be added until every requirement
 below is implemented and independently verified against a real engine:
 
-1. **Verified immutable toolbox asset.** A local toolbox image needs a pinned
-   digest plus verifiable provenance/signature before it is allowed into a
-   target's namespaces.
+1. **Verified immutable toolbox asset.** The read-only v1 descriptor above is
+   only the schema/provenance-policy foundation. A local toolbox image still
+   needs inspection by its pinned digest, platform/index validation, and actual
+   provenance/signature/certificate/identity verification before it is allowed
+   into a target's namespaces.
 2. **Consented acquisition and update policy.** If the asset is absent or
    expired, fetching it is a separately announced, user-approved network
    action. The product must define verification, retention, expiry, and

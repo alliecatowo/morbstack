@@ -77,6 +77,22 @@ public struct MorbPaths {
     /// `~/.morbstack/data` — persistent VM state.
     public static var dataDirectory: URL { root.appendingPathComponent("data", isDirectory: true) }
 
+    /// `~/.morbstack/data/debug-toolbox` — reserved for an explicitly acquired,
+    /// verified debug-toolbox asset and its receipt. Merely reading this location must
+    /// never create it, pull an image, or contact Docker; that keeps `morb debug check`
+    /// a safe offline diagnostic while the executor remains unavailable.
+    public static var debugToolboxDirectory: URL {
+        dataDirectory.appendingPathComponent("debug-toolbox", isDirectory: true)
+    }
+
+    /// `~/.morbstack/data/debug-toolbox/asset-manifest.json` — the local, declarative
+    /// asset descriptor. A manifest at this path is not trusted merely because it is
+    /// present; `DebugToolboxAsset` validates its schema, then a future verifier must
+    /// prove the local image and provenance bundle before an executor can use it.
+    public static var debugToolboxManifest: URL {
+        debugToolboxDirectory.appendingPathComponent("asset-manifest.json", isDirectory: false)
+    }
+
     /// `~/.morbstack/data/runtime` — immutable, versioned release runtime payloads.
     ///
     /// A signed app bundle is copied here before it becomes active. `current` and
