@@ -114,6 +114,15 @@ fn main() {
 
 #[cfg(target_os = "linux")]
 fn run_linux(args: &[String]) {
+    // Every long-lived guest transport ultimately writes to a raw accepted
+    // vsock `File`. A Docker client cancelling a `docker cp` tar download
+    // must make that writer observe EPIPE, not deliver SIGPIPE and terminate
+    // morbinit (PID 1) before its relay can release the connection.
+    if let Err(e) = sys::ignore_sigpipe() {
+        eprintln!("morbinit: could not ignore SIGPIPE: {}", e);
+        std::process::exit(1);
+    }
+
     if sys::getpid() == 1 {
         real_init();
         return;

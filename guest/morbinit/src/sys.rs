@@ -83,6 +83,18 @@ pub const SHUT_RDWR: c_int = 2;
 pub const SIGTERM: c_int = 15;
 /// Unignorable. Only used after `SIGTERM` has been given a grace period.
 pub const SIGKILL: c_int = 9;
+/// A write to a disconnected stream must return `EPIPE` to a relay worker,
+/// never terminate the guest init while it is serving a streamed Docker API
+/// response such as `docker cp`.
+pub const SIGPIPE: c_int = 13;
+
+// The C API expresses these special signal dispositions as function-pointer
+// macros. Linux specifies `SIG_IGN` as the all-platform integer value 1 and
+// reports an error from `signal(2)` as `(void *) -1`. Keeping their FFI form
+// as pointer-sized integers avoids an invented callback for either special
+// value and is valid for the musl/Linux deployment ABI used by morbinit.
+const SIG_IGN_HANDLER: usize = 1;
+const SIG_ERR_HANDLER: usize = usize::MAX;
 
 /// `struct sockaddr_vm`, matching the kernel's `linux/vm_sockets.h` layout.
 #[repr(C)]
@@ -138,6 +150,7 @@ mod raw {
         pub fn sync();
         pub fn waitpid(pid: i32, status: *mut c_int, options: c_int) -> i32;
         pub fn kill(pid: i32, sig: c_int) -> c_int;
+        pub fn signal(signum: c_int, handler: usize) -> usize;
         pub fn getpid() -> i32;
         pub fn socket(domain: c_int, ty: c_int, protocol: c_int) -> c_int;
         pub fn bind(sockfd: c_int, addr: *const c_void, addrlen: u32) -> c_int;
@@ -287,6 +300,22 @@ pub fn power_off() -> io::Result<()> {
 /// whether morbinit is really running as PID 1.
 pub fn getpid() -> i32 {
     unsafe { raw::getpid() }
+}
+
+/// Make broken stream writes report `EPIPE` instead of delivering `SIGPIPE`.
+///
+/// `morbinit` relays arbitrary Docker traffic through accepted AF_VSOCK fds.
+/// The Rust `File` used for that accepted endpoint ultimately calls `write(2)`,
+/// whose default broken-pipe disposition would terminate the whole process.
+/// This process-wide setting must be made before the relay threads start;
+/// callers then handle the ordinary I/O error and tear their connection down.
+pub fn ignore_sigpipe() -> io::Result<()> {
+    let previous = unsafe { raw::signal(SIGPIPE, SIG_IGN_HANDLER) };
+    if previous == SIG_ERR_HANDLER {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 /// Non-blocking reap of a single exited (or otherwise state-changed) child,

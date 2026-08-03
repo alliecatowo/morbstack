@@ -22,6 +22,9 @@
 //!   * A terminal read/write error is different from EOF: it shuts down both
 //!     endpoints, waking the opposite copy worker. This releases the bounded
 //!     connection slot when a client cancels a streamed BuildKit session.
+//!   * `morbinit` ignores `SIGPIPE` before this listener starts. A cancelled
+//!     archive/build receiver therefore surfaces as `EPIPE` here and releases
+//!     only its relay, rather than terminating guest PID 1.
 //!   * Bounded concurrency (`MAX_CONNECTIONS`), because each connection
 //!     costs two threads and PID 1 must not be DoS-able into thread
 //!     exhaustion.

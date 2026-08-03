@@ -382,6 +382,11 @@ must preserve:
   therefore backpressured by the normal socket buffers instead of making the
   host collect an unbounded userspace write queue. The relay still has no
   HTTP framing, endpoint classification, or body buffering on this path.
+- **Broken-pipe safe.** Before any guest relay thread starts, `morbinit`
+  ignores `SIGPIPE`. An abrupt client cancellation while `dockerd` is
+  writing an archive/build/log stream becomes an ordinary `EPIPE`, which
+  closes that relay without taking down guest PID 1 or changing archive
+  bytes, metadata, paths, ownership, or symlink semantics.
 - **Guest-side connection cap**: `MAX_CONNECTIONS = 64` in `proxy.rs`
   (each proxied connection costs the guest two threads — a copy-in and a
   copy-out — so this bounds morbinit's own thread usage). The host-side
