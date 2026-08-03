@@ -44,9 +44,10 @@ Morbstack is not yet something you run containers with day to day. There
 is no packaged app or DMG yet (see "Install" below), and real gaps remain
 — read this section before trying it, not after something breaks.
 
-**What works**, per [`docs/roadmap.md`](docs/roadmap.md)'s M0 gates, all
-verified end to end against a real cold-booted VM (see
-[`docs/parity.md`](docs/parity.md) for the full audit):
+**What works** is split deliberately between live evidence and newly landed
+release plumbing. The historical VM results live in
+[`docs/parity.md`](docs/parity.md); implementation that still needs a fresh,
+clean-profile VM pass is marked that way rather than promoted to a claim.
 
 - `docker run`, `docker exec`, `docker logs`, `docker cp`, `docker stats`,
   `docker events`, `docker system df/prune` — the core CLI, byte-for-byte
@@ -67,6 +68,12 @@ verified end to end against a real cold-booted VM (see
 - Docker-in-Docker via the bind-mounted socket, OOM/disk-full failure
   modes matching real Docker's contract, and restart policies surviving
   a daemon restart.
+- The development app bundle now carries signed upstream Docker, Compose,
+  Buildx, kernel, initramfs, and optional Kubernetes artifacts. The consented
+  setup transaction installs only Morbstack-owned links, registers a Docker
+  context, and creates `~/.docker/run/docker.sock` only when that conventional
+  location is absent and safe to own. **Clean-profile, real-VM evidence is
+  still pending** before this is called an out-of-the-box release guarantee.
 
 **What does not work yet** — the honest list, not softened:
 
@@ -76,13 +83,15 @@ verified end to end against a real cold-booted VM (see
   `host.docker.internal` and `gateway.docker.internal` are the deliberate
   exception: they resolve to the VM NAT gateway inside containers, so they
   reach services listening on the Mac.
-- **No zero-config socket discovery.** You must `export DOCKER_HOST=...`
-  or create a `docker context` by hand — nothing registers one for you
-  automatically the way Docker Desktop's installer does.
-- **No `docker buildx` shipped.** The guest's BuildKit is fully
-  functional once a client-side `docker-buildx` binary exists — it just
-  isn't fetched or installed by this repo yet, so `docker build`'s
-  modern BuildKit-by-default path fails out of the box.
+- **No durable background service yet.** Setup can safely install the
+  conventional per-user discovery link and a context, but a full desktop
+  replacement also needs a user-owned service that keeps the engine available
+  after the app window closes. That is active P0 work; no manual environment
+  variable is required after the consented setup when the daemon is running.
+- **Buildx is bundled, pending clean-profile evidence.** The app’s Buildx
+  plugin is the unmodified upstream binary and setup installs it in Docker’s
+  standard plugin location. Its live clean-machine contract is not claimed
+  complete until the release matrix proves it against a fresh VM.
 - **No inotify across a VirtioFS bind mount.** A host-side edit is
   correct the instant you read it, but hot-reload watchers (`nodemon`,
   `webpack --watch`, `vite`) never see the change-notification event.
@@ -110,9 +119,10 @@ Liquid Glass composition that WindowServer owns.
 
 `swift run MorbShots` validates deterministic fixture data only; it writes no images.
 For a visual review, launch the fixture-backed app in a real window and inspect it with
-Computer Use in both appearances and at normal/narrow widths. A future macOS XCUITest
-host will add repeatable accessibility and full-window screenshot assertions. See
-[`docs/design/NATIVE-MACOS-PLAYBOOK.md`](docs/design/NATIVE-MACOS-PLAYBOOK.md).
+Computer Use in both appearances and at normal/narrow widths. The repository also carries
+a macOS XCUITest host for repeatable accessibility and screenshot evidence; macOS must
+authorize Xcode Helper under Accessibility before it can drive the app. See
+[`docs/development/codex.md`](docs/development/codex.md).
 
 ## Requirements
 
