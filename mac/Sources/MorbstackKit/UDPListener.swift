@@ -234,8 +234,10 @@ public final class UDPListener {
             var boundAddress = sockaddr_in()
             var boundLength = socklen_t(MemoryLayout<sockaddr_in>.size)
             named = withUnsafeMutablePointer(to: &boundAddress) { pointer in
-                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                    POSIXSocketSupport.retryOnInterrupt { Darwin.getsockname(descriptor, $0, &boundLength) }
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+                    POSIXSocketSupport.retryOnInterrupt {
+                        Darwin.getsockname(descriptor, socketAddress, &boundLength)
+                    }
                 }
             }
             boundPort = Int(UInt16(bigEndian: boundAddress.sin_port))
@@ -243,8 +245,10 @@ public final class UDPListener {
             var boundAddress = sockaddr_in6()
             var boundLength = socklen_t(MemoryLayout<sockaddr_in6>.size)
             named = withUnsafeMutablePointer(to: &boundAddress) { pointer in
-                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                    POSIXSocketSupport.retryOnInterrupt { Darwin.getsockname(descriptor, $0, &boundLength) }
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+                    POSIXSocketSupport.retryOnInterrupt {
+                        Darwin.getsockname(descriptor, socketAddress, &boundLength)
+                    }
                 }
             }
             boundPort = Int(UInt16(bigEndian: boundAddress.sin6_port))
