@@ -89,7 +89,7 @@ enum TrackDConfigEditor {
 
     // MARK: Auto-suspend
 
-    /// Idle minutes before the VM suspends. `0` disables it.
+    /// Idle minutes before Morbstack reclaims VM memory. `0` disables it.
     static let autoSuspendRange = 0...120
 
     static func applyAutoSuspend(_ minutes: Int, to config: inout MorbConfig) {

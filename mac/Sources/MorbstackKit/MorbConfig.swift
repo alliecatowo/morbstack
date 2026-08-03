@@ -31,8 +31,8 @@ public struct MorbConfig: Equatable, Codable, Sendable {
     /// Kernel command line handed to the Linux boot loader.
     ///
     /// `nil` — the default — means "derive it from the boot mode", which is what makes
-    /// a fresh install boot correctly whether or not `data/kernel/initrd.img` has been
-    /// built yet. An explicit value in `config.toml` always wins.
+    /// a fresh install boot correctly whether or not a managed runtime has been
+    /// activated yet. An explicit value in `config.toml` always wins.
     public var kernelCmdline: String?
 
     /// Whether to expose Rosetta to the guest (when installed on the host).
@@ -462,7 +462,7 @@ public struct MorbConfig: Equatable, Codable, Sendable {
             out += "# Override the kernel image path.\n"
             out += "kernel_path = \(MorbConfig.quote(kernelPath))\n"
         } else {
-            out += "# Override the kernel image path (defaults to data/kernel/vmlinux).\n"
+            out += "# Override the kernel image path (defaults to the managed runtime).\n"
             out += "# kernel_path = \"\"\n"
         }
         out += "\n"
@@ -470,7 +470,7 @@ public struct MorbConfig: Equatable, Codable, Sendable {
             out += "# Override the initramfs path.\n"
             out += "initrd_path = \(MorbConfig.quote(initrdPath))\n"
         } else {
-            out += "# Override the initramfs path (defaults to data/kernel/initrd.img).\n"
+            out += "# Override the initramfs path (defaults to the managed runtime).\n"
             out += "# An absent file means Morbstack boots from the root disk instead.\n"
             out += "# initrd_path = \"\"\n"
         }

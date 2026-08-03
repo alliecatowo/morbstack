@@ -165,7 +165,7 @@ struct MorbCommands: Commands {
 
             Button("Start Engine") { Task { await model.engineAction(.start) } }
                 .disabled(model.engine.isRunning || model.isEngineBusy)
-            Button("Suspend Engine") { Task { await model.engineAction(.suspend) } }
+            Button("Free Engine Memory") { Task { await model.engineAction(.suspend) } }
                 .disabled(!model.engine.isRunning || model.isEngineBusy)
             Button("Stop Engine") { Task { await model.engineAction(.stop) } }
                 .disabled(!model.engine.reachable || model.isEngineBusy)
@@ -416,7 +416,7 @@ struct EngineFooter: View {
     private func engineActionTitle(_ action: EngineAction) -> String {
         switch action {
         case .start: return "Start Engine"
-        case .suspend: return "Suspend Engine"
+        case .suspend: return "Free Engine Memory"
         case .stop: return "Stop Engine"
         }
     }
@@ -572,7 +572,7 @@ struct EngineStoppedView: View {
                         Task { await model.engineAction(.start) }
                     } label: {
                         Label(
-                            model.engine.state == "suspended" ? "Resume Engine" : "Start Engine",
+                            "Start Engine",
                             systemImage: "play.fill")
                     }
                     .buttonStyle(.borderedProminent)
@@ -597,7 +597,7 @@ struct EngineStoppedView: View {
         }
         switch model.engine.state {
         case "suspended":
-            return "The virtual machine is saved to disk. Resuming restores it exactly where it left off — your containers are still there."
+            return "The engine is not running. Start it from persisted Docker data; images, containers and volumes remain, but don’t rely on running containers surviving."
         case "error":
             return "Morbstack could not bring the virtual machine up. Run morb doctor in a terminal for a full diagnosis."
         default:

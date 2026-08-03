@@ -61,7 +61,12 @@ public struct DoctorReport: Codable, Equatable, Sendable {
 public enum Doctor {
 
     /// Runs every check and returns the report.
-    public static func run(config: MorbConfig? = nil) -> DoctorReport {
+    public static func run(
+        config: MorbConfig? = nil,
+        includeLiveShares: Bool = true,
+        includeDockerIntegrationChecks: Bool = true,
+        includeDaemonChecks: Bool = true
+    ) -> DoctorReport {
         var checks: [DoctorCheck] = []
         let fm = FileManager.default
 
@@ -167,7 +172,7 @@ public enum Doctor {
                 DoctorCheck(
                     name: "kernel",
                     status: .warn,
-                    detail: "missing at \(kernelURL.path) — run scripts/fetch-kernel.sh"))
+                    detail: "missing at \(kernelURL.path) — launch a complete Morbstack.app or run scripts/fetch-kernel.sh"))
         }
 
         // 5b. Guest initramfs. Its presence is what selects the boot mode, so report
@@ -187,7 +192,7 @@ public enum Doctor {
                 DoctorCheck(
                     name: "initrd",
                     status: .warn,
-                    detail: "missing at \(initrdURL.path) — run `make guest-image` to build it"))
+                    detail: "missing at \(initrdURL.path) — launch a complete Morbstack.app or run `make guest-image` to build it"))
         }
 
         // 5c. Directory sharing, which is what makes `docker run -v` work at all.
@@ -202,7 +207,11 @@ public enum Doctor {
             sharePlan = MorbShares.Plan()
             checks.append(DoctorCheck(name: "shares", status: .fail, detail: "\(error)"))
         }
-        appendShareChecks(&checks, plan: sharePlan, config: loadedConfig)
+        appendShareChecks(
+            &checks,
+            plan: sharePlan,
+            config: loadedConfig,
+            liveShares: includeLiveShares ? liveShares() : nil)
 
         checks.append(
             DoctorCheck(
@@ -278,102 +287,90 @@ public enum Doctor {
                     detail: "`docker` is not on PATH — install the Docker CLI (brew install docker)"))
         }
 
-        // 10. Docker contexts directory (where `docker context create` writes).
-        let contextsDirectory = fm.homeDirectoryForCurrentUser
-            .appendingPathComponent(".docker/contexts", isDirectory: true)
-        checks.append(
-            DoctorCheck(
-                name: "docker-contexts",
-                status: .info,
-                detail: fm.fileExists(atPath: contextsDirectory.path)
-                    ? contextsDirectory.path
-                    : "no ~/.docker/contexts yet"))
+        let morbstackSocketPath = MorbPaths.dockerSocket.path
+        if includeDockerIntegrationChecks {
+            // 10. Docker contexts directory (where `docker context create` writes).
+            let contextsDirectory = fm.homeDirectoryForCurrentUser
+                .appendingPathComponent(".docker/contexts", isDirectory: true)
+            checks.append(
+                DoctorCheck(
+                    name: "docker-contexts",
+                    status: .info,
+                    detail: fm.fileExists(atPath: contextsDirectory.path)
+                        ? contextsDirectory.path
+                        : "no ~/.docker/contexts yet"))
 
-        // 10b. Docker CLI credential helper.
-        //
-        // Docker Desktop writes `"credsStore": "desktop"` into ~/.docker/config.json.
-        // That helper talks to Docker Desktop's own backend, so with Desktop not
-        // running (the whole point of Morbstack) the CLI blocks on it *before* it
-        // ever reaches our socket: `docker pull` hangs with no output and no
-        // timeout, which looks exactly like a broken daemon. Worth naming
-        // explicitly — every Docker Desktop refugee starts out in this state.
-        let dockerConfig = fm.homeDirectoryForCurrentUser
-            .appendingPathComponent(".docker/config.json", isDirectory: false)
-        if let data = try? Data(contentsOf: dockerConfig),
-            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let credsStore = json["credsStore"] as? String,
-            !credsStore.isEmpty
-        {
-            let helper = "docker-credential-\(credsStore)"
-            if credsStore == "desktop", which(helper) == nil || !isDockerDesktopRunning() {
-                checks.append(
-                    DoctorCheck(
-                        name: "docker-credentials",
-                        status: .warn,
-                        detail: "~/.docker/config.json sets credsStore \"\(credsStore)\"; that helper "
-                            + "needs Docker Desktop running and will hang `docker pull` without it. "
-                            + "Remove the credsStore line, or run with "
-                            + "DOCKER_CONFIG pointed at a config that omits it."))
+            // 10b. Docker CLI credential helper.
+            let dockerConfig = fm.homeDirectoryForCurrentUser
+                .appendingPathComponent(".docker/config.json", isDirectory: false)
+            if let data = try? Data(contentsOf: dockerConfig),
+                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                let credsStore = json["credsStore"] as? String,
+                !credsStore.isEmpty
+            {
+                let helper = "docker-credential-\(credsStore)"
+                if credsStore == "desktop", which(helper) == nil || !isDockerDesktopRunning() {
+                    checks.append(
+                        DoctorCheck(
+                            name: "docker-credentials",
+                            status: .warn,
+                            detail: "~/.docker/config.json sets credsStore \"\(credsStore)\"; that helper "
+                                + "needs Docker Desktop running and will hang `docker pull` without it. "
+                                + "Remove the credsStore line, or run with "
+                                + "DOCKER_CONFIG pointed at a config that omits it."))
+                } else {
+                    checks.append(
+                        DoctorCheck(name: "docker-credentials", status: .info, detail: "credsStore \(credsStore)"))
+                }
             } else {
                 checks.append(
-                    DoctorCheck(name: "docker-credentials", status: .info, detail: "credsStore \(credsStore)"))
+                    DoctorCheck(name: "docker-credentials", status: .pass, detail: "no credential helper configured"))
             }
-        } else {
-            checks.append(
-                DoctorCheck(name: "docker-credentials", status: .pass, detail: "no credential helper configured"))
+
+            // 10c. Context-blind Docker clients can select conventional sockets.
+            let discoveryConflicts = dockerAutoDiscoveryConflicts(
+                morbstackSocketPath: morbstackSocketPath,
+                candidates: rootlessDockerSocketCandidates(homeDirectory: fm.homeDirectoryForCurrentUser),
+                fileExists: { fm.fileExists(atPath: $0) },
+                canonicalPath: Self.canonicalSocketPath)
+            if fm.fileExists(atPath: morbstackSocketPath), !discoveryConflicts.isEmpty {
+                let paths = discoveryConflicts.map { "`\($0)`" }.joined(separator: ", ")
+                let verb = discoveryConflicts.count == 1 ? "is" : "are"
+                checks.append(
+                    DoctorCheck(
+                        name: "docker-discovery",
+                        status: .warn,
+                        detail: "\(paths) \(verb) not Morbstack but context-blind clients (including "
+                            + "Testcontainers Node) may select it before \(morbstackSocketPath). "
+                            + "Set DOCKER_HOST=unix://\(morbstackSocketPath) for those tools, "
+                            + "or stop/remove the competing Docker socket."))
+            }
         }
 
-        // 10c. Context-blind Docker clients. A Docker CLI context only affects tools
-        // that actually use the Docker CLI context store. Testcontainers Node, for
-        // example, instead probes these conventional sockets directly. During a
-        // Docker Desktop -> Morbstack migration, leaving Desktop's rootless socket
-        // here means those tools can run successfully against the *wrong* engine.
-        //
-        // This is deliberately a warning only when Morbstack is also published: a
-        // stale Desktop socket on a machine where Morbstack is stopped is not a
-        // competing endpoint yet, and a current context cannot help a client that
-        // never consults contexts in the first place.
-        let morbstackSocketPath = MorbPaths.dockerSocket.path
-        let discoveryConflicts = dockerAutoDiscoveryConflicts(
-            morbstackSocketPath: morbstackSocketPath,
-            candidates: rootlessDockerSocketCandidates(homeDirectory: fm.homeDirectoryForCurrentUser),
-            fileExists: { fm.fileExists(atPath: $0) },
-            canonicalPath: Self.canonicalSocketPath)
-        if fm.fileExists(atPath: morbstackSocketPath), !discoveryConflicts.isEmpty {
-            let paths = discoveryConflicts.map { "`\($0)`" }.joined(separator: ", ")
-            let verb = discoveryConflicts.count == 1 ? "is" : "are"
-            checks.append(
-                DoctorCheck(
-                    name: "docker-discovery",
-                    status: .warn,
-                    detail: "\(paths) \(verb) not Morbstack but context-blind clients (including "
-                        + "Testcontainers Node) may select it before \(morbstackSocketPath). "
-                        + "Set DOCKER_HOST=unix://\(morbstackSocketPath) for those tools, "
-                        + "or stop/remove the competing Docker socket."))
-        }
+        if includeDaemonChecks {
+            // 11. Daemon liveness.
+            let controlPath = MorbPaths.controlSocket.path
+            if UnixSocketClient.isAlive(path: controlPath) {
+                checks.append(DoctorCheck(name: "daemon", status: .pass, detail: "responding on \(controlPath)"))
+            } else {
+                checks.append(
+                    DoctorCheck(
+                        name: "daemon",
+                        status: .warn,
+                        detail: fm.fileExists(atPath: controlPath)
+                            ? "stale socket at \(controlPath) — morbstackd is not running"
+                            : "not running (start it with `make run-daemon`)"))
+            }
 
-        // 11. Daemon liveness.
-        let controlPath = MorbPaths.controlSocket.path
-        if UnixSocketClient.isAlive(path: controlPath) {
-            checks.append(DoctorCheck(name: "daemon", status: .pass, detail: "responding on \(controlPath)"))
-        } else {
+            // 12. Docker socket.
             checks.append(
                 DoctorCheck(
-                    name: "daemon",
-                    status: .warn,
-                    detail: fm.fileExists(atPath: controlPath)
-                        ? "stale socket at \(controlPath) — morbstackd is not running"
-                        : "not running (start it with `make run-daemon`)"))
+                    name: "docker-socket",
+                    status: fm.fileExists(atPath: morbstackSocketPath) ? .pass : .info,
+                    detail: fm.fileExists(atPath: morbstackSocketPath)
+                        ? morbstackSocketPath
+                        : "not published (daemon not running)"))
         }
-
-        // 12. Docker socket.
-        checks.append(
-            DoctorCheck(
-                name: "docker-socket",
-                status: fm.fileExists(atPath: morbstackSocketPath) ? .pass : .info,
-                detail: fm.fileExists(atPath: morbstackSocketPath)
-                    ? morbstackSocketPath
-                    : "not published (daemon not running)"))
 
         return DoctorReport(version: MorbVersion.string, checks: checks)
     }
@@ -434,7 +431,10 @@ public enum Doctor {
     /// Nothing here is a `.fail`: a machine with no shares still runs containers, it
     /// just cannot bind-mount host directories. See ``DoctorReport/healthy``.
     private static func appendShareChecks(
-        _ checks: inout [DoctorCheck], plan: MorbShares.Plan, config: MorbConfig
+        _ checks: inout [DoctorCheck],
+        plan: MorbShares.Plan,
+        config: MorbConfig,
+        liveShares: [MorbShareState]?
     ) {
         guard !config.sharedPaths.isEmpty else {
             checks.append(
@@ -447,7 +447,7 @@ public enum Doctor {
         }
 
         let report = MorbShareSurface.report(
-            configured: MorbShareSurface.configuredShares(config: config), live: liveShares())
+            configured: MorbShareSurface.configuredShares(config: config), live: liveShares)
         let live = report.source == .daemon
 
         let summary: String

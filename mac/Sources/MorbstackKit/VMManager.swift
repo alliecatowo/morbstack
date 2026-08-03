@@ -505,6 +505,27 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
         }
     }
 
+    /// Deletes the Docker data disk after proving that this manager has released it.
+    ///
+    /// This intentionally runs on the VM queue instead of exposing the disk image to
+    /// a command-line caller. A lifecycle token is only a report of the last operation:
+    /// an `.error` token can still retain a `VZVirtualMachine`, and unlinking its disk
+    /// would leave a live guest writing to an orphaned file. The only safe proof is
+    /// that the queue which owns Virtualization.framework no longer owns a VM object.
+    ///
+    /// A saved state has no live VM object and is safe to discard with the disk. An
+    /// error, including one whose VM object was released by a failed operation, is
+    /// deliberately refused until the owner has completed an explicit stop. That
+    /// makes recovery fail closed rather than guessing what Virtualization.framework
+    /// still has attached.
+    public func resetDisk(completion: @escaping (Result<Void, Error>) -> Void) {
+        let done = CompletionOnce(completion)
+        queue.async { [weak self] in
+            guard let self else { return done.fire(.failure(CompletionOnce.managerGone)) }
+            self.resetDiskOnQueue(done: done)
+        }
+    }
+
     /// Brings the VM to a state where the guest answers its control channel, booting
     /// or resuming as appropriate.
     ///
@@ -1057,6 +1078,51 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
             setState(.error("\(error)"))
             flushWaiters(.failure(error))
             done.fire(.failure(error))
+        }
+    }
+
+    /// Deletes the data disk only after the VM-owning queue has verified release.
+    private func resetDiskOnQueue(done: CompletionOnce) {
+        guard virtualMachine == nil else {
+            done.fire(.failure(MorbError.vm(
+                "the VM is still attached in state \(state.description); refusing to delete its disk. "
+                    + "Run `morb stop --force` and retry.")))
+            return
+        }
+
+        switch state {
+        case .stopped, .suspended:
+            break
+        case .error:
+            done.fire(.failure(MorbError.vm(
+                "the VM is in an error state; refusing to guess whether Virtualization.framework "
+                    + "has released the disk. Run `morb stop --force` and retry.")))
+            return
+        case .starting, .running, .pausing, .stopping:
+            done.fire(.failure(MorbError.vm(
+                "the VM is \(state.description); stop it before deleting the disk.")))
+            return
+        }
+
+        let disk = MorbPaths.diskImage
+        do {
+            let savedState = MorbPaths.vmState
+            if FileManager.default.fileExists(atPath: savedState.path) {
+                // A saved VM state is no longer resumable once this operation has
+                // begun. Remove it before touching the disk, so a later failure can
+                // only leave a cold-bootable disk — never a resumable state whose
+                // device it was written against has disappeared.
+                try FileManager.default.removeItem(at: savedState)
+            }
+            setState(.stopped)
+            if FileManager.default.fileExists(atPath: disk.path) {
+                try FileManager.default.removeItem(at: disk)
+            }
+            log.warn("deleted Docker data disk after verified VM release: \(disk.path)")
+            done.fire(.success(()))
+        } catch {
+            done.fire(.failure(MorbError.io(
+                "could not delete \(disk.path): \(error.localizedDescription)")))
         }
     }
 

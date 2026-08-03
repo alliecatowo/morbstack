@@ -229,6 +229,10 @@ done
 (cd mac && swift build -c release --product MorbstackApp)
 (cd mac && swift build -c release --product morbstackd)
 (cd mac && swift build -c release --product morb)
+# The runtime version is an immutable payload namespace inside the signed app bundle.
+# Keep it aligned with the host binaries until runtime releases gain their own cadence.
+VERSION=`sed -n 's/.*public static let string = "\\(.*\\)".*/\\1/p' mac/Sources/MorbstackKit/Version.swift`
+[ -n "$VERSION" ] || { echo "error: could not determine Morbstack runtime version" >&2; exit 1; }
 rm -rf dist/Morbstack.app
 mkdir -p dist/Morbstack.app/Contents/MacOS
 mkdir -p dist/Morbstack.app/Contents/Resources
@@ -243,8 +247,15 @@ cp mac/.build/AppIcon.icns dist/Morbstack.app/Contents/Resources/AppIcon.icns
 cp -R dist/host-bin dist/Morbstack.app/Contents/Resources/host-bin
 cp mac/AppResources/Info.plist dist/Morbstack.app/Contents/Info.plist
 printf 'APPL????' > dist/Morbstack.app/Contents/PkgInfo
+# A release carries every byte needed to boot Docker and enable Kubernetes. The
+# packager hashes and copies existing assets only; it neither downloads nor builds
+# them, so release automation remains the one place that decides their provenance.
+RUNTIME_SOURCE_ROOT="${MORBSTACK_RUNTIME_SOURCE_ROOT:-${MORBSTACK_HOME:-$HOME/.morbstack}/data}"
+scripts/package-runtime-artifacts.sh \
+	--source-root "$RUNTIME_SOURCE_ROOT" \
+	--destination dist/Morbstack.app/Contents/Resources/runtime \
+	--version "$VERSION"
 # Stamp the real version in, so the bundle and `morb version` agree.
-VERSION=`sed -n 's/.*public static let string = "\\(.*\\)".*/\\1/p' mac/Sources/MorbstackKit/Version.swift`
 if [ -n "$VERSION" ]; then
 	/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" dist/Morbstack.app/Contents/Info.plist
 	/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" dist/Morbstack.app/Contents/Info.plist

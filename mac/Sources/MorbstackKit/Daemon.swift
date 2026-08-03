@@ -177,6 +177,11 @@ public final class Daemon {
         let logger = log ?? MorbLog()
         self.log = logger
         self.config = try MorbConfig.load()
+        if let runtime = try RuntimeArtifactStore.installBundledRuntimeIfPresent() {
+            logger.info(
+                "runtime \(runtime.version) \(runtime.wasAlreadyInstalled ? "verified" : "installed") "
+                    + "at \(runtime.directory.path)")
+        }
         self.vm = VMManager(config: config, log: logger)
         self.proxy = DockerProxy(vm: vm, log: logger)
         self.forwarder = PortForwarder(vm: vm, log: logger)
@@ -621,6 +626,26 @@ public final class Daemon {
                         ? "suspend complete: \(running) running container(s) saved with the VM "
                             + "(they survive only if the next restore succeeds)"
                         : "suspend complete: \(running) running container(s) were stopped with the VM")
+            }
+            return response
+
+        case "reset-disk":
+            // This must be a VM-owner operation, not a CLI state check followed by an
+            // unlink. `VMManager` serializes the verification and deletion with every
+            // Virtualization.framework transition, so a Docker client can either start
+            // before this request (causing a safe refusal) or after it (booting a fresh
+            // disk), but never attach the image while it is being removed.
+            proxy.beginOrderlyShutdown()
+            defer { proxy.endOrderlyShutdown() }
+            let hadDisk = FileManager.default.fileExists(atPath: MorbPaths.diskImage.path)
+            let hadSavedState = FileManager.default.fileExists(atPath: MorbPaths.vmState.path)
+            var response = awaitVMOperation("reset-disk", timeout: 15) {
+                self.vm.resetDisk(completion: $0)
+            }
+            if response.ok {
+                response.data?["deleted"] = .bool(hadDisk)
+                response.data?["saved_state_deleted"] = .bool(hadSavedState)
+                response.data?["disk"] = .string(MorbPaths.diskImage.path)
             }
             return response
 

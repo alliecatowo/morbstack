@@ -28,22 +28,23 @@ let usage = """
       status       Show daemon and VM state
       start        Boot the VM
       stop         Shut the VM down
-      suspend      Save the VM to disk and free its memory
-      resume       Restore a suspended VM
+      suspend      Release VM memory; a host that cannot restore state stops cleanly
+      resume       Start a suspended VM; cold-boots when state cannot be restored
       shares       List the shared host paths and whether the guest has them
       rosetta      Show Rosetta status; `rosetta install` sets it up
       k8s          Run a local Kubernetes cluster (off by default)
       version      Print CLI and daemon versions
       doctor       Diagnose the host; works without the daemon
+      diagnose     Create a redacted, reviewable support bundle; never starts the daemon
       reset-disk   Delete the Docker data disk and start over (destructive)
       mcp          Model Context Protocol server; read-only unless granted
       migrate      Import images, volumes and config from another runtime
       bench        Run the open benchmark suite and report the numbers
       scan         SBOM and CVE scan an image, entirely on this machine
       debug        Open a toolbox shell in a container, even a distroless one
-      context      Manage the `morbstack` docker context (zero-config discovery)
+      context      Inspect the `morbstack` Docker context and discovery socket
       install-cli  Install bundled docker, compose, and buildx for this user
-      uninstall-cli Remove only the CLI links/context/profile block Morbstack owns
+      uninstall-cli Remove only the CLI links/socket/context/profile block Morbstack owns
       install-cli-plugins
                    Legacy: install only compose/buildx plugins (prefer install-cli)
 
@@ -57,7 +58,7 @@ let usage = """
       k8s kubeconfig         Write ~/.morbstack/kubeconfig and say how to use it
       k8s kubeconfig --merge Merge the `morbstack` context into ~/.kube/config,
                              after asking, and after taking a timestamped backup
-      context status         Show whether the context is registered and current
+      context status         Show the context and per-user discovery socket state
       context create         Register the `morbstack` docker context. Asks first.
       context use            Make it the default context. Always asks; refuses
                              to replace another explicit default without --force
@@ -78,6 +79,8 @@ let usage = """
       --print-plan
                  Print what a command would do and exit without doing it
                  (rosetta install, install-cli, uninstall-cli, install-cli-plugins).
+      --output <directory>
+                 Write `morb diagnose` output below this absolute or ~/ directory.
       --make-default
                  Let install-cli add ~/.morbstack/bin before an existing docker on PATH.
       --help     Print this help
@@ -297,6 +300,70 @@ case "doctor":
     }
     exit(report.healthy ? 0 : 2)
 
+case "diagnose":
+    // A support bundle is intentionally local-only. Do not route this through
+    // `probeDaemon` either: the collector's declared inputs are host metadata,
+    // sanitized Doctor checks, and bounded tails of Morbstack-owned text logs.
+    var requestedOutput: String?
+    var argumentIndex = 0
+    while argumentIndex < extraArguments.count {
+        let argument = extraArguments[argumentIndex]
+        if argument == "--output" {
+            guard argumentIndex + 1 < extraArguments.count else {
+                fail("diagnose --output needs a directory", code: 2)
+            }
+            guard requestedOutput == nil else {
+                fail("diagnose accepts only one --output directory", code: 2)
+            }
+            requestedOutput = extraArguments[argumentIndex + 1]
+            argumentIndex += 2
+        } else if argument.hasPrefix("--output=") {
+            guard requestedOutput == nil else {
+                fail("diagnose accepts only one --output directory", code: 2)
+            }
+            let value = String(argument.dropFirst("--output=".count))
+            guard !value.isEmpty else { fail("diagnose --output needs a directory", code: 2) }
+            requestedOutput = value
+            argumentIndex += 1
+        } else {
+            fail("unknown diagnose option `\(argument)` (expected --output <directory>)", code: 2)
+        }
+    }
+
+    let outputDirectory: URL
+    if let requestedOutput {
+        let expanded = (requestedOutput as NSString).expandingTildeInPath
+        guard expanded.hasPrefix("/") else {
+            fail("diagnose --output must be an absolute path or begin with ~/", code: 2)
+        }
+        outputDirectory = URL(fileURLWithPath: expanded, isDirectory: true)
+    } else {
+        outputDirectory = MorbDiagnostics.defaultOutputDirectory
+    }
+    do {
+        let result = try MorbDiagnostics.collect(outputDirectory: outputDirectory)
+        if wantsJSON {
+            let payload: [String: AnyCodableValue] = [
+                "directory": .string(result.directory),
+                "created_at": .string(result.createdAt),
+                "files": .array(result.files.map(AnyCodableValue.string)),
+                "warnings": .array(result.warnings.map(AnyCodableValue.string)),
+            ]
+            out((try? IPCCodec.prettyJSON(DaemonResponse.success(payload))) ?? "{}")
+        } else {
+            out("[ok] created redacted diagnostics bundle")
+            out("     \(result.directory)")
+            if !result.warnings.isEmpty {
+                for warning in result.warnings {
+                    out("[--] \(warning)")
+                }
+            }
+            out("Review README.txt and report.json before sharing the directory.")
+        }
+    } catch {
+        fail((error as? MorbError)?.description ?? error.localizedDescription, code: 2)
+    }
+
 case "version":
     // The local version always prints; the daemon's is best-effort so `morb version`
     // never fails just because nothing is running.
@@ -457,9 +524,9 @@ case "shares":
     }
 
 case "context":
-    // Zero-config discovery (docs/parity.md #17/#23): nothing here spawns the daemon —
-    // it is all local file reads/writes against ~/.docker (or $DOCKER_CONFIG), following
-    // the same rule as `shares`/`doctor`/`rosetta status`.
+    // Docker connection setup is host-only: nothing here spawns the daemon. Context
+    // metadata follows $DOCKER_CONFIG, while the conventional discovery socket is the
+    // user-owned ~/.docker/run/docker.sock location used by Docker-aware tools.
     let contextSubcommand = extraArguments.first { !$0.hasPrefix("-") } ?? "status"
 
     func renderContextStatus(_ status: MorbDockerContext.Status) {
@@ -490,6 +557,26 @@ case "context":
         out("")
         out("  docker config directory: \(status.dockerConfigDirectory)")
         out("")
+        let directSocket = MorbDockerContext.directSocketStatus()
+        switch directSocket.state {
+        case .correct:
+            out("[ok] conventional Docker discovery socket points at Morbstack")
+            out("     \(directSocket.path) -> \(directSocket.expectedDestination)")
+        case .missing:
+            out("[--] conventional Docker discovery socket is not linked")
+            out("     `morb install-cli` can create the user-owned link:")
+            out("     \(directSocket.path) -> \(directSocket.expectedDestination)")
+        case .pointsElsewhere(let destination):
+            out("[--] conventional Docker discovery socket belongs to another target; preserved")
+            out("     \(directSocket.path) -> \(destination)")
+        case .occupied(let kind):
+            out("[--] conventional Docker discovery socket is occupied by an existing \(kind); preserved")
+            out("     \(directSocket.path)")
+        case .unavailable(let reason):
+            out("[--] conventional Docker discovery socket is not safe for Morbstack to manage")
+            out("     \(reason)")
+        }
+        out("")
         out("  Optional: some tools (older scripts, some IDE defaults) still look for the")
         out("  conventional \(MorbDockerContext.systemSocketPath) before trying a context or")
         out("  DOCKER_HOST. Morbstack never creates that symlink itself — it is a system")
@@ -501,6 +588,26 @@ case "context":
     switch contextSubcommand {
     case "status":
         let status = MorbDockerContext.status()
+        let directSocket = MorbDockerContext.directSocketStatus()
+        let directSocketState: String
+        let directSocketExistingDestination: AnyCodableValue
+        switch directSocket.state {
+        case .missing:
+            directSocketState = "missing"
+            directSocketExistingDestination = .null
+        case .correct:
+            directSocketState = "correct"
+            directSocketExistingDestination = .string(directSocket.expectedDestination)
+        case .pointsElsewhere(let destination):
+            directSocketState = "points_elsewhere"
+            directSocketExistingDestination = .string(destination)
+        case .occupied(let kind):
+            directSocketState = "occupied_\(kind)"
+            directSocketExistingDestination = .null
+        case .unavailable(let reason):
+            directSocketState = "unavailable"
+            directSocketExistingDestination = .string(reason)
+        }
         finish(.success([
             "name": .string(MorbDockerContext.name),
             "registered": .bool(status.registered),
@@ -510,6 +617,10 @@ case "context":
             "is_current": .bool(status.isCurrent),
             "docker_config_directory": .string(status.dockerConfigDirectory),
             "socket_path": .string(status.socketPath),
+            "direct_socket_path": .string(directSocket.path),
+            "direct_socket_expected_destination": .string(directSocket.expectedDestination),
+            "direct_socket_state": .string(directSocketState),
+            "direct_socket_existing_destination": directSocketExistingDestination,
             "system_socket_symlink_command": .string(MorbDockerContext.suggestedSymlinkCommand()),
         ])) { _ in renderContextStatus(status) }
 
@@ -755,6 +866,21 @@ case "install-cli":
             out("  Docker context: already registered; leaves explicit current context `\(current)` unchanged.")
         }
         out("")
+        switch installPlan.directSocket.state {
+        case .missing:
+            out("  Docker discovery: creates the user-owned link \(installPlan.directSocket.path)")
+            out("                    -> \(installPlan.directSocket.expectedDestination)")
+        case .correct:
+            out("  Docker discovery: \(installPlan.directSocket.path) already points at Morbstack.")
+        case .pointsElsewhere(let destination):
+            out("  Docker discovery: preserves existing link \(installPlan.directSocket.path)")
+            out("                    -> \(destination)")
+        case .occupied(let kind):
+            out("  Docker discovery: preserves existing \(kind) at \(installPlan.directSocket.path)")
+        case .unavailable(let reason):
+            out("  Docker discovery: not changed; \(reason)")
+        }
+        out("")
         out("No VM is started. No Docker image, volume, or existing Docker context is removed.")
     }
 
@@ -799,6 +925,18 @@ case "install-cli":
         case .unsupportedShell: out("[--] PATH not changed for this shell")
         case .malformedExistingBlock(let profile): out("[--] PATH not changed; inspect \(profile)")
         }
+        switch result.directSocket.state {
+        case .correct:
+            out("[ok] conventional Docker discovery socket points at Morbstack")
+        case .missing:
+            out("[--] conventional Docker discovery socket was not created")
+        case .pointsElsewhere(let destination):
+            out("[--] preserved existing Docker discovery socket -> \(destination)")
+        case .occupied(let kind):
+            out("[--] preserved existing \(kind) at Docker discovery socket")
+        case .unavailable(let reason):
+            out("[--] Docker discovery socket not changed: \(reason)")
+        }
         if result.contextCreated { out("[ok] registered Docker context `morbstack`") }
         if result.contextBecameCurrent { out("[ok] current Docker context is now `morbstack`") }
         if let contextError = result.contextError {
@@ -818,6 +956,7 @@ case "uninstall-cli":
         out("  \(MorbCliInstallation.dockerDestination().path) when it is a Morbstack symlink")
         out("  docker-compose/docker-buildx links in \(MorbCliPlugins.cliPluginsDirectory().path) when they are Morbstack symlinks")
         out("  the exact managed PATH block from the selected shell profile")
+        out("  ~/.docker/run/docker.sock only when it is Morbstack's user-owned symlink")
         out("  the `morbstack` Docker context only when it points at Morbstack's socket")
         out("")
         out("It does NOT remove Morbstack.app, ~/.morbstack/data, images, volumes, or another Docker installation.")
@@ -846,6 +985,13 @@ case "uninstall-cli":
         else { out("[ok] removed: \(result.removedLinks.joined(separator: ", "))") }
         if !result.preservedLinks.isEmpty { out("[--] preserved non-Morbstack links: \(result.preservedLinks.joined(separator: ", "))") }
         if result.removedProfileBlock { out("[ok] removed Morbstack's managed PATH block") }
+        switch result.directSocket {
+        case .removed: out("[ok] removed Morbstack's Docker discovery socket link")
+        case .notPresent: out("[--] no Morbstack Docker discovery socket link to remove")
+        case .pointsElsewhere(let destination): out("[--] preserved Docker discovery link -> \(destination)")
+        case .occupied(let kind): out("[--] preserved existing \(kind) at Docker discovery socket")
+        case .unavailable(let reason): out("[--] Docker discovery socket not changed: \(reason)")
+        }
         switch result.context {
         case .removed(let wasCurrent): out("[ok] removed Docker context `morbstack`\(wasCurrent ? " and restored Docker's default context" : "")")
         case .notRegistered: out("[--] no Morbstack Docker context to remove")
@@ -1090,40 +1236,19 @@ case "rosetta":
     }
 
 case "reset-disk":
-    // Deliberately does not go through `callDaemon`: this command must never be the
-    // reason a daemon exists (see MorbCommandPolicy.selfServedCommands), and "nothing
-    // is running" is the state in which it is *safe* to proceed rather than a reason
-    // to bail out.
-    let daemonState: String? = {
-        guard let response = try? UnixSocketClient.roundTrip(
-            path: MorbPaths.controlSocket.path,
-            request: DaemonRequest(cmd: "status"),
-            timeout: 5),
-            response.ok
-        else { return nil }
-        return response.data?["state"]?.displayString
-    }()
-
-    // Only a stack that is demonstrably not using the disk may have it removed. An
-    // `error` state counts: that is precisely the wedged case this command exists for.
-    if let daemonState, daemonState != "stopped", daemonState != "error" {
-        fail(
-            "the VM is \(daemonState); refusing to delete the disk out from under it.\n"
-                + "       Run `morb stop` first, then retry.",
-            code: 2)
-    }
-
     let disk = MorbPaths.diskImage
-    guard FileManager.default.fileExists(atPath: disk.path) else {
+    let hasDisk = FileManager.default.fileExists(atPath: disk.path)
+    let hasSavedState = FileManager.default.fileExists(atPath: MorbPaths.vmState.path)
+    guard hasDisk || hasSavedState else {
         finish(.success([
             "deleted": .bool(false),
             "disk": .string(disk.path),
+            "saved_state_deleted": .bool(false),
         ])) { _ in
             out("[--] nothing to do: \(disk.path) does not exist")
             out("    The next boot will create a fresh one and the guest will format it.")
         }
     }
-
     let sizeOnDisk: String = {
         guard let attributes = try? FileManager.default.attributesOfItem(atPath: disk.path),
               let allocated = attributes[.size] as? NSNumber
@@ -1151,22 +1276,53 @@ case "reset-disk":
         }
     }
 
-    // A saved-state blob describes a guest whose disk is about to disappear. It is not
-    // ours to delete here, but restoring it afterwards would be incoherent, so say so.
-    let hasSavedState = FileManager.default.fileExists(atPath: MorbPaths.vmState.path)
+    // A live daemon must delete through its VM-owning queue. A lifecycle state token
+    // alone is not enough evidence: a failed pause can report `error` while retaining
+    // a VZVirtualMachine that still has this disk attached.
+    let liveReset = probeDaemon(DaemonRequest(cmd: "reset-disk"), timeout: 20)
+    let response: DaemonResponse
+    if let liveReset {
+        response = liveReset
+    } else {
+        // With no answering daemon, take its singleton lock for the entire delete.
+        // This closes the race where a daemon starts between an observation and the
+        // unlink: it either already owns the lock (we refuse) or cannot attach the
+        // disk until this reset has completed.
+        do {
+            try MorbPaths.ensureDirectories()
+            let resetLock = FileLock(path: MorbPaths.lockFile.path)
+            guard try resetLock.acquire() else {
+                fail(
+                    "morbstackd may still own the VM disk; refusing to delete it.\n"
+                        + "       Wait for the daemon to respond, then run `morb stop --force` and retry.",
+                    code: 2)
+            }
+            defer { resetLock.release() }
 
-    do {
-        try FileManager.default.removeItem(at: disk)
-    } catch {
-        fail("could not delete \(disk.path): \(error.localizedDescription)", code: 2)
+            let hadDisk = FileManager.default.fileExists(atPath: disk.path)
+            let hadSavedState = FileManager.default.fileExists(atPath: MorbPaths.vmState.path)
+            // Keep a failed offline reset cold-bootable. Removing a saved state first
+            // means a later disk-delete failure cannot leave state that describes a
+            // disk the caller has begun replacing.
+            if hadSavedState { try FileManager.default.removeItem(at: MorbPaths.vmState) }
+            if hadDisk { try FileManager.default.removeItem(at: disk) }
+            response = .success([
+                "deleted": .bool(hadDisk),
+                "disk": .string(disk.path),
+                "saved_state_deleted": .bool(hadSavedState),
+            ])
+        } catch {
+            fail("could not reset \(disk.path): \(error.localizedDescription)", code: 2)
+        }
     }
 
-    finish(.success([
-        "deleted": .bool(true),
-        "disk": .string(disk.path),
-        "saved_state_present": .bool(hasSavedState),
-    ])) { _ in
-        out("[ok] deleted \(disk.path)")
+    finish(response) { data in
+        let deleted = data["deleted"] == .bool(true)
+        if deleted {
+            out("[ok] deleted \(disk.path)")
+        } else {
+            out("[--] nothing to do: \(disk.path) does not exist")
+        }
         out("")
         out("  On the next `morb start` Morbstack will:")
         out("    1. create a fresh sparse disk image of the configured size")
@@ -1174,11 +1330,9 @@ case "reset-disk":
         out("    3. bring dockerd up on an empty /var/lib/docker")
         out("")
         out("  All previous images, containers and volumes are gone.")
-        if hasSavedState {
+        if data["saved_state_deleted"] == .bool(true) {
             out("")
-            out("  Note: \(MorbPaths.vmState.path) still exists and describes the guest that")
-            out("        was using the deleted disk. It was left alone, but it will be")
-            out("        discarded on the next bring-up rather than restored.")
+            out("  Removed the saved VM state with the disk; it cannot describe a fresh disk.")
         }
     }
 

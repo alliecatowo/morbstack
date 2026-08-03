@@ -77,6 +77,25 @@ public struct MorbPaths {
     /// `~/.morbstack/data` — persistent VM state.
     public static var dataDirectory: URL { root.appendingPathComponent("data", isDirectory: true) }
 
+    /// `~/.morbstack/data/runtime` — immutable, versioned release runtime payloads.
+    ///
+    /// A signed app bundle is copied here before it becomes active. `current` and
+    /// `previous` below are relative symlinks into this directory, so a release can
+    /// move the kernel/initramfs as one coherent unit and still roll back safely.
+    public static var runtimeArtifactsDirectory: URL {
+        dataDirectory.appendingPathComponent("runtime", isDirectory: true)
+    }
+
+    /// `~/.morbstack/data/runtime/current` — active versioned runtime release.
+    public static var currentRuntimeDirectory: URL {
+        runtimeArtifactsDirectory.appendingPathComponent("current", isDirectory: true)
+    }
+
+    /// `~/.morbstack/data/runtime/previous` — the release available for rollback.
+    public static var previousRuntimeDirectory: URL {
+        runtimeArtifactsDirectory.appendingPathComponent("previous", isDirectory: true)
+    }
+
     /// `~/.morbstack/data/disk.img` — the sparse raw root disk.
     public static var diskImage: URL { dataDirectory.appendingPathComponent("disk.img", isDirectory: false) }
 
@@ -95,15 +114,32 @@ public struct MorbPaths {
         dataDirectory.appendingPathComponent("save-restore-unsupported", isDirectory: false)
     }
 
-    /// `~/.morbstack/data/kernel` — where `scripts/fetch-kernel.sh` drops the kernel.
+    /// `~/.morbstack/data/kernel` — legacy development asset location used by
+    /// `scripts/fetch-kernel.sh`. Release bundles use ``runtimeArtifactsDirectory``.
     public static var kernelDirectory: URL { dataDirectory.appendingPathComponent("kernel", isDirectory: true) }
 
-    /// `~/.morbstack/data/kernel/vmlinux` — the uncompressed guest kernel image.
-    public static var kernel: URL { kernelDirectory.appendingPathComponent("vmlinux", isDirectory: false) }
+    /// The uncompressed guest kernel image.
+    ///
+    /// Prefer the digest-checked release under `runtime/current`; retain the legacy
+    /// fetch-script location for source checkouts and explicit developer workflows.
+    public static var kernel: URL {
+        let managed = currentRuntimeDirectory
+            .appendingPathComponent("kernel", isDirectory: true)
+            .appendingPathComponent("vmlinux", isDirectory: false)
+        return FileManager.default.isReadableFile(atPath: managed.path)
+            ? managed
+            : kernelDirectory.appendingPathComponent("vmlinux", isDirectory: false)
+    }
 
-    /// `~/.morbstack/data/kernel/initrd.img` — the gzipped newc cpio initramfs holding
-    /// `morbinit` and the Docker binaries, built by `make guest-image`.
-    public static var initrd: URL { kernelDirectory.appendingPathComponent("initrd.img", isDirectory: false) }
+    /// The gzipped newc cpio initramfs holding `morbinit` and the Docker binaries.
+    public static var initrd: URL {
+        let managed = currentRuntimeDirectory
+            .appendingPathComponent("kernel", isDirectory: true)
+            .appendingPathComponent("initrd.img", isDirectory: false)
+        return FileManager.default.isReadableFile(atPath: managed.path)
+            ? managed
+            : kernelDirectory.appendingPathComponent("initrd.img", isDirectory: false)
+    }
 
     /// `~/.morbstack/data/k8s` — the Kubernetes payload the daemon streams into the
     /// guest on `morb k8s enable`, put there by
@@ -114,7 +150,12 @@ public struct MorbPaths {
     /// initramfs would spend that much guest RAM on every boot for a feature nobody
     /// asked for. Absent on a machine that never fetched them, which is exactly the
     /// state `morb k8s status` reports as `not-installed`.
-    public static var k8sPayloadDirectory: URL { dataDirectory.appendingPathComponent("k8s", isDirectory: true) }
+    public static var k8sPayloadDirectory: URL {
+        let managed = currentRuntimeDirectory.appendingPathComponent("k8s", isDirectory: true)
+        return FileManager.default.fileExists(atPath: managed.path)
+            ? managed
+            : dataDirectory.appendingPathComponent("k8s", isDirectory: true)
+    }
 
     /// `~/.morbstack/kubeconfig` — where Morbstack writes the cluster's kubeconfig.
     ///
@@ -148,7 +189,9 @@ public struct MorbPaths {
     public static func ensureDirectories() throws {
         let fm = FileManager.default
         let attributes: [FileAttributeKey: Any] = [.posixPermissions: NSNumber(value: Int16(0o700))]
-        for directory in [root, runDirectory, dataDirectory, kernelDirectory, logsDirectory] {
+        for directory in [
+            root, runDirectory, dataDirectory, runtimeArtifactsDirectory, kernelDirectory, logsDirectory,
+        ] {
             do {
                 try fm.createDirectory(at: directory, withIntermediateDirectories: true, attributes: attributes)
                 try fm.setAttributes(attributes, ofItemAtPath: directory.path)

@@ -203,7 +203,7 @@ struct MorbMenuBarContent: View {
         switch action {
         case .start: return "Start engine"
         case .stop: return "Stop engine"
-        case .suspend: return "Suspend engine"
+        case .suspend: return "Free engine memory"
         }
     }
 

@@ -107,6 +107,9 @@ public enum MorbCliInstallation {
         public let plugins: [LinkItem]
         public let pathRegistration: PathRegistration
         public let contextRegistration: ContextRegistration
+        /// The conventional per-user Docker socket location. The installer creates
+        /// only a missing, user-owned link and preserves every existing path.
+        public let directSocket: MorbDockerContext.DirectSocketStatus
 
         /// Every binary that the clean-machine contract requires is available from this
         /// app bundle or this checkout.  Callers must refuse to install a partial
@@ -135,6 +138,7 @@ public enum MorbCliInstallation {
 
         let pathRegistration = pathRegistration(
             environment: environment, makeDefault: makeDefault)
+        let directSocket = MorbDockerContext.directSocketStatus(environment: environment)
         let context = MorbDockerContext.status(environment: environment)
         let contextRegistration: ContextRegistration
         if context.registered && context.matchesSocket {
@@ -155,7 +159,8 @@ public enum MorbCliInstallation {
             docker: docker,
             plugins: plugins,
             pathRegistration: pathRegistration,
-            contextRegistration: contextRegistration)
+            contextRegistration: contextRegistration,
+            directSocket: directSocket)
     }
 
     // MARK: - Installation
@@ -163,6 +168,10 @@ public enum MorbCliInstallation {
     public struct InstallResult: Equatable, Sendable {
         public let links: [String: LinkResult]
         public let pathRegistration: PathRegistration
+        /// The verified post-install state of `~/.docker/run/docker.sock`. A non-ready
+        /// state is never treated as an error when it belongs to another tool; it is
+        /// reported so the caller can explain that Morbstack left it untouched.
+        public let directSocket: MorbDockerContext.DirectSocketStatus
         public let contextCreated: Bool
         public let contextBecameCurrent: Bool
         /// Context setup has a useful partial-success state: links/profile were safely
@@ -212,6 +221,7 @@ public enum MorbCliInstallation {
         }
 
         try installPathRegistration(installPlan.pathRegistration)
+        let directSocket = try MorbDockerContext.installDirectSocket(environment: environment)
 
         var created = false
         var becameCurrent = false
@@ -230,6 +240,7 @@ public enum MorbCliInstallation {
         return InstallResult(
             links: results,
             pathRegistration: installPlan.pathRegistration,
+            directSocket: directSocket,
             contextCreated: created,
             contextBecameCurrent: becameCurrent,
             contextError: contextError)
@@ -241,6 +252,7 @@ public enum MorbCliInstallation {
         public let removedLinks: [String]
         public let preservedLinks: [String]
         public let removedProfileBlock: Bool
+        public let directSocket: MorbDockerContext.DirectSocketRemoveResult
         public let context: MorbDockerContext.RemoveResult
     }
 
@@ -269,10 +281,11 @@ public enum MorbCliInstallation {
         }
 
         let removedProfileBlock = try removeProfileBlock(environment: environment)
+        let directSocket = try MorbDockerContext.removeDirectSocket(environment: environment)
         let context = try MorbDockerContext.remove(environment: environment)
         return UninstallResult(
             removedLinks: removed.sorted(), preservedLinks: preserved.sorted(),
-            removedProfileBlock: removedProfileBlock, context: context)
+            removedProfileBlock: removedProfileBlock, directSocket: directSocket, context: context)
     }
 
     // MARK: - Details

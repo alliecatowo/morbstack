@@ -61,6 +61,7 @@ final class FirstRunCLISetupModel {
             needsContextRegistration = false
         }
         return needsLinks || needsPathRegistration || needsContextRegistration
+            || plan.directSocket.canCreate
     }
 
     /// Reads the current state without writing to disk.  A detached task keeps profile
@@ -190,14 +191,15 @@ struct FirstRunCLISetupSheet: View {
                 }
             }
 
-            Section("Shell and Docker context") {
+            Section("Shell, Docker context, and discovery") {
                 planLine(title: "PATH", detail: plan.pathRegistration.firstRunDescription)
                 planLine(title: "Context", detail: plan.contextRegistration.firstRunDescription)
+                planLine(title: "Direct socket", detail: plan.directSocket.firstRunDescription)
             }
 
             Section {
                 Label(
-                    "The changes above are limited to command-line links, shell configuration, and the morbstack Docker context. No VM starts, and no images, volumes, or credentials change.",
+                    "The changes above are limited to command-line links, shell configuration, Docker connection setup, and one user-owned socket link. No VM starts, and no images, volumes, or credentials change.",
                     systemImage: "checkmark.shield"
                 )
                 .foregroundStyle(.secondary)
@@ -344,6 +346,24 @@ private extension MorbCliInstallation.ContextRegistration {
     }
 }
 
+private extension MorbDockerContext.DirectSocketStatus {
+
+    var firstRunDescription: String {
+        switch state {
+        case .missing:
+            return "Creates \(path) → \(expectedDestination) for tools that use Docker’s conventional per-user socket."
+        case .correct:
+            return "\(path) already points to Morbstack."
+        case .pointsElsewhere(let destination):
+            return "Leaves the existing link to \(destination) unchanged."
+        case .occupied(let kind):
+            return "Leaves the existing \(kind) at \(path) unchanged."
+        case .unavailable(let reason):
+            return "Not changed: \(reason)."
+        }
+    }
+}
+
 private extension MorbCliInstallation.InstallResult {
 
     var completionDescription: String {
@@ -352,6 +372,12 @@ private extension MorbCliInstallation.InstallResult {
             lines.append("Docker’s current context is now morbstack.")
         } else if contextCreated {
             lines.append("The morbstack Docker context was registered without changing your selected context.")
+        }
+        switch directSocket.state {
+        case .correct:
+            lines.append("Docker’s conventional per-user socket now points to Morbstack.")
+        case .pointsElsewhere, .occupied, .unavailable, .missing:
+            lines.append("An existing Docker discovery path was left unchanged.")
         }
         return lines.joined(separator: " ")
     }

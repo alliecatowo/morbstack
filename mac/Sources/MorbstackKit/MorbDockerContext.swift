@@ -23,6 +23,7 @@
 // `morb context use`.
 
 import CryptoKit
+import Darwin
 import Foundation
 
 public enum MorbDockerContext {
@@ -292,6 +293,284 @@ public enum MorbDockerContext {
             throw MorbError.io("could not remove \(meta.path): \(error.localizedDescription)")
         }
         return .removed(wasCurrent: current == name)
+    }
+
+    // MARK: - User-owned direct Docker discovery
+
+    /// Docker Desktop established this per-user location as the conventional socket
+    /// for tools that do not honour Docker contexts. Unlike `/var/run/docker.sock`, it
+    /// lives below the current user's home directory and therefore needs neither a
+    /// helper nor administrator authority.
+    public static func directDiscoverySocketPath(
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> URL {
+        homeDirectory
+            .appendingPathComponent(".docker", isDirectory: true)
+            .appendingPathComponent("run", isDirectory: true)
+            .appendingPathComponent("docker.sock", isDirectory: false)
+    }
+
+    /// The complete state of the conventional user-owned discovery socket. Its
+    /// `state` deliberately distinguishes a stale or occupied path from an absent
+    /// path: callers may create only `missing`, and must preserve every other case.
+    public struct DirectSocketStatus: Equatable, Sendable {
+        public enum State: Equatable, Sendable {
+            /// The path and its parents are safe for Morbstack to create.
+            case missing
+            /// A user-owned symlink already points at this Morbstack runtime.
+            case correct
+            /// A symlink exists but points at another runtime or location.
+            case pointsElsewhere(String)
+            /// A non-symlink node occupies the conventional path.
+            case occupied(String)
+            /// A parent or the existing link is not safely user-owned.
+            case unavailable(String)
+        }
+
+        public let path: String
+        public let expectedDestination: String
+        public let state: State
+
+        public var isManaged: Bool {
+            if case .correct = state { return true }
+            return false
+        }
+
+        public var canCreate: Bool {
+            if case .missing = state { return true }
+            return false
+        }
+    }
+
+    /// Reads the standard `~/.docker/run/docker.sock` location without touching the
+    /// filesystem. The directory must be owned by the effective user and not pass
+    /// through a symlink before the installer will create or remove anything there.
+    public static func directSocketStatus(
+        socketPath: String = MorbPaths.dockerSocket.path,
+        discoverySocketPath: URL? = nil,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> DirectSocketStatus {
+        let discovery = discoverySocketPath ?? directDiscoverySocketPath()
+        let expected = URL(fileURLWithPath: socketPath).standardizedFileURL.path
+        // MORBSTACK_HOME is deliberately a throwaway/developer isolation override.
+        // Publishing it through the real user's conventional Docker path would leave a
+        // durable link to a temporary engine after that run ends. A caller supplying a
+        // concrete discovery path is an explicit test/integration seam, so it remains
+        // available for isolated verification.
+        if discoverySocketPath == nil,
+           let homeOverride = environment["MORBSTACK_HOME"], !homeOverride.isEmpty
+        {
+            return DirectSocketStatus(
+                path: discovery.path,
+                expectedDestination: expected,
+                state: .unavailable("MORBSTACK_HOME is overridden; the real user Docker path is not modified"))
+        }
+        if let issue = directSocketParentIssue(for: discovery) {
+            return DirectSocketStatus(
+                path: discovery.path, expectedDestination: expected, state: .unavailable(issue))
+        }
+
+        let fm = FileManager.default
+        guard let metadata = fileStatus(at: discovery) else {
+            if errno == ENOENT {
+                return DirectSocketStatus(
+                    path: discovery.path, expectedDestination: expected, state: .missing)
+            }
+            return DirectSocketStatus(
+                path: discovery.path, expectedDestination: expected,
+                state: .unavailable("could not inspect the existing path: \(posixErrorDescription())"))
+        }
+
+        guard metadata.st_uid == geteuid() else {
+            return DirectSocketStatus(
+                path: discovery.path, expectedDestination: expected,
+                state: .unavailable("the existing path is not owned by the current user"))
+        }
+
+        if isSymbolicLink(metadata) {
+            guard let rawDestination = try? fm.destinationOfSymbolicLink(atPath: discovery.path) else {
+                return DirectSocketStatus(
+                    path: discovery.path, expectedDestination: expected,
+                    state: .unavailable("could not read the existing symbolic link"))
+            }
+            let resolved = resolvedLink(
+                rawDestination, relativeTo: discovery.deletingLastPathComponent())
+            return DirectSocketStatus(
+                path: discovery.path,
+                expectedDestination: expected,
+                state: resolved == expected ? .correct : .pointsElsewhere(resolved))
+        }
+
+        return DirectSocketStatus(
+            path: discovery.path, expectedDestination: expected,
+            state: .occupied(fileKind(metadata)))
+    }
+
+    /// Creates the conventional user-owned link only when the read-only status says it
+    /// is absent. Existing links, files, sockets, directories, and unsafe parents are
+    /// all preserved; a concurrent creator is re-read and reported rather than removed.
+    @discardableResult
+    public static func installDirectSocket(
+        socketPath: String = MorbPaths.dockerSocket.path,
+        discoverySocketPath: URL? = nil,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> DirectSocketStatus {
+        let discovery = discoverySocketPath ?? directDiscoverySocketPath()
+        let before = directSocketStatus(
+            socketPath: socketPath, discoverySocketPath: discoverySocketPath, environment: environment)
+        guard before.canCreate else { return before }
+
+        let runDirectory = discovery.deletingLastPathComponent()
+        do {
+            try FileManager.default.createDirectory(
+                at: runDirectory,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: NSNumber(value: Int16(0o700))])
+        } catch {
+            throw MorbError.io("could not create \(runDirectory.path): \(error.localizedDescription)")
+        }
+
+        // Directory creation can race with another tool. Re-check every ownership and
+        // symlink condition before creating the final link, which itself never replaces
+        // a node at the destination.
+        let ready = directSocketStatus(
+            socketPath: socketPath, discoverySocketPath: discoverySocketPath, environment: environment)
+        guard ready.canCreate else { return ready }
+        do {
+            try FileManager.default.createSymbolicLink(
+                at: discovery, withDestinationURL: URL(fileURLWithPath: socketPath))
+        } catch {
+            let afterFailure = directSocketStatus(
+                socketPath: socketPath, discoverySocketPath: discoverySocketPath, environment: environment)
+            if afterFailure.isManaged { return afterFailure }
+            throw MorbError.io(
+                "could not link \(discovery.path) to \(socketPath): \(error.localizedDescription)")
+        }
+
+        let after = directSocketStatus(
+            socketPath: socketPath, discoverySocketPath: discoverySocketPath, environment: environment)
+        guard after.isManaged else {
+            throw MorbError.io(
+                "created \(discovery.path), but it could not be verified as Morbstack-owned")
+        }
+        return after
+    }
+
+    /// The outcome of an explicit CLI integration uninstall. Only the exact,
+    /// user-owned link back to this runtime is removed; parent directories and every
+    /// other path at the conventional location remain untouched.
+    public enum DirectSocketRemoveResult: Equatable, Sendable {
+        case removed
+        case notPresent
+        case pointsElsewhere(String)
+        case occupied(String)
+        case unavailable(String)
+    }
+
+    @discardableResult
+    public static func removeDirectSocket(
+        socketPath: String = MorbPaths.dockerSocket.path,
+        discoverySocketPath: URL? = nil,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> DirectSocketRemoveResult {
+        let discovery = discoverySocketPath ?? directDiscoverySocketPath()
+        let status = directSocketStatus(
+            socketPath: socketPath, discoverySocketPath: discoverySocketPath, environment: environment)
+        switch status.state {
+        case .missing:
+            return .notPresent
+        case .pointsElsewhere(let destination):
+            return .pointsElsewhere(destination)
+        case .occupied(let kind):
+            return .occupied(kind)
+        case .unavailable(let reason):
+            return .unavailable(reason)
+        case .correct:
+            do {
+                try FileManager.default.removeItem(at: discovery)
+            } catch {
+                throw MorbError.io("could not remove \(discovery.path): \(error.localizedDescription)")
+            }
+            return .removed
+        }
+    }
+
+    private enum DirectDirectoryStatus {
+        case missing
+        case safe
+        case unavailable(String)
+    }
+
+    private static func directSocketParentIssue(for discovery: URL) -> String? {
+        let runDirectory = discovery.deletingLastPathComponent()
+        let dockerDirectory = runDirectory.deletingLastPathComponent()
+        for directory in [dockerDirectory, runDirectory] {
+            switch userOwnedDirectoryStatus(at: directory) {
+            case .missing, .safe:
+                continue
+            case .unavailable(let reason):
+                return "\(directory.path) \(reason)"
+            }
+        }
+        return nil
+    }
+
+    private static func userOwnedDirectoryStatus(at directory: URL) -> DirectDirectoryStatus {
+        guard let metadata = fileStatus(at: directory) else {
+            if errno == ENOENT { return .missing }
+            return .unavailable("could not be inspected: \(posixErrorDescription())")
+        }
+        if isSymbolicLink(metadata) {
+            return .unavailable("is a symbolic link")
+        }
+        if !isDirectory(metadata) {
+            return .unavailable("is not a directory")
+        }
+        if metadata.st_uid != geteuid() {
+            return .unavailable("is not owned by the current user")
+        }
+        if metadata.st_mode & mode_t(S_IWGRP | S_IWOTH) != 0 {
+            return .unavailable("is writable by group or other users")
+        }
+        return .safe
+    }
+
+    private static func fileStatus(at url: URL) -> stat? {
+        var metadata = stat()
+        let result = url.withUnsafeFileSystemRepresentation { path -> Int32 in
+            guard let path else { return -1 }
+            return lstat(path, &metadata)
+        }
+        return result == 0 ? metadata : nil
+    }
+
+    private static func isDirectory(_ metadata: stat) -> Bool {
+        (metadata.st_mode & mode_t(S_IFMT)) == mode_t(S_IFDIR)
+    }
+
+    private static func isSymbolicLink(_ metadata: stat) -> Bool {
+        (metadata.st_mode & mode_t(S_IFMT)) == mode_t(S_IFLNK)
+    }
+
+    private static func fileKind(_ metadata: stat) -> String {
+        let type = metadata.st_mode & mode_t(S_IFMT)
+        switch type {
+        case mode_t(S_IFSOCK): return "socket"
+        case mode_t(S_IFREG): return "file"
+        case mode_t(S_IFDIR): return "directory"
+        default: return "non-symlink filesystem node"
+        }
+    }
+
+    private static func posixErrorDescription() -> String {
+        String(cString: strerror(errno))
+    }
+
+    private static func resolvedLink(_ raw: String, relativeTo directory: URL) -> String {
+        if raw.hasPrefix("/") {
+            return URL(fileURLWithPath: raw).standardizedFileURL.path
+        }
+        return directory.appendingPathComponent(raw).standardizedFileURL.path
     }
 
     // MARK: - /var/run/docker.sock (manual, never automatic)

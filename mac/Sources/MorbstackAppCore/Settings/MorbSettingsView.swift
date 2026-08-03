@@ -282,7 +282,7 @@ private struct TrackDResourceSettings: View {
     private var suspendSetting: some View {
         VStack(alignment: .leading) {
             Stepper(
-                "Suspend when idle: \(TrackDConfigEditor.describeSuspend(store.draft))",
+                "Stop when idle: \(TrackDConfigEditor.describeSuspend(store.draft))",
                 value: Binding(
                     get: { store.draft.autoSuspendMinutes },
                     set: {
@@ -294,7 +294,7 @@ private struct TrackDResourceSettings: View {
                 step: 5
             )
             Text(
-                "Morbstack saves the VM after this much Docker inactivity and restores it on the next command. Set the value to zero to keep it running."
+                "Morbstack stops the engine after this much Docker inactivity. The next Docker command starts it from persisted Docker data; don’t rely on running containers surviving. Set the value to zero to keep it running."
             )
             .font(.footnote)
             .foregroundStyle(.secondary)

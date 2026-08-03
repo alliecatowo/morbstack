@@ -3,5 +3,6 @@
 
 [agents]
 # The primary agent plus three focused subagents fits the repository's current
-# local capacity while leaving one owner for integration and validation.
-max_concurrent_threads_per_session = 3
+# local capacity while leaving one owner for integration and validation. Agents
+# must still serialize builds and live-VM runs.
+max_concurrent_threads_per_session = 4

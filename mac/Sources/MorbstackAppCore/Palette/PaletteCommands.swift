@@ -296,7 +296,7 @@ enum PaletteCommandBuilder {
                 switch action {
                 case .start: return ("Start engine", "play.fill", "start boot up vm resume engine")
                 case .stop: return ("Stop engine", "stop.fill", "stop shutdown halt vm engine")
-                case .suspend: return ("Suspend engine", "moon.zzz.fill", "suspend pause sleep vm engine")
+                case .suspend: return ("Free engine memory", "moon.zzz.fill", "suspend pause sleep vm engine")
                 }
             }()
             return PaletteCommand(
