@@ -1,6 +1,8 @@
 # Linux Machines
 
 Status: **M0 schema-only foundation is implemented; no machine runtime or UI exists yet.**
+The M1 blueprint below is planned architecture, not implementation evidence or a
+user-visible capability.
 
 M0 is deliberately an inventory contract, not a partial VM feature. The pure
 [MachineRegistry.swift](../mac/Sources/MorbstackKit/MachineRegistry.swift) model
@@ -57,6 +59,49 @@ kernel, initramfs, root disk, cloud-init support, and optional machine agent.
 That agent contract is separately versioned even where a port number can be
 reused inside another VM.
 
+## Planned M1 runtime boundary and authority
+
+M1 is a new machine subsystem, not a second mode in `VMManager`. The existing
+daemon may route an authenticated machine request to it, but the subsystem must
+not receive a Docker API client, `VMManager`, `PortForwarder`,
+`DirectoryShares`, Docker configuration, Kubernetes credentials, or a Docker
+VM path. Sharing a low-level lock or listener primitive is acceptable only when
+that primitive carries no Docker identity or state.
+
+| Planned component | Sole authority | Explicit non-authority |
+| --- | --- | --- |
+| `MachineImageCatalog` | Read the sealed, app-shipped curated-image list, publisher verification material, and compatible device layouts. | No mutable label, Docker image, or user-writable catalog is a curated image. |
+| `MachineImageStore` | Stage an explicit image acquisition, verify publisher material and every declared byte, then atomically expose an immutable content-addressed base. | No launch-time download, PATH/cache fallback, Docker image-cache reuse, or attachment of unverified bytes. |
+| `MachineRegistryStore` plus journal | Serialize registry writes, UUID reservation, create/import/export/delete intent, and crash recovery records. | It never stores raw cloud-config/seed data, credentials, private keys, or console transcripts. |
+| `MachineSupervisor` | Own one `VZVirtualMachine` queue and lifecycle state machine for each UUID. | It cannot call the Docker lifecycle or reuse Docker's MAC, vsock contract, disk, saved state, shares, or ports. |
+| `MachineGuestControl` | Authenticate the versioned, host-only agent and graceful shutdown request for one VM. | It cannot treat a Docker/morbinit vsock service as a machine agent or publish a network service. |
+| `MachineLoopbackRelay` (M2) | Hold one selected/random `127.0.0.1` SSH lease for a running NAT machine. | It never listens on LAN, survives stop, allocates Docker ports, or exposes an isolated machine. |
+
+The planned tree is below `~/.morbstack/data/machines/`, never beneath Docker's
+disk or runtime tree:
+
+```text
+machines/
+  registry.json                 # secret-free desired/observed records
+  registry.lock                 # serializes registry and image-cache mutation
+  images/<image-digest>/        # verified immutable regular files only
+  instances/<machine-uuid>/
+    disk.raw                    # that UUID's writable clone only
+    receipt.json                # redacted provisioning outcome
+    console.log                 # owner-only bounded retention
+    seed/                       # transient owner-only NoCloud material
+    transactions/               # durable redacted recovery journal
+    export-staging/             # one explicit export transaction
+```
+
+These are planned names, not M0-created paths. Every access must be owner-only,
+regular-file checked, and resolved beneath its expected root; opaque UUIDs and
+content digests are the only model-controlled path components. Visible names,
+archive names, and host paths never choose a machine-owned file. A per-UUID
+serialized queue prevents two lifecycle requests from constructing two VMs. The
+app sends intent over machine-specific daemon IPC and renders observation; it
+does not edit machine files or turn an app restart into a lifecycle command.
+
 ## Record, state, and image ownership
 
 The declarative machine record contains only: opaque UUID, display name, native
@@ -80,20 +125,38 @@ key, password, raw cloud-init text, terminal transcript, or Docker credential.
 ## Image provenance and compatibility
 
 The first release supports one curated cloud-image family per host architecture.
-A manifest is required before creation and contains:
+The current M0 manifest binds platform, distribution, agent protocol, required
+artifact digests, declared provenance, and expiry, but it deliberately has no
+virtual-device-layout compatibility key or pinned publisher-verifier identity.
+M1 must introduce those in an explicit versioned catalog/manifest contract; it
+must not infer that a valid M0 declaration is attachable because its declared
+verification result says `verified`.
 
-- immutable upstream publisher URL and release, plus publisher verification
-  result;
+The M1 attachability contract binds all of the following to the image digest and
+the sealed app catalog entry:
+
+- immutable upstream publisher URL and release, plus verification material,
+  expected signer identity, and verification result;
 - architecture, distribution/cloud-init version, and guest-agent protocol;
 - SHA-256 for kernel, initramfs, root disk, agent package, and seed-image input;
 - SSH, VirtioFS, and cloud-init datasource expectations; and
-- a compatibility key for virtual-device layout and boot assets.
+- a versioned compatibility key for virtual-device layout, boot assets, and
+  guest-control handshake.
 
-The fetcher downloads privately, verifies publisher metadata when available and
-every manifest digest, then atomically exposes a content-addressed cache. Bad,
-unsigned, or unverified input is not attachable. A mutable “latest” label is
-never identity. A new image has a new digest; existing machines retain their
-recorded base until a separately reviewed migration exists.
+The catalog is sealed in the signed app release; an app update is the only way
+to update trusted publisher material. Acquisition is separately initiated by a
+person, shows source, identity, architecture, and expected size before any
+networking, stages privately, verifies publisher material and every declared
+byte, then atomically exposes a content-addressed cache. There is no `latest`,
+Docker/cache/PATH fallback, account, or telemetry path. Bad, unsigned,
+mismatched, or unverified input is not attachable. A new image has a new digest;
+existing machines retain their recorded base until a separately reviewed
+migration exists.
+
+Expiry blocks a new fetch or new machine from relying on stale publisher
+verification. It never starts a download, deletes a verified base, destroys a
+machine, blocks stopped export, or strands existing user data. Updating an image
+acquires a new digest; it may not replace a base in place.
 
 Apple requires ARM64 Linux artifacts on Apple silicon and AMD64 artifacts on
 Intel. A Virtualization.framework VM emulates a machine of the same architecture
@@ -144,6 +207,12 @@ SSH is a machine capability, not key escrow:
 
 The resulting standard SSH target is the first editor integration contract. No
 editor plugin, web terminal, or direct disk access is required.
+
+M2 initially offers copy-only integration: a standard `ssh` command plus an
+SSH-config/known-hosts snippet derived from the verified fingerprint. It never
+silently edits `~/.ssh/config` or `~/.ssh/known_hosts`. Any later explicit
+installer needs its own backup, collision, and rollback contract. Convenience
+is never a reason to disable host-key checking.
 
 ## Networking modes
 
@@ -217,6 +286,37 @@ machine UUID directory and private transient artifacts. Never delete a shared
 base, selected host folder, SSH key, Docker data, another machine, or export
 destination. Failure to release a device aborts deletion and reports the state.
 
+### Planned transaction and recovery rules
+
+M1 records intent before each non-idempotent filesystem or device change and a
+terminal result afterward. On daemon ownership after an interruption it scans
+only the private instance tree: an incomplete create, delete, import, or export
+is **Recovery Required**, never silently reported as stopped or removed.
+Recovery may offer a bounded, explained retry or discard only after proving the
+exact UUID-owned files it affects. Uncertain cloud-init/agent completion retains
+the disk and says `provisioning unknown`; it is not a successful creation.
+
+Create validates the host architecture, sealed image availability, exact
+hardware, isolated device configuration, and reviewed public configuration
+before reservation. It reserves the UUID under the registry lock, clones or
+copies the verified base, prepares the private seed, validates the exact VZ
+configuration, boots, completes the per-instance agent/cloud-init handshake,
+then atomically makes the record visible. A normal Stop asks the matching agent
+to flush and power off before observing VM termination; Force Stop is a
+separately labelled unclean action. Selection, diagnostics, export, and SSH copy
+never auto-start a stopped machine.
+
+The readiness handshake must prove the expected UUID/instance ID, image digest,
+agent protocol, and cloud-init completion against a per-boot host challenge.
+Raw seed data and that challenge remain private runtime material; only a digest,
+timestamps, host-key fingerprint, and redacted outcome enter the receipt. A
+mismatch is unavailable/provisioning unknown, not ready. M2 creates its relay
+only after this check for a running NAT machine; any stop, network downgrade,
+agent loss, conflict, or identity mismatch releases the loopback listener.
+Isolated machines have no Virtio network device, share device, or SSH relay;
+changing isolated/NAT is a stopped-machine validated-device replacement, not a
+live toggle.
+
 ## Apple capability and entitlement constraints
 
 - The VM-owning daemon requires the virtualization entitlement and must validate
@@ -244,10 +344,44 @@ destination. Failure to release a device aborts deletion and reports the state.
 | M3 — export/shares | Stopped export/import; single-folder VirtioFS, read-only default, read-write review, share receipts. | Prove no Docker/global-share inheritance, ownership mutation, or delete path can touch base cache or selected host folder. |
 | M4 — advanced | Private groups; later bridge, custom links, Rosetta, graphics, USB, snapshots. | One capability at a time with entitlement review, failure injection, security audit, and native accessibility/window acceptance. |
 
-When M1 receives UI work, use a system Table of records, a selection-driven
-inspector Form, native toolbar/menu lifecycle commands, an empty-state system
-view, and standard create/export/delete sheets. Do not introduce dashboard cards,
-fake progress, a web terminal, or opaque global settings.
+## Native macOS route and promotion gates
+
+M0 does not receive an aspirational route. Once M1 has a truthful supervisor,
+Machines is a record-management task: use a system `Table` (name, state, image,
+architecture, CPU/memory, network intent), normal selection/sorting and
+`.searchable` when needed, with a selection-driven inspector `Form` for identity,
+configuration, endpoint, receipt, and recovery detail. The sidebar names the
+area; it does not become a second dashboard.
+
+| Semantic state | Native presentation and command rule |
+| --- | --- |
+| No M1 runtime / no attachable curated image | `ContentUnavailableView` with the precise unavailable reason and a non-destructive review path. No fake machines or Create button. |
+| No records | `ContentUnavailableView` with **New Machine…** only when an attachable image exists. |
+| Creating, provisioning, starting, stopping, export/import/delete | Retain the selected row and use real phase text with an indeterminate `ProgressView` in the inspector or standard sheet. Offer Cancel only with a defined cancellation/recovery path; never invent a percentage. |
+| Running / stopped | **Stop** / **Start** respectively is the primary lifecycle command. SSH copy appears only after verified readiness and a live loopback lease. |
+| Provisioning unknown, error, interrupted transaction | The inspector states the safe error and exact recovery choices. There is no generic “fix it”, auto-restart, or destructive cleanup. |
+| Export/delete/import replacement | Use standard sheets with exact machine name and affected disk/endpoints/shares. Multiple deletion requires exact-name confirmation and is never a one-click toolbar action. |
+
+Lifecycle commands live in the route toolbar and scoped **Machine** menu;
+secondary operations use a standard `Menu` or contextual menu. Per-machine
+controls never move into global settings. Use standard forms, buttons,
+confirmation dialogs, inspector behavior, and accessibility labels—not cards,
+custom pills, a web terminal, custom progress dashboard, or a parallel visual
+system.
+
+M1 is not promoted from planned to implemented until all of these have dated
+evidence from a signed, real app/daemon installation. Source review or a
+fixture alone is insufficient.
+
+| Gate | Required proof |
+| --- | --- |
+| **G0 — migration and ownership** | M0 data has an explicit compatible migration or remains read-only; M1 does not reinterpret `stopped`/`unavailable`. Registry, journal, image, and instance paths reject traversal/symlinks and retain owner-only permissions. |
+| **G1 — pinned base** | A person-initiated catalog acquisition verifies publisher material and every byte; it rejects bad, wrong-architecture, expired input and exposes no partial base. No launch-time network or Docker/PATH/cache fallback. |
+| **G2 — isolated lifecycle** | Create/start/normal stop/force stop/delete plus each interrupted phase show truthful recovery. Before/after evidence proves Docker VM state, disk, socket, Kubernetes, shares, MAC, and published ports are unchanged. |
+| **G3 — provisioning and SSH** | NoCloud accepts reviewed public input, redacts seed data, and requires the matching agent handshake. Private keys never enter records/logs/diagnostics/exports; NAT SSH is machine-owned loopback only, and isolated machines expose none. |
+| **G4 — portable data and shares** | Stopped export/import verifies data and creates a new UUID; cancellation/failure leaves source/destination safe. Scoped read-only and reviewed read-write shares prove no Docker/global-share inheritance or ownership mutation. |
+| **G5 — native accessibility** | Real WindowServer review covers light/dark, normal/narrow widths, sidebar/inspector/table sort and selection, keyboard/focus, VoiceOver, progress/error/recovery, accessibility display settings, and destructive confirmation. |
+| **G6 — clean profile** | A fresh profile creates, reaches over SSH, stops, exports, imports, and deletes a machine while Docker state stays unchanged, without Docker Desktop, account setup, telemetry, or manual environment wiring. |
 
 ## Primary sources
 
