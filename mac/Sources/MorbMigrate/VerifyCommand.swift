@@ -33,24 +33,29 @@ enum VerifyCommand {
         let assumeYes = args.flag("yes")
         let destination = EngineClient()
 
-        let source: MigrationSource
-        do {
-            source = try SourceResolver.resolve(from: args.option("from"))
-        } catch {
-            errOut("\(error)")
-            return 2
-        }
-
         var imageRefs: [String] = []
         var volumeNames: [String] = []
+        var sourceToken = args.option("from")
+        var loadedReportPath: String?
 
         if let reportPath = args.option("report") {
-            guard let report = MigrateReport.load(from: URL(fileURLWithPath: reportPath)) else {
+            let url = URL(fileURLWithPath: reportPath)
+            if let report = ImageMigrationTransactionReport.load(from: url) {
+                // A structured images-only report is already independently verified
+                // during `run`; this optional command repeats the comparison later and
+                // intentionally exposes a prior failed item as missing or different.
+                // Exclude only items deliberately cancelled before it could begin.
+                imageRefs = report.items.filter { $0.outcome != .cancelled }.map(\.reference)
+                if sourceToken == nil { sourceToken = report.source.socketPath }
+                loadedReportPath = reportPath
+            } else if let report = MigrateReport.load(from: url) {
+                imageRefs = report.images.filter { $0.status == "copied" }.map(\.reference)
+                volumeNames = report.volumes.filter { $0.status == "copied" }.map(\.name)
+                loadedReportPath = reportPath
+            } else {
                 errOut("could not read report at \(reportPath)")
                 return 2
             }
-            imageRefs = report.images.filter { $0.status == "copied" }.map(\.reference)
-            volumeNames = report.volumes.filter { $0.status == "copied" }.map(\.name)
         } else if let mostRecent = MigrateReport.mostRecent(), args.option("images") == nil, args.option("volumes") == nil {
             imageRefs = mostRecent.images.filter { $0.status == "copied" }.map(\.reference)
             volumeNames = mostRecent.volumes.filter { $0.status == "copied" }.map(\.name)
@@ -61,6 +66,17 @@ enum VerifyCommand {
         }
         if let explicit = args.option("volumes") {
             volumeNames = explicit.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }
+        }
+
+        let source: MigrationSource
+        do {
+            source = try SourceResolver.resolve(from: sourceToken)
+        } catch {
+            errOut("\(error)")
+            return 2
+        }
+        if let loadedReportPath {
+            out("Using migration report: \(loadedReportPath)\n")
         }
         if imageRefs.isEmpty, volumeNames.isEmpty {
             // Nothing named explicitly and no report to read — fall back to "everything

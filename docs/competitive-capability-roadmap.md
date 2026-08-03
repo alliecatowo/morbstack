@@ -40,7 +40,7 @@ larger feature checklist.
 | Native operations app | `MorbstackAppCore` has real containers, stacks, images, volumes, networks, builds, Kubernetes, disk, and migration routes; `DockerClient.swift` performs real lifecycle, log, stats, inspection, and prune API calls. | Implemented surface. It is not a reason to defer behavioral gaps below. |
 | Self-contained CLI, standard plugins, context, direct discovery, and opt-in service | `CliPlugins.swift`, `MorbCliInstallation.swift`, `MorbDockerContext.swift`, `BackgroundService.swift`, and `MorbSetupVerification.swift`. The service is a signed per-user `SMAppService` LaunchAgent, not a root daemon. | Implemented pending one complete, fresh-user proof: install → selected integrations → service → engine start → Docker `/_ping` → Compose/buildx/Testcontainers/IDE discovery. |
 | Kubernetes and recovery | `guest/morbinit/src/k8s.rs`, `K8sRuntime.swift`, the Kubernetes route, and `k8s-diagnose`. | Opt-in cluster and diagnosis exist. Missing are safe workload-level logs, events, exec, and port-forward operations with clear cancellation/recovery. |
-| Migration | `MorbMigrate` has explicit image/volume/config/verify commands; the app's Migration route is read-only inspection. `MigrateCLI.unavailableRun()` intentionally rejects a combined migration. | Good safety boundary, incomplete flow. There is no selected-transfer plan/report/resume/rollback-guidance transaction. |
+| Migration | `MigrationReadOnlyPlanner` derives a read-only image comparison; `ImageMigrationTransaction` and `morb migrate run` execute an explicitly selected images-only transfer with one confirmation, typed progress, post-load image-ID verification, and a durable report. The app route remains inspection-only. | Images-only transaction implemented pending real-engine acceptance. Volumes, bind mounts, containers, CLI configuration, credentials, registry/provenance policy, resumable cancellation, and automatic rollback remain deliberately out of scope. |
 | Filesystem sharing | VirtioFS same-path sharing and share inspection are implemented; [`sharing.md`](sharing.md) records that host edits do not emit guest inotify events. | Day-to-day hot reload remains broken. Silent unshared/misresolved source behavior is still too dangerous. |
 | Published ports | `PortForwarder.swift` forwards TCP loopback. `DockerProxy` applies a bounded explicit-create preflight using `HostPortPreflight`, so a normally encoded `docker run -p <port>:...` rejects a currently held TCP loopback port before the guest receives the create; explicit UDP and unsupported host-address publishes also reject instead of pretending to publish. | The snapshot closes before Docker starts: it is not a TCP lease and does not cover dynamic/ranged ports, separately-created containers started later, or the race after the check. UDP forwarding remains absent. |
 | Disk management | `DiskCapacity.swift` is a correct read-only preflight. | Grow-only resize is deliberately unavailable until the guest filesystem protocol exists; shrinking must remain unsupported. |
@@ -133,11 +133,11 @@ user selected/shared; it must not watch the whole disk or install a helper.
 lists, inspection, logs, stats, lifecycle, and destructive confirmations.
 Finish workflows rather than adding dashboard panels.
 
-1. **Migration transaction:** expose a structured selected-items plan from
-   `MorbMigrate`, require a dry run and confirmation, stream image/volume
-   progress, write a precise report, verify, and give rollback *guidance* that
-   never destroys the source runtime. Keep the app read-only until those shared
-   primitives exist.
+1. **Migration transaction:** selected local-image planning, confirmation,
+   typed progress, report, and image-ID verification exist in `MorbMigrate`.
+   Complete separately proven volume/bind-mount transfer, resumable cancellation,
+   credential/provenance remediation, and rollback *guidance* that never destroys
+   the source runtime. Keep the app read-only until each shared primitive exists.
 2. **Debug toolbox:** the read-only readiness and target-plan boundary exists;
    ship its executor only with a pinned, signed toolbox image, provenance,
    expiry/update policy, namespace/cleanup rules, and a real interactive PTY

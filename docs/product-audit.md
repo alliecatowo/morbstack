@@ -87,9 +87,10 @@ guarantee.
    stack actions, container logs/stats/exec/debug, safe image/volume export
    and inspection, and Kubernetes workload/event/log/exec/port-forward
    operations with reasons and recovery.
-5. Finish a non-destructive native migration assistant: detect, dry run,
-   selected image/volume transfer, verification, report, rollback guidance
-   and explicit credential remediation.
+5. Finish a non-destructive native migration assistant: selected local-image
+   preparation/confirmation/verification/report now exists in the service and
+   CLI; add separately proven volume transfer, native confirmation/progress,
+   rollback guidance, and explicit credential remediation.
 
 ### P2 — exceed the competing native experience
 

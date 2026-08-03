@@ -105,17 +105,17 @@ enum DetectCommand {
         if running.isEmpty {
             out("  No other running runtime was found, so there is nothing to migrate from yet.")
             out("  Start Docker Desktop (or Colima, or OrbStack) and run `morb migrate detect` again,")
-            out("  or inspect an explicit source with `morb migrate images --from <runtime-or-socket> --dry-run`.")
+            out("  or inspect an explicit source with `morb migrate plan --from <runtime-or-socket>`.")
         } else if running.count > 1 {
             out("  More than one other runtime is running (\(running.map(\.name).joined(separator: ", "))).")
-            out("  Pick one explicitly with `morb migrate images --from <runtime> --dry-run`; nothing runs automatically.")
+            out("  Pick one explicitly with `morb migrate plan --from <runtime>`; nothing runs automatically.")
         } else if let only = running.first {
             let source = sourceToken(for: only)
             out("  \(only.name) has \(only.images.map(String.init) ?? "?") image(s) and \(only.volumes.map(String.init) ?? "?") volume(s).")
-            out("  Review each transfer with `morb migrate images --from \(source) --dry-run` and")
-            out("  `morb migrate volumes --from \(source) --dry-run`, then run those commands explicitly")
-            out("  and finish with `morb migrate verify --from \(source)`. The combined `morb migrate run`")
-            out("  workflow is intentionally unavailable until it can write an accurate, scoped report.")
+            out("  Review the image plan with `morb migrate plan --from \(source)`, then run")
+            out("  `morb migrate run --from \(source) --image <reference>` for each selected image")
+            out("  (or the explicitly broad `--all-images`). This transaction verifies its selected")
+            out("  images and writes a report. Volumes remain a separate, explicitly reviewed workflow.")
         }
     }
 

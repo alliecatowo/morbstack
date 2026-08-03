@@ -78,7 +78,7 @@ enum MigrateCLI {
             return usageError(error)
 
         case "run":
-            return unavailableRun()
+            return RunImagesCommand.run(arguments: commandArguments, json: json)
 
         default:
             return usageError("unknown subcommand `\(command)`")
@@ -120,18 +120,6 @@ enum MigrateCLI {
         return nil
     }
 
-    /// `ImagesCommand` and `VolumesCommand` do not expose the copied item lists;
-    /// `VerifyCommand` therefore cannot be limited to the objects a combined command
-    /// just transferred, and `MigrateReport` cannot be written accurately.  Calling
-    /// them in sequence would look like the documented all-in-one migration while
-    /// omitting its essential report and verification guarantees.  Keep that gap
-    /// visible until those primitives have a shared result model.
-    private static func unavailableRun() -> Int32 {
-        errOut("`run` is not available yet: the existing image and volume commands do not expose the results needed to write an accurate migration report and verify exactly what was copied")
-        errOut("run `morb migrate images`, `morb migrate volumes`, then `morb migrate verify` explicitly")
-        return 2
-    }
-
     private static func usageError(_ message: String) -> Int32 {
         errOut(message)
         FileHandle.standardError.write(Data("\n".utf8))
@@ -147,6 +135,7 @@ enum MigrateCLI {
           detect                 Survey local container runtimes (the default).
           config                 Inspect Docker CLI configuration, read-only.
           plan [options]         Derive a read-only source/destination image plan.
+          run [options]          Import an explicitly selected image set, verify it, and write a report.
           images [options]       Copy images into Morbstack.
           volumes [options]      Copy named volumes into Morbstack.
           verify [options]       Compare images and volumes between engines.
@@ -163,6 +152,13 @@ enum MigrateCLI {
           --filter <text>          Include matching tagged images only.
           --all                    Include dangling images.
 
+        Run options (images only):
+          --from <runtime|socket>  Docker Desktop, Colima, OrbStack, or a socket path.
+          --image <reference>      Select one planned image; repeat for more images.
+          --all-images             Explicitly select every currently planned tagged image.
+          --dry-run                Prepare and print the exact selected image set without changing anything.
+          --yes                    Skip the terminal confirmation after reviewing the selection.
+
         Volume options:
           --from <runtime|socket>  Docker Desktop, Colima, OrbStack, or a socket path.
           --filter <text>          Copy matching named volumes only.
@@ -177,7 +173,10 @@ enum MigrateCLI {
           --report <path>          Read copied items from a migration report.
           --yes                    Allow required helper-image pulls.
 
-        Pass --json before the subcommand for machine-readable output.
+        `run` does not migrate volumes, bind mounts, containers, Docker CLI configuration,
+        credentials, or registry state. It uses local image archives only. Pass --json
+        before the subcommand for machine-readable output; JSON `run` requires --yes
+        unless it is a --dry-run.
         """
         output.write(Data((usage + "\n").utf8))
     }

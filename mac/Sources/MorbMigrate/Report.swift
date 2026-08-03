@@ -1,10 +1,12 @@
 // Copyright 2026 The Morbstack Authors.
 // Licensed under the Apache License, Version 2.0 (the "License").
 //
-// The record `morb migrate run` leaves behind at `~/.morbstack/migrate/<timestamp>.json`
-// — what `morb migrate verify --report <path>` reads back to know what to check, and
-// what `morb migrate rollback` reads to know which context to name in the one command
-// it prints.
+// The legacy combined-migration report shape. Earlier explicit `images`/`volumes`
+// commands did not write it, but `morb migrate verify --report` still understands it
+// for compatibility with any report a development checkout produced. The executable
+// images-only transaction writes the typed `ImageMigrationTransactionReport` in
+// ImageMigrationTransaction.swift instead; it has its own scoped verification and
+// rollback guidance and does not imply a volume/config migration.
 
 import Foundation
 import MorbFeatures
@@ -31,9 +33,8 @@ struct MigrateReport: Codable {
     var verifyMatch: Int
     var verifyDiffer: Int
     var verifyMissing: Int
-    /// `docker config.json`'s `currentContext` at the moment `run` started, read before
-    /// anything else happened — this is the one piece of state `morb migrate rollback`
-    /// exists to hand back.
+    /// Retained solely for decoding legacy reports. No current `morb migrate run`
+    /// operation changes Docker CLI context or writes this field.
     var previousDockerContext: String
 
     enum CodingKeys: String, CodingKey {
