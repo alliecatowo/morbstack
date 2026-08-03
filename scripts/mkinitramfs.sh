@@ -5,7 +5,8 @@
 # Assembles a gzipped newc cpio archive containing:
 #   - the Alpine 3.24.1 aarch64 minirootfs (dist/rootfs/alpine-minirootfs.tar.gz)
 #   - morbinit (cross-compiled Rust PID 1) installed as /init
-#   - the static Docker 29.7.1 aarch64 engine binaries (dist/guest-bin/*)
+#   - the static Docker 29.7.1 aarch64 engine binaries (dist/guest-bin/*),
+#     with an optional version-pinned Moby-patched `morbstack-dockerd`
 #     installed into /usr/local/bin
 #   - /usr/share/udhcpc/default.script (Alpine ships one; we only write a
 #     fallback if it's somehow missing)
@@ -40,6 +41,7 @@ DEST_FILE="${DEST_DIR}/initrd.img"
 
 ROOTFS_TARBALL="${REPO_ROOT}/dist/rootfs/alpine-minirootfs.tar.gz"
 GUEST_BIN_DIR="${REPO_ROOT}/dist/guest-bin"
+PATCHED_DOCKERD_BIN="${GUEST_BIN_DIR}/morbstack-dockerd"
 APKS_DIR="${REPO_ROOT}/dist/apks"
 MORBINIT_DIR="${REPO_ROOT}/guest/morbinit"
 MORBINIT_BIN="${MORBINIT_DIR}/target/aarch64-unknown-linux-musl/release/morbinit"
@@ -204,8 +206,13 @@ mkdir -p "${STAGE_DIR}/usr/local/bin"
 for f in "${GUEST_BIN_DIR}"/*; do
 	base="$(basename "${f}")"
 	[ "${base}" = "PROVENANCE.txt" ] && continue
+	[ "${base}" = "morbstack-dockerd" ] && continue
 	install -m 0755 "${f}" "${STAGE_DIR}/usr/local/bin/${base}"
 done
+if [ -x "${PATCHED_DOCKERD_BIN}" ]; then
+	install -m 0755 "${PATCHED_DOCKERD_BIN}" "${STAGE_DIR}/usr/local/bin/dockerd"
+	echo "Using pinned Morbstack-patched dockerd: ${PATCHED_DOCKERD_BIN}"
+fi
 
 # ---------------------------------------------------------------------------
 # fsutils: btrfs-progs, e2fsprogs, iptables-legacy + their full .so

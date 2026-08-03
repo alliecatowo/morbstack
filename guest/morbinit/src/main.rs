@@ -54,6 +54,7 @@ mod log;
 mod mounts;
 mod net;
 mod netaddr;
+mod publish_all;
 mod k8s;
 mod live_share;
 mod proxy;
@@ -357,6 +358,17 @@ fn real_init() {
             "FATAL: could not bind vsock datagram-dial port {}: published UDP \
              container ports will not be reachable from the host ({})",
             datagram::VSOCK_DATAGRAM_DIAL_PORT,
+            e
+        ));
+    }
+
+    // `docker run -P` / `--publish-all` asks patched Moby to reserve the
+    // complete effective EXPOSE set through this guest-to-host broker at each
+    // container start. It is independent from the data-plane dialers above.
+    if let Err(e) = publish_all::spawn_publish_all_allocator() {
+        log::log(&format!(
+            "FATAL: could not bind vsock publish-all allocator port {}: {} — Docker -P will fail clearly",
+            publish_all::VSOCK_PUBLISH_ALL_ALLOCATOR_PORT,
             e
         ));
     }

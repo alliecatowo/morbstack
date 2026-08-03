@@ -1823,4 +1823,6 @@ public enum MorbVsockPorts {
     /// The stream transport preserves each UDP payload with explicit frames; see
     /// ``DatagramDial`` for the handshake and data-plane contract.
     public static let datagramDial: UInt32 = 2378
+    /// Per-container host allocator sessions used by patched Moby for `docker -P`.
+    public static let publishAllAllocator: UInt32 = 2379
 }

@@ -88,6 +88,16 @@ struct DockerDynamicPortPublication: Hashable, Sendable {
     let containerPort: Int
 }
 
+/// One effective `PublishAllPorts` mapping emitted by patched Moby at container
+/// start. Unlike a create document, this already includes image `EXPOSE` ports;
+/// the host must reserve every entry before replying to the guest allocator.
+struct DockerPublishAllPortRequest: Hashable, Sendable {
+    let transport: DockerDynamicPortTransport
+    let hostIP: String
+    let requestedHostPort: Int
+    let containerPort: Int
+}
+
 /// A bounded dynamic-host-port create document that can be transformed before it
 /// reaches the guest Engine.
 ///
@@ -228,6 +238,25 @@ public enum DockerPortPublicationPreflight {
     /// ``maximumSynchronousFixedPortBindings`` so a mixed TCP+UDP request cannot grow
     /// beyond the same bounded lease transaction.
     public static let maximumSynchronousFixedTCPBindings = maximumSynchronousFixedPortBindings
+
+    /// Proves that an inspect response belongs to the immutable ID in a pending
+    /// start/restart request and uses Engine-owned `PublishAllPorts` allocation.
+    /// No image metadata is inferred on the host: patched Moby expands `EXPOSE`
+    /// inside the guest and calls back only after this narrow proof succeeds.
+    static func stoppedContainerUsesPublishAllPorts(in body: Data, expectedContainerID: String) -> Bool {
+        guard
+            isFullContainerID(expectedContainerID),
+            let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+            (object["Id"] as? String) == expectedContainerID,
+            let state = object["State"] as? [String: Any],
+            (state["Running"] as? Bool) == false,
+            let hostConfig = object["HostConfig"] as? [String: Any],
+            (hostConfig["PublishAllPorts"] as? Bool) == true
+        else {
+            return false
+        }
+        return true
+    }
 
     public enum Verdict: Equatable, Sendable {
         case allowed
@@ -788,9 +817,11 @@ public enum DockerPortPublicationPreflight {
             return .notDynamic
         }
 
+        // `-P` is allocated at guest start after Moby merges image EXPOSE ports.
+        // It must not enter this create-time rewrite path: the patched Engine asks
+        // the host allocator for the complete effective set atomically instead.
         if let publishAllPorts = hostConfig["PublishAllPorts"] as? Bool, publishAllPorts {
-            return .rejected(
-                message: "dynamic published ports with PublishAllPorts (-P) are not supported yet")
+            return .notDynamic
         }
 
         guard let portBindings = hostConfig["PortBindings"] as? [String: Any] else {

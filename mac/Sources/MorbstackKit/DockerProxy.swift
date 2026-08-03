@@ -270,6 +270,7 @@ public final class DockerProxy {
     private enum PortLeaseObservation {
         case create(PortForwarder.PortLease)
         case start(PortForwarder.PortLease)
+        case publishAllStart(PublishAllPortAllocator.Session)
     }
 
     /// Performs a bounded `MSG_PEEK` for only the normal fixed-length create and
@@ -437,12 +438,65 @@ public final class DockerProxy {
                         return
                     }
 
-                    let observation = self.forwarder.claimStartLease(containerIdentifier: containerID)
-                        .map(PortLeaseObservation.start)
+                    if let lease = self.forwarder.claimStartLease(containerIdentifier: containerID) {
+                        self.relayAfterPreflight(
+                            clientFD: clientFD,
+                            createBody: nil,
+                            leaseObservation: .start(lease))
+                    } else if self.forwarder.stoppedContainerUsesPublishAllPorts(containerID: containerID) {
+                        self.beginPublishAllStart(
+                            clientFD: clientFD,
+                            containerID: containerID,
+                            operation: operation)
+                    } else {
+                        self.relayAfterPreflight(clientFD: clientFD, createBody: nil, leaseObservation: nil)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Opens the per-container host allocator session before Moby receives the
+    /// exact start request. The session does not allocate anything eagerly; it
+    /// waits until Moby has expanded the image's effective `EXPOSE` set.
+    private func beginPublishAllStart(
+        clientFD: Int32,
+        containerID: String,
+        operation: ContainerLifecycleOperation
+    ) {
+        vm.connectVsock(port: MorbVsockPorts.publishAllAllocator) { [weak self] result in
+            guard let self else {
+                Darwin.close(clientFD)
+                return
+            }
+            switch result {
+            case .failure(let error):
+                self.rejectContainerLifecycle(
+                    clientFD: clientFD,
+                    statusCode: 500,
+                    reason: "Internal Server Error",
+                    message: "could not reach the host publish-all allocator: \(error.localizedDescription)",
+                    operation: operation)
+            case .success(let fd):
+                do {
+                    let session = PublishAllPortAllocator.Session(
+                        fd: fd,
+                        containerID: containerID,
+                        forwarder: self.forwarder,
+                        log: self.log)
+                    try session.start()
                     self.relayAfterPreflight(
                         clientFD: clientFD,
                         createBody: nil,
-                        leaseObservation: observation)
+                        leaseObservation: .publishAllStart(session))
+                } catch {
+                    Darwin.close(fd)
+                    self.rejectContainerLifecycle(
+                        clientFD: clientFD,
+                        statusCode: 500,
+                        reason: "Internal Server Error",
+                        message: "could not register the host publish-all allocator: \(error.localizedDescription)",
+                        operation: operation)
                 }
             }
         }
@@ -831,6 +885,11 @@ public final class DockerProxy {
                 }
                 _ = forwarder.completeStart(lease, succeeded: succeeded)
             }
+
+        case .publishAllStart(let session):
+            return DockerPortLeaseResponseObserver(kind: .start) { outcome in
+                session.complete(succeeded: outcome == .startSucceeded)
+            }
         }
     }
 
@@ -842,6 +901,7 @@ public final class DockerProxy {
         switch observation {
         case .create(let lease): forwarder.abandon(lease, reason: reason)
         case .start(let lease): _ = forwarder.completeStart(lease, succeeded: false)
+        case .publishAllStart(let session): session.complete(succeeded: false)
         }
     }
 

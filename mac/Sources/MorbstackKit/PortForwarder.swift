@@ -282,6 +282,9 @@ public final class PortForwarder {
         var containerID: String?
         var startClaimed = false
         var isForwarding = false
+        /// `PublishAllPorts` allocations belong to one Engine start only. Moby keeps
+        /// the config dynamic, so a later stop must close rather than pause them.
+        var releaseOnStop = false
     }
 
     enum PortLeaseError: LocalizedError {
@@ -513,6 +516,76 @@ public final class PortForwarder {
         return reservation
     }
 
+    /// Reserves the complete effective `docker -P` set reported by patched Moby.
+    /// The Unix/vsock bridge has already proved the immutable container ID; all
+    /// entries are held as one transaction and are released on the next stop so Moby
+    /// can allocate a fresh set on restart.
+    func reservePublishAllPorts(
+        containerID: String,
+        requests: [DockerPublishAllPortRequest]
+    ) throws -> [Int] {
+        guard DockerPortPublicationPreflight.isFullContainerID(containerID),
+              !requests.isEmpty,
+              requests.count <= DockerPortPublicationPreflight.maximumSynchronousFixedPortBindings
+        else {
+            throw PortLeaseError.unavailable("invalid Docker publish-all allocation request")
+        }
+
+        var fixedTCP: [DockerExplicitTCPPortBinding] = []
+        var fixedUDP: [DockerExplicitUDPPortBinding] = []
+        var dynamic: [DockerDynamicPortPublication] = []
+        dynamic.reserveCapacity(requests.count)
+        for request in requests {
+            let allowedAddresses = request.transport == .tcp
+                ? PortForwardPlan.forwardableHostAddresses
+                : PortForwardPlan.forwardableUDPHostAddresses
+            guard allowedAddresses.contains(request.hostIP),
+                  (0...65535).contains(request.requestedHostPort),
+                  (1...65535).contains(request.containerPort)
+            else {
+                throw PortLeaseError.unavailable("unsupported Docker publish-all host publication")
+            }
+            if request.requestedHostPort == 0 {
+                dynamic.append(DockerDynamicPortPublication(
+                    transport: request.transport,
+                    hostIP: request.hostIP,
+                    hostPort: 0,
+                    containerPort: request.containerPort))
+            } else if request.transport == .tcp {
+                fixedTCP.append(DockerExplicitTCPPortBinding(
+                    hostIP: request.hostIP,
+                    hostPort: request.requestedHostPort,
+                    containerPort: request.containerPort))
+            } else {
+                fixedUDP.append(DockerExplicitUDPPortBinding(
+                    hostIP: request.hostIP,
+                    hostPort: request.requestedHostPort,
+                    containerPort: request.containerPort))
+            }
+        }
+
+        guard case .reserved(let reservation) = try reservePorts(
+            fixedTCP: fixedTCP,
+            fixedUDP: fixedUDP,
+            dynamic: dynamic,
+            releaseOnStop: true)
+        else {
+            throw PortLeaseError.unavailable("publish-all allocation became stale")
+        }
+        guard associate(reservation.lease, withContainerID: containerID) else {
+            abandon(reservation.lease, reason: "publish-all allocation could not be associated with its container")
+            throw PortLeaseError.unavailable("publish-all allocation lost its container identity")
+        }
+        var dynamicPublications = reservation.publications.makeIterator()
+        return try requests.map { request in
+            guard request.requestedHostPort == 0 else { return request.requestedHostPort }
+            guard let publication = dynamicPublications.next() else {
+                throw PortLeaseError.unavailable("publish-all allocation returned the wrong number of ports")
+            }
+            return publication.hostPort
+        }
+    }
+
     /// Rebuilds the complete fixed TCP/UDP lease after VM stop. Recovery is all or
     /// nothing: inspect must prove every retained binding before the host opens one
     /// socket, otherwise the lifecycle request remains an ordinary raw relay.
@@ -568,6 +641,28 @@ public final class PortForwarder {
         }
     }
 
+    /// Inspects an immutable stopped container only to decide whether the
+    /// publish-all host session is needed. The effective endpoint set stays in
+    /// Moby because only Moby has merged image `EXPOSE` metadata at this point.
+    func stoppedContainerUsesPublishAllPorts(
+        containerID: String,
+        timeout: TimeInterval = 5
+    ) -> Bool {
+        guard DockerPortPublicationPreflight.isFullContainerID(containerID) else { return false }
+        let inspectBody: Data
+        do {
+            inspectBody = try getEngineJSON(
+                path: DockerAPIDecoding.containerInspectPath(containerID: containerID),
+                timeout: timeout)
+        } catch {
+            log.info("could not inspect stopped container \(String(containerID.prefix(12))) for publish-all recovery: \(error)")
+            return false
+        }
+        return DockerPortPublicationPreflight.stoppedContainerUsesPublishAllPorts(
+            in: inspectBody,
+            expectedContainerID: containerID)
+    }
+
     /// The one ledger lock covers all fixed TCP/UDP binds and dynamic TCP/UDP
     /// allocation. A failed bind rolls every listener from this request back before
     /// Docker sees a create/start success, so the host never reports a partial lease.
@@ -575,7 +670,8 @@ public final class PortForwarder {
         fixedTCP: [DockerExplicitTCPPortBinding],
         fixedUDP: [DockerExplicitUDPPortBinding],
         dynamic: [DockerDynamicPortPublication],
-        startLeaseAssociation: StartLeaseAssociation? = nil
+        startLeaseAssociation: StartLeaseAssociation? = nil,
+        releaseOnStop: Bool = false
     ) throws -> PortLeaseReservationAttempt {
         let leaseID = UUID()
         var tcpListeners: [Int: TCPListener] = [:]
@@ -710,7 +806,8 @@ public final class PortForwarder {
                 lease: lease,
                 tcpListeners: tcpListeners,
                 udpListeners: udpListeners,
-                containerID: startLeaseAssociation?.containerID)
+                containerID: startLeaseAssociation?.containerID,
+                releaseOnStop: releaseOnStop)
             if let startLeaseAssociation {
                 leaseByContainerID[startLeaseAssociation.containerID] = lease.identifier
             }
@@ -917,6 +1014,13 @@ public final class PortForwarder {
     /// socket for a later start. UDP flows are closed before the held socket returns
     /// to drain-only mode, so no datagram can cross a stopped-container lifecycle.
     private func deactivateLease(_ identifier: UUID, reason: String) {
+        lock.lock()
+        let releaseOnStop = leases[identifier]?.releaseOnStop ?? false
+        lock.unlock()
+        if releaseOnStop {
+            releaseLease(identifier, reason: reason)
+            return
+        }
         var tcpListeners: [TCPListener] = []
         var udpListeners: [UDPListener] = []
         var flows: [UDPFlow] = []

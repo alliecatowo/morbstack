@@ -1,0 +1,199 @@
+From 0d5c4b1df1f5d75c0a2ef4d3c15b59f2dc478941 Mon Sep 17 00:00:00 2001
+From: Morbstack Authors <engineering@morbstack.dev>
+Date: Mon, 3 Aug 2026 12:00:00 -0700
+Subject: [PATCH] daemon: allocate publish-all ports through Morbstack host
+
+Morbstack's Docker Engine runs in a Linux VM, while published container
+ports must be held on the Mac host.  For an explicit `-p`, the host proxy can
+hold the requested endpoint before create.  `-P` is different: Moby expands
+the effective set only after merging the image Config.ExposedPorts, and it
+must choose a fresh set on every start.
+
+Ask the guest's local morbinit broker to allocate that effective complete set
+at the point Moby has expanded it, then use the returned ports only in this
+start-local PortMap.  HostConfig remains untouched, preserving normal Moby
+reallocation after stop/restart.  The broker addresses the Mac host over a
+per-container vsock session and returns an all-or-nothing allocation.
+
+This is intentionally a small, version-pinned downstream patch.  It has no
+effect unless HostConfig.PublishAllPorts is set.
+---
+ daemon/morbstack_publish_all.go | 166 ++++++++++++++++++++++++++++++++++
+ daemon/network.go               |   8 ++
+ 2 files changed, 174 insertions(+)
+ create mode 100644 daemon/morbstack_publish_all.go
+
+diff --git a/daemon/morbstack_publish_all.go b/daemon/morbstack_publish_all.go
+new file mode 100644
+index 000000000000..f490e4f4a710
+--- /dev/null
++++ b/daemon/morbstack_publish_all.go
+@@ -0,0 +1,144 @@
++package daemon
++
++import (
++	"bufio"
++	"fmt"
++	"net"
++	"net/netip"
++	"sort"
++	"strconv"
++	"strings"
++	"time"
++
++	networktypes "github.com/moby/moby/api/types/network"
++)
++
++const (
++	morbstackPublishAllSocket  = "/run/morbstack/publish-all.sock"
++	morbstackPublishAllTimeout = 15 * time.Second
++	morbstackPublishAllMax     = 128
++)
++
++// morbstackPublishAllCandidate records one effective mapping in stable request
++// order. The corresponding PortMap is deliberately rebuilt rather than
++// modifying HostConfig: Moby's regular PublishAllPorts lifecycle must remain
++// free to choose a new allocation after each stop.
++type morbstackPublishAllCandidate struct {
++	port     networktypes.Port
++	hostIP   netip.Addr
++	hostPort string
++}
++
++func morbstackAllocatePublishAllPorts(containerID string, ports networktypes.PortMap) (networktypes.PortMap, error) {
++	if len(ports) == 0 {
++		return ports, nil
++	}
++
++	keys := make([]networktypes.Port, 0, len(ports))
++	for port := range ports {
++		keys = append(keys, port)
++	}
++	sort.Slice(keys, func(i, j int) bool { return keys[i].String() < keys[j].String() })
++
++	candidates := make([]morbstackPublishAllCandidate, 0, len(keys))
++	for _, port := range keys {
++		protocol := string(port.Proto())
++		if protocol != "tcp" && protocol != "udp" {
++			return nil, fmt.Errorf("Morbstack cannot publish all %s ports", protocol)
++		}
++		bindings := ports[port]
++		if len(bindings) == 0 {
++			candidates = append(candidates, morbstackPublishAllCandidate{port: port})
++			continue
++		}
++		for _, binding := range bindings {
++			if binding.HostPort != "" {
++				value, err := strconv.ParseUint(binding.HostPort, 10, 16)
++				if err != nil {
++					return nil, fmt.Errorf("Morbstack cannot allocate publish-all HostPort %q: %w", binding.HostPort, err)
++				}
++				if value == 0 {
++					return nil, fmt.Errorf("Morbstack cannot allocate zero publish-all HostPort")
++				}
++			}
++			candidates = append(candidates, morbstackPublishAllCandidate{port: port, hostIP: binding.HostIP, hostPort: binding.HostPort})
++		}
++	}
++	if len(candidates) > morbstackPublishAllMax {
++		return nil, fmt.Errorf("Morbstack publish-all has %d bindings; limit is %d", len(candidates), morbstackPublishAllMax)
++	}
++
++	connection, err := net.DialTimeout("unix", morbstackPublishAllSocket, morbstackPublishAllTimeout)
++	if err != nil {
++		return nil, fmt.Errorf("Morbstack host port allocator unavailable: %w", err)
++	}
++	defer connection.Close()
++	if err := connection.SetDeadline(time.Now().Add(morbstackPublishAllTimeout)); err != nil {
++		return nil, fmt.Errorf("set Morbstack allocator deadline: %w", err)
++	}
++
++	writer := bufio.NewWriter(connection)
++	if _, err := fmt.Fprintf(writer, "ALLOC %s %d\\n", containerID, len(candidates)); err != nil {
++		return nil, err
++	}
++	for _, candidate := range candidates {
++		hostIP := "-"
++		if candidate.hostIP.IsValid() {
++			hostIP = candidate.hostIP.String()
++		}
++		hostPort := candidate.hostPort
++		if hostPort == "" {
++			hostPort = "0"
++		}
++		if _, err := fmt.Fprintf(writer, "%s %d %s %s\\n", candidate.port.Proto(), candidate.port.Num(), hostIP, hostPort); err != nil {
++			return nil, err
++		}
++	}
++	if err := writer.Flush(); err != nil {
++		return nil, err
++	}
++
++	reader := bufio.NewReader(connection)
++	header, err := morbstackPublishAllLine(reader)
++	if err != nil {
++		return nil, err
++	}
++	if reason, ok := strings.CutPrefix(header, "ERR "); ok {
++		return nil, fmt.Errorf("Morbstack host port allocator: %s", reason)
++	}
++	if header != fmt.Sprintf("OK %d", len(candidates)) {
++		return nil, fmt.Errorf("Morbstack host port allocator returned invalid reply %q", header)
++	}
++
++	allocated := make(networktypes.PortMap, len(keys))
++	for _, candidate := range candidates {
++		line, err := morbstackPublishAllLine(reader)
++		if err != nil {
++			return nil, err
++		}
++		value, ok := strings.CutPrefix(line, "PORT ")
++		if !ok {
++			return nil, fmt.Errorf("Morbstack host port allocator returned invalid port %q", line)
++		}
++		port, err := strconv.ParseUint(value, 10, 16)
++		if err != nil || port == 0 {
++			return nil, fmt.Errorf("Morbstack host port allocator returned invalid port %q", value)
++		}
++		allocated[candidate.port] = append(allocated[candidate.port], networktypes.PortBinding{
++			HostIP: candidate.hostIP,
++			HostPort: strconv.FormatUint(port, 10),
++		})
++	}
++	return allocated, nil
++}
++
++func morbstackPublishAllLine(reader *bufio.Reader) (string, error) {
++	line, err := reader.ReadString('\\n')
++	if err != nil {
++		return "", err
++	}
++	if len(line) > 512 || !strings.HasSuffix(line, "\\n") {
++		return "", fmt.Errorf("Morbstack host port allocator sent an invalid line")
++	}
++	return strings.TrimSuffix(line, "\\n"), nil
++}
+diff --git a/daemon/network.go b/daemon/network.go
+index 5fb4d082daeb..0c5c3780cabe 100644
+--- a/daemon/network.go
++++ b/daemon/network.go
+@@ -1057,6 +1057,17 @@ func buildPortsRelatedCreateEndpointOptions(c *container.Container, n *libnetwo
+ 		}
+ 	}
+ 
++	// `-P` expands effective image EXPOSE ports only here, after config merge.
++	// Ask the Morbstack host to reserve every endpoint atomically, but keep the
++	// result start-local so a later stop/restart correctly allocates anew.
++	if c.HostConfig.PublishAllPorts && len(ports) > 0 {
++		var err error
++		ports, err = morbstackAllocatePublishAllPorts(c.ID, ports)
++		if err != nil {
++			return nil, err
++		}
++	}
++
+ 	for p, bindings := range ports {
+ 		protocol := lntypes.ParseProtocol(string(p.Proto()))
+ 		exposedPorts = append(exposedPorts, lntypes.TransportPort{
+-- 
+2.39.5
