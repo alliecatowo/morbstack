@@ -778,80 +778,138 @@ public final class PortForwarder {
                 udpListeners[endpoint] = listener
             }
 
-            for publication in dynamic {
-                switch publication.transport {
-                case .tcp:
-                    guard let requested = DockerHostAddress(dockerHostIP: publication.hostIP),
-                          portExposure.permits(requested)
-                    else {
-                        throw PortLeaseError.unavailable(
-                            "Docker requested a host address that is disabled in Morbstack Settings")
-                    }
-                    let listener = TCPListener(
-                        port: 0,
-                        queue: acceptQueue,
-                        hostAddress: requested)
-                    do {
-                        try listener.start()
-                    } catch {
-                        throw PortLeaseError.unavailable(
-                            "could not allocate a dynamic published TCP port on \(requested.stringValue): \(error.localizedDescription)")
-                    }
-                    let allocated = DockerExplicitTCPPortBinding(
-                        hostIP: publication.hostIP,
-                        hostPort: listener.port,
-                        containerPort: publication.containerPort)
-                    guard let endpoint = DockerHostEndpoint(hostIP: allocated.hostIP, port: allocated.hostPort),
-                          tcpListeners[endpoint] == nil
-                    else {
-                        listener.stop()
-                        throw PortLeaseError.unavailable(
-                            "kernel returned an already-reserved dynamic TCP port \(allocated.hostPort)")
-                    }
-                    tcpListeners[endpoint] = listener
-                    allocatedDynamicTCP.append(allocated)
-                    allocatedDynamic.append(DockerDynamicPortPublication(
-                        transport: .tcp,
-                        hostIP: allocated.hostIP,
-                        hostPort: allocated.hostPort,
-                        containerPort: allocated.containerPort))
+            // libnetwork allocates one shared host port for a group of otherwise
+            // identical dynamic bindings that differ only by host address. Mirror
+            // that contract on the Mac: every candidate is bound for the full group
+            // before it is committed, and a range moves on only when an endpoint is
+            // occupied. A failure unwinds the entire create transaction below.
+            var allocatedDynamicByIndex: [Int: DockerDynamicPortPublication] = [:]
+            var unallocated = Set(dynamic.indices)
+            for seed in dynamic.indices where unallocated.contains(seed) {
+                let seedPublication = dynamic[seed]
+                let groupIndices = dynamic.indices.filter {
+                    unallocated.contains($0)
+                        && dynamic[$0].allocationIdentity == seedPublication.allocationIdentity
+                }
+                for index in groupIndices { unallocated.remove(index) }
+                let candidates: [Int]
+                if let range = seedPublication.requestedHostPortRange {
+                    candidates = Array(range.ports)
+                } else {
+                    // A kernel-selected first address can collide on a second family
+                    // or explicit host address. Retry a bounded number of fresh
+                    // ephemeral selections, as libnetwork does for an all-address
+                    // allocation group.
+                    candidates = Array(repeating: 0, count: max(1, groupIndices.count == 1 ? 1 : 16))
+                }
 
-                case .udp:
-                    guard let requested = DockerHostAddress(dockerHostIP: publication.hostIP),
-                          portExposure.permits(requested)
-                    else {
-                        throw PortLeaseError.unavailable(
-                            "Docker requested a host address that is disabled in Morbstack Settings")
-                    }
-                    let listener = UDPListener(port: 0, queue: acceptQueue, hostAddress: requested)
+                var lastAddressInUse: Error?
+                var selectedGroup = false
+                for candidate in candidates {
+                    var pendingTCP: [(DockerHostEndpoint, TCPListener, DockerExplicitTCPPortBinding)] = []
+                    var pendingUDP: [(DockerHostEndpoint, UDPListener, DockerExplicitUDPPortBinding)] = []
+                    var selectedPort = candidate
                     do {
-                        // Like fixed UDP leases, this bound socket drains until the
-                        // create-associated listener receives an exact start success.
-                        try listener.start()
+                        for index in groupIndices {
+                            let publication = dynamic[index]
+                            guard let address = DockerHostAddress(dockerHostIP: publication.hostIP),
+                                  portExposure.permits(address)
+                            else {
+                                throw PortLeaseError.unavailable(
+                                    "Docker requested a host address that is disabled in Morbstack Settings")
+                            }
+                            switch publication.transport {
+                            case .tcp:
+                                let listener = TCPListener(
+                                    port: selectedPort,
+                                    queue: acceptQueue,
+                                    hostAddress: address)
+                                try listener.start()
+                                selectedPort = listener.port
+                                let binding = DockerExplicitTCPPortBinding(
+                                    hostIP: publication.hostIP,
+                                    hostPort: selectedPort,
+                                    containerPort: publication.containerPort)
+                                guard let endpoint = binding.endpoint,
+                                      tcpListeners[endpoint] == nil,
+                                      !pendingTCP.contains(where: { $0.0 == endpoint })
+                                else {
+                                    listener.stop()
+                                    throw PortLeaseError.unavailable(
+                                        "host selected duplicate TCP endpoint \(selectedPort)")
+                                }
+                                pendingTCP.append((endpoint, listener, binding))
+
+                            case .udp:
+                                let listener = UDPListener(
+                                    port: selectedPort,
+                                    queue: acceptQueue,
+                                    hostAddress: address)
+                                try listener.start()
+                                selectedPort = listener.port
+                                let binding = DockerExplicitUDPPortBinding(
+                                    hostIP: publication.hostIP,
+                                    hostPort: selectedPort,
+                                    containerPort: publication.containerPort)
+                                guard let endpoint = binding.endpoint,
+                                      udpListeners[endpoint] == nil,
+                                      !pendingUDP.contains(where: { $0.0 == endpoint })
+                                else {
+                                    listener.stop()
+                                    throw PortLeaseError.unavailable(
+                                        "host selected duplicate UDP endpoint \(selectedPort)")
+                                }
+                                pendingUDP.append((endpoint, listener, binding))
+                            }
+                        }
                     } catch {
-                        throw PortLeaseError.unavailable(
-                            "could not allocate a dynamic published UDP port on \(requested.stringValue): \(error.localizedDescription)")
+                        for entry in pendingTCP { entry.1.stop() }
+                        for entry in pendingUDP { entry.1.stop() }
+                        let addressInUse: Bool
+                        if let tcpError = error as? TCPListenerError,
+                                  case .addressInUse = tcpError {
+                            addressInUse = true
+                        } else if let udpError = error as? UDPListener.Error,
+                                  case .addressInUse = udpError {
+                            addressInUse = true
+                        } else {
+                            addressInUse = false
+                        }
+                        guard addressInUse else {
+                            throw PortLeaseError.unavailable(
+                                "could not allocate a dynamic published port: \(error.localizedDescription)")
+                        }
+                        lastAddressInUse = error
+                        continue
                     }
-                    let allocated = DockerExplicitUDPPortBinding(
-                        hostIP: publication.hostIP,
-                        hostPort: listener.port,
-                        containerPort: publication.containerPort)
-                    guard let endpoint = DockerHostEndpoint(hostIP: allocated.hostIP, port: allocated.hostPort),
-                          udpListeners[endpoint] == nil
-                    else {
-                        listener.stop()
-                        throw PortLeaseError.unavailable(
-                            "kernel returned an already-reserved dynamic UDP port \(allocated.hostPort)")
+
+                    for (endpoint, listener, binding) in pendingTCP {
+                        tcpListeners[endpoint] = listener
+                        allocatedDynamicTCP.append(binding)
                     }
-                    udpListeners[endpoint] = listener
-                    allocatedDynamicUDP.append(allocated)
-                    allocatedDynamic.append(DockerDynamicPortPublication(
-                        transport: .udp,
-                        hostIP: allocated.hostIP,
-                        hostPort: allocated.hostPort,
-                        containerPort: allocated.containerPort))
+                    for (endpoint, listener, binding) in pendingUDP {
+                        udpListeners[endpoint] = listener
+                        allocatedDynamicUDP.append(binding)
+                    }
+                    for index in groupIndices {
+                        let publication = dynamic[index]
+                        allocatedDynamicByIndex[index] = DockerDynamicPortPublication(
+                            transport: publication.transport,
+                            hostIP: publication.hostIP,
+                            hostPort: selectedPort,
+                            containerPort: publication.containerPort,
+                            requestedHostPortRange: publication.requestedHostPortRange)
+                    }
+                    selectedGroup = true
+                    break
+                }
+                guard selectedGroup else {
+                    let rangeDescription = seedPublication.requestedHostPortRange?.stringValue ?? "ephemeral range"
+                    throw PortLeaseError.unavailable(
+                        "could not allocate a published \(seedPublication.transport.name) port in \(rangeDescription): \(lastAddressInUse?.localizedDescription ?? "all candidate ports are in use")")
                 }
             }
+            allocatedDynamic = dynamic.indices.compactMap { allocatedDynamicByIndex[$0] }
 
             let allTCP = fixedTCP + allocatedDynamicTCP
             let allUDP = fixedUDP + allocatedDynamicUDP

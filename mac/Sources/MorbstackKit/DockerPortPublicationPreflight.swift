@@ -2,11 +2,9 @@
 // Licensed under the Apache License, Version 2.0 (the "License").
 //
 // Admission parsing for explicit `HostConfig.PortBindings` in a Docker
-// container-create request. The parser admits only fixed loopback TCP/UDP bindings
-// it can inspect without consuming bytes. `DockerProxy` turns the complete concrete
-// fixed TCP/UDP set into one held listener lease. The Docker CLI expands a fixed
-// equal-length `-p` range into just such bindings before it sends the Engine request.
-// Dynamic host-port ranges remain outside the synchronous contract.
+// container-create request. The parser recognizes fixed bindings and Docker's
+// host-port range allocation grammar without consuming bytes. `DockerProxy` turns
+// the complete set into one held listener lease before dockerd sees the create.
 
 import Foundation
 
@@ -29,10 +27,9 @@ public struct DockerExplicitTCPPortBinding: Hashable, Sendable {
     var endpoint: DockerHostEndpoint? { DockerHostEndpoint(hostIP: hostIP, port: hostPort) }
 }
 
-/// One fixed IPv4/default UDP publication that is safe to retain on the Mac's
-/// loopback. UDP has its own socket namespace, so it deliberately remains a distinct
-/// value from ``DockerExplicitTCPPortBinding`` even when the numeric host port is the
-/// same.
+/// One fixed UDP publication the Mac can retain. UDP has its own socket namespace,
+/// so it deliberately remains a distinct value from ``DockerExplicitTCPPortBinding``
+/// even when the numeric host port is the same.
 public struct DockerExplicitUDPPortBinding: Hashable, Sendable {
     public let hostIP: String
     public let hostPort: Int
@@ -67,10 +64,38 @@ public struct DockerFixedPortLeasePlan: Hashable, Sendable {
     public var isEmpty: Bool { tcp.isEmpty && udp.isEmpty }
 }
 
+/// One inclusive Docker host-port allocation range.
+///
+/// Docker treats `8080-8082:80` as a request to allocate one port from that range
+/// for container port 80. It is materially different from an equal-length
+/// host/container range, which the CLI expands into one concrete PortBinding per
+/// container port before it reaches the Engine API.
+struct DockerHostPortRange: Hashable, Sendable {
+    let lowerBound: Int
+    let upperBound: Int
+
+    init?(string: String) {
+        let pieces = string.split(separator: "-", omittingEmptySubsequences: false)
+        guard pieces.count == 2,
+              let lower = Int(pieces[0]),
+              let upper = Int(pieces[1]),
+              (1...65_535).contains(lower),
+              (1...65_535).contains(upper),
+              lower <= upper
+        else { return nil }
+        lowerBound = lower
+        upperBound = upper
+    }
+
+    var stringValue: String { "\(lowerBound)-\(upperBound)" }
+    var ports: ClosedRange<Int> { lowerBound...upperBound }
+}
+
 /// The transport of one bounded dynamic host-port publication.
 ///
 /// This remains intentionally narrower than Docker's complete port grammar. The
-/// held host forwarder supports loopback TCP and IPv4/default UDP only.
+/// held host forwarder supports TCP and UDP on numeric IPv4 and IPv6 host
+/// addresses that the Mac can bind under the selected exposure policy.
 enum DockerDynamicPortTransport: Hashable, Sendable {
     case tcp
     case udp
@@ -90,6 +115,36 @@ struct DockerDynamicPortPublication: Hashable, Sendable {
     let hostIP: String
     let hostPort: Int
     let containerPort: Int
+    /// `nil` means Docker's ordinary ephemeral allocation. A value means allocate
+    /// exactly one port from this inclusive range before create reaches dockerd.
+    let requestedHostPortRange: DockerHostPortRange?
+
+    init(
+        transport: DockerDynamicPortTransport,
+        hostIP: String,
+        hostPort: Int,
+        containerPort: Int,
+        requestedHostPortRange: DockerHostPortRange? = nil
+    ) {
+        self.transport = transport
+        self.hostIP = hostIP
+        self.hostPort = hostPort
+        self.containerPort = containerPort
+        self.requestedHostPortRange = requestedHostPortRange
+    }
+
+    var allocationIdentity: AllocationIdentity {
+        AllocationIdentity(
+            transport: transport,
+            containerPort: containerPort,
+            requestedHostPortRange: requestedHostPortRange)
+    }
+
+    struct AllocationIdentity: Hashable, Sendable {
+        let transport: DockerDynamicPortTransport
+        let containerPort: Int
+        let requestedHostPortRange: DockerHostPortRange?
+    }
 }
 
 /// One effective `PublishAllPorts` mapping emitted by patched Moby at container
@@ -119,6 +174,7 @@ struct DockerDynamicPortCreatePlan {
         case omitted
         case empty
         case explicitZero
+        case range(DockerHostPortRange)
     }
 
     private struct Entry: Hashable {
@@ -159,18 +215,25 @@ struct DockerDynamicPortCreatePlan {
                 containerPort: $0.containerPort,
                 hostPortOrigin: $0.hostPortOrigin)
         }
-        self.requestedPublications = entries.map {
+        self.requestedPublications = entries.map { entry in
+            let requestedRange: DockerHostPortRange?
+            if case .range(let range) = entry.hostPortOrigin {
+                requestedRange = range
+            } else {
+                requestedRange = nil
+            }
             DockerDynamicPortPublication(
-                transport: $0.transport,
-                hostIP: $0.hostIP,
+                transport: entry.transport,
+                hostIP: entry.hostIP,
                 hostPort: 0,
-                containerPort: $0.containerPort)
+                containerPort: entry.containerPort,
+                requestedHostPortRange: requestedRange)
         }
         self.fixedPlan = fixedPlan
     }
 
-    /// Replaces only planned empty, omitted, or literal `"0"` `HostPort` entries
-    /// with kernel-reserved ports.
+    /// Replaces only planned empty, omitted, literal `"0"`, or valid raw range
+    /// `HostPort` entries with the host-reserved concrete ports.
     ///
     /// Rechecking every entry is defensive but significant: JSON object graphs are
     /// mutable Foundation values, and a transaction must never turn a stale plan into
@@ -188,10 +251,18 @@ struct DockerDynamicPortCreatePlan {
         }
 
         for (entry, publication) in zip(entries, publications) {
+            let expectedRange: DockerHostPortRange?
+            if case .range(let range) = entry.hostPortOrigin {
+                expectedRange = range
+            } else {
+                expectedRange = nil
+            }
             guard publication.transport == entry.transport,
                   publication.hostIP == entry.hostIP,
                   publication.containerPort == entry.containerPort,
+                  publication.requestedHostPortRange == expectedRange,
                   (1...65535).contains(publication.hostPort),
+                  expectedRange.map({ $0.ports.contains(publication.hostPort) }) ?? true,
                   var bindings = portBindings[entry.containerPortKey] as? [Any],
                   bindings.indices.contains(entry.index),
                   var binding = bindings[entry.index] as? [String: Any]
@@ -206,6 +277,8 @@ struct DockerDynamicPortCreatePlan {
                 originalFormStillMatches = (binding["HostPort"] as? String) == ""
             case .explicitZero:
                 originalFormStillMatches = (binding["HostPort"] as? String) == "0"
+            case .range(let range):
+                originalFormStillMatches = (binding["HostPort"] as? String) == range.stringValue
             }
             guard originalFormStillMatches else {
                 throw MorbError.protocolViolation("dynamic published-port create plan no longer matches its request body")
@@ -325,12 +398,15 @@ public enum DockerPortPublicationPreflight {
 
             for entry in entries {
                 guard let entry = entry as? [String: Any] else { continue }
+                let rawHostPort = string(entry["HostPort"])?
+                    .trimmingCharacters(in: .whitespaces) ?? ""
                 // The dynamic transaction validates this exact string spelling
                 // below. It has no fixed host endpoint to preflight here.
-                if (entry["HostPort"] as? String) == "0" {
+                if rawHostPort == "0" || DockerHostPortRange(string: rawHostPort) != nil
+                {
                     continue
                 }
-                let hostPort = string(entry["HostPort"])?.trimmingCharacters(in: .whitespaces) ?? ""
+                let hostPort = rawHostPort
                 guard !hostPort.isEmpty else {
                     // Docker will allocate this later. No host endpoint exists yet to
                     // check, and treating it as a fixed port would be a false claim.
@@ -350,8 +426,12 @@ public enum DockerPortPublicationPreflight {
                         message: "published host address \(hostIP) is not a numeric IPv4 or IPv6 address")
                 }
                 guard let port = Int(hostPort) else {
+                    // A valid host range belongs to the same host-first dynamic
+                    // transaction as an omitted port; the later parser retains the
+                    // exact spelling and rewrites it to the atomically held port.
+                    if DockerHostPortRange(string: hostPort) != nil { continue }
                     return .rejected(
-                        message: "published \(protocolName.uppercased()) host port \(hostPort) is not a concrete port; dynamic host-port ranges are not supported")
+                        message: "published \(protocolName.uppercased()) host port \(hostPort) is not a valid port or port range")
                 }
 
                 let endpoint = DockerHostEndpoint(hostIP: hostIP, port: port)!
@@ -822,10 +902,10 @@ public enum DockerPortPublicationPreflight {
         return byHostPort.values.sorted { $0.hostPort < $1.hostPort }
     }
 
-    /// Recognizes Docker's empty, omitted, or literal `"0"` `HostPort` TCP and UDP
-    /// bindings for the stateful Phase 1 allocator. `PublishAllPorts`, raw dynamic
-    /// host-port ranges, invalid address/protocol values, and opaque sibling entries
-    /// are rejected rather than silently falling back to an Engine-owned allocation.
+    /// Recognizes Docker's empty, omitted, literal `"0"`, or bounded host-range TCP
+    /// and UDP bindings for the stateful Phase 1 allocator. `PublishAllPorts`,
+    /// invalid address/protocol values, and opaque sibling entries are rejected rather
+    /// than silently falling back to an Engine-owned allocation.
     static func dynamicPortCreatePlan(in body: Data) -> DynamicPortVerdict {
         guard
             let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
@@ -855,10 +935,10 @@ public enum DockerPortPublicationPreflight {
         )] = []
         var sawOpaqueEntry = false
         var unsupportedSiblingMessage: String?
-        var fixedTCPByHostPort: [Int: DockerExplicitTCPPortBinding] = [:]
-        var fixedUDPByHostPort: [Int: DockerExplicitUDPPortBinding] = [:]
-        var ambiguousTCPHostPorts: Set<Int> = []
-        var ambiguousUDPHostPorts: Set<Int> = []
+        var fixedTCPByEndpoint: [DockerHostEndpoint: DockerExplicitTCPPortBinding] = [:]
+        var fixedUDPByEndpoint: [DockerHostEndpoint: DockerExplicitUDPPortBinding] = [:]
+        var ambiguousTCPEndpoints: Set<DockerHostEndpoint> = []
+        var ambiguousUDPEndpoints: Set<DockerHostEndpoint> = []
 
         for containerPortKey in portBindings.keys.sorted() {
             let protocolName = networkProtocol(in: containerPortKey)
@@ -891,6 +971,8 @@ public enum DockerPortPublicationPreflight {
                     dynamicHostPortOrigin = .empty
                 } else if rawHostPort == "0" {
                     dynamicHostPortOrigin = .explicitZero
+                } else if let rawHostPort, let range = DockerHostPortRange(string: rawHostPort) {
+                    dynamicHostPortOrigin = .range(range)
                 } else {
                     dynamicHostPortOrigin = nil
                 }
@@ -937,7 +1019,7 @@ public enum DockerPortPublicationPreflight {
                           (1...65535).contains(hostPort)
                     else {
                         unsupportedSiblingMessage = unsupportedSiblingMessage
-                            ?? "published \(protocolName.uppercased()) host port \(rawHostPort ?? "missing") is not a concrete port; dynamic host-port ranges are not supported yet"
+                            ?? "published \(protocolName.uppercased()) host port \(rawHostPort ?? "missing") is not a valid port or port range"
                         continue
                     }
                     let hostIP: String
@@ -968,18 +1050,17 @@ public enum DockerPortPublicationPreflight {
                         }
                         let candidate = DockerExplicitTCPPortBinding(
                             hostIP: hostIP, hostPort: hostPort, containerPort: containerPort)
-                        guard !ambiguousTCPHostPorts.contains(hostPort) else { continue }
-                        if let existing = fixedTCPByHostPort[hostPort] {
+                        guard let endpoint = candidate.endpoint,
+                              !ambiguousTCPEndpoints.contains(endpoint)
+                        else { continue }
+                        if let existing = fixedTCPByEndpoint[endpoint] {
                             guard existing.containerPort == candidate.containerPort else {
-                                fixedTCPByHostPort.removeValue(forKey: hostPort)
-                                ambiguousTCPHostPorts.insert(hostPort)
+                                fixedTCPByEndpoint.removeValue(forKey: endpoint)
+                                ambiguousTCPEndpoints.insert(endpoint)
                                 continue
                             }
-                            if existing.hostIP.contains(":"), !candidate.hostIP.contains(":") {
-                                fixedTCPByHostPort[hostPort] = candidate
-                            }
                         } else {
-                            fixedTCPByHostPort[hostPort] = candidate
+                            fixedTCPByEndpoint[endpoint] = candidate
                         }
 
                     case "udp":
@@ -990,15 +1071,17 @@ public enum DockerPortPublicationPreflight {
                         }
                         let candidate = DockerExplicitUDPPortBinding(
                             hostIP: hostIP, hostPort: hostPort, containerPort: containerPort)
-                        guard !ambiguousUDPHostPorts.contains(hostPort) else { continue }
-                        if let existing = fixedUDPByHostPort[hostPort] {
+                        guard let endpoint = candidate.endpoint,
+                              !ambiguousUDPEndpoints.contains(endpoint)
+                        else { continue }
+                        if let existing = fixedUDPByEndpoint[endpoint] {
                             guard existing.containerPort == candidate.containerPort else {
-                                fixedUDPByHostPort.removeValue(forKey: hostPort)
-                                ambiguousUDPHostPorts.insert(hostPort)
+                                fixedUDPByEndpoint.removeValue(forKey: endpoint)
+                                ambiguousUDPEndpoints.insert(endpoint)
                                 continue
                             }
                         } else {
-                            fixedUDPByHostPort[hostPort] = candidate
+                            fixedUDPByEndpoint[endpoint] = candidate
                         }
 
                     default:
@@ -1017,13 +1100,17 @@ public enum DockerPortPublicationPreflight {
             return .rejected(
                 message: "dynamic published ports require a fully understood PortBindings document")
         }
-        guard ambiguousTCPHostPorts.isEmpty, ambiguousUDPHostPorts.isEmpty else {
+        guard ambiguousTCPEndpoints.isEmpty, ambiguousUDPEndpoints.isEmpty else {
             return .rejected(
-                message: "dynamic published ports cannot map one loopback endpoint to multiple container targets")
+                message: "dynamic published ports cannot map one host endpoint to multiple container targets")
         }
         let fixedPlan = DockerFixedPortLeasePlan(
-            tcp: fixedTCPByHostPort.values.sorted { $0.hostPort < $1.hostPort },
-            udp: fixedUDPByHostPort.values.sorted { $0.hostPort < $1.hostPort })
+            tcp: fixedTCPByEndpoint.values.sorted {
+                $0.hostPort == $1.hostPort ? $0.hostIP < $1.hostIP : $0.hostPort < $1.hostPort
+            },
+            udp: fixedUDPByEndpoint.values.sorted {
+                $0.hostPort == $1.hostPort ? $0.hostIP < $1.hostIP : $0.hostPort < $1.hostPort
+            })
         guard dynamicEntries.count + fixedPlan.tcp.count + fixedPlan.udp.count
             <= maximumSynchronousFixedPortBindings
         else {

@@ -145,11 +145,11 @@ final class PortForwardingTests: XCTestCase {
             "UDP is event-confirmed; it must not accidentally enter the fixed TCP lease ledger")
     }
 
-    func testUnsupportedProtocolAndUDPRangeAreNotMisrepresentedAsLeases() {
+    func testUnsupportedProtocolsAndInvalidHostRangesAreRejected() {
         let unsupported = Data(
             #"{"HostConfig":{"PortBindings":{"80/sctp":[{"HostPort":"8080"}]}}}"#.utf8)
-        let range = Data(
-            #"{"HostConfig":{"PortBindings":{"53/udp":[{"HostPort":"5353-5355"}]}}}"#.utf8)
+        let invalidRange = Data(
+            #"{"HostConfig":{"PortBindings":{"53/udp":[{"HostPort":"5355-5353"}]}}}"#.utf8)
 
         guard case .rejected(let unsupportedMessage) =
             DockerPortPublicationPreflight.inspectContainerCreate(body: unsupported)
@@ -158,11 +158,91 @@ final class PortForwardingTests: XCTestCase {
         }
         XCTAssertTrue(unsupportedMessage.contains("SCTP"))
         guard case .rejected(let rangeMessage) =
-            DockerPortPublicationPreflight.inspectContainerCreate(body: range)
+            DockerPortPublicationPreflight.inspectContainerCreate(body: invalidRange)
         else {
-            return XCTFail("a UDP range must not look like one fixed reservation")
+            return XCTFail("a descending host-port range is not a Docker allocation range")
         }
-        XCTAssertTrue(rangeMessage.contains("not a single port"))
+        XCTAssertTrue(rangeMessage.contains("valid port or port range"))
+    }
+
+    func testHostPortRangeUsesOneHostFirstAllocationForEachAddressFamily() throws {
+        let create = Data(
+            """
+            {"HostConfig":{"PortBindings":{"80/tcp":[
+              {"HostIp":"0.0.0.0","HostPort":"8080-8082"},
+              {"HostIp":"::","HostPort":"8080-8082"}
+            ],"53/udp":[{"HostIp":"::","HostPort":"5353-5355"}]}}}
+            """.utf8)
+
+        XCTAssertEqual(DockerPortPublicationPreflight.inspectContainerCreate(body: create), .allowed)
+        guard case .supported(let plan) =
+            DockerPortPublicationPreflight.dynamicPortCreatePlan(in: create)
+        else {
+            return XCTFail("a valid Docker host-port range must use the host-first allocator")
+        }
+
+        XCTAssertEqual(plan.fixedPlan, DockerFixedPortLeasePlan(tcp: [], udp: []))
+        XCTAssertEqual(
+            plan.requestedPublications.map(\.requestedHostPortRange?.stringValue),
+            ["8080-8082", "5353-5355", "8080-8082"])
+
+        let selected = [
+            DockerDynamicPortPublication(
+                transport: .tcp, hostIP: "0.0.0.0", hostPort: 8081, containerPort: 80,
+                requestedHostPortRange: DockerHostPortRange(string: "8080-8082")),
+            DockerDynamicPortPublication(
+                transport: .udp, hostIP: "::", hostPort: 5354, containerPort: 53,
+                requestedHostPortRange: DockerHostPortRange(string: "5353-5355")),
+            DockerDynamicPortPublication(
+                transport: .tcp, hostIP: "::", hostPort: 8081, containerPort: 80,
+                requestedHostPortRange: DockerHostPortRange(string: "8080-8082"))
+        ]
+        let rewritten = try plan.rewrittenBody(with: selected)
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: rewritten) as? [String: Any])
+        let hostConfig = try XCTUnwrap(object["HostConfig"] as? [String: Any])
+        let bindings = try XCTUnwrap(hostConfig["PortBindings"] as? [String: Any])
+        let tcp = try XCTUnwrap(bindings["80/tcp"] as? [[String: Any]])
+        let udp = try XCTUnwrap(bindings["53/udp"] as? [[String: Any]])
+        XCTAssertEqual(tcp.map { $0["HostPort"] as? String }, ["8081", "8081"])
+        XCTAssertEqual(udp.first?["HostPort"] as? String, "5354")
+    }
+
+    func testHostPortRangeRewriterRefusesAnOutOfRangeAllocation() throws {
+        let create = Data(
+            #"{"HostConfig":{"PortBindings":{"80/tcp":[{"HostPort":"8080-8082"}]}}}"#.utf8)
+        guard case .supported(let plan) =
+            DockerPortPublicationPreflight.dynamicPortCreatePlan(in: create)
+        else {
+            return XCTFail("a valid Docker host-port range must use the host-first allocator")
+        }
+
+        XCTAssertThrowsError(
+            try plan.rewrittenBody(with: [
+                DockerDynamicPortPublication(
+                    transport: .tcp, hostIP: "", hostPort: 8083, containerPort: 80,
+                    requestedHostPortRange: DockerHostPortRange(string: "8080-8082"))
+            ]))
+    }
+
+    func testDynamicRangePlanRetainsFixedDualStackSiblingEndpoints() {
+        let create = Data(
+            """
+            {"HostConfig":{"PortBindings":{"80/tcp":[{"HostPort":"8080-8082"}],
+              "443/tcp":[
+                {"HostIp":"0.0.0.0","HostPort":"8443"},
+                {"HostIp":"::","HostPort":"8443"}
+              ]}}}
+            """.utf8)
+
+        guard case .supported(let plan) =
+            DockerPortPublicationPreflight.dynamicPortCreatePlan(in: create)
+        else {
+            return XCTFail("mixed fixed and range bindings must stay one transaction")
+        }
+        XCTAssertEqual(plan.requestedPublications.count, 1)
+        XCTAssertEqual(
+            Set(plan.fixedPlan.tcp.compactMap(\.endpoint)),
+            Set([endpoint("0.0.0.0", 8443), endpoint("::", 8443)]))
     }
 
     // MARK: - Fixed TCP lease recovery after VM loss

@@ -511,8 +511,8 @@ public final class DockerProxy {
 
     // MARK: - Bounded dynamic published-port create transaction
 
-    /// Starts Phase 1's only request-transforming path: an explicit empty TCP or
-    /// IPv4/default UDP `HostPort` and a normal fixed-length create body.
+    /// Starts Phase 1's only request-transforming path: an empty, zero, or bounded
+    /// TCP/UDP host-port allocation request in a normal create body.
     ///
     /// The original request remains in the Unix socket until this point. It is read
     /// with an exact byte count — never a generous buffer — so a following request
