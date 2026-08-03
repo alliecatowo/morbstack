@@ -87,6 +87,10 @@ struct BuildsRootView: View {
     @State private var selection: BuildCacheRecord.ID?
     @State private var showsInspector = true
     @State private var isRefreshing = false
+    @State private var isPruning = false
+    @State private var showsPruneConfirmation = false
+    @State private var pruneError: String?
+    @State private var lastPrunedBytes: Int64?
 
     private var records: [BuildCacheRecord] { model.buildCache }
 
@@ -97,10 +101,23 @@ struct BuildsRootView: View {
     private var unusedCount: Int { BuildCacheList.unused(records).count }
 
     private var subtitle: String {
-        guard !records.isEmpty else { return "No cache" }
+        if isPruning { return "Pruning unused cache…" }
+
+        guard !records.isEmpty else {
+            guard let lastPrunedBytes else { return "No cache" }
+            return lastPrunedBytes > 0
+                ? "No cache · \(Formatters.bytesString(lastPrunedBytes)) reclaimed"
+                : "No cache · No space reclaimed"
+        }
         var parts = ["\(records.count) record\(records.count == 1 ? "" : "s")"]
         parts.append(Formatters.bytesString(BuildCacheList.totalSize(records)))
         if unusedCount > 0 { parts.append("\(unusedCount) unused") }
+        if let lastPrunedBytes {
+            let outcome = lastPrunedBytes > 0
+                ? "\(Formatters.bytesString(lastPrunedBytes)) reclaimed"
+                : "No space reclaimed"
+            parts.append(outcome)
+        }
         return parts.joined(separator: " · ")
     }
 
@@ -115,6 +132,35 @@ struct BuildsRootView: View {
             .navigationSubtitle(subtitle)
             .searchable(text: $query, placement: .toolbar, prompt: "Description, type, ID")
             .toolbar { toolbarContent }
+            .confirmationDialog(
+                "Prune unused build cache?",
+                isPresented: $showsPruneConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button("Prune Unused Cache", role: .destructive) {
+                    Task { await pruneUnusedCache() }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text(
+                    "Docker will remove unused build cache across this engine, not only the selected "
+                        + "record. It keeps cache that is in use. Docker decides the final eligible "
+                        + "records when the cleanup runs.")
+            }
+            .alert(
+                "Couldn’t Prune Build Cache",
+                isPresented: Binding(
+                    get: { pruneError != nil },
+                    set: { if !$0 { pruneError = nil } })
+            ) {
+                Button("Try Again") {
+                    pruneError = nil
+                    showsPruneConfirmation = true
+                }
+                Button("Cancel", role: .cancel) { pruneError = nil }
+            } message: {
+                Text(pruneError ?? "")
+            }
             .task {
                 if selection == nil { selection = visible.first?.id }
             }
@@ -147,7 +193,25 @@ struct BuildsRootView: View {
             }
             .accessibilityLabel("Refresh build cache")
             .help("Refresh the BuildKit cache records")
-            .disabled(isRefreshing)
+            .disabled(isRefreshing || isPruning)
+        }
+        ToolbarItem(id: "builds.prune", placement: .secondaryAction) {
+            Button(role: .destructive) {
+                showsPruneConfirmation = true
+            } label: {
+                if isPruning {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Image(systemName: "trash")
+                }
+            }
+            .accessibilityLabel(isPruning ? "Pruning unused build cache" : "Prune unused build cache")
+            .help(
+                unusedCount == 0
+                    ? "No unused build cache to prune"
+                    : "Prune \(unusedCount) unused cache record\(unusedCount == 1 ? "" : "s")")
+            .disabled(unusedCount == 0 || isPruning || isRefreshing)
         }
         if !records.isEmpty {
             ToolbarItem(id: "builds.inspector", placement: .primaryAction) {
@@ -292,13 +356,14 @@ struct BuildsRootView: View {
                         Label("Copy Record ID", systemImage: "doc.on.doc")
                     }
                     if !record.inUse {
-                        LabeledContent("Removal", value: "Unavailable")
+                        LabeledContent("Removal", value: "All unused cache")
                         Text(
                             "Docker can only prune every unused cache record at once; it cannot remove the "
-                                + "reviewed records by ID. Morbstack does not run that broader operation.")
+                                + "reviewed record by ID. Use Prune Unused Cache to run that engine-wide cleanup.")
                             .foregroundStyle(.secondary)
                     }
                 }
+                cacheMaintenance
             }
         } else {
             ContentUnavailableView(
@@ -315,6 +380,54 @@ struct BuildsRootView: View {
         isRefreshing = true
         defer { isRefreshing = false }
         await model.refreshBuildCache()
+    }
+
+    @ViewBuilder
+    private var cacheMaintenance: some View {
+        Section("Cache Maintenance") {
+            if isPruning {
+                ProgressView("Pruning unused cache…")
+            }
+
+            Button("Prune Unused Cache…", role: .destructive) {
+                showsPruneConfirmation = true
+            }
+            .disabled(unusedCount == 0 || isPruning || isRefreshing)
+
+            if let lastPrunedBytes {
+                LabeledContent("Last Prune") {
+                    Text(
+                        lastPrunedBytes > 0
+                            ? "\(Formatters.bytesString(lastPrunedBytes)) reclaimed"
+                            : "No space reclaimed")
+                }
+            }
+        } footer: {
+            if unusedCount > 0 {
+                Text(
+                    "Docker decides which unused cache records are eligible when pruning begins. "
+                        + "The list is for review only; individual cache records cannot be deleted.")
+            } else {
+                Text("There are no unused cache records to prune.")
+            }
+        }
+    }
+
+    @MainActor
+    private func pruneUnusedCache() async {
+        guard unusedCount > 0, !isPruning else { return }
+
+        isPruning = true
+        lastPrunedBytes = nil
+        defer { isPruning = false }
+
+        do {
+            lastPrunedBytes = try await model.client.pruneBuildCache()
+            await model.refreshBuildCache()
+            await model.refreshDisk()
+        } catch {
+            pruneError = MorbErrorMessage.text(for: error)
+        }
     }
 
     private func copyBuildCommand() {
