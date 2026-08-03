@@ -26,8 +26,8 @@ public struct DockerExplicitTCPPortBinding: Hashable, Sendable {
     }
 }
 
-/// A bounded, explicit-empty-host-port TCP create document that can be transformed
-/// before it reaches the guest Engine.
+/// A bounded dynamic-host-port TCP create document that can be transformed before it
+/// reaches the guest Engine.
 ///
 /// This is intentionally not a general Docker create model. It remembers only the
 /// exact JSON entries the Phase 1 transaction is allowed to replace, and reparses the
@@ -39,27 +39,41 @@ struct DockerDynamicTCPCreatePlan {
         let index: Int
         let hostIP: String
         let containerPort: Int
+        /// The Docker API treats both an empty and an omitted `HostPort` as the
+        /// string field's zero value. Keep the request's original form in the plan
+        /// so a stale plan cannot overwrite a later fixed or malformed binding.
+        let hostPortWasOmitted: Bool
     }
 
     let requestedPublications: [DockerExplicitTCPPortBinding]
     private let body: Data
     private let entries: [Entry]
 
-    init(body: Data, entries: [(containerPortKey: String, index: Int, hostIP: String, containerPort: Int)]) {
+    init(
+        body: Data,
+        entries: [(
+            containerPortKey: String,
+            index: Int,
+            hostIP: String,
+            containerPort: Int,
+            hostPortWasOmitted: Bool
+        )]
+    ) {
         self.body = body
         self.entries = entries.map {
             Entry(
                 containerPortKey: $0.containerPortKey,
                 index: $0.index,
                 hostIP: $0.hostIP,
-                containerPort: $0.containerPort)
+                containerPort: $0.containerPort,
+                hostPortWasOmitted: $0.hostPortWasOmitted)
         }
         self.requestedPublications = entries.map {
             DockerExplicitTCPPortBinding(hostIP: $0.hostIP, hostPort: 0, containerPort: $0.containerPort)
         }
     }
 
-    /// Replaces only the planned `HostPort: ""` entries with kernel-reserved ports.
+    /// Replaces only planned empty or omitted `HostPort` entries with kernel-reserved ports.
     ///
     /// Rechecking every entry is defensive but significant: JSON object graphs are
     /// mutable Foundation values, and a transaction must never turn a stale plan into
@@ -82,10 +96,17 @@ struct DockerDynamicTCPCreatePlan {
                   (1...65535).contains(publication.hostPort),
                   var bindings = portBindings[entry.containerPortKey] as? [Any],
                   bindings.indices.contains(entry.index),
-                  var binding = bindings[entry.index] as? [String: Any],
-                  let hostPort = binding["HostPort"] as? String,
-                  hostPort.isEmpty
+                  var binding = bindings[entry.index] as? [String: Any]
             else {
+                throw MorbError.protocolViolation("dynamic TCP create plan no longer matches its request body")
+            }
+            let originalFormStillMatches: Bool
+            if entry.hostPortWasOmitted {
+                originalFormStillMatches = binding["HostPort"] == nil
+            } else {
+                originalFormStillMatches = (binding["HostPort"] as? String)?.isEmpty == true
+            }
+            guard originalFormStillMatches else {
                 throw MorbError.protocolViolation("dynamic TCP create plan no longer matches its request body")
             }
             binding["HostPort"] = String(publication.hostPort)
@@ -372,10 +393,10 @@ public enum DockerPortPublicationPreflight {
         return byHostPort.values.sorted { $0.hostPort < $1.hostPort }
     }
 
-    /// Recognizes only explicit empty `HostPort` TCP bindings for the stateful Phase
-    /// 1 allocator. `PublishAllPorts`, ranges, UDP, missing `HostPort`, invalid
-    /// address/protocol values, and opaque sibling entries are rejected rather than
-    /// silently falling back to an Engine-owned allocation.
+    /// Recognizes Docker's empty or omitted `HostPort` TCP bindings for the stateful
+    /// Phase 1 allocator. `PublishAllPorts`, ranges, UDP, invalid address/protocol
+    /// values, and opaque sibling entries are rejected rather than silently falling
+    /// back to an Engine-owned allocation.
     static func dynamicTCPCreatePlan(in body: Data) -> DynamicTCPVerdict {
         guard
             let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
@@ -393,7 +414,13 @@ public enum DockerPortPublicationPreflight {
             return .notDynamic
         }
 
-        var dynamicEntries: [(containerPortKey: String, index: Int, hostIP: String, containerPort: Int)] = []
+        var dynamicEntries: [(
+            containerPortKey: String,
+            index: Int,
+            hostIP: String,
+            containerPort: Int,
+            hostPortWasOmitted: Bool
+        )] = []
         var sawOpaqueEntry = false
         var sawNonTCPPublication = false
         var unsupportedSiblingMessage: String?
@@ -411,16 +438,18 @@ public enum DockerPortPublicationPreflight {
                     sawOpaqueEntry = true
                     continue
                 }
-                guard let rawHostPort = binding["HostPort"] as? String else {
-                    // Omitting HostPort is Engine-owned dynamic allocation too, but
-                    // Phase 1 is intentionally limited to Docker's explicit `""`
-                    // shape so we do not reinterpret a malformed client document.
+                let rawHostPort = binding["HostPort"] as? String
+                let hostPortWasOmitted = binding["HostPort"] == nil
+                guard rawHostPort != nil || hostPortWasOmitted else {
+                    // The Engine API declares HostPort as a string. A present value
+                    // of another type is not equivalent to its zero value, so it
+                    // stays opaque instead of being coerced into a publication.
                     unsupportedSiblingMessage = unsupportedSiblingMessage
-                        ?? "dynamic published ports require an explicit empty HostPort in Phase 1"
+                        ?? "dynamic published ports require a string or omitted HostPort"
                     continue
                 }
 
-                if rawHostPort.isEmpty {
+                if hostPortWasOmitted || rawHostPort?.isEmpty == true {
                     guard protocolName == "tcp" else {
                         return .rejected(
                             message: "dynamic published \(protocolName.uppercased()) ports are not supported yet")
@@ -445,12 +474,20 @@ public enum DockerPortPublicationPreflight {
                         return .rejected(
                             message: "published host address \(hostIP) is not supported; Morbstack forwards TCP only on loopback")
                     }
-                    dynamicEntries.append((containerPortKey, index, hostIP, containerPort))
+                    dynamicEntries.append((
+                        containerPortKey,
+                        index,
+                        hostIP,
+                        containerPort,
+                        hostPortWasOmitted))
                 } else {
                     // A transaction that rewrites one entry must understand every
                     // sibling. Fixed TCP bindings remain supported, but fixed UDP or
                     // an opaque/invalid sibling would need a second lease contract.
-                    guard let hostPort = Int(rawHostPort), (1...65535).contains(hostPort) else {
+                    guard let rawHostPort,
+                          let hostPort = Int(rawHostPort),
+                          (1...65535).contains(hostPort)
+                    else {
                         unsupportedSiblingMessage = unsupportedSiblingMessage
                             ?? "published \(protocolName.uppercased()) host port \(rawHostPort) is not a single port; dynamic ranges are not supported yet"
                         continue
