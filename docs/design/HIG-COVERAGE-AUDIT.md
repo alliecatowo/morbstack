@@ -133,6 +133,7 @@ the WindowServer-composited bundle.
 | --- | --- | --- |
 | Shell/sidebar | Hide then show sidebar | System `NavigationSplitView` owned collapse/reveal; no custom toggle or overlay appeared. |
 | Engine-off content | Relaunched without accepting setup, then explicitly started Morbstack | Native `ContentUnavailableView` supplied the one appropriate Start action. The user-visible setup review was dismissed without changing shell/context settings. |
+| Container selection/inspector | Selected an actual stopped container and inspected Overview | The detail uses native `TabView` tabs and one grouped Form; scalar facts and variable rows remain semantic controls, while Start is the only primary lifecycle command for that stopped record. |
 | Images | Real local images, selection/inspector, Pull sheet opened then escaped | Direct sortable `Table`; no redundant first table section; Pull uses a system document-modal `Form` and no image was pulled. |
 | Volumes | Real local named volume selection | Inspector labels the Docker path as a **Guest Mount Point** and offers no impossible Finder reveal. |
 | Builds | Empty cache state; Build sheet opened then dismissed | `ContentUnavailableView` offers Build/Refresh; Build is a system document-modal review sheet and no build ran. |
