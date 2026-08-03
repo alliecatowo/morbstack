@@ -111,6 +111,40 @@ the existing 256 KiB preflight window, a single numeric `Content-Length`, no
 and 128 KiB of body. It returns a clear host error rather than exposing an unassociated
 `201` if the response does not meet that contract.
 
+### Docker CLI `create -p` and `run -p` source audit
+
+This audit uses the current upstream Docker CLI source to establish the request
+shape Morbstack receives; it is not live Docker, VM, or guest-Engine acceptance
+evidence. Both commands register the same container flags through
+[`addFlags`](https://github.com/docker/cli/blob/master/cli/command/container/create.go),
+call the shared `parse` function, and pass its `HostConfig` to the shared
+[`createContainer`](https://github.com/docker/cli/blob/master/cli/command/container/create.go)
+request path. `docker run` then starts the ID returned by that create call
+([`run.go`](https://github.com/docker/cli/blob/master/cli/command/container/run.go));
+`docker create` stops after it receives the ID. Therefore the published-port
+portion of their `POST /containers/create` request is the same for identical
+flags. Their lifecycle is not: an accepted `docker create -p` intentionally keeps
+the associated TCP listener held but inactive until a later successful start.
+
+The shared parser converts `--publish` specifications through
+[`nat.ParsePortSpecs`](https://github.com/docker/cli/blob/master/cli/command/container/opts.go).
+That parser defaults an omitted protocol to TCP, accepts TCP, UDP, and SCTP, removes
+the CLI brackets from an IPv6 literal, appends repeated bindings under the same
+container-port/protocol key, and expands an equal-length range into one concrete
+binding per container port ([`nat.go`](https://github.com/docker/go-connections/blob/master/nat/nat.go)).
+It deliberately retains a host range only when one container port asks the Engine
+to choose a port from that range. The CLI then creates the Engine `PortBindings`
+map from those parsed values, with `HostIp` expressed as a parsed address when one
+was supplied and a zero address otherwise. Morbstack's preflight examines that
+Engine shape, not shell syntax.
+
+For a later `docker start`, the normal CLI passes the full ID returned by its own
+create. A manually issued `docker start <name-or-prefix>` remains an opaque start
+request by design; after the Engine reports the exact running publication, the
+event snapshot can promote the existing matching held TCP lease. A failed or
+destroyed created container never exposes a forwarding listener; its failed-start
+lease remains inactive and its destroy event releases it.
+
 ### Normal `-p` compatibility matrix
 
 This is a source audit of the ordinary Docker Engine request path, not substitute
@@ -124,11 +158,14 @@ body does not completely identify.
 
 | Docker CLI intent | Recognized create shape | Source-level outcome | Important limit |
 | --- | --- | --- | --- |
+| `docker create -p 8080:80` | The same `PortBindings` create shape as `docker run -p 8080:80` | The fixed TCP listener is associated with the successful `201` response and remains held but inactive. A later successful start promotes it without reopening the port. | This is a source-level lifecycle claim; clean-profile create/start/destroy evidence is still required. |
 | `-p 8080:80` or `-p 8080:80/tcp` | One concrete TCP `HostPort`; no explicit address, `""`, or `"0.0.0.0"` host address spelling | A held `127.0.0.1:8080` listener is reserved before create, associated with the returned full ID, and activated before the exact successful start response. | Morbstack deliberately exposes the Mac loopback endpoint, not an external interface. |
+| Repeated identical fixed TCP flags, for example `-p 8080:80 -p 8080:80` | The Docker CLI appends repeated bindings to the same `80/tcp` map entry | Morbstack deduplicates the identical host endpoint for its one listener/lease. | The guest Engine owns whether duplicate bindings are accepted; this is not a claim that every duplicate request succeeds. |
 | `-p 127.0.0.1:8080:80` | Concrete TCP `HostPort` with `HostIp: "127.0.0.1"` | Same fixed-TCP lease path. | Live Docker/VM evidence is still pending. |
 | `-p <container-port>`, `-p :<container-port>`, or `-p 0:<container-port>` | TCP `HostPort` omitted, exact `""`, or exact `"0"` | The create transaction holds a kernel-selected loopback listener and rewrites only that planned entry with its concrete port before the Engine sees it. | Fixed-length, bounded JSON/HTTP only; not a general HTTP transformer. |
 | Multiple compatible TCP `-p` flags | Multiple distinct concrete or recognized dynamic TCP entries | One atomic lease holds every requested listener; dynamic entries are rewritten with the reserved values. | A duplicate host port may only name one guest target. |
 | `-p 8080:80/udp` | Concrete IPv4/default UDP publication | The existing IPv4 UDP data plane reconciles the Engine-confirmed endpoint. | There is no synchronous held UDP allocation guarantee yet; IPv6-literal UDP publication is rejected rather than falsely forwarded through IPv4. |
+| `-p 8080:80/sctp` | Docker CLI accepts and serializes an SCTP `PortBindings` key | Rejected during Morbstack's fixed-port preflight because its host forwarder implements TCP and IPv4/default UDP only. | This is an intentional truthful rejection, not SCTP forwarding support. |
 | `-p '[::1]:8080:80'` | Concrete TCP `HostPort` with `HostIp: "::1"` | The preflight, held create/start lease, and event reconciler bind the actual local IPv6 endpoint `[::1]:8080`. | Live Docker/VM evidence is still pending. |
 | `-p '[::]:8080:80'` | Concrete TCP `HostPort` with wildcard IPv6 `HostIp: "::"` | Morbstack keeps the publication local and binds `[::1]:8080`, not an external wildcard address. | This is an intentional local-desktop safety policy, not external-interface parity. |
 | One container described on both IPv4 and IPv6 at the same numeric port | Dual-family records for the same proven target | The one-listener ledger chooses IPv4 when both families are present, preserving ordinary `127.0.0.1` access. | A simultaneous `127.0.0.1` **and** `[::1]` lease for one Docker mapping remains future dual-stack parity work. |
