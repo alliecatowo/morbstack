@@ -38,6 +38,27 @@ Without `--dry-run`, the command prints the selected images and asks once. The
 `--yes` flag is an explicit opt-in to skip that terminal prompt. JSON output
 requires `--yes` so a prompt can never corrupt a machine-readable response.
 
+### Native app workflow
+
+The Migration route uses the same `ImageMigrationTransaction` service, not a
+shell command or a separate import implementation. Runtime discovery and the
+initial comparison remain read-only. When a comparison has copyable images,
+**Select Images to Import…** opens a native document-modal table with no rows
+selected. The person selects exact references, chooses **Review Selected
+Images**, and the app derives a new read-only plan for those references. A
+second review sheet shows the exact source, Morbstack destination, image IDs,
+estimated size, excluded scopes, and cancellation behavior. Only **Import
+Selected Images** invokes the transaction's confirmation-bound write method.
+
+The transfer sheet uses actual per-image service progress and can **Stop
+Remaining Images**. A load already in progress is allowed to finish and be
+verified before the service stops. The final native report includes each
+outcome, verification state, archive bytes, detail, and the durable report
+path. It may offer **Retry Unfinished Images**, but that command only opens a
+new selection/review for items that failed before a known destination import
+or were cancelled; it never silently resumes a transfer and never auto-retries
+an item that requires review.
+
 ## Exact behavior
 
 Preparation reads source and destination image inventories. For every selected
