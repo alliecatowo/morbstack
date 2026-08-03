@@ -116,20 +116,80 @@ struct ImagesRootView: View {
     }
 
     var body: some View {
-        content
-            .navigationTitle("Images")
-            .navigationSubtitle(subtitle)
-            .searchable(text: $query, placement: .toolbar, prompt: "Repository, tag, digest")
-            .toolbar { toolbarContent }
-            .focusedSceneValue(
-                \.imageArchiveExportAction,
-                selectedImage == nil || imageArchiveExport != nil ? nil : chooseImageArchiveDestination)
-            .sheet(item: $imageArchiveExport) { operation in
-                ImageArchiveExportSheet(operation: operation, cancel: cancelImageArchiveExport)
-                    .interactiveDismissDisabled()
+        initializedScreen
+    }
+
+    // Opaque view boundaries deliberately keep each native presentation concern small.
+    // Besides making these lifecycles readable, they avoid asking the Swift type checker
+    // to infer one enormous generic modifier chain on this feature-rich screen.
+    private var initializedScreen: some View {
+        selectionResolutionScreen
+            .task {
+                initializeSelectionIfNeeded()
             }
+    }
+
+    private var selectionResolutionScreen: some View {
+        pruneConfirmationScreen
+            // The platform for one image, fetched when it is selected. `GET /images/json`
+            // already carries it for anything pulled from a multi-arch index; this only
+            // fires for the remainder — locally built images, mostly.
+            .task(id: selection) {
+                guard let selection else { return }
+                await model.resolveArchitecture(for: selection)
+            }
+    }
+
+    private var pruneConfirmationScreen: some View {
+        imageArchiveNoticeScreen
+            .confirmationDialog(
+                "Remove dangling images?",
+                isPresented: $showsPruneConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button(
+                    "Remove \(reclaimableDanglingCount) Dangling Image\(reclaimableDanglingCount == 1 ? "" : "s")",
+                    role: .destructive
+                ) {
+                    Task { await pruneDangling() }
+                }
+            } message: {
+                Text(
+                    "This removes unused image layers and frees about \(Formatters.bytesString(danglingBytes)). "
+                        + "Images used by containers are kept.")
+            }
+    }
+
+    private var imageArchiveNoticeScreen: some View {
+        operationFailureScreen
             .alert(
-                removal.map { $0.inUse ? "\($0.label) is in use" : "Remove \($0.label)?" } ?? "",
+                imageArchiveExportNotice?.title ?? "",
+                isPresented: imageArchiveExportNoticePresented,
+                presenting: imageArchiveExportNotice
+            ) { _ in
+                Button("OK", role: .cancel) {}
+            } message: { notice in
+                Text(notice.message)
+            }
+    }
+
+    private var operationFailureScreen: some View {
+        removalConfirmationScreen
+            .alert(
+                operationFailure?.title ?? "",
+                isPresented: operationFailurePresented,
+                presenting: operationFailure
+            ) { _ in
+                Button("OK", role: .cancel) {}
+            } message: { failure in
+                Text(failure.message)
+            }
+    }
+
+    private var removalConfirmationScreen: some View {
+        sheetScreen
+            .alert(
+                removalAlertTitle,
                 isPresented: removalPresented,
                 presenting: removal
             ) { target in
@@ -150,52 +210,30 @@ struct ImagesRootView: View {
                 }
             }
             .onDeleteCommand(perform: stageSelectedImageForRemoval)
-            .alert(
-                operationFailure?.title ?? "",
-                isPresented: operationFailurePresented,
-                presenting: operationFailure
-            ) { _ in
-                Button("OK", role: .cancel) {}
-            } message: { failure in
-                Text(failure.message)
+    }
+
+    private var sheetScreen: some View {
+        baseScreen
+            .sheet(item: $imageArchiveExport) { operation in
+                ImageArchiveExportSheet(operation: operation, cancel: cancelImageArchiveExport)
+                    .interactiveDismissDisabled()
             }
-            .alert(
-                imageArchiveExportNotice?.title ?? "",
-                isPresented: imageArchiveExportNoticePresented,
-                presenting: imageArchiveExportNotice
-            ) { _ in
-                Button("OK", role: .cancel) {}
-            } message: { notice in
-                Text(notice.message)
-            }
-            .confirmationDialog(
-                "Remove dangling images?",
-                isPresented: $showsPruneConfirmation,
-                titleVisibility: .visible
-            ) {
-                Button(
-                    "Remove \(reclaimableDanglingCount) Dangling Image\(reclaimableDanglingCount == 1 ? "" : "s")",
-                    role: .destructive
-                ) {
-                    Task { await pruneDangling() }
-                }
-            } message: {
-                Text(
-                    "This removes unused image layers and frees about \(Formatters.bytesString(danglingBytes)). "
-                        + "Images used by containers are kept.")
-            }
-            // The platform for one image, fetched when it is selected. `GET /images/json`
-            // already carries it for anything pulled from a multi-arch index; this only
-            // fires for the remainder — locally built images, mostly.
-            .task(id: selection) {
-                guard let selection else { return }
-                await model.resolveArchitecture(for: selection)
-            }
-            // Select the first row so the system inspector opens with a useful detail
-            // view, while retaining its normal explicit show/hide control.
-            .task {
-                initializeSelectionIfNeeded()
-            }
+    }
+
+    private var baseScreen: some View {
+        content
+            .navigationTitle("Images")
+            .navigationSubtitle(subtitle)
+            .searchable(text: $query, placement: .toolbar, prompt: "Repository, tag, digest")
+            .toolbar { toolbarContent }
+            .focusedSceneValue(
+                \.imageArchiveExportAction,
+                selectedImage == nil || imageArchiveExport != nil ? nil : chooseImageArchiveDestination)
+    }
+
+    private var removalAlertTitle: String {
+        guard let removal else { return "" }
+        return removal.inUse ? "\(removal.label) is in use" : "Remove \(removal.label)?"
     }
 
     // MARK: Toolbar
