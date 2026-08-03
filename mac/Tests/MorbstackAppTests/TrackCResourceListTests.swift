@@ -334,7 +334,7 @@ final class TrackCResourceListTests: XCTestCase {
 
     // MARK: - Networks
 
-    func testBuiltInNetworksAreSplitOutInTheirCanonicalOrder() {
+    func testNetworkNameSortIncludesBuiltInAndUserDefinedRecords() {
         let networks = [
             network("none"),
             network("my_app_default", driver: "bridge", containers: 3),
@@ -342,22 +342,29 @@ final class TrackCResourceListTests: XCTestCase {
             network("bridge"),
         ]
 
-        let split = TrackCNetworkList.sections(
+        let visible = TrackCNetworkList.visible(
             networks: networks, query: "", sortKey: .name, ascending: true)
 
-        XCTAssertEqual(split.custom.map(\.name), ["my_app_default"])
         XCTAssertEqual(
-            split.builtIn.map(\.name), ["bridge", "host", "none"],
-            "the built-in footnote keeps a fixed order regardless of the table's sort")
+            visible.map(\.name),
+            ["bridge", "host", "my_app_default", "none"])
     }
 
-    func testBuiltInOrderIgnoresTheTablesSortDirection() {
-        let networks = [network("none"), network("bridge"), network("host", driver: "host")]
+    func testNetworkKindSortIncludesBuiltInAndUserDefinedRecords() {
+        let networks = [
+            network("none"),
+            network("app_default"),
+            network("bridge"),
+            network("host", driver: "host"),
+        ]
 
-        let descending = TrackCNetworkList.sections(
-            networks: networks, query: "", sortKey: .name, ascending: false)
+        let visible = TrackCNetworkList.visible(
+            networks: networks, query: "", sortKey: .kind, ascending: true)
 
-        XCTAssertEqual(descending.builtIn.map(\.name), ["bridge", "host", "none"])
+        XCTAssertEqual(visible.map(\.name), ["bridge", "host", "none", "app_default"])
+        XCTAssertEqual(
+            visible.map(TrackCNetworkList.kindLabel(for:)),
+            ["Built-in", "Built-in", "Built-in", "User-defined"])
     }
 
     func testUnusedNetworksNeverIncludeTheBuiltInsEvenWhenEmpty() {

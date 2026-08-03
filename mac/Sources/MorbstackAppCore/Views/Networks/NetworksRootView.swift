@@ -3,15 +3,14 @@
 //
 // The Networks screen.
 //
-// Mostly a read-only inventory. The one interesting design problem is `bridge`, `host`
-// and `none`: they are always present, they are never what the user came here to look
-// at, and the engine will refuse to delete them. Rather than let them sit at the top of
-// the list looking like ordinary rows with a broken delete button, they are pushed to
-// their own section and omit removal commands altogether.
+// Mostly a read-only inventory. `bridge`, `host`, and `none` are always present and
+// Docker manages their lifetime, but they remain records in the same flat collection as
+// user-defined networks. Their Kind value makes that policy clear without breaking the
+// table's native all-record sort behavior.
 //
-// A standard `Table` presents the two operational groups, while selection reveals the
-// chosen network's facts in the system inspector. This keeps inventory, selection, and
-// detail as distinct macOS interactions instead of a hand-built split layout.
+// A standard flat `Table` presents the operational collection, while selection reveals
+// the chosen network's facts in the system inspector. This keeps inventory, selection,
+// and detail as distinct macOS interactions instead of a hand-built split layout.
 
 import AppKit
 import SwiftUI
@@ -20,6 +19,7 @@ import SwiftUI
 
 enum TrackCNetworkSortKey: String, Hashable, CaseIterable {
     case name
+    case kind
     case driver
     case scope
     case containers
@@ -44,6 +44,13 @@ enum TrackCNetworkList {
             switch key {
             case .name:
                 return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+            case .kind:
+                let lhsKind = kindLabel(for: lhs)
+                let rhsKind = kindLabel(for: rhs)
+                if lhsKind != rhsKind {
+                    return lhsKind.localizedStandardCompare(rhsKind) == .orderedAscending
+                }
+                return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
             case .driver:
                 if lhs.driver != rhs.driver {
                     return lhs.driver.localizedStandardCompare(rhs.driver) == .orderedAscending
@@ -62,24 +69,21 @@ enum TrackCNetworkList {
         return ascending ? ordered : ordered.reversed()
     }
 
-    /// Splits into the user's own networks and Docker's three permanent ones.
+    /// Returns every network matching the query in the table's current sort order.
     ///
-    /// Built-ins keep a fixed `bridge, host, none` order rather than following the
-    /// table's sort: they are a footnote, and a footnote that reorders itself when you
-    /// click a column header is just noise.
-    static func sections(
+    /// A network's Docker-managed status is a column value, not a second table section:
+    /// clicking a native column header always orders the entire visible collection.
+    static func visible(
         networks: [NetworkSummary],
         query: String,
         sortKey: TrackCNetworkSortKey,
         ascending: Bool
-    ) -> (custom: [NetworkSummary], builtIn: [NetworkSummary]) {
-        let visible = networks.filter { matches($0, query: query) }
-        let custom = sorted(visible.filter { !$0.isBuiltIn }, by: sortKey, ascending: ascending)
-        let order = ["bridge", "host", "none"]
-        let builtIn = visible.filter(\.isBuiltIn).sorted {
-            (order.firstIndex(of: $0.name) ?? order.count) < (order.firstIndex(of: $1.name) ?? order.count)
-        }
-        return (custom, builtIn)
+    ) -> [NetworkSummary] {
+        sorted(networks.filter { matches($0, query: query) }, by: sortKey, ascending: ascending)
+    }
+
+    static func kindLabel(for network: NetworkSummary) -> String {
+        network.isBuiltIn ? "Built-in" : "User-defined"
     }
 
     /// Custom networks with nothing attached — what a prune would take.
@@ -97,6 +101,12 @@ struct TrackCNetworkComparator: SortComparator {
         let result: ComparisonResult
         switch key {
         case .name: result = MorbSort.string(lhs.name, rhs.name)
+        case .kind:
+            let lhsKind = TrackCNetworkList.kindLabel(for: lhs)
+            let rhsKind = TrackCNetworkList.kindLabel(for: rhs)
+            result = lhsKind == rhsKind
+                ? MorbSort.string(lhs.name, rhs.name)
+                : MorbSort.string(lhsKind, rhsKind)
         case .driver:
             result = lhs.driver == rhs.driver
                 ? MorbSort.string(lhs.name, rhs.name)
@@ -218,10 +228,10 @@ struct NetworksRootView: View {
     /// launches for a trailing-column inspector, so it is not persisted here.
     @State private var showsInspector = true
 
-    private var sections: (custom: [NetworkSummary], builtIn: [NetworkSummary]) {
+    private var visibleNetworks: [NetworkSummary] {
         let key = sortOrder.first?.key ?? .name
         let ascending = (sortOrder.first?.order ?? .forward) == .forward
-        return TrackCNetworkList.sections(
+        return TrackCNetworkList.visible(
             networks: model.networks, query: query, sortKey: key, ascending: ascending)
     }
 
@@ -295,17 +305,15 @@ struct NetworksRootView: View {
                 removal = network
             }
             .onChange(of: query) { _, _ in
-                let split = sections
-                let visible = split.custom + split.builtIn
                 if let selection,
-                   !visible.contains(where: { $0.id == selection }) {
-                    self.selection = visible.first?.id
+                   !visibleNetworks.contains(where: { $0.id == selection }) {
+                    self.selection = visibleNetworks.first?.id
                 }
             }
             // Selects the first row so the inspector opens with something to show — see
             // the identical note in `VolumesRootView`.
             .task {
-                if selection == nil { selection = sections.custom.first?.id ?? sections.builtIn.first?.id }
+                if selection == nil { selection = visibleNetworks.first?.id }
             }
     }
 
@@ -352,7 +360,6 @@ struct NetworksRootView: View {
 
     @ViewBuilder
     private var content: some View {
-        let split = sections
         if model.networks.isEmpty {
             ContentUnavailableView {
                 Label("No Networks", systemImage: "network")
@@ -365,21 +372,26 @@ struct NetworksRootView: View {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
             }
-        } else if split.custom.isEmpty && split.builtIn.isEmpty {
+        } else if visibleNetworks.isEmpty {
             ContentUnavailableView.search(text: query)
         } else {
-            table(split)
+            table
                 .inspector(isPresented: $showsInspector) {
                     detailPane
                 }
         }
     }
 
-    private func table(_ split: (custom: [NetworkSummary], builtIn: [NetworkSummary])) -> some View {
+    private var table: some View {
         Table(of: NetworkSummary.self, selection: $selection, sortOrder: $sortOrder) {
             TableColumn("Name", sortUsing: TrackCNetworkComparator(key: .name)) { network in
                 nameCell(network)
             }
+            TableColumn("Kind", sortUsing: TrackCNetworkComparator(key: .kind)) { network in
+                Text(TrackCNetworkList.kindLabel(for: network))
+                    .foregroundStyle(.secondary)
+            }
+            .width(min: 96, ideal: 108, max: 136)
             TableColumn("Driver", sortUsing: TrackCNetworkComparator(key: .driver)) { network in
                 Text(network.driver)
                     .foregroundStyle(.secondary)
@@ -395,15 +407,8 @@ struct NetworksRootView: View {
             }
             .width(min: 76, ideal: 92, max: 120)
         } rows: {
-            if !split.custom.isEmpty {
-                Section("User-defined") {
-                    ForEach(split.custom) { TableRow($0) }
-                }
-            }
-            if !split.builtIn.isEmpty {
-                Section("Built-in") {
-                    ForEach(split.builtIn) { TableRow($0) }
-                }
+            ForEach(visibleNetworks) { network in
+                TableRow(network)
             }
         }
         .contextMenu(forSelectionType: NetworkSummary.ID.self) { ids in
@@ -475,7 +480,7 @@ struct NetworksRootView: View {
                 }
 
                 Section("Kind") {
-                    LabeledContent("Network", value: network.isBuiltIn ? "Built in" : "User-defined")
+                    LabeledContent("Network", value: TrackCNetworkList.kindLabel(for: network))
                     LabeledContent(
                         "Removal",
                         value: network.isBuiltIn
