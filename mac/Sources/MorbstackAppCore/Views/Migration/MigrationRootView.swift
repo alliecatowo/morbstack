@@ -7,9 +7,10 @@
 // existing Docker engines respond to read-only requests. The separately labeled
 // images-only workflow begins with an empty selection, derives a fresh plan before a
 // scoped review, and only calls `ImageMigrationTransaction.execute` from the explicit
-// confirmation action. It intentionally excludes volumes: the current CLI volume dry
-// run creates a helper container. No route path starts a runtime, asks a credential
-// helper, writes Docker configuration, or performs an implicit import.
+// confirmation action. Named volumes have a separate GET-only eligibility comparison;
+// this route never creates a helper container or transfers a volume. No route path
+// starts a runtime, asks a credential helper, writes Docker configuration, or performs
+// an implicit import.
 
 import Foundation
 import MorbMigrate
@@ -327,10 +328,77 @@ struct MigrationRootView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                LabeledContent("Volume Plan", value: "Not available")
-                Text(
-                    "The current volume dry run can create a temporary helper container to inspect the destination, so it is deliberately excluded here.")
-                    .foregroundStyle(.secondary)
+                if isPlanning && plannedRuntimeID != runtime.id {
+                    LabeledContent("Named Volume Eligibility", value: "Inspecting…")
+                    ProgressView("Reading named-volume inventories…")
+                        .controlSize(.small)
+                } else if let volumes = plan(for: runtime)?.volumePlan {
+                    LabeledContent("Named Volume Eligibility", value: "Read Only")
+                    LabeledContent("Eligible", value: "\(volumes.eligible.count) volumes")
+                    LabeledContent("Destination Exists", value: "\(volumes.destinationExisting.count) volumes")
+                    LabeledContent("Unsupported Driver", value: "\(volumes.unsupported.count) volumes")
+
+                    if volumes.items.isEmpty {
+                        ContentUnavailableView {
+                            Label("No Named Volumes", systemImage: "externaldrive")
+                        } description: {
+                            Text("The selected source reported no named volumes.")
+                        }
+                        .frame(height: 128)
+                    } else {
+                        Table(volumes.items) {
+                            TableColumn("Volume") { volume in
+                                Text(volume.name)
+                                    .font(.body.monospaced())
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                            .width(min: 120, ideal: 160)
+
+                            TableColumn("Driver") { volume in
+                                Text(volume.driver)
+                                    .lineLimit(1)
+                            }
+                            .width(min: 72, ideal: 96)
+
+                            TableColumn("Eligibility") { volume in
+                                VStack(alignment: .leading, spacing: 2) {
+                                    switch volume.disposition {
+                                    case .eligible:
+                                        Text("Eligible")
+                                    case .destinationExists:
+                                        Text("Destination Exists")
+                                    case .unsupportedDriver:
+                                        Text("Unsupported Driver")
+                                    }
+                                    Text(volume.reason)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(2)
+                                }
+                            }
+                            .width(min: 180, ideal: 260)
+                        }
+                        .frame(minHeight: 120, idealHeight: 180, maxHeight: 260)
+                        .accessibilityLabel("Read-only named volume eligibility")
+                    }
+
+                    Text(
+                        "Eligibility compares names and drivers only. Volume contents, free space, overwrite safety, and merge behavior were not inspected.")
+                        .foregroundStyle(.secondary)
+                } else if let unavailableReason = plan(for: runtime)?.volumeUnavailableReason {
+                    LabeledContent("Named Volume Eligibility", value: "Unavailable")
+                    Text(unavailableReason)
+                        .foregroundStyle(.secondary)
+                } else if runtime.running {
+                    LabeledContent("Named Volume Eligibility", value: "Not Inspected")
+                    Text("Select Refresh to compare named-volume inventories from the two running engines.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    LabeledContent("Named Volume Eligibility", value: "Source Not Running")
+                    Text("Start the selected source runtime before requesting a read-only inventory comparison.")
+                        .foregroundStyle(.secondary)
+                }
 
             } else {
                 Text(
@@ -341,7 +409,7 @@ struct MigrationRootView: View {
             Text("Migration")
         } footer: {
             Text(
-                "Inspection stays read-only. The separately labeled import action transfers only the images you select after a second review; it never starts a runtime, writes Docker configuration, or migrates volumes.")
+                "Inspection stays read-only. The separately labeled import action transfers only the images you select after a second review; named-volume eligibility does not transfer a volume. This route never starts a runtime or writes Docker configuration.")
         }
     }
 
