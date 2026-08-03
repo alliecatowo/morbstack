@@ -38,9 +38,12 @@ working" has a precise, checkable answer rather than a marketing claim.
 - **Compose v2 and buildx are bundled.** The packaged app carries pinned,
   unmodified upstream `docker`, `docker-compose`, and `docker-buildx`
   binaries. Its consented first-run transaction puts the client on PATH,
-  installs both plugins in Docker's standard `cli-plugins` directory, and
-  registers a `morbstack` context without overwriting another explicit
-  context. See [`first-run.md`](first-run.md). The guest-side BuildKit
+  installs both plugins in Docker's standard `cli-plugins` directory only
+  when their targets are missing or positively identified as older Morbstack
+  links, and registers a `morbstack` context without overwriting another
+  explicit context. A user-owned plugin file/link is preserved and blocks the
+  transaction rather than being replaced. See [`first-run.md`](first-run.md).
+  The guest-side BuildKit
   capability remains subject to the clean-machine L1 release test; shipping
   a plugin is necessary but not by itself proof of end-to-end parity.
 - **`~/.docker/config.json` is honored**, including:

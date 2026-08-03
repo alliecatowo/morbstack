@@ -44,10 +44,14 @@ sheet and the transparent CLI equivalent:
 The plan is shown before any write. On a clean, default-zsh Mac, consenting
 does all of the following without administrator access:
 
-1. Symlinks the bundled `docker` to `~/.morbstack/bin/docker`.
+1. Symlinks the bundled `docker` to `~/.morbstack/bin/docker` when that target
+   is missing or is an older Morbstack link; it does not replace another file
+   or link even inside that per-user directory.
 2. Symlinks `docker-compose` and `docker-buildx` to Docker's standard
    `~/.docker/cli-plugins/` directory (or `$DOCKER_CONFIG/cli-plugins` when
-   the user deliberately set `DOCKER_CONFIG`).
+   the user deliberately set `DOCKER_CONFIG`). A missing target or an older
+   Morbstack link is eligible; another tool's file or link is preserved and
+   blocks setup until the person resolves that exact destination.
 3. Adds one uniquely marked, reversible line block to `~/.zprofile`, placing
    `~/.morbstack/bin` on the PATH of future login shells.
 4. Registers the standard Docker context named `morbstack`. If Docker is on

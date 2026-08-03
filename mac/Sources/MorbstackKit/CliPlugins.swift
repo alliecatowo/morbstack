@@ -30,6 +30,25 @@ public enum MorbCliPlugins {
     public static let buildx = Plugin(name: "buildx")
     public static let all: [Plugin] = [compose, buildx]
 
+    /// Whether a resolved symlink target is a binary from a Morbstack bundle or
+    /// checkout. This is deliberately about *provenance*, not mere path shape:
+    /// `~/.docker/cli-plugins` belongs to the person's Docker client, so an
+    /// existing plugin may be replaced only when it is recognizably an older
+    /// Morbstack installation. The same predicate is used by the combined CLI
+    /// installer and its uninstall path so upgrades and removal agree on what
+    /// Morbstack owns.
+    static func isManagedInstalledBinaryTarget(_ target: String, binaryName: String) -> Bool {
+        let standardTarget = URL(fileURLWithPath: target).standardizedFileURL.path
+        let bundleRoot = "/Morbstack.app/Contents/Resources/host-bin/"
+        let checkoutRoot = "/dist/host-bin/"
+        let comesFromMorbstack = standardTarget.contains(bundleRoot)
+            || standardTarget.contains(checkoutRoot)
+        guard comesFromMorbstack else { return false }
+
+        return standardTarget.hasSuffix("/host-bin/\(binaryName)")
+            || standardTarget.hasSuffix("/host-bin/cli-plugins/\(binaryName)")
+    }
+
     /// Where docker's own cli-plugins resolver looks.
     ///
     /// Honours `DOCKER_CONFIG` exactly the way the `docker` CLI itself does, rather than
@@ -133,10 +152,19 @@ public enum MorbCliPlugins {
             public let alreadyPresent: Bool
             /// The destination is already a symlink pointing at exactly `source`.
             public let alreadyCorrect: Bool
-            /// The destination exists and is something other than a symlink to `source`
-            /// — installing will replace it. Distinguished from `alreadyPresent` because
-            /// the confirmation prompt owes the user this specific fact.
-            public var willReplace: Bool { alreadyPresent && !alreadyCorrect }
+            /// The existing destination is a positively identified Morbstack link. It
+            /// may be replaced during an explicit upgrade; an arbitrary user file or
+            /// plugin link is never eligible for replacement.
+            public let existingIsManaged: Bool
+            /// A Morbstack-owned older link will be updated to this installation.
+            public var willReplace: Bool {
+                alreadyPresent && !alreadyCorrect && existingIsManaged
+            }
+            /// An existing file or link belongs to the person or another tool. The
+            /// caller must stop and name the conflict instead of deleting it.
+            public var hasUnmanagedConflict: Bool {
+                alreadyPresent && !alreadyCorrect && !existingIsManaged
+            }
         }
         public var directory: String
         public var items: [Item]
@@ -161,12 +189,19 @@ public enum MorbCliPlugins {
                 guard let source, let existingTarget else { return false }
                 return resolvedSymlinkTarget(existingTarget, relativeTo: directory) == source.standardizedFileURL.path
             }()
+            let existingIsManaged: Bool = {
+                guard let existingTarget else { return false }
+                return MorbCliPlugins.isManagedInstalledBinaryTarget(
+                    resolvedSymlinkTarget(existingTarget, relativeTo: directory),
+                    binaryName: plugin.binaryName)
+            }()
             return Plan.Item(
                 plugin: plugin.name,
                 source: source?.path,
                 destination: destination.path,
                 alreadyPresent: present,
-                alreadyCorrect: correct)
+                alreadyCorrect: correct,
+                existingIsManaged: existingIsManaged)
         }
         return Plan(directory: directory.path, items: items)
     }
@@ -188,6 +223,9 @@ public enum MorbCliPlugins {
         case alreadyCorrect(String)
         /// No source binary was found for this plugin (see ``sourceBinary(for:)``).
         case sourceMissing(String)
+        /// An existing file or link is not verifiably Morbstack-owned, so it was left
+        /// in place. This is an installation conflict, not a successful fallback.
+        case preservedExisting(String, String)
         /// The symlink could not be created.
         case failed(String, String)
     }
@@ -220,7 +258,18 @@ public enum MorbCliPlugins {
                 return .alreadyCorrect(plugin.name)
             }
             if fm.fileExists(atPath: destination.path) || existingTarget != nil {
-                try? fm.removeItem(at: destination)
+                guard let existingTarget,
+                      isManagedInstalledBinaryTarget(
+                        resolvedSymlinkTarget(existingTarget, relativeTo: directory),
+                        binaryName: plugin.binaryName)
+                else {
+                    return .preservedExisting(plugin.name, destination.path)
+                }
+                do {
+                    try fm.removeItem(at: destination)
+                } catch {
+                    return .failed(plugin.name, "could not replace Morbstack's previous link: \(error.localizedDescription)")
+                }
             }
             do {
                 try fm.createSymbolicLink(at: destination, withDestinationURL: source)

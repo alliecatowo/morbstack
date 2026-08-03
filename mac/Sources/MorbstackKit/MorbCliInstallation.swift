@@ -69,7 +69,15 @@ public enum MorbCliInstallation {
         public let destination: String
         public let alreadyPresent: Bool
         public let alreadyCorrect: Bool
-        public var willReplace: Bool { alreadyPresent && !alreadyCorrect }
+        /// Only a positively identified older Morbstack link may be updated. A
+        /// destination supplied by another Docker installation remains untouched.
+        public let existingIsManaged: Bool
+        public var willReplace: Bool {
+            alreadyPresent && !alreadyCorrect && existingIsManaged
+        }
+        public var hasUnmanagedConflict: Bool {
+            alreadyPresent && !alreadyCorrect && !existingIsManaged
+        }
     }
 
     public enum PathRegistration: Equatable, Sendable {
@@ -118,6 +126,14 @@ public enum MorbCliInstallation {
         /// toolchain: having `docker` but not `docker buildx` recreates parity #13.
         public var hasCompleteToolchain: Bool {
             docker.source != nil && plugins.allSatisfy { $0.source != nil }
+        }
+
+        /// The bundle contains the complete toolchain *and* every target is either
+        /// absent, already correct, or a recognisable Morbstack upgrade target.
+        /// This stays distinct from ``hasCompleteToolchain`` so callers can tell a
+        /// broken bundle from a deliberately preserved user installation.
+        public var isInstallable: Bool {
+            hasCompleteToolchain && !([docker] + plugins).contains(where: \.hasUnmanagedConflict)
         }
     }
 
@@ -202,6 +218,15 @@ public enum MorbCliInstallation {
         guard installPlan.hasCompleteToolchain else {
             throw MorbError.notFound(
                 "the bundled Docker CLI toolchain is incomplete; expected docker, docker-compose, and docker-buildx")
+        }
+        let conflicts = ([installPlan.docker] + installPlan.plugins)
+            .filter(\.hasUnmanagedConflict)
+            .map(\.destination)
+        guard conflicts.isEmpty else {
+            throw MorbError.config(
+                "refusing to replace an existing non-Morbstack Docker tool link at "
+                    + conflicts.joined(separator: ", ")
+                    + "; move or remove it yourself, then review setup again")
         }
 
         var results: [String: LinkResult] = [:]
@@ -312,9 +337,16 @@ public enum MorbCliInstallation {
             return resolvedLink(rawTarget, relativeTo: destination.deletingLastPathComponent())
                 == source.standardizedFileURL.path
         }()
+        let existingIsManaged: Bool = {
+            guard let rawTarget else { return false }
+            return MorbCliPlugins.isManagedInstalledBinaryTarget(
+                resolvedLink(rawTarget, relativeTo: destination.deletingLastPathComponent()),
+                binaryName: name)
+        }()
         return LinkItem(
             name: name, source: source?.path, destination: destination.path,
-            alreadyPresent: present, alreadyCorrect: correct)
+            alreadyPresent: present, alreadyCorrect: correct,
+            existingIsManaged: existingIsManaged)
     }
 
     private static func pathRegistration(
@@ -379,10 +411,20 @@ public enum MorbCliInstallation {
             if fm.fileExists(atPath: destination.path)
                 || (try? fm.destinationOfSymbolicLink(atPath: destination.path)) != nil
             {
+                guard let raw = try? fm.destinationOfSymbolicLink(atPath: destination.path),
+                      MorbCliPlugins.isManagedInstalledBinaryTarget(
+                        resolvedLink(raw, relativeTo: directory),
+                        binaryName: destination.lastPathComponent)
+                else {
+                    throw MorbError.config(
+                        "refusing to replace non-Morbstack file or link at \(destination.path)")
+                }
                 try fm.removeItem(at: destination)
             }
             try fm.createSymbolicLink(at: destination, withDestinationURL: source)
             return .linked
+        } catch let error as MorbError {
+            throw error
         } catch {
             throw MorbError.io("could not link \(destination.path) to \(source.path): \(error.localizedDescription)")
         }
@@ -407,12 +449,12 @@ public enum MorbCliInstallation {
         let fm = FileManager.default
         guard let raw = try? fm.destinationOfSymbolicLink(atPath: destination.path) else { return false }
         let resolved = resolvedLink(raw, relativeTo: destination.deletingLastPathComponent())
-        // The source may already be gone because the app was moved to Trash.  Match the
-        // exact product layout, not existence, so a person can still clean stale links.
-        let expectedSuffix = "/host-bin/\(destination.lastPathComponent)"
-        let ownedBundle = resolved.contains("/Morbstack.app/Contents/Resources/host-bin/")
-        let ownedCheckout = resolved.contains("/dist/host-bin/")
-        guard resolved.hasSuffix(expectedSuffix), ownedBundle || ownedCheckout else { return false }
+        // The source may already be gone because the app was moved to Trash. Match
+        // the exact managed layout, including the nested CLI-plugin directory, rather
+        // than requiring the old target to still exist.
+        guard MorbCliPlugins.isManagedInstalledBinaryTarget(
+            resolved, binaryName: destination.lastPathComponent)
+        else { return false }
         do {
             try fm.removeItem(at: destination)
             return true

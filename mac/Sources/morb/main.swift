@@ -1072,7 +1072,10 @@ case "install-cli-plugins":
                 out("  docker-\(item.plugin): already correct (\(item.destination) -> \(source))")
             } else if item.willReplace {
                 out("  docker-\(item.plugin): \(item.destination) -> \(source)")
-                out("      REPLACES an existing file/symlink at that path")
+                out("      updates an existing Morbstack link at that path")
+            } else if item.hasUnmanagedConflict {
+                out("  docker-\(item.plugin): preserves existing file/symlink at \(item.destination)")
+                out("      setup cannot replace a link it does not own")
             } else {
                 out("  docker-\(item.plugin): \(item.destination) -> \(source)")
             }
@@ -1087,6 +1090,16 @@ case "install-cli-plugins":
         out("")
         out("  Nothing was changed. Re-run without --print-plan to go ahead.")
         exit(0)
+    }
+
+    let pluginConflicts = plan.items.filter(\.hasUnmanagedConflict)
+    guard pluginConflicts.isEmpty else {
+        let destinations = pluginConflicts.map(\.destination).joined(separator: "\n       ")
+        fail(
+            "plugin setup preserves existing non-Morbstack files or links at:\n"
+                + "       \(destinations)\n"
+                + "       Move or remove only the link you intend to replace, then re-run --print-plan.",
+            code: 2)
     }
 
     if !force {
@@ -1113,6 +1126,9 @@ case "install-cli-plugins":
         case .linked(let name): jsonOutcomes[name] = .string("linked")
         case .alreadyCorrect(let name): jsonOutcomes[name] = .string("already_correct")
         case .sourceMissing(let name): jsonOutcomes[name] = .string("source_missing")
+        case .preservedExisting(let name, let destination):
+            jsonOutcomes[name] = .string("preserved_existing: \(destination)")
+            anyFailed = true
         case .failed(let name, let reason):
             jsonOutcomes[name] = .string("failed: \(reason)")
             anyFailed = true
@@ -1124,6 +1140,8 @@ case "install-cli-plugins":
             case .linked(let name): out("[ok] docker-\(name) linked")
             case .alreadyCorrect(let name): out("[ok] docker-\(name) already correct")
             case .sourceMissing(let name): out("[--] docker-\(name): no source binary found, skipped")
+            case .preservedExisting(let name, let destination):
+                out("[!!] docker-\(name): preserved non-Morbstack file/link at \(destination)")
             case .failed(let name, let reason): out("[!!] docker-\(name): \(reason)")
             }
         }
@@ -1152,7 +1170,14 @@ case "install-cli":
         out("")
         let allLinks = [installPlan.docker] + installPlan.plugins
         for item in allLinks {
-            let relation = item.willReplace ? " (REPLACES existing file/symlink)" : ""
+            let relation: String
+            if item.willReplace {
+                relation = " (updates existing Morbstack link)"
+            } else if item.hasUnmanagedConflict {
+                relation = " (PRESERVES existing non-Morbstack file/link; setup is blocked)"
+            } else {
+                relation = ""
+            }
             out("  \(item.destination) -> \(item.source ?? "-")\(relation)")
         }
         out("")
@@ -1211,6 +1236,18 @@ case "install-cli":
         out("")
         out("Nothing was changed.")
         exit(0)
+    }
+
+    guard installPlan.isInstallable else {
+        let conflicts = ([installPlan.docker] + installPlan.plugins)
+            .filter(\.hasUnmanagedConflict)
+            .map(\.destination)
+            .joined(separator: "\n       ")
+        fail(
+            "CLI setup preserves existing non-Morbstack files or links at:\n"
+                + "       \(conflicts)\n"
+                + "       Move or remove only the link you intend to replace, then re-run --print-plan.",
+            code: 2)
     }
 
     if !force {

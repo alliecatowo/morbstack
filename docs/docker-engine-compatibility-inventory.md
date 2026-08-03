@@ -116,6 +116,22 @@ evidence-promotion rule are authoritative in
 [clean-profile-acceptance.md](clean-profile-acceptance.md). A library working with a
 hand-exported `DOCKER_HOST` is a diagnosis, not a passing replacement test.
 
+### Host installation and discovery ledger
+
+The table below is an exact source audit of the consented `morb install-cli`
+path, refreshed 2026-08-03. It follows Docker's documented client configuration
+rules where they are observable in a host-only installer. It does **not** prove
+that any selected client, IDE, Testcontainers binding, or guest Engine completed a
+real connection.
+
+| Contract | Source-reviewed implementation | Still required before a compatibility claim |
+| --- | --- | --- |
+| Docker client configuration and context | `MorbDockerContext` writes the standard context metadata below `$DOCKER_CONFIG/contexts/meta/…/meta.json` (or `~/.docker`) and preserves other `config.json` keys while setting `currentContext`. Status reports the documented process-visible precedence: nonempty `DOCKER_CONTEXT`, then `DOCKER_HOST`, then saved `currentContext`; command-line `--context`/`--host` are intentionally outside a process snapshot. A same-named foreign or malformed context is preserved. | CP-02 must use `docker context show` and `docker context inspect morbstack` with a clean, ordinary shell. Verify the selected bundled CLI against the shipped Engine rather than treating compatible JSON layout as a successful connection. |
+| Bundled Compose v2 and Buildx plugin discovery | `MorbCliPlugins` resolves the normal per-user `$DOCKER_CONFIG/cli-plugins` directory, installing only the bundle's pinned upstream `docker-compose` and `docker-buildx`. A non-Morbstack file or link is a blocking conflict; only a recognisable older Morbstack bundle/check-out link can be upgraded. The legacy `morb install-cli-plugins` path preserves an unmanaged collision too. | CP-01 validates the signed payload; CP-02 records `docker compose version` and `docker buildx version`; CP-04 runs a real Compose project and `buildx build --load`. The audit does not prove Docker CLI plugin search precedence beyond the documented user directory. |
+| Direct Unix-socket discovery | `MorbDockerContext` can create only a missing, user-owned `~/.docker/run/docker.sock` symlink to Morbstack's private socket. It rejects symlinked/unsafe parents and preserves an existing link, file, socket, or directory. The direct-discovery path intentionally stays under the real home directory even if a process chooses a separate `DOCKER_CONFIG`; it is a compatibility path for context-blind consumers, not Docker CLI configuration. | CP-03 must prove that the link exists after the Engine is ready and that a stock client reaches the same Engine by normal configuration and by the direct Unix path. This source audit does not establish how every Testcontainers language binding ranks candidate sockets. |
+| System socket and context-blind tools | Morbstack never writes `/var/run/docker.sock`; it offers only a displayed manual command because that is a system-owned path. `Doctor` identifies competing user-level discovery sockets but does not force an environment override as a fix. | CP-06 and CP-07 must run locked Testcontainers and Dev Containers fixtures with no Docker override. A manual `/var/run/docker.sock` link or exported `DOCKER_HOST` is diagnostic evidence only, never a passing drop-in result. |
+| Reinstall and removal ownership | Combined setup preflights all CLI links before writing; it refuses unmanaged collisions and rechecks ownership immediately before replacement. Cleanup removes only symlinks whose resolved targets match a Morbstack bundle/check-out layout, including nested `host-bin/cli-plugins` links. | CP-02/CP-05 need an idempotent-reinstall and owned-state-cleanup observation on a signed candidate. The source check cannot prove macOS permissions, quarantine, bundle movement, or an interrupted upgrade's recovery behavior. |
+
 ## Published ports: `-p` first, then `-P`
 
 `-p` is a required normal Docker path. The current implementation deliberately
@@ -214,6 +230,12 @@ evidence that exists; relay-reviewed is never a synonym for compatible.
   admission policy.
 - `mac/Sources/MorbstackKit/DockerAPI.swift` and `PortForwarder.swift` — internal
   `v1.43` reads and port-reconciliation behavior.
+- `mac/Sources/MorbstackKit/MorbCliInstallation.swift` — consented, reversible
+  bundled-client links, ownership preflight, and shell-profile integration.
+- `mac/Sources/MorbstackKit/CliPlugins.swift` — standard CLI-plugin directory,
+  bundle source lookup, and conservative plugin-link ownership classifier.
+- `mac/Sources/MorbstackKit/MorbDockerContext.swift` — standard context metadata,
+  selection-status model, and direct per-user socket ownership boundary.
 - `docs/dynamic-port-allocation.md` — detailed `-p` contract and `-P` source audit.
 - `docs/clean-profile-acceptance.md` — serial release gate; it is intentionally not
   replaced by this inventory.
