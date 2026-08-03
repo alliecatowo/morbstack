@@ -1,6 +1,6 @@
 # Product parity audit
 
-Status: active delivery contract. Last reconciled 2026-08-02 against the
+Status: active delivery contract. Last reconciled 2026-08-03 against the
 repository and current official OrbStack documentation. This is a delivery
 plan, not a claim that every item has shipped or been live-verified.
 
@@ -45,7 +45,7 @@ guarantee.
 | Self-contained runtime and host CLI | `e329140` packages a signed, versioned runtime manifest plus upstream Docker, Compose, and Buildx in the app; first-run setup links only reviewed user-owned locations. | Implemented; clean-profile live verification pending. |
 | Direct Docker discovery and durable ownership | `e329140` creates `~/.docker/run/docker.sock` only when it is safely absent; `1dda777` adds an explicit signed per-user `SMAppService` LaunchAgent; `ddac4a3` offers it default-off in first run. | Implemented; registration and clean-profile live verification pending. |
 | Diagnostics and recovery | `e329140` adds an offline, bounded, redacted `morb diagnose`; `cacda50` exposes actual Kubernetes startup diagnostics and an escape path. | Implemented; support-bundle smoke checked; full real-VM recovery matrix pending. |
-| Operational UI | `0c45d08` makes BuildKit cache pruning a real engine-wide confirmed action; `317785f` makes disk-capacity states truthful; `51519d5`, `b63c813`, and `c39cf04` record full-window table readability repairs. | Implemented; real-window Computer Use review completed for these routes. |
+| Operational UI | `9c0cee5` adds a reviewed, native BuildKit local-build workflow; `e066891` adds a native selected-images migration workflow; `6b3aa92` adds real container network statistics; `34f3353` adds pod log/event inspection; `acd0925` makes disk-capacity and resize-readiness states truthful. | Implemented pending the corresponding real-engine acceptance paths. The full-window Computer Use review is recorded for safe routes; no build, migration, or Kubernetes mutation was performed during it. |
 | Port behavior | The fixed-TCP Docker create/start path now retains a real loopback listener through a bounded create-ID response and exact-204 start handoff; the CLI preflight remains an advisory diagnostic. | Fixed supported TCP publications are race-resistant through the recognized exchange. Dynamic/range ports, UDP, opaque/name-based start handoff, and VM-stop persistence remain incomplete. |
 
 ## The parity program
@@ -63,10 +63,11 @@ guarantee.
 3. **One transactional onboarding.** Preflight, show the exact changes,
    install the runtime/service/`morb`/Docker/Compose/Buildx/context/socket,
    start the engine, and run real health probes. It must be resumable and
-   offer a specific repair path. **Current implementation:** the explicit CLI
-   setup and first-run sheet now re-read every host integration and report
-   daemon/Docker reachability without starting a stopped runtime; the complete
-   engine-starting transaction and clean-profile live evidence remain P0 work.
+   offer a specific repair path. **Current implementation:** the explicit
+   first-run transaction presents every host-owned change, keeps the background
+   service opt-in, starts only Morbstack after explicit confirmation, then
+   performs a bounded Docker health verification and exposes a repair action.
+   Clean-profile live evidence remains the P0 release gate.
 4. **Release evidence, not documentation promises.** Run a clean-profile
    compatibility matrix for direct socket discovery, Docker contexts,
    Buildx, Compose, Testcontainers, Dev Containers and core IDE paths.
@@ -84,14 +85,15 @@ guarantee.
    stop/preflight diagnostic, but no host image is resized), truthful idle-stop wording
    until genuine suspend/restore is demonstrated, and a redacted `morb diagnose` bundle
    with structured VM/DNS/share/forwarder/Kubernetes health.
-4. Make the operations app real: durable build progress/cancel/cache,
-   stack actions, container logs/stats/exec/debug, safe image/volume export
-   and inspection, and Kubernetes workload/event/log/exec/port-forward
-   operations with reasons and recovery.
-5. Finish a non-destructive native migration assistant: selected local-image
-   preparation/confirmation/verification/report now exists in the service and
-   CLI; add separately proven volume transfer, native confirmation/progress,
-   rollback guidance, and explicit credential remediation.
+4. Finish the remaining operational app workflows: exercise the implemented
+   local BuildKit workflow against a clean engine; complete stack actions,
+   container exec/debug, safe image/volume export and inspection, and
+   Kubernetes exec/port-forward with reasons and recovery. Container
+   logs/stats and selected-pod logs/events already use real read-only APIs.
+5. Finish migration beyond the implemented native selected-image
+   preparation/review/progress/verification/report workflow: add separately
+   proven volume transfer, rollback guidance, and explicit credential
+   remediation.
 
 ### P2 — exceed the competing native experience
 
