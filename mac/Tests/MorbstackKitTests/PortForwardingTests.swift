@@ -70,9 +70,11 @@ final class PortForwardingTests: XCTestCase {
         XCTAssertTrue(PortForwardPlan.isForwardable(binding(ip: "")))
         XCTAssertFalse(PortForwardPlan.isForwardable(binding(ip: "192.168.65.3")))
         XCTAssertFalse(PortForwardPlan.isForwardable(binding(ip: "0.0.0.0", proto: "udp")))
+        XCTAssertTrue(PortForwardPlan.isForwardableUDP(binding(ip: "0.0.0.0", proto: "udp")))
+        XCTAssertFalse(PortForwardPlan.isForwardableUDP(binding(ip: "192.168.65.3", proto: "udp")))
     }
 
-    func testUDPPortsAreReportedSeparatelyRatherThanForwarded() throws {
+    func testUDPPortsGetTheirOwnConcreteListenerPlan() throws {
         let json = Data(
             """
             [{"Id":"d","Names":["/dns"],"Ports":[
@@ -80,7 +82,7 @@ final class PortForwardingTests: XCTestCase {
             """.utf8)
         let bindings = try DockerAPIDecoding.publishedPorts(containersJSON: json)
         XCTAssertTrue(PortForwardPlan.desiredListeners(bindings).isEmpty)
-        XCTAssertEqual(PortForwardPlan.udpHostPorts(bindings).map(\.hostPort), [5353])
+        XCTAssertEqual(PortForwardPlan.desiredUDPListeners(bindings).keys.sorted(), [5353])
     }
 
     func testRejectsANonArrayContainersDocument() {
@@ -119,6 +121,36 @@ final class PortForwardingTests: XCTestCase {
 
         XCTAssertTrue(DockerPortPublicationPreflight.explicitTCPBindings(in: dynamic).isEmpty)
         XCTAssertTrue(DockerPortPublicationPreflight.explicitTCPBindings(in: ambiguous).isEmpty)
+    }
+
+    func testFixedLoopbackUDPCreateIsAdmittedButHasNoTCPLease() {
+        let create = Data(
+            #"{"HostConfig":{"PortBindings":{"53/udp":[{"HostIp":"127.0.0.1","HostPort":"5353"}]}}}"#.utf8)
+
+        XCTAssertEqual(DockerPortPublicationPreflight.inspectContainerCreate(body: create), .allowed)
+        XCTAssertTrue(
+            DockerPortPublicationPreflight.explicitTCPBindings(in: create).isEmpty,
+            "UDP is event-confirmed; it must not accidentally enter the fixed TCP lease ledger")
+    }
+
+    func testUnsupportedProtocolAndUDPRangeAreNotMisrepresentedAsLeases() {
+        let unsupported = Data(
+            #"{"HostConfig":{"PortBindings":{"80/sctp":[{"HostPort":"8080"}]}}}"#.utf8)
+        let range = Data(
+            #"{"HostConfig":{"PortBindings":{"53/udp":[{"HostPort":"5353-5355"}]}}}"#.utf8)
+
+        guard case .rejected(let unsupportedMessage) =
+            DockerPortPublicationPreflight.inspectContainerCreate(body: unsupported)
+        else {
+            return XCTFail("SCTP must not look like a supported forward")
+        }
+        XCTAssertTrue(unsupportedMessage.contains("SCTP"))
+        guard case .rejected(let rangeMessage) =
+            DockerPortPublicationPreflight.inspectContainerCreate(body: range)
+        else {
+            return XCTFail("a UDP range must not look like one fixed reservation")
+        }
+        XCTAssertTrue(rangeMessage.contains("not a single port"))
     }
 
     // MARK: - Running containers (the auto-suspend interlock)
@@ -284,6 +316,45 @@ final class PortForwardingTests: XCTestCase {
         ) { error in
             XCTAssertTrue("\(error)".contains("in time"), "\(error)")
         }
+    }
+
+    // MARK: - Datagram dial
+
+    func testDatagramDialPreambleAndFramingPreservePacketBoundaries() throws {
+        XCTAssertEqual(String(decoding: DatagramDial.preamble(hostPort: 5353), as: UTF8.self), "UDP 5353\n")
+
+        var sockets: [Int32] = [-1, -1]
+        guard socketpair(AF_UNIX, SOCK_STREAM, 0, &sockets) == 0 else {
+            throw XCTSkip("socketpair failed: \(String(cString: strerror(errno)))")
+        }
+        defer {
+            close(sockets[0])
+            close(sockets[1])
+        }
+        XCTAssertTrue(DatagramDial.writeFrame(fd: sockets[1], datagram: Data("one".utf8)))
+        XCTAssertTrue(DatagramDial.writeFrame(fd: sockets[1], datagram: Data()))
+        XCTAssertTrue(DatagramDial.writeFrame(fd: sockets[1], datagram: Data("three".utf8)))
+
+        XCTAssertEqual(try DatagramDial.readFrame(fd: sockets[0]), Data("one".utf8))
+        XCTAssertEqual(try DatagramDial.readFrame(fd: sockets[0]), Data())
+        XCTAssertEqual(try DatagramDial.readFrame(fd: sockets[0]), Data("three".utf8))
+    }
+
+    func testDatagramDialRejectsAFrameLargerThanUDPPermits() throws {
+        var sockets: [Int32] = [-1, -1]
+        guard socketpair(AF_UNIX, SOCK_STREAM, 0, &sockets) == 0 else {
+            throw XCTSkip("socketpair failed: \(String(cString: strerror(errno)))")
+        }
+        defer {
+            close(sockets[0])
+            close(sockets[1])
+        }
+        XCTAssertFalse(
+            DatagramDial.writeFrame(
+                fd: sockets[1],
+                datagram: Data(repeating: 0, count: DatagramDial.maximumDatagramBytes + 1)))
+        XCTAssertTrue(POSIXSocketSupport.writeAll(sockets[1], Data([0, 1, 0, 0])))
+        XCTAssertThrowsError(try DatagramDial.readFrame(fd: sockets[0]))
     }
 
     // MARK: - Listener

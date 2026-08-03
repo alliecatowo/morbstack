@@ -462,8 +462,8 @@ case "ports":
             out("\(marker) \(result.transport.rawValue) \(result.bindAddress):\(result.port) — \(result.detail)")
         }
         out("")
-        out("TCP publishes on 127.0.0.1 only; Morbstack never exposes a container port to the LAN.")
-        out("A free result is a point-in-time check, not a reservation. UDP is checked but not forwarded yet.")
+        out("TCP and UDP publish on 127.0.0.1 only; Morbstack never exposes a container port to the LAN.")
+        out("A free result is a point-in-time check, not a reservation. TCP fixed creates hold a lease; UDP begins after Docker reports the concrete publication.")
     }
     exit(hasUnavailable ? 2 : 0)
 

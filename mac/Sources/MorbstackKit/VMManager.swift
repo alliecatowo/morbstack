@@ -1754,4 +1754,9 @@ public enum MorbVsockPorts {
     ///
     /// See ``StreamDial`` for the one-line preamble that opens the exchange.
     public static let streamDial: UInt32 = 2376
+    /// Datagram-dial: framed UDP messages for published UDP container ports.
+    ///
+    /// The stream transport preserves each UDP payload with explicit frames; see
+    /// ``DatagramDial`` for the handshake and data-plane contract.
+    public static let datagramDial: UInt32 = 2378
 }

@@ -393,9 +393,10 @@ of what its docs say.
   to forwarding before the exact `docker start` 204 reaches the client. That closes
   the host-port race for that exchange. Dynamic/ranged allocation, chunked or opaque
   create responses, name-based/nonstandard start handoff, VM-stop persistence, and
-  UDP remain outside that synchronous contract.
-- **No UDP port forwarding at all.** The published-port forwarder is
-  TCP-only.
+  UDP remain outside that synchronous **TCP lease** contract.
+- **UDP forwarding is real but event-confirmed.** A framed datagram relay preserves
+  per-client message boundaries and replies over loopback once Docker exposes a
+  concrete port. Dynamic/ranged UDP does not claim a create/start reservation.
 - **No qemu fallback for amd64**, despite the plumbing existing — no
   static `qemu-x86_64` ships, so anything Rosetta cannot translate simply
   fails with no fallback ([amd64.md](amd64.md)).

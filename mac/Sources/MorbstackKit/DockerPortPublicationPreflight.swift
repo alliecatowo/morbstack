@@ -2,9 +2,10 @@
 // Licensed under the Apache License, Version 2.0 (the "License").
 //
 // Admission parsing for explicit `HostConfig.PortBindings` in a Docker
-// container-create request. The parser intentionally recognizes only fixed TCP
-// bindings. `DockerProxy` may turn those into held listener leases; dynamic/range
-// allocations remain for a future Engine/guest allocation contract.
+// container-create request. The parser admits only fixed loopback TCP/UDP bindings
+// it can inspect without consuming bytes. `DockerProxy` turns fixed TCP bindings into
+// held listener leases; UDP is event-confirmed after Docker has assigned a concrete
+// endpoint, so dynamic/range allocations remain outside the synchronous contract.
 
 import Foundation
 
@@ -69,36 +70,33 @@ public enum DockerPortPublicationPreflight {
                 let key = "\(protocolName)|\(hostIP)|\(hostPort)"
                 guard examined.insert(key).inserted else { continue }
 
-                guard protocolName == "tcp" else {
-                    if protocolName == "udp" {
-                        return .rejected(
-                            message: "published UDP port \(hostPort) cannot be used: Morbstack does not forward UDP ports")
-                    }
+                guard protocolName == "tcp" || protocolName == "udp" else {
                     return .rejected(
-                        message: "published \(protocolName.uppercased()) port \(hostPort) is not supported by Morbstack's TCP-only host forwarder")
+                        message: "published \(protocolName.uppercased()) port \(hostPort) is not supported by Morbstack's host forwarder")
                 }
 
                 guard PortForwardPlan.forwardableHostAddresses.contains(hostIP) else {
                     return .rejected(
-                        message: "published host address \(hostIP) is not supported; Morbstack forwards TCP only on loopback")
+                        message: "published host address \(hostIP) is not supported; Morbstack forwards TCP and UDP only on loopback")
                 }
                 guard let port = Int(hostPort) else {
                     return .rejected(
-                        message: "published TCP host port \(hostPort) is not a single port; dynamic and range allocations are not preflighted")
+                        message: "published \(protocolName.uppercased()) host port \(hostPort) is not a single port; dynamic and range allocations are not preflighted")
                 }
 
-                let result = HostPortPreflight.check(port: port, transport: .tcp)
+                let transport: HostPortPreflight.Transport = protocolName == "tcp" ? .tcp : .udp
+                let result = HostPortPreflight.check(port: port, transport: transport)
                 switch result.availability {
                 case .available:
                     continue
                 case .inUse:
                     return .rejected(
-                        message: "driver failed programming external connectivity: Bind for 127.0.0.1:\(port) failed: port is already allocated")
+                        message: "driver failed programming external connectivity: Bind for 127.0.0.1:\(port)/\(protocolName) failed: port is already allocated")
                 case .invalid:
-                    return .rejected(message: "published TCP host port \(hostPort) is invalid")
+                    return .rejected(message: "published \(protocolName.uppercased()) host port \(hostPort) is invalid")
                 case .unavailable:
                     return .rejected(
-                        message: "could not verify published TCP port 127.0.0.1:\(port): \(result.detail)")
+                        message: "could not verify published \(protocolName.uppercased()) port 127.0.0.1:\(port): \(result.detail)")
                 }
             }
         }

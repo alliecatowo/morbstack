@@ -255,6 +255,16 @@ public enum PortForwardPlan {
             && binding.hostPort <= 65535
     }
 
+    /// Whether an event-confirmed UDP publication can be represented by one Mac
+    /// loopback datagram endpoint. This is intentionally separate from
+    /// ``isForwardable(_:)`` because TCP and UDP may share one numeric host port.
+    public static func isForwardableUDP(_ binding: DockerPortBinding) -> Bool {
+        binding.networkProtocol == "udp"
+            && forwardableHostAddresses.contains(binding.hostIP)
+            && binding.hostPort > 0
+            && binding.hostPort <= 65535
+    }
+
     /// Reduces raw bindings to one desired listener per host port.
     ///
     /// Docker reports the same host port twice when it binds both `0.0.0.0` and `::`;
@@ -274,11 +284,25 @@ public enum PortForwardPlan {
         return desired
     }
 
-    /// The UDP host ports present in `bindings`, which this milestone does not forward.
-    public static func udpHostPorts(_ bindings: [DockerPortBinding]) -> [DockerPortBinding] {
-        bindings
-            .filter { $0.networkProtocol == "udp" && forwardableHostAddresses.contains($0.hostIP) }
-            .sorted { $0.hostPort < $1.hostPort }
+    /// Reduces event-confirmed UDP publications to one listener per UDP host port.
+    ///
+    /// Docker reports dual-stack bindings separately. Morbstack binds the safe IPv4
+    /// loopback endpoint once, preferring Docker's IPv4 spelling for diagnostics just
+    /// as the TCP plan does. If two different containers claim the same UDP endpoint,
+    /// Docker owns the malformed state; this method never invents a winner beyond its
+    /// stable first-seen/IPv4 preference.
+    public static func desiredUDPListeners(_ bindings: [DockerPortBinding]) -> [Int: DockerPortBinding] {
+        var desired: [Int: DockerPortBinding] = [:]
+        for binding in bindings where isForwardableUDP(binding) {
+            if let existing = desired[binding.hostPort] {
+                let existingIsIPv6 = existing.hostIP.contains(":")
+                let candidateIsIPv6 = binding.hostIP.contains(":")
+                if existingIsIPv6 && !candidateIsIPv6 { desired[binding.hostPort] = binding }
+            } else {
+                desired[binding.hostPort] = binding
+            }
+        }
+        return desired
     }
 
     /// Computes the listener changes needed to go from `current` to `desired`.

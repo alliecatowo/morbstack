@@ -17,9 +17,11 @@ import Foundation
 ///    would either be laggy or wasteful; events alone would miss whatever happened
 ///    while the daemon was not watching, and would have to reconstruct port bindings
 ///    from a stream that does not carry them.
-/// 2. **Listeners.** Each published TCP port gets a ``TCPListener`` on `127.0.0.1`.
-/// 3. **Splicing.** Each accepted connection opens a vsock stream-dial (2376), names
-///    the port, and hands both descriptors to an ``FDRelay``.
+/// 2. **Listeners.** Each published TCP or UDP port gets the matching loopback socket
+///    on `127.0.0.1`.
+/// 3. **Transport.** TCP accepts open a vsock stream-dial (2376) and use ``FDRelay``.
+///    UDP clients instead get a long-lived framed datagram-dial (2378), preserving
+///    individual messages and their reply flow.
 ///
 /// The forwarder is owned by ``Daemon``. Its event stream is active only while the VM
 /// is running; a fixed-TCP lease may bind just before a cold VM starts so the Engine
@@ -72,6 +74,154 @@ public final class PortForwarder {
         /// A listener pre-bound by DockerProxy before the Engine saw its create
         /// request. Normal event-discovered forwards have no lease identity.
         let leaseID: UUID?
+    }
+
+    /// One active UDP publication. UDP's source tuple matters, so an endpoint owns
+    /// a small set of per-Mac-client datagram-dial flows rather than one unlabelled
+    /// shared stream to the guest.
+    private final class UDPForward {
+        var binding: DockerPortBinding
+        let listener: UDPListener
+        var flows: [UDPListener.Client: UDPFlow] = [:]
+
+        init(binding: DockerPortBinding, listener: UDPListener) {
+            self.binding = binding
+            self.listener = listener
+        }
+    }
+
+    /// A bounded host sender -> guest connected-UDP socket flow.
+    ///
+    /// Writes are serialized on a private queue so two datagrams from the same
+    /// client cannot interleave their frame headers. Queue accounting prevents a
+    /// local UDP flood from becoming an unbounded collection of Dispatch blocks.
+    private final class UDPFlow {
+        private enum State { case opening, open(Int32), closed }
+        private static let maximumQueuedDatagrams = 64
+        private static let maximumQueuedBytes = 1_048_576
+
+        let client: UDPListener.Client
+        let binding: DockerPortBinding
+        let generation: Int
+        private let queue = DispatchQueue(label: "dev.morbstack.portforward.udp-flow")
+        private let lock = NSLock()
+        private var state: State = .opening
+        private var pending: [Data] = []
+        private var queuedDatagrams = 0
+        private var queuedBytes = 0
+        private var lastActivity = Date()
+        private var overloadLogged = false
+
+        init(client: UDPListener.Client, binding: DockerPortBinding, generation: Int) {
+            self.client = client
+            self.binding = binding
+            self.generation = generation
+        }
+
+        /// Returns true only once for an overload burst, so the caller can explain a
+        /// dropped UDP datagram without logging one line per packet.
+        func enqueue(_ datagram: Data, onWriteFailure: @escaping () -> Void) -> Bool {
+            lock.lock()
+            if case .closed = state {
+                lock.unlock()
+                return false
+            }
+            let overLimit = queuedDatagrams >= UDPFlow.maximumQueuedDatagrams
+                || queuedBytes + datagram.count > UDPFlow.maximumQueuedBytes
+            if overLimit {
+                let shouldLog = !overloadLogged
+                overloadLogged = true
+                lock.unlock()
+                return shouldLog
+            }
+            queuedDatagrams += 1
+            queuedBytes += datagram.count
+            lastActivity = Date()
+            if case .opening = state {
+                pending.append(datagram)
+                lock.unlock()
+                return false
+            }
+            lock.unlock()
+            schedule(datagram, onWriteFailure: onWriteFailure)
+            return false
+        }
+
+        func activate(_ descriptor: Int32, onWriteFailure: @escaping () -> Void) -> Bool {
+            lock.lock()
+            guard case .opening = state else {
+                lock.unlock()
+                Darwin.close(descriptor)
+                return false
+            }
+            state = .open(descriptor)
+            let buffered = pending
+            pending.removeAll(keepingCapacity: false)
+            lastActivity = Date()
+            lock.unlock()
+            for datagram in buffered {
+                schedule(datagram, onWriteFailure: onWriteFailure)
+            }
+            return true
+        }
+
+        func noteReply() {
+            lock.lock()
+            lastActivity = Date()
+            lock.unlock()
+        }
+
+        var openDescriptor: Int32? {
+            lock.lock()
+            defer { lock.unlock() }
+            if case .open(let fd) = state { return fd }
+            return nil
+        }
+
+        func idle(at date: Date, timeout: TimeInterval) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return date.timeIntervalSince(lastActivity) >= timeout
+        }
+
+        func close() {
+            lock.lock()
+            let descriptor: Int32
+            switch state {
+            case .open(let fd): descriptor = fd
+            case .opening, .closed: descriptor = -1
+            }
+            state = .closed
+            lock.unlock()
+            guard descriptor >= 0 else { return }
+            // Wake a reader and any frame writer before the descriptor can be reused.
+            // The close itself is ordered after already-queued writes on the serial
+            // flow queue, so a writer that observed this fd cannot accidentally write
+            // into an unrelated later vsock connection with the same number.
+            _ = Darwin.shutdown(descriptor, SHUT_RDWR)
+            queue.async { Darwin.close(descriptor) }
+        }
+
+        private func write(_ datagram: Data, onFailure: @escaping () -> Void) {
+            lock.lock()
+            let descriptor: Int32
+            if case .open(let fd) = state { descriptor = fd } else { descriptor = -1 }
+            lock.unlock()
+            let succeeded = descriptor >= 0 && DatagramDial.writeFrame(fd: descriptor, datagram: datagram)
+
+            lock.lock()
+            queuedDatagrams = max(0, queuedDatagrams - 1)
+            queuedBytes = max(0, queuedBytes - datagram.count)
+            if queuedDatagrams == 0 { overloadLogged = false }
+            lock.unlock()
+            if !succeeded { onFailure() }
+        }
+
+        private func schedule(_ datagram: Data, onWriteFailure: @escaping () -> Void) {
+            queue.async { [weak self] in
+                self?.write(datagram, onFailure: onWriteFailure)
+            }
+        }
     }
 
     /// Opaque ownership of listeners reserved before a recognized Docker create
@@ -131,11 +281,17 @@ public final class PortForwarder {
         label: "dev.morbstack.portforward.accept", attributes: .concurrent)
     private let dialQueue = DispatchQueue(
         label: "dev.morbstack.portforward.dial", qos: .userInitiated, attributes: .concurrent)
+    private let udpDialQueue = DispatchQueue(
+        label: "dev.morbstack.portforward.udp-dial", qos: .userInitiated, attributes: .concurrent)
     private let relayQueue = DispatchQueue(
         label: "dev.morbstack.portforward.relay", attributes: .concurrent)
 
     /// Permits for ``dialQueue``; see ``maxConcurrentDials``.
     private let dialPermits = DispatchSemaphore(value: PortForwarder.maxConcurrentDials)
+    /// UDP flows are long-lived. A smaller setup limit leaves capacity for interactive
+    /// TCP accepts while preventing one noisy datagram service from creating unlimited
+    /// blocked vsock connects.
+    private let udpDialPermits = DispatchSemaphore(value: 16)
 
     private let lock = NSLock()
     private var running = false
@@ -143,6 +299,7 @@ public final class PortForwarder {
     /// launched with and exit as soon as it goes stale.
     private var generation = 0
     private var forwards: [Int: Forward] = [:]
+    private var udpForwards: [Int: UDPForward] = [:]
     /// Fixed TCP listeners held continuously from a recognized create through a
     /// matching start handoff (or container destruction/daemon stop).
     private var leases: [UUID: LeaseRecord] = [:]
@@ -158,13 +315,19 @@ public final class PortForwarder {
     /// idle, so the failure mode is an auto-suspend fired while connections are live.
     private var connectionCounts: [Int: Int] = [:]
     private var refreshQueued = false
-    private var announcedUDPPorts: Set<Int> = []
     private var failedBinds: [Int: FailedBind] = [:]
+    private var failedUDPBinds: [Int: FailedBind] = [:]
     private var retryTimer: DispatchSourceTimer?
     /// Dials started but not yet spliced, throttled by ``maxConcurrentDials``.
     private var pendingDials = 0
     /// Set while a burst is being shed, so the refusal is logged once and not per client.
     private var dialBurstLogged = false
+
+    /// Global, not per port: each UDP client flow holds a vsock connection and a
+    /// guest thread, so letting every published port consume 128 would multiply the
+    /// guest resource budget rather than enforce one.
+    private static let maximumUDPFlows = 48
+    private static let udpFlowIdleTimeout: TimeInterval = 60
 
     /// Creates a forwarder. Nothing happens until ``start()``.
     public init(vm: VMManager, log: MorbLog) {
@@ -178,7 +341,9 @@ public final class PortForwarder {
     public var activeForwards: [String] {
         lock.lock()
         defer { lock.unlock() }
-        return forwards.keys.sorted().compactMap { forwards[$0]?.binding.description }
+        let tcp = forwards.keys.sorted().compactMap { forwards[$0]?.binding.description }
+        let udp = udpForwards.keys.sorted().compactMap { udpForwards[$0]?.binding.description }
+        return tcp + udp
     }
 
     /// The number of forwarded connections currently being relayed.
@@ -200,10 +365,15 @@ public final class PortForwarder {
     public var failedForwards: [String] {
         lock.lock()
         defer { lock.unlock() }
-        return failedBinds.keys.sorted().compactMap { port in
+        let tcp = failedBinds.keys.sorted().compactMap { port in
             guard let failure = failedBinds[port] else { return nil }
             return "\(failure.binding.description) — \(failure.reason)"
         }
+        let udp = failedUDPBinds.keys.sorted().compactMap { port in
+            guard let failure = failedUDPBinds[port] else { return nil }
+            return "\(failure.binding.description) — \(failure.reason)"
+        }
+        return tcp + udp
     }
 
     /// `true` between ``start()`` and ``stop()``.
@@ -465,7 +635,6 @@ public final class PortForwarder {
         running = true
         generation &+= 1
         let generation = self.generation
-        announcedUDPPorts.removeAll()
         lock.unlock()
 
         log.info("port forwarding active; watching the Docker event stream")
@@ -490,6 +659,8 @@ public final class PortForwarder {
         generation &+= 1
         let closing = forwards
         forwards.removeAll()
+        let closingUDP = udpForwards
+        udpForwards.removeAll()
         let closingLeases = leases.values
         leases.removeAll()
         leaseByContainerID.removeAll()
@@ -499,6 +670,7 @@ public final class PortForwarder {
         // generation and become no-ops rather than debits against the next run.
         connectionCounts.removeAll()
         failedBinds.removeAll()
+        failedUDPBinds.removeAll()
         let timer = retryTimer
         retryTimer = nil
         lock.unlock()
@@ -512,19 +684,24 @@ public final class PortForwarder {
             }
         }
         for listener in listeners.values { listener.stop() }
+        for forward in closingUDP.values {
+            forward.listener.stop()
+            for flow in forward.flows.values { flow.close() }
+        }
         for relay in inFlight { relay.cancel() }
 
         let because = reason.map { " (\($0))" } ?? ""
-        if closing.isEmpty, closingLeases.isEmpty {
+        if closing.isEmpty, closingUDP.isEmpty, closingLeases.isEmpty {
             log.info("port forwarding stopped\(because)")
         } else {
             // Named individually: this is the line a user greps for when
             // `curl 127.0.0.1:8080` stops answering, and "3 listener(s)" does not
             // tell them which three.
-            let ports = Set(closing.keys).union(closingLeases.flatMap { $0.lease.publications.map(\.hostPort) })
-                .sorted().map(String.init).joined(separator: ", ")
-            let count = Set(closing.keys).union(closingLeases.flatMap { $0.lease.publications.map(\.hostPort) }).count
-            let subject = count == 1 ? "port \(ports) is" : "ports \(ports) are"
+            let tcpPorts = Set(closing.keys).union(closingLeases.flatMap { $0.lease.publications.map(\.hostPort) })
+            let descriptions = tcpPorts.sorted().map { "\($0)/tcp" }
+                + closingUDP.keys.sorted().map { "\($0)/udp" }
+            let ports = descriptions.joined(separator: ", ")
+            let subject = descriptions.count == 1 ? "port \(ports) is" : "ports \(ports) are"
             log.info(
                 "port forwarding stopped\(because); 127.0.0.1 \(subject) no longer "
                     + "published and will be republished when the guest is running again")
@@ -573,11 +750,38 @@ public final class PortForwarder {
             .filter { $0.nextAttemptAt <= now }
             .map(\.binding)
             .sorted { $0.hostPort < $1.hostPort }
+        let dueUDP = failedUDPBinds.values
+            .filter { $0.nextAttemptAt <= now }
+            .map(\.binding)
+            .sorted { $0.hostPort < $1.hostPort }
         lock.unlock()
 
         for binding in due {
             openForward(binding, generation: generation)
         }
+        for binding in dueUDP {
+            openUDPForward(binding, generation: generation)
+        }
+        expireUDPFlows(now: now)
+    }
+
+    /// UDP has no close handshake. Retire inactive client flows so a process that
+    /// sprays one packet from thousands of ephemeral ports cannot keep vsock sockets
+    /// forever. Sixty seconds is deliberately much longer than normal request/reply
+    /// use while still bounding the guest-side connection count.
+    private func expireUDPFlows(now: Date) {
+        var expired: [UDPFlow] = []
+        lock.lock()
+        for forward in udpForwards.values {
+            let clients = forward.flows.compactMap { client, flow in
+                flow.idle(at: now, timeout: PortForwarder.udpFlowIdleTimeout) ? client : nil
+            }
+            for client in clients {
+                if let flow = forward.flows.removeValue(forKey: client) { expired.append(flow) }
+            }
+        }
+        lock.unlock()
+        for flow in expired { flow.close() }
     }
 
     // MARK: - Event stream
@@ -870,16 +1074,6 @@ public final class PortForwarder {
     /// Only ever called from ``workQueue``, so the read-diff-write below cannot
     /// interleave with another reconciliation.
     private func apply(bindings: [DockerPortBinding], generation: Int, reason: String) {
-        for udp in PortForwardPlan.udpHostPorts(bindings) {
-            lock.lock()
-            let isNew = announcedUDPPorts.insert(udp.hostPort).inserted
-            lock.unlock()
-            guard isNew else { continue }
-            log.warn(
-                "UDP port \(udp.hostPort) published by \(udp.containerName) is not forwarded to the "
-                    + "Mac; Morbstack forwards TCP only for now")
-        }
-
         let desired = PortForwardPlan.desiredListeners(bindings)
 
         // A start by container name or an opaque client can bypass DockerProxy's
@@ -917,19 +1111,55 @@ public final class PortForwarder {
         lock.unlock()
 
         let plan = PortForwardPlan.diff(current: current, desired: desired)
-        guard !plan.close.isEmpty || !plan.open.isEmpty else { return }
+        if !plan.close.isEmpty || !plan.open.isEmpty {
+            // Close first: a port whose container was replaced appears in both lists,
+            // and rebinding it while the old listener still holds it would fail
+            // EADDRINUSE against ourselves.
+            for port in plan.close {
+                let replacementOwnsPort = desired[port].map { desiredBinding in
+                    current[port].map { $0.containerID != desiredBinding.containerID } ?? false
+                } ?? false
+                closeForward(port: port, reason: reason, preserveLease: !replacementOwnsPort)
+            }
+            for binding in plan.open {
+                openForward(binding, generation: generation)
+            }
+        }
 
-        // Close first: a port whose container was replaced appears in both lists, and
-        // rebinding it while the old listener still holds it would fail EADDRINUSE
-        // against ourselves.
+        applyUDP(bindings: bindings, generation: generation, reason: reason)
+    }
+
+    /// UDP has the same event-driven discovery as TCP, but its independent port space
+    /// needs a separate plan: Docker may legitimately publish TCP and UDP on the same
+    /// numerical port at once. Nothing in this method guesses a pre-start dynamic or
+    /// range allocation; `containers/json` has already supplied the concrete endpoint.
+    private func applyUDP(bindings: [DockerPortBinding], generation: Int, reason: String) {
+        let desired = PortForwardPlan.desiredUDPListeners(bindings)
+
+        lock.lock()
+        for (port, desiredBinding) in desired {
+            guard let forward = udpForwards[port], forwardTargetMatches(forward.binding, desiredBinding) else {
+                continue
+            }
+            forward.binding = desiredBinding
+        }
+        let current = udpForwards.mapValues(\.binding)
+        for port in failedUDPBinds.keys {
+            if let stillWanted = desired[port] {
+                failedUDPBinds[port]?.binding = stillWanted
+            } else {
+                failedUDPBinds.removeValue(forKey: port)
+            }
+        }
+        lock.unlock()
+
+        let plan = PortForwardPlan.diff(current: current, desired: desired)
+        guard !plan.close.isEmpty || !plan.open.isEmpty else { return }
         for port in plan.close {
-            let replacementOwnsPort = desired[port].map { desiredBinding in
-                current[port].map { $0.containerID != desiredBinding.containerID } ?? false
-            } ?? false
-            closeForward(port: port, reason: reason, preserveLease: !replacementOwnsPort)
+            closeUDPForward(port: port, reason: reason)
         }
         for binding in plan.open {
-            openForward(binding, generation: generation)
+            openUDPForward(binding, generation: generation)
         }
     }
 
@@ -949,6 +1179,17 @@ public final class PortForwarder {
             forward.listener.stop()
             log.info("port forward removed: \(forward.binding.description) — after \(reason)")
         }
+    }
+
+    private func closeUDPForward(port: Int, reason: String) {
+        lock.lock()
+        let forward = udpForwards.removeValue(forKey: port)
+        failedUDPBinds.removeValue(forKey: port)
+        lock.unlock()
+        guard let forward else { return }
+        forward.listener.stop()
+        for flow in forward.flows.values { flow.close() }
+        log.info("UDP port forward removed: \(forward.binding.description) — after \(reason)")
     }
 
     /// Binds one host port, or records the failure and schedules a retry.
@@ -999,6 +1240,48 @@ public final class PortForwarder {
         log.info("port forward added: \(binding.description) on 127.0.0.1:\(port)")
     }
 
+    /// Binds one event-confirmed UDP publication. The listener is a real datagram
+    /// endpoint, not a TCP approximation: every host client gets a framed vsock flow
+    /// to a connected guest UDP socket and replies return to that same client.
+    private func openUDPForward(_ binding: DockerPortBinding, generation: Int) {
+        let port = binding.hostPort
+        lock.lock()
+        let deferred = failedUDPBinds[port].map { $0.nextAttemptAt > Date() } ?? false
+        lock.unlock()
+        if deferred { return }
+
+        let listener = UDPListener(port: port, queue: acceptQueue)
+        listener.onDatagram = { [weak self, weak listener] datagram, client in
+            guard let self, let listener else { return }
+            self.handleUDPDatagram(
+                datagram, from: client, binding: binding, listener: listener, generation: generation)
+        }
+        do {
+            try listener.start()
+        } catch UDPListener.Error.addressInUse {
+            recordFailedUDPBind(
+                binding,
+                reason: "another process holds 127.0.0.1:\(port)/udp; will retry")
+            return
+        } catch {
+            recordFailedUDPBind(binding, reason: "\(error); will retry")
+            return
+        }
+
+        lock.lock()
+        let accepted = running && self.generation == generation
+        if accepted {
+            udpForwards[port] = UDPForward(binding: binding, listener: listener)
+            failedUDPBinds.removeValue(forKey: port)
+        }
+        lock.unlock()
+        guard accepted else {
+            listener.stop()
+            return
+        }
+        log.info("UDP port forward added: \(binding.description) on 127.0.0.1:\(port)")
+    }
+
     /// The actual host listener is keyed by port, container identity, and its guest
     /// target. Docker's `Ports` response may normalize `0.0.0.0` to an empty address
     /// or finally reveal the human-readable name; neither difference requires a
@@ -1040,6 +1323,186 @@ public final class PortForwarder {
             "cannot publish \(binding.description): \(reason) in \(Int(delay))s "
                 + "(container \(binding.containerName) is not reachable on 127.0.0.1:\(port) "
                 + "until then)")
+    }
+
+    private func recordFailedUDPBind(_ binding: DockerPortBinding, reason: String) {
+        let port = binding.hostPort
+        lock.lock()
+        let attempts = (failedUDPBinds[port]?.attempts ?? 0) + 1
+        let delay = min(
+            PortForwarder.minimumBindBackoff * pow(2, Double(attempts - 1)),
+            PortForwarder.maximumBindBackoff)
+        let previousDelay = failedUDPBinds[port].map { _ in
+            min(
+                PortForwarder.minimumBindBackoff * pow(2, Double(attempts - 2)),
+                PortForwarder.maximumBindBackoff)
+        }
+        failedUDPBinds[port] = FailedBind(
+            binding: binding,
+            reason: reason,
+            attempts: attempts,
+            nextAttemptAt: Date().addingTimeInterval(delay))
+        lock.unlock()
+        guard previousDelay == nil || previousDelay! < delay else { return }
+        log.warn(
+            "cannot publish \(binding.description): \(reason) in \(Int(delay))s "
+                + "(container \(binding.containerName) is not reachable on 127.0.0.1:\(port)/udp until then)")
+    }
+
+    // MARK: - Per-client UDP flows
+
+    private func handleUDPDatagram(
+        _ datagram: Data,
+        from client: UDPListener.Client,
+        binding: DockerPortBinding,
+        listener: UDPListener,
+        generation: Int
+    ) {
+        let flow: UDPFlow
+        let needsDial: Bool
+        lock.lock()
+        guard running, self.generation == generation,
+              let forward = udpForwards[binding.hostPort],
+              forward.listener === listener,
+              forwardTargetMatches(forward.binding, binding)
+        else {
+            lock.unlock()
+            return
+        }
+        if let existing = forward.flows[client] {
+            flow = existing
+            needsDial = false
+        } else {
+            let activeFlowCount = udpForwards.values.reduce(0) { $0 + $1.flows.count }
+            guard activeFlowCount < PortForwarder.maximumUDPFlows else {
+                lock.unlock()
+                log.warn(
+                    "dropping UDP datagram for \(binding.description): \(PortForwarder.maximumUDPFlows) "
+                        + "client flows are already active")
+                return
+            }
+            let created = UDPFlow(client: client, binding: binding, generation: generation)
+            forward.flows[client] = created
+            flow = created
+            needsDial = true
+        }
+        lock.unlock()
+
+        let onWriteFailure = { [weak self, weak flow] in
+            guard let self, let flow else { return }
+            self.removeUDPFlow(flow, hostPort: binding.hostPort, client: client, reason: "a frame write failed")
+        }
+        if flow.enqueue(datagram, onWriteFailure: onWriteFailure) {
+            log.warn(
+                "dropping UDP datagrams for \(binding.description) from \(client.description): "
+                    + "the per-client bridge queue is full")
+        }
+        if needsDial {
+            busyHandler?()
+            establishUDPFlow(flow, listener: listener)
+        }
+    }
+
+    /// Opens the host-to-guest transport after the first real UDP packet. The first
+    /// packet stays in the flow's bounded opening queue; subsequent packets from that
+    /// client retain their arrival order until the handshake completes.
+    private func establishUDPFlow(_ flow: UDPFlow, listener: UDPListener) {
+        vm.ensureRunning(timeout: PortForwarder.dialBootTimeout) { [weak self, weak flow, weak listener] result in
+            guard let self, let flow, let listener else { return }
+            guard case .success = result else {
+                self.log.warn("dropping UDP flow to \(flow.binding.description): the VM is unavailable")
+                self.removeUDPFlow(flow, hostPort: flow.binding.hostPort, client: flow.client, reason: "the VM was unavailable")
+                return
+            }
+            self.udpDialQueue.async { [weak self, weak flow, weak listener] in
+                guard let self, let flow, let listener else { return }
+                self.udpDialPermits.wait()
+                defer { self.udpDialPermits.signal() }
+                self.dialUDPFlow(flow, listener: listener)
+            }
+        }
+    }
+
+    /// Blocking datagram-dial handshake, bounded by the flow and setup caps above.
+    private func dialUDPFlow(_ flow: UDPFlow, listener: UDPListener) {
+        guard isCurrent(flow.generation) else {
+            removeUDPFlow(flow, hostPort: flow.binding.hostPort, client: flow.client, reason: "the forwarder stopped")
+            return
+        }
+        let descriptor: Int32
+        switch vm.connectVsockBlocking(port: MorbVsockPorts.datagramDial, timeout: 5) {
+        case .failure(let error):
+            log.warn("could not open a datagram-dial for \(flow.binding.description): \(error)")
+            removeUDPFlow(flow, hostPort: flow.binding.hostPort, client: flow.client, reason: "the guest datagram channel was unavailable")
+            return
+        case .success(let fd):
+            descriptor = fd
+        }
+        do {
+            try DatagramDial.perform(fd: descriptor, hostPort: flow.binding.hostPort)
+        } catch {
+            Darwin.close(descriptor)
+            log.warn("datagram-dial to \(flow.binding.description) refused: \(error)")
+            removeUDPFlow(flow, hostPort: flow.binding.hostPort, client: flow.client, reason: "the guest rejected the UDP dial")
+            return
+        }
+
+        let onWriteFailure = { [weak self, weak flow] in
+            guard let self, let flow else { return }
+            self.removeUDPFlow(flow, hostPort: flow.binding.hostPort, client: flow.client, reason: "a frame write failed")
+        }
+        guard flow.activate(descriptor, onWriteFailure: onWriteFailure) else { return }
+        relayQueue.async { [weak self, weak flow, weak listener] in
+            guard let self, let flow, let listener else { return }
+            self.readUDPReplies(flow, listener: listener)
+        }
+    }
+
+    /// Sends guest UDP replies back through the same Mac socket and exact source tuple
+    /// that produced the flow. This is why a generic one-shot "UDP over TCP" proxy is
+    /// insufficient: it could not carry unsolicited or multi-datagram replies.
+    private func readUDPReplies(_ flow: UDPFlow, listener: UDPListener) {
+        while isCurrent(flow.generation) {
+            let descriptor: Int32
+            // The flow intentionally keeps its descriptor private; `readFrame` needs
+            // it here only after activation, so ask through this small accessor.
+            guard let fd = flow.openDescriptor else { return }
+            descriptor = fd
+            do {
+                guard let reply = try DatagramDial.readFrame(fd: descriptor) else {
+                    removeUDPFlow(flow, hostPort: flow.binding.hostPort, client: flow.client, reason: "the guest closed the UDP flow")
+                    return
+                }
+                flow.noteReply()
+                guard listener.send(reply, to: flow.client) else {
+                    removeUDPFlow(flow, hostPort: flow.binding.hostPort, client: flow.client, reason: "the local UDP listener closed")
+                    return
+                }
+            } catch {
+                log.warn("datagram-dial reply for \(flow.binding.description) failed: \(error)")
+                removeUDPFlow(flow, hostPort: flow.binding.hostPort, client: flow.client, reason: "the datagram reply stream failed")
+                return
+            }
+        }
+    }
+
+    private func removeUDPFlow(
+        _ flow: UDPFlow,
+        hostPort: Int,
+        client: UDPListener.Client,
+        reason: String
+    ) {
+        lock.lock()
+        if let forward = udpForwards[hostPort], forward.flows[client] === flow {
+            forward.flows.removeValue(forKey: client)
+        }
+        lock.unlock()
+        flow.close()
+        // Flow closure is normal UDP lifetime (including the idle timeout), so it is
+        // intentionally not a line in the user-facing daemon log. Failures were
+        // reported at their source above; retaining every remote ephemeral port would
+        // make the log unusable during normal DNS or game traffic.
+        _ = reason
     }
 
     // MARK: - Per-connection splicing

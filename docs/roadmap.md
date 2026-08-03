@@ -132,7 +132,7 @@ Morbstack to make specific, checkable performance claims publicly.
   along with a cold enable-to-Ready time, a `LoadBalancer` Service
   reachable from the Mac, a clean disable, and the idle CPU/memory cost
   of leaving it on. See [`k8s.md`](k8s.md) for the numbers and
-  [`protocol.md`](protocol.md) §3.3 for the payload-install wire
+  [`protocol.md`](protocol.md) §3.4 for the payload-install wire
   protocol (vsock port 2377).
 - `syft`/`grype` integration for image scanning.
 - `morb diagnose` — a bundle-the-diagnostics command for bug reports.

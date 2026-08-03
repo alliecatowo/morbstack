@@ -87,11 +87,11 @@ remove only Morbstack-owned state.
 two places where a successful Docker command can currently describe a state
 that is not actually usable.
 
-**Slice A — publication contract:** reserve host endpoints transactionally
-against Docker create/start, retain the listener/lease until container removal
-or failed start, and add UDP forwarding. Return a Docker-compatible conflict
-before the container is reported running; retain a readable diagnostic for the
-app and `morb status`.
+**Slice A — publication contract:** reserve fixed TCP host endpoints
+transactionally against Docker create/start, retain the listener/lease until
+container removal or failed start, and relay UDP as bounded event-confirmed
+datagram flows. Return a Docker-compatible conflict before the TCP container is
+reported running; retain a readable diagnostic for the app and `morb status`.
 
 **Slice B — share contract:** canonicalize macOS source paths before guest
 mapping, validate them against the configured share set, and reject a missing

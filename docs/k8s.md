@@ -50,7 +50,7 @@ morb k8s disable      # stops the cluster; the payload and its data are kept
 single intention; a two-step flow whose first step is "upload 122 MB" is
 an implementation detail escaping into the interface. The payload (`k3s`
 + `cri-dockerd`, streamed over vsock port 2377 — see
-[`protocol.md`](protocol.md) §3.3) is sha256-verified on both ends and
+[`protocol.md`](protocol.md) §3.4) is sha256-verified on both ends and
 skipped if the guest already has a byte-identical copy, so the second and
 later `enable` calls do no transfer at all.
 
@@ -242,7 +242,7 @@ Mac cannot represent that regardless of which package hits it next.
 
 ## See also
 
-- [`protocol.md`](protocol.md) §3.3 — the vsock 2377 payload install wire
+- [`protocol.md`](protocol.md) §3.4 — the vsock 2377 payload install wire
   protocol, including the `HAVE`/`PUT` handshake and why it is
   sha256-verified on both ends.
 - [`roadmap.md`](roadmap.md) — milestone sequencing.

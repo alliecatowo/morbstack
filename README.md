@@ -104,7 +104,10 @@ clean-profile VM pass is marked that way rather than promoted to a claim.
   `/tmp/...` bind sources work as they do on macOS. If you remove that share
   or it fails to mount, those sources can still be empty; `morb doctor`
   reports the condition.
-- **No UDP port forwarding**, and no `morb.local` DNS/domains.
+- **UDP publishes use the event-confirmed datagram relay.** UDP is loopback-only like
+  TCP, and supports real datagram/reply flows once Docker reveals the concrete port;
+  it deliberately does not claim TCP-style synchronous reservation for dynamic or
+  ranged publishes. `morb.local` DNS/domains remain unavailable.
 
 [`docs/parity.md`](docs/parity.md)'s own tally, from a live audit against
 a real guest, not simulated: **20 PASS, 3 PARTIAL, 6 FAIL** out of 29

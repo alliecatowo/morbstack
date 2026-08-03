@@ -115,15 +115,18 @@ the user to run `docker context create` by hand. #18/#19's DNS/host-gateway
 implementation is described in the follow-up above and needs a fresh live
 run, not more design work.
 
-**#27 — fixed-TCP host-port admission is now synchronous on the recognized path.**
+**#27 — fixed-TCP host-port admission is now synchronous on the recognized path; UDP
+has a real event-confirmed data plane.**
 For an ordinary fixed, loopback-supported TCP create, the host retains a real
 listener before forwarding create, associates it from a bounded normal create
 response, and activates that same descriptor before an exact start `204` reaches
 the client. This removes the prior success-with-no-listener race without changing
 Docker request/response bytes. The claim is intentionally narrower than complete
-Docker Desktop parity: dynamic/ranged allocation, UDP, opaque or chunked response
-framing, name-based/nonstandard start handoff, and lease survival across VM/daemon
-shutdown still need their own data-plane or lifecycle contract.
+Docker Desktop parity: dynamic/ranged allocation, opaque or chunked response framing,
+name-based/nonstandard start handoff, and lease survival across VM/daemon shutdown
+still need their own allocation or lifecycle contract. UDP datagrams and reply flows
+now cross a dedicated framed vsock relay, but are intentionally event-confirmed rather
+than promoted to the fixed-TCP synchronous lease claim.
 
 ## Priority list — what to fix first for a credible "drop-in" claim
 

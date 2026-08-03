@@ -13,9 +13,10 @@ import Foundation
 
 /// Checks whether the Mac loopback endpoint Morbstack would use is currently free.
 ///
-/// The current data plane forwards TCP on loopback only. UDP checks are still useful
-/// before a Docker operation—the TCP and UDP port spaces conflict independently—but
-/// return an explicit `notForwarded` publication state until Morbstack has a UDP relay.
+/// Morbstack forwards TCP and UDP on loopback only. TCP's fixed-create lease is held
+/// through the acknowledged start response; UDP uses its own real datagram listener
+/// after Docker reports a concrete event-confirmed publication, so this API remains a
+/// deliberately non-reserving availability snapshot for both transports.
 public enum HostPortPreflight {
 
     public static let loopbackAddress = "127.0.0.1"
@@ -39,9 +40,6 @@ public enum HostPortPreflight {
     public enum Publication: String, Codable, Equatable, Sendable {
         /// Morbstack's TCP forwarder binds `127.0.0.1`, never every network interface.
         case loopbackOnly = "loopback_only"
-        /// UDP has no host relay yet. A free UDP port is not a promise that it will be
-        /// reachable through Morbstack.
-        case notForwarded = "not_forwarded"
     }
 
     public struct Result: Codable, Equatable, Sendable {
@@ -64,7 +62,7 @@ public enum HostPortPreflight {
     /// this probe never sets it. UDP sets neither reuse option, which avoids turning a
     /// diagnostic check into a shared/hijackable UDP endpoint.
     public static func check(port: Int, transport: Transport) -> Result {
-        let publication: Publication = transport == .tcp ? .loopbackOnly : .notForwarded
+        let publication: Publication = .loopbackOnly
         guard (1...65535).contains(port) else {
             return Result(
                 port: port,
@@ -127,7 +125,7 @@ public enum HostPortPreflight {
             publication: publication,
             detail: transport == .tcp
                 ? "available now on loopback; this check does not reserve the port"
-                : "available now on loopback; UDP forwarding is not implemented and this check does not reserve the port")
+                : "available now on loopback; UDP forwarding begins after Docker reports the concrete publication and this check does not reserve the port")
     }
 
     /// The boundary of the Engine-facing create preflight.
@@ -138,7 +136,9 @@ public enum HostPortPreflight {
     /// The lease is associated only with a bounded identity-bearing create response
     /// and is handed to ``PortForwarder`` without rebinding after a normal `204`
     /// start response. This API itself remains a snapshot: callers of `morb ports
-    /// check`, dynamic (`-P`/omitted host port), range, UDP, malformed, chunked, and
-    /// oversized shapes must not infer a reservation from its result.
-    public static let reservationDesign = "HostPortPreflight is advisory; recognized fixed-TCP Docker creates take a continuously held listener lease before reaching the Engine."
+    /// check`, dynamic (`-P`/omitted host port), range, malformed, chunked, and
+    /// oversized shapes must not infer a reservation from its result. Fixed UDP
+    /// creates use the snapshot only; their listener is opened from Docker's concrete
+    /// post-start port event and therefore has no TCP-style synchronous lease.
+    public static let reservationDesign = "HostPortPreflight is advisory; recognized fixed-TCP Docker creates take a continuously held listener lease before reaching the Engine, while UDP forwards only from event-confirmed concrete publications."
 }

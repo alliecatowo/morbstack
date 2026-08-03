@@ -5,20 +5,22 @@ speaks in milestone M0. The eventual gRPC contract for the guest control
 plane is sketched in `proto/morbstack/v1/control.proto`, but M0 does not
 implement it — everything described below is what actually ships.
 
-There are three distinct protocols in play, over three distinct transports:
+There are four distinct protocols in play, over two transport families:
 
 1. **MRB0 framed JSON**, host morbstackd <-> guest morbinit, over vsock
    port 1024.
 2. **Stream-dial**, host morbstackd <-> guest morbinit, over vsock port
    2376 — a one-line handshake followed by a raw byte splice, used to reach
-   published container ports from the Mac.
-3. **Daemon control IPC**, CLI `morb` <-> host `morbstackd`, over a Unix
+   published TCP container ports from the Mac.
+3. **Datagram-dial**, host morbstackd <-> guest morbinit, over vsock port
+   2378 — a one-line handshake followed by bounded framed UDP datagrams for
+   published UDP container ports from the Mac.
+4. **Daemon control IPC**, CLI `morb` <-> host `morbstackd`, over a Unix
    domain socket, newline-delimited JSON.
 
-They are unrelated to each other and must not be confused: MRB0 and
-stream-dial both cross the host/guest boundary over vsock, on different
-ports and with different framing; daemon control IPC never leaves the
-host.
+They are unrelated to each other and must not be confused: MRB0, stream-dial,
+and datagram-dial all cross the host/guest boundary over vsock, on different
+ports and with different framing; daemon control IPC never leaves the host.
 
 ---
 
@@ -312,6 +314,7 @@ Failure:
 | 2375 | Docker Engine API relay (host morbstackd <-> guest dockerd) |
 | 2376 | Stream-dial: host requests a connection to an arbitrary guest-local TCP port (used for published container ports) |
 | 2377 | Bulk payload install: host streams large files into the guest (used for the Kubernetes payload) |
+| 2378 | Datagram-dial: framed UDP relay for published container ports |
 
 Port 2375 is the conventional plaintext Docker Engine API port; it is used
 here only on the host<->guest vsock link, which is not reachable from the
@@ -332,10 +335,10 @@ RAM-resident rootfs, so anything in the image is paid for in guest memory on
 every boot, including the overwhelming majority of boots where Kubernetes is
 off. Streaming it once, on the first `morb k8s enable`, and landing it on the
 persistent ext4 disk keeps the cost proportional to the feature's use. See
-§3.3.
+§3.4.
 
 New ports must be added to this table before use. Do not reuse 1024, 2375,
-2376, or 2377 for anything else.
+2376, 2377, or 2378 for anything else.
 
 ### 3.1 The vsock 2375 <-> `docker.sock` relay, end to end
 
@@ -473,12 +476,15 @@ guest -> host:  "OK\n"              connection established; splice begins
 
 Before relaying an ordinary fixed-length `POST .../containers/create`, the
 host-side `DockerProxy` takes a bounded non-consuming `MSG_PEEK` of the request.
-For every fixed, supported TCP publication in `HostConfig.PortBindings` that maps
-unambiguously to one Mac loopback listener, it first takes the same short
-availability snapshot as `morb ports check`, then **binds and retains the actual
-`TCPListener` before the request reaches the guest Engine**. A failed real bind is
-reported as a Docker-style HTTP 500 before any guest side effect. The retained
-descriptor, rather than the snapshot, closes the host-port race.
+For every fixed, supported TCP or UDP publication in `HostConfig.PortBindings` that
+maps unambiguously to one Mac loopback listener, it first takes the same short
+availability snapshot as `morb ports check`. For **TCP**, it then binds and retains
+the actual `TCPListener` before the request reaches the guest Engine. A failed real
+TCP bind is reported as a Docker-style HTTP 500 before any guest side effect. The
+retained descriptor, rather than the snapshot, closes the TCP host-port race. UDP
+uses its independent datagram port space and begins only after Docker reports a
+concrete post-start UDP endpoint; the fixed-UDP snapshot is an early conflict
+diagnostic, not a reservation.
 
 The proxy still passes the original Docker request and response bytes untouched
 through `FDRelay`. It only observes a bounded, nonchunked 2xx create response with
@@ -499,9 +505,11 @@ reconnect. Daemon or VM-forwarder shutdown deliberately releases all leases: the
 cannot survive a VM-unavailable interval, and only normal running-container
 discovery is rebuilt after the VM returns.
 
-The same admission path rejects explicit UDP publications (there is no UDP relay)
-and host addresses outside the loopback-only forwarder's supported set rather than
-letting them become a successful-looking but unreachable publish.
+The admission path rejects SCTP/unknown protocols and host addresses outside the
+loopback-only forwarder's supported set rather than letting them become a
+successful-looking but unreachable publish. Explicit UDP is accepted when its fixed
+endpoint is valid and currently available; the data plane below carries real UDP
+datagrams, not a TCP approximation.
 
 Once the VM is ready, the same preserved request body is also checked for bind
 sources in `HostConfig.Binds` and top-level `Mounts`. The check uses the directory
@@ -518,18 +526,52 @@ and malformed shapes remain dockerd's responsibility.
 This is deliberately a narrow lease protocol, **not a generic HTTP proxy, dynamic
 port allocator, or filesystem sandbox**. The peek does not remove any bytes, and a
 chunked, oversized, malformed, pipelined, or otherwise unrecognized create response
-causes its provisional lease to be released rather than guessed. Dynamic
+causes its provisional TCP lease to be released rather than guessed. Dynamic
 (`-P`/empty host port), ranges, UDP, unsupported addresses, opaque creates, start by
-name, and nonstandard start framing have no synchronous create/start lease guarantee.
+name, and nonstandard start framing have no synchronous **TCP** create/start lease
+guarantee.
 An event-driven running-container snapshot can still promote an already-associated
 lease after an opaque or name-based start, but that happens after the Engine reply and
 is not equivalent to the 204 handoff guarantee. Dynamic publication needs a real
-guest-to-host allocation-and-response contract; UDP needs a real UDP data plane.
+guest-to-host allocation-and-response contract. UDP already has a real data plane,
+but deliberately has no TCP-style reservation claim.
 Likewise, a bind source can change after its share/symlink snapshot.
 
 ---
 
-### 3.3 The vsock 2377 payload install protocol
+### 3.3 The vsock 2378 datagram-dial protocol (published UDP ports)
+
+`docker run -d -p 5353:53/udp ...` makes dockerd's userland proxy listen on
+`127.0.0.1:5353` inside the guest. UDP cannot use §3.2's raw stream splice: a
+stream has no datagram boundaries and has no way to distinguish replies for two Mac
+clients. Port 2378 therefore creates one connected guest UDP socket per Mac source
+tuple and frames every datagram on a dedicated vsock stream.
+
+```text
+host -> guest:  "UDP <port>\n"
+guest -> host:  "OK\n" or "ERR <reason>\n"
+both directions: [u32 big-endian payload length][exactly that many payload bytes]
+```
+
+- `<port>` is the guest-local published port, the same numeric port Docker exposed
+  on the host. `OK` is emitted only after the guest creates and connects its UDP
+  socket to `127.0.0.1:<port>`.
+- The length is 0 through 65,507 inclusive. Zero-length datagrams are valid; EOF
+  before a new header is connection teardown, while EOF inside a header or payload is
+  a protocol error rather than a silently truncated packet.
+- The host binds `127.0.0.1` only and keys a flow by its local client's IPv4 source
+  address and port. Guest replies are written through that exact host listener and
+  source tuple. There is a global 48-flow host cap (below the guest's 64-flow cap), a
+  64-datagram/1 MiB queue per flow during guest setup or backpressure, and an idle
+  flow is retired after 60 s.
+- UDP publications are created from the event-confirmed `containers/json` endpoint.
+  Dynamic and range allocations can become reachable after Docker reveals a concrete
+  port, but intentionally do not receive the synchronous TCP create/start lease or a
+  preallocation guarantee.
+
+---
+
+### 3.4 The vsock 2377 payload install protocol
 
 A line-oriented request/reply preamble followed, for a transfer, by a raw
 byte body. Text for the control words so a human tailing the guest console

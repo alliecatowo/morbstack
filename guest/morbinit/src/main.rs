@@ -15,6 +15,7 @@
 //!        * the MRB0 control server on vsock 1024 (`control.rs`),
 //!        * the Docker API relay on vsock 2375 (`proxy.rs`),
 //!        * the stream dialer on vsock 2376 (`dial.rs`),
+//!        * the datagram dialer on vsock 2378 (`datagram.rs`),
 //!        * the dockerd readiness monitor (`proxy.rs`), which also triggers
 //!          the one-shot offline image load.
 //!
@@ -44,6 +45,7 @@
 
 mod binfmt;
 mod control;
+mod datagram;
 mod dial;
 mod disk;
 mod dns;
@@ -323,6 +325,18 @@ fn real_init() {
             "FATAL: could not bind vsock stream-dial port {}: {} — published \
              container ports will not be reachable from the host",
             dial::VSOCK_STREAM_DIAL_PORT,
+            e
+        ));
+    }
+
+    // Published UDP container ports (vsock 2378 -> connected guest UDP socket).
+    // Independent from stream-dial because a byte splice cannot preserve UDP packet
+    // boundaries or route replies to the correct Mac sender.
+    if let Err(e) = datagram::spawn_datagram_dialer() {
+        log::log(&format!(
+            "FATAL: could not bind vsock datagram-dial port {}: published UDP \
+             container ports will not be reachable from the host ({})",
+            datagram::VSOCK_DATAGRAM_DIAL_PORT,
             e
         ));
     }
