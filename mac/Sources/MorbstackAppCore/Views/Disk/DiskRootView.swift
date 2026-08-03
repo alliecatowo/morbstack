@@ -342,7 +342,10 @@ struct DiskRootView: View {
             .help("Recalculate disk usage — the engine walks every layer, so this is not instant")
         }
         if model.disk != nil {
-            ToolbarItem(id: "disk.inspector", placement: .primaryAction) {
+            // Showing a trailing column changes the window's navigation layout; it is
+            // not the primary task on a storage review screen. Let the system place
+            // this view control alongside the standard toolbar affordances.
+            ToolbarItem(id: "disk.inspector", placement: .automatic) {
                 Button {
                     showsInspector.toggle()
                 } label: {
