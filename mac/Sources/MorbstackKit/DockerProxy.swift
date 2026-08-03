@@ -208,7 +208,8 @@ public final class DockerProxy {
                     leaseObservation: lease.map(PortLeaseObservation.create))
             }
 
-        case .start(let containerIdentifier):
+        case .containerLifecycle(let request):
+            let containerIdentifier = request.containerIdentifier
             if let lease = forwarder.claimStartLease(containerIdentifier: containerIdentifier) {
                 relayAfterPreflight(
                     clientFD: clientFD,
@@ -216,14 +217,15 @@ public final class DockerProxy {
                     leaseObservation: .start(lease))
             } else if DockerPortPublicationPreflight.isFullContainerID(containerIdentifier) {
                 // A VM/daemon stop intentionally closes every held listener. Before
-                // this one exact immutable-ID start reaches dockerd, give the
+                // this one exact immutable-ID lifecycle request reaches dockerd, give the
                 // forwarder a bounded chance to rebuild a fixed TCP lease from the
                 // guest's persistent HostConfig.PortBindings. Names and ID prefixes
                 // retain the raw relay: they can resolve to a different container
-                // between inspect and start.
+                // between inspect and the lifecycle operation.
                 bootstrapStoppedContainerStartLease(
                     clientFD: clientFD,
-                    containerID: containerIdentifier)
+                    containerID: containerIdentifier,
+                    operation: request.operation)
             } else {
                 relayAfterPreflight(clientFD: clientFD, createBody: nil, leaseObservation: nil)
             }
@@ -233,7 +235,7 @@ public final class DockerProxy {
     private enum DockerRequestInspection {
         case other
         case create(ContainerCreateRequest)
-        case start(String)
+        case containerLifecycle(ContainerLifecycleRequest)
     }
 
     /// A complete create request as seen non-consumingly by `MSG_PEEK`.
@@ -248,15 +250,28 @@ public final class DockerProxy {
         let rawRequest: Data
     }
 
+    /// The two bodyless Engine endpoints whose successful `204` means a container
+    /// has started and a held TCP listener may be activated. They share the lease
+    /// protocol, but their request bytes are always relayed unchanged.
+    private enum ContainerLifecycleOperation: String {
+        case start
+        case restart
+    }
+
+    private struct ContainerLifecycleRequest {
+        let containerIdentifier: String
+        let operation: ContainerLifecycleOperation
+    }
+
     private enum PortLeaseObservation {
         case create(PortForwarder.TCPPortLease)
         case start(PortForwarder.TCPPortLease)
     }
 
     /// Performs a bounded `MSG_PEEK` for only the normal fixed-length create and
-    /// bodyless start shapes this lease protocol can prove. No bytes are removed from
-    /// `clientFD`; every other request remains intact for ``FDRelay``, including
-    /// upgraded, chunked, and otherwise opaque Engine traffic.
+    /// bodyless start/restart shapes this lease protocol can prove. No bytes are
+    /// removed from `clientFD`; every other request remains intact for ``FDRelay``,
+    /// including upgraded, chunked, and otherwise opaque Engine traffic.
     private func inspectDockerRequest(in clientFD: Int32) -> DockerRequestInspection {
         let deadline = Date().addingTimeInterval(DockerProxy.createPreflightPeekBudget)
 
@@ -286,7 +301,7 @@ public final class DockerProxy {
                 continue
             }
 
-            if let containerIdentifier = containerStartIdentifier(in: parsed.head) {
+            if let lifecycleRequest = containerLifecycleRequest(in: parsed.head) {
                 let transferEncoding = parsed.head.headers["transfer-encoding"]?
                     .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 let contentLength: Int
@@ -302,7 +317,7 @@ public final class DockerProxy {
                 guard transferEncoding.isEmpty, contentLength == 0 else {
                     return .other
                 }
-                return .start(containerIdentifier)
+                return .containerLifecycle(lifecycleRequest)
             }
 
             guard isContainerCreate(parsed.head) else { return .other }
@@ -348,25 +363,33 @@ public final class DockerProxy {
         return components.suffix(2).map(String.init) == ["containers", "create"]
     }
 
-    private func containerStartIdentifier(in request: HTTPRequestHead) -> String? {
+    private func containerLifecycleRequest(in request: HTTPRequestHead) -> ContainerLifecycleRequest? {
         guard request.method.uppercased() == "POST" else { return nil }
         let path = request.target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first ?? ""
         let components = path.split(separator: "/", omittingEmptySubsequences: true)
         guard components.count >= 3,
               components[components.count - 3] == "containers",
-              components.last == "start"
+              let finalComponent = components.last,
+              let operation = ContainerLifecycleOperation(rawValue: String(finalComponent))
         else {
             return nil
         }
         let identifier = String(components[components.count - 2])
-        return identifier.isEmpty ? nil : identifier
+        guard !identifier.isEmpty else { return nil }
+        return ContainerLifecycleRequest(
+            containerIdentifier: identifier,
+            operation: operation)
     }
 
     /// Performs the bounded recovery query for a stopped container whose previously
     /// held fixed TCP lease was released with the old VM generation. It deliberately
     /// happens only after `ensureRunning` and off the VM queue: the inspect uses a
     /// fresh blocking vsock connection, while VM lifecycle work must stay responsive.
-    private func bootstrapStoppedContainerStartLease(clientFD: Int32, containerID: String) {
+    private func bootstrapStoppedContainerStartLease(
+        clientFD: Int32,
+        containerID: String,
+        operation: ContainerLifecycleOperation
+    ) {
         vm.ensureRunning(timeout: DockerProxy.bootTimeout) { [weak self] result in
             guard let self else {
                 Darwin.close(clientFD)
@@ -377,7 +400,7 @@ public final class DockerProxy {
                 if self.isShuttingDown {
                     self.log.info("client arrived during shutdown; rejected cleanly (\(error))")
                 } else {
-                    self.log.error("Docker start rejected before TCP lease recovery: \(error)")
+                    self.log.error("Docker \(operation.rawValue) rejected before TCP lease recovery: \(error)")
                 }
                 self.writeGatewayError(to: clientFD, message: "\(error)")
                 Darwin.close(clientFD)
@@ -397,15 +420,16 @@ public final class DockerProxy {
                     } catch {
                         // This is deliberately different from an unavailable or
                         // unsupported inspect document, which reserve... reports as
-                        // nil and which keeps the historical raw start relay. Here a
+                        // nil and which keeps the historical raw lifecycle relay. Here a
                         // concrete HostConfig publication was proved but Mac bind
                         // ownership could not be obtained, so do not start a
                         // container whose promised endpoint Morbstack cannot hold.
-                        self.rejectContainerStart(
+                        self.rejectContainerLifecycle(
                             clientFD: clientFD,
                             statusCode: 500,
                             reason: "Internal Server Error",
-                            message: error.localizedDescription)
+                            message: error.localizedDescription,
+                            operation: operation)
                         return
                     }
 
@@ -805,7 +829,7 @@ public final class DockerProxy {
         }
     }
 
-    /// The response observer owns create/start cleanup once a relay exists. These
+    /// The response observer owns create/lifecycle cleanup once a relay exists. These
     /// earlier error branches have no guest response to observe, so they must retire
     /// the provisional reservation explicitly.
     private func finishLeaseObservation(_ observation: PortLeaseObservation?, reason: String) {
@@ -839,17 +863,18 @@ public final class DockerProxy {
         connectionFinished()
     }
 
-    /// Rejects a recognized start before it reaches the Engine. This is reserved for
-    /// the case where an inspect-derived fixed TCP publication was understood but a
-    /// real Mac listener could not be retained; opaque or unsupported inspect
-    /// documents intentionally use the ordinary relay instead.
-    private func rejectContainerStart(
+    /// Rejects a recognized start or restart before it reaches the Engine. This is
+    /// reserved for the case where an inspect-derived fixed TCP publication was
+    /// understood but a real Mac listener could not be retained; opaque or
+    /// unsupported inspect documents intentionally use the ordinary relay instead.
+    private func rejectContainerLifecycle(
         clientFD: Int32,
         statusCode: Int,
         reason: String,
-        message: String
+        message: String,
+        operation: ContainerLifecycleOperation
     ) {
-        log.warn("docker container start rejected before relay: \(message)")
+        log.warn("docker container \(operation.rawValue) rejected before relay: \(message)")
         writeEngineError(to: clientFD, statusCode: statusCode, reason: reason, message: message)
         Darwin.close(clientFD)
         connectionFinished()

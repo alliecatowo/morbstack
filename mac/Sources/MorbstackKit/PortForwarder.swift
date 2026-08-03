@@ -686,13 +686,18 @@ public final class PortForwarder {
         return true
     }
 
-    /// Claims a created lease for a start response observer. Docker accepts a unique
-    /// ID prefix in this route, so support that exact unambiguous case too; container
-    /// *names* are intentionally not guessed from a create response.
+    /// Claims a created lease for a start/restart response observer.
+    ///
+    /// Docker routes accept names and ID prefixes, but this host-side lease ledger
+    /// cannot prove which object dockerd will resolve for either spelling. A full
+    /// immutable ID is the only request identifier that can safely activate the
+    /// listener before the Engine's `204`; all other spellings remain byte-for-byte
+    /// relays and rely on the ordinary Engine event reconciliation.
     func claimStartLease(containerIdentifier: String) -> TCPPortLease? {
         lock.lock()
         defer { lock.unlock() }
-        guard let identifier = matchingLeaseIdentifier(for: containerIdentifier),
+        guard DockerPortPublicationPreflight.isFullContainerID(containerIdentifier),
+              let identifier = leaseByContainerID[containerIdentifier],
               var record = leases[identifier], !record.startClaimed
         else {
             return nil
@@ -741,16 +746,6 @@ public final class PortForwarder {
         record.startClaimed = false
         leases[lease.identifier] = record
         lock.unlock()
-    }
-
-    /// Finds the one associated lease that Docker's `/containers/<id>/start` path can
-    /// name. A non-unique short ID is deliberately left to event reconciliation.
-    private func matchingLeaseIdentifier(for containerIdentifier: String) -> UUID? {
-        if let exact = leaseByContainerID[containerIdentifier] { return exact }
-        let candidates = leaseByContainerID.compactMap { id, leaseID in
-            id.hasPrefix(containerIdentifier) ? leaseID : nil
-        }
-        return candidates.count == 1 ? candidates[0] : nil
     }
 
     /// Transfers continuously-held listener ownership into the active forward map.

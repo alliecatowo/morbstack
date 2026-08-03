@@ -42,19 +42,21 @@ intentional request-transforming proxy path, not another passive observer.
 ## Implemented Phase 1 transaction
 
 For one recognized normal `POST .../containers/create`, Morbstack now supports an
-explicit empty `HostPort: ""` on one or more TCP `PortBindings` entries. It holds a
-real `127.0.0.1` listener allocated by the macOS kernel, writes each concrete number
-into a re-encoded create body and matching `Content-Length`, and sends that body to
-the guest Engine. The host associates the full ID from a bounded normal `201` response
-*before any `201` byte reaches the Docker client*. A later recognized start continues
-to promote the same held listener under the existing lease lifecycle.
+omitted `HostPort`, exact `HostPort: ""`, or exact `HostPort: "0"` on one or more TCP
+`PortBindings` entries. It holds a real `127.0.0.1` listener allocated by the macOS
+kernel, writes each concrete number into a re-encoded create body and matching
+`Content-Length`, and sends that body to the guest Engine. The host associates the
+full ID from a bounded normal `201` response
+*before any `201` byte reaches the Docker client*. A later recognized bodyless start
+or restart continues to promote the same held listener under the existing lease
+lifecycle.
 
 The transaction consumes precisely the original create header and declared body; it
 does not read ahead. On an HTTP keep-alive connection, it closes only the guest-side
 one-request connection and gives the unconsumed client socket back to `DockerProxy`
-for a fresh preflight. That means a same-connection or already-pipelined `start`
-request still takes the normal start-response activation path after the create ID is
-associated. A client-requested `Connection: close` closes normally after the create
+for a fresh preflight. That means a same-connection or already-pipelined lifecycle
+request still takes the normal lifecycle-response activation path after the create ID
+is associated. A client-requested `Connection: close` closes normally after the create
 response instead.
 
 This Phase 1 path is bounded to a valid fixed-length JSON request already visible in
@@ -67,30 +69,36 @@ and 128 KiB of body. It returns a clear host error rather than exposing an unass
 
 The listener itself is intentionally not persisted across a VM/daemon stop: while the
 guest is absent, accepting the Mac port would be a false availability claim. The next
-bodyless `POST /containers/<canonical-full-64-lowercase-hex-id>/start` instead gets
-a bounded inspect on a fresh Docker-API vsock connection after the guest is ready.
-Morbstack accepts that
-recovery only when the inspect response proves the same stopped ID and every
+bodyless `POST /containers/<canonical-full-64-lowercase-hex-id>/(start|restart)`
+instead gets a bounded inspect on a fresh Docker-API vsock connection after the guest
+is ready. Morbstack accepts that recovery only when the inspect response proves the
+same stopped ID and every
 `HostConfig.PortBindings` entry is a concrete, unambiguous loopback TCP endpoint. It
 then binds and associates all listeners under the current forwarder generation before
-relaying the original start bytes; the existing exact-`204` observer remains the only
-activation handoff.
+relaying the original lifecycle bytes; the existing exact-`204` observer remains the
+only activation handoff. A fixed-TCP lease already associated with a container is
+also claimed for its recognized bodyless `restart`, so its listener stays continuously
+held across the Engine's stop/start cycle and is reactivated only after that `204`.
+Docker documents `204` as the successful response for both
+[start and restart](https://docs.docker.com/reference/api/engine/version/v1.43/);
+all other responses leave the lease inactive.
 
-This is not durable host-side lease persistence or general start interception. A
-name/unique-prefix start, inspect or lifecycle failure, a running container, empty or
-zero host port, range, UDP/non-TCP, unsupported address, malformed/ambiguous binding,
-or a non-bodyless request remains an unchanged relay with no synchronous recovery
-claim. If a fully proved endpoint cannot be bound on macOS, the start is rejected
-before it reaches the Engine rather than reporting a container that Morbstack cannot
-publish.
+This is not durable host-side lease persistence or general lifecycle interception. A
+name/unique-prefix start or restart, inspect or lifecycle failure, a running container
+with no existing full-ID lease, empty or zero host port, range, UDP/non-TCP,
+unsupported address, malformed/ambiguous binding, or a non-bodyless request remains
+an unchanged relay with no synchronous recovery claim. If a fully proved endpoint
+cannot be bound on macOS, the start or restart is rejected before it reaches the
+Engine rather than reporting a container that Morbstack cannot publish.
 
 ## Still outside the synchronous guarantee
 
 The following remain unsupported or explicitly outside this transaction:
 
-- Omitted `HostPort`, `HostPort: "0"`, and any opaque/slow/oversized create that does
-  not enter the bounded preflight. They retain the raw Engine relay and therefore make
-  **no** Phase 1 synchronous allocation claim.
+- Any dynamic `HostPort` spelling other than an omitted field, exact `""`, or exact
+  `"0"`, and any opaque/slow/oversized create that does not enter the bounded
+  preflight. They retain the raw Engine relay and therefore make **no** Phase 1
+  synchronous allocation claim.
 - `HostConfig.PublishAllPorts` (`docker run -P`), which needs every eligible
   `ExposedPorts` entry materialized into an explicit binding.
 - Host-port ranges, which need an unambiguous container-port-to-host-port mapping
