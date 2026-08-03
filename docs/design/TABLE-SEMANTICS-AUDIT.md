@@ -26,7 +26,7 @@ The binding detail is in the [native macOS playbook](NATIVE-MACOS-PLAYBOOK.md#ch
 
 | Source | Current task/data shape | Decision | Required follow-through |
 | --- | --- | --- | --- |
-| `Views/Containers/ContainersRootView.swift` | Compare peer containers by name, project, image, state, ports, and age; select one for actions/details. | **Retain `Table`.** This is the core dense operational-record case. | Keep the inspector as the place for rich metadata and verify bordered system-table appearance in a current full window. |
+| `Views/Containers/ContainersRootView.swift` | Select a local container for inspection or lifecycle actions; at the observed low density, scan its name and compact state. | **Use `List(selection:)` (CUA override).** The current full-window review showed four real records followed by repeated dark Table stripes, so comparison columns were visually outweighing the record task. | Keep image, ports, state, and Compose metadata in the inspector; preserve filter, selection, double-click primary action, context menu, Delete review, and lifecycle confirmation. Recheck the native List in a current full window. |
 | `Views/Containers/ContainerStatsTab.swift` — network samples | Reveal exact timestamped receive/send values behind the throughput chart. | **Retain `Table` as the chart’s tabular equivalent.** | Keep it a compact disclosure, not the primary statistics layout; the chart and table must derive from the same real samples. |
 | `Views/Containers/ContainerStatsTab.swift` — scalar samples | Reveal exact timestamp/value pairs behind a CPU or memory chart. | **Retain `Table` as the chart’s tabular equivalent.** | Preserve the accessible label and avoid converting it into a card or synthetic log. |
 | `Views/Images/ImagesRootView.swift` | Compare local images by repository, tag, ID, size, age, and use; select one. | **Retain `Table`.** Tagged and dangling groups are labeled sections, not a hierarchy. | Recheck the system bordered style with a real current bundle; only use a section when both actual groups exist. |
@@ -50,11 +50,13 @@ The binding detail is in the [native macOS playbook](NATIVE-MACOS-PLAYBOOK.md#ch
 
 ## Result
 
-The remaining 20 `Table` uses have a task-shaped native justification. `Stacks` is the
-one hierarchy that now uses a system `List` + `OutlineGroup`: its primary task is
-traversal, while the inspector owns service facts. The two chart sample tables remain
-required exact-value alternatives; configuration, source editing, logs, empty states,
-and selected-record facts use their respective system patterns outside tables.
+The remaining 19 `Table` uses have a task-shaped native justification. `Containers` is
+a CUA-driven flat `List(selection:)` exception because its observed sparse inventory
+read more clearly as selected records than as an extended multicolumn grid. `Stacks` is
+the hierarchy that uses a system `List` + `OutlineGroup`: its primary task is traversal,
+while the inspector owns service facts. The two chart sample tables remain required
+exact-value alternatives; configuration, source editing, logs, empty states, and
+selected-record facts use their respective system patterns outside tables.
 
 The remaining risk is visual and behavioral acceptance, not a missing generic
 container: evaluate each route in a current full window at normal and narrow widths,

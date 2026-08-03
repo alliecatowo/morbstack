@@ -285,6 +285,13 @@ struct ContainersRootView: View {
                 .contextMenu {
                     contextMenu(for: container)
                 }
+                // `List` has no `Table.primaryAction` equivalent. Preserve the former
+                // double-click behavior with the standard macOS primary gesture while
+                // leaving single-click selection and keyboard focus system-owned.
+                .onTapGesture(count: 2) {
+                    model.selectedContainerID = container.id
+                    showsInspector = true
+                }
             }
         }
         .onDeleteCommand {

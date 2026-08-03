@@ -175,12 +175,13 @@ SwiftUI [`List`](https://developer.apple.com/documentation/swiftui/list), and
 
 `ContainersRootView` therefore uses direct `List(selection:)` for the flat local
 inventory. Each standard system row exposes only the container name and compact current
-state; selecting it remains the primary record action and reveals the existing native
-inspector. The inspector remains the detailed record surface for returned image, state,
-ports, and Compose metadata. Existing filter behavior, contextual lifecycle/copy/remove
-commands, Delete-key removal review, toolbar lifecycle actions, and destructive
-confirmation boundaries remain unchanged. The route adds no custom list style, cards,
-material, row background, or per-row command controls. Current-bundle light/dark,
+state; selecting it reveals the existing native inspector, and the preserved double-click
+primary gesture explicitly selects and reveals that same record. The inspector remains
+the detailed record surface for returned image, state, ports, and Compose metadata.
+Existing filter behavior, contextual lifecycle/copy/remove commands, Delete-key removal
+review, toolbar lifecycle actions, and destructive confirmation boundaries remain
+unchanged. The route adds no custom list style, cards, material, row background, or
+per-row command controls. Current-bundle light/dark,
 narrow-width, keyboard/VoiceOver, context-menu, inspector, and lifecycle acceptance
 remain required; this source change performs no build, test, Docker/VM, or live-app
 action.
