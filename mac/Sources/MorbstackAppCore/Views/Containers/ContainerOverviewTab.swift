@@ -1,11 +1,11 @@
 // Copyright 2026 The Morbstack Authors.
 // Licensed under the Apache License, Version 2.0 (the "License").
 //
-// The overview is an inspector: `Form` and `LabeledContent` describe one selected
-// container, while the variable-length operational collections use ordinary macOS
-// tables.  There are no dashboard cards, chips, or custom list rows here.
+// The overview is a selected-record inspector. `Form`, `Section`, and
+// `LabeledContent` keep its facts in the system's compact metadata hierarchy; the main
+// Containers route owns the operational table. There are no dashboard cards, chips,
+// nested scroll views, or miniature tables here.
 
-import AppKit
 import MorbstackKit
 import SwiftUI
 
@@ -19,7 +19,6 @@ struct ContainerOverviewTab: View {
 
     @State private var envQuery = ""
     @State private var revealed: Set<Int> = []
-    @State private var mountSelection: Set<TrackBMountDisplay.ID> = []
 
     var body: some View {
         overviewContent
@@ -44,80 +43,73 @@ struct ContainerOverviewTab: View {
     }
 
     private func loadedContent(_ details: TrackBInspectDetails) -> some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                configurationForm(details)
-                if !container.ports.isEmpty { portsTable }
-                environment(details)
-                if !details.mounts.isEmpty { mountsTable(details) }
-                if !details.labels.isEmpty { labelsTable(details) }
-            }
-            .padding()
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    private func configurationForm(_ details: TrackBInspectDetails) -> some View {
         Form {
-            Section("State") {
-                LabeledContent("Status") {
-                    Text(statusText(details))
-                }
-                if let created = details.created {
-                    LabeledContent("Created") {
-                        Text(Formatters.relativeDate(created))
-                            .help(Formatters.absoluteDate(created))
-                    }
-                }
-                if let startedAt = details.startedAt, startedAt.timeIntervalSince1970 > 0 {
-                    LabeledContent("Started") {
-                        Text(Formatters.relativeDate(startedAt))
-                            .help(Formatters.absoluteDate(startedAt))
-                    }
-                }
-                if let finishedAt = details.finishedAt, finishedAt.timeIntervalSince1970 > 0,
-                   container.state != "running", container.state != "restarting"
-                {
-                    let code = details.exitCode.map { " (exit \($0))" } ?? ""
-                    LabeledContent("Exited") {
-                        Text(Formatters.relativeDate(finishedAt) + code)
-                            .help(Formatters.absoluteDate(finishedAt))
-                    }
-                }
-                if details.restartCount > 0 {
-                    LabeledContent("Restarts") { Text("\(details.restartCount)") }
-                }
-            }
-
-            Section("Configuration") {
-                LabeledContent("Image") { monospaced(container.image) }
-                if !details.imageID.isEmpty {
-                    LabeledContent("Image ID") { monospaced(details.imageID) }
-                }
-                LabeledContent("Command") { monospaced(details.command.isEmpty ? "—" : details.command) }
-                if let entrypoint = details.entrypoint {
-                    LabeledContent("Entrypoint") { monospaced(entrypoint) }
-                }
-                if let workingDir = details.workingDir {
-                    LabeledContent("Working Directory") { monospaced(workingDir) }
-                }
-                if let user = details.user {
-                    LabeledContent("User") { monospaced(user) }
-                }
-                if let policy = details.restartPolicy {
-                    LabeledContent("Restart Policy") { Text(policy) }
-                }
-                if !details.networks.isEmpty {
-                    LabeledContent("Networks") { Text(details.networks.joined(separator: ", ")) }
-                }
-                if let platform = details.platform, !platform.isEmpty {
-                    LabeledContent("Platform") { Text(platform) }
-                }
-            }
+            configurationSections(details)
+            if !container.ports.isEmpty { portsSection }
+            environmentSection(details)
+            if !details.mounts.isEmpty { mountsSection(details) }
+            if !details.labels.isEmpty { labelsSection(details) }
         }
         .formStyle(.grouped)
-        .scrollDisabled(true)
-        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    @ViewBuilder
+    private func configurationSections(_ details: TrackBInspectDetails) -> some View {
+        Section("State") {
+            LabeledContent("Status") {
+                Text(statusText(details))
+            }
+            if let created = details.created {
+                LabeledContent("Created") {
+                    Text(Formatters.relativeDate(created))
+                        .help(Formatters.absoluteDate(created))
+                }
+            }
+            if let startedAt = details.startedAt, startedAt.timeIntervalSince1970 > 0 {
+                LabeledContent("Started") {
+                    Text(Formatters.relativeDate(startedAt))
+                        .help(Formatters.absoluteDate(startedAt))
+                }
+            }
+            if let finishedAt = details.finishedAt, finishedAt.timeIntervalSince1970 > 0,
+               container.state != "running", container.state != "restarting"
+            {
+                let code = details.exitCode.map { " (exit \($0))" } ?? ""
+                LabeledContent("Exited") {
+                    Text(Formatters.relativeDate(finishedAt) + code)
+                        .help(Formatters.absoluteDate(finishedAt))
+                }
+            }
+            if details.restartCount > 0 {
+                LabeledContent("Restarts") { Text("\(details.restartCount)") }
+            }
+        }
+
+        Section("Configuration") {
+            LabeledContent("Image") { monospaced(container.image) }
+            if !details.imageID.isEmpty {
+                LabeledContent("Image ID") { monospaced(details.imageID) }
+            }
+            LabeledContent("Command") { monospaced(details.command.isEmpty ? "—" : details.command) }
+            if let entrypoint = details.entrypoint {
+                LabeledContent("Entrypoint") { monospaced(entrypoint) }
+            }
+            if let workingDir = details.workingDir {
+                LabeledContent("Working Directory") { monospaced(workingDir) }
+            }
+            if let user = details.user {
+                LabeledContent("User") { monospaced(user) }
+            }
+            if let policy = details.restartPolicy {
+                LabeledContent("Restart Policy") { Text(policy) }
+            }
+            if !details.networks.isEmpty {
+                LabeledContent("Networks") { Text(details.networks.joined(separator: ", ")) }
+            }
+            if let platform = details.platform, !platform.isEmpty {
+                LabeledContent("Platform") { Text(platform) }
+            }
+        }
     }
 
     private func monospaced(_ text: String) -> some View {
@@ -135,116 +127,95 @@ struct ContainerOverviewTab: View {
         return "\(status.capitalized) · \(health)"
     }
 
-    private var portsTable: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Ports")
-                .font(.headline)
-
-            Table(container.ports) {
-                TableColumn("Host") { port in
-                    Text(port.hostPort.map { "\(port.hostIP ?? "0.0.0.0"):\($0)" } ?? "Not Published")
-                        .font(.system(.body, design: .monospaced))
-                        .foregroundStyle(port.hostPort == nil ? .secondary : .primary)
-                }
-                TableColumn("Container") { port in
-                    Text("\(port.containerPort)")
-                        .font(.system(.body, design: .monospaced))
-                }
-                TableColumn("Protocol") { port in
-                    Text(port.proto.uppercased())
-                        .foregroundStyle(.secondary)
-                }
-                TableColumn("") { port in
-                    if let url = port.url {
-                        Button { NSWorkspace.shared.open(url) } label: {
-                            Image(systemName: "arrow.up.forward.app")
+    private var portsSection: some View {
+        Section("Ports") {
+            ForEach(container.ports) { port in
+                LabeledContent("\(port.containerPort)/\(port.proto.uppercased())") {
+                    HStack(spacing: 8) {
+                        Text(port.hostPort.map { "\(port.hostIP ?? "0.0.0.0"):\($0)" } ?? "Not Published")
+                            .font(.system(.body, design: .monospaced))
+                            .foregroundStyle(port.hostPort == nil ? .secondary : .primary)
+                        if let url = port.url {
+                            Link("Open", destination: url)
+                            .accessibilityLabel("Open \(url.absoluteString)")
+                            .help("Open \(url.absoluteString)")
                         }
-                        .accessibilityLabel("Open \(url.absoluteString)")
-                        .help("Open \(url.absoluteString)")
                     }
                 }
-                .width(28)
             }
-            .frame(height: tableHeight(rows: container.ports.count))
         }
     }
 
-    private func environment(_ details: TrackBInspectDetails) -> some View {
+    @ViewBuilder
+    private func environmentSection(_ details: TrackBInspectDetails) -> some View {
         let variables = TrackBLogFilter.filter(
             details.env,
             needle: TrackBLogFilter.normalize(envQuery),
             lowered: \.lowered)
 
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Environment")
-                    .font(.headline)
-                Spacer()
-                if !details.env.isEmpty {
-                    DocumentSearchField(text: $envQuery, prompt: "Filter variables", width: 180)
-                }
+        Section("Environment") {
+            if !details.env.isEmpty {
+                TextField("Filter variables", text: $envQuery)
             }
-
             if details.env.isEmpty {
                 Text("This container declares no environment variables.")
                     .foregroundStyle(.secondary)
             } else if variables.isEmpty {
                 ContentUnavailableView.search(text: envQuery)
-                    .frame(height: 120)
             } else {
-                environmentTable(variables)
+                ForEach(variables) { variable in
+                    environmentRow(variable)
+                }
             }
         }
     }
 
-    private func environmentTable(_ variables: [TrackBInspectDetails.EnvVar]) -> some View {
-        Table(variables) {
-            TableColumn("Name") { variable in
-                HStack(spacing: 6) {
-                    if TrackBSecretHeuristic.looksSensitive(key: variable.key) {
-                        Image(systemName: "key.fill")
-                            .foregroundStyle(.orange)
-                            .help("The variable name suggests this value may be sensitive")
-                    }
-                    Text(variable.key)
-                        .font(.system(.body, design: .monospaced))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .textSelection(.enabled)
-                }
-            }
-            .width(min: 120, ideal: 170)
-
-            TableColumn("Value") { variable in
+    private func environmentRow(_ variable: TrackBInspectDetails.EnvVar) -> some View {
+        LabeledContent {
+            HStack(spacing: 8) {
                 environmentValue(variable)
-            }
-
-            TableColumn("") { variable in
-                HStack(spacing: 4) {
-                    Button {
-                        if revealed.contains(variable.id) {
-                            revealed.remove(variable.id)
-                        } else {
-                            revealed.insert(variable.id)
-                        }
-                    } label: {
-                        Image(systemName: revealed.contains(variable.id) ? "eye.slash" : "eye")
+                Button {
+                    if revealed.contains(variable.id) {
+                        revealed.remove(variable.id)
+                    } else {
+                        revealed.insert(variable.id)
                     }
-                    .accessibilityLabel(revealed.contains(variable.id) ? "Hide value" : "Reveal value")
-                    .help(revealed.contains(variable.id) ? "Hide value" : "Reveal value")
-
-                    Button {
-                        MorbPasteboard.copy(variable.value)
-                    } label: {
-                        Image(systemName: "doc.on.doc")
-                    }
-                    .accessibilityLabel("Copy value")
-                    .help("Copy value")
+                } label: {
+                    Image(systemName: revealed.contains(variable.id) ? "eye.slash" : "eye")
                 }
+                .accessibilityLabel(revealed.contains(variable.id) ? "Hide value" : "Reveal value")
+                .help(revealed.contains(variable.id) ? "Hide value" : "Reveal value")
+
+                Button {
+                    MorbPasteboard.copy(variable.value)
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                }
+                .accessibilityLabel("Copy value")
+                .help("Copy value")
             }
-            .width(54)
+        } label: {
+            environmentLabel(variable)
         }
-        .frame(height: tableHeight(rows: variables.count))
+    }
+
+    @ViewBuilder
+    private func environmentLabel(_ variable: TrackBInspectDetails.EnvVar) -> some View {
+        if TrackBSecretHeuristic.looksSensitive(key: variable.key) {
+            Label(variable.key, systemImage: "key.fill")
+                .font(.system(.body, design: .monospaced))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .textSelection(.enabled)
+                .help("The variable name suggests this value may be sensitive")
+        } else {
+            Text(variable.key)
+                .font(.system(.body, design: .monospaced))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .textSelection(.enabled)
+                .help(variable.key)
+        }
     }
 
     @ViewBuilder
@@ -270,45 +241,39 @@ struct ContainerOverviewTab: View {
             sharesAreKnown: TrackEShareStatus.canJudgeBindMounts(fileSharing))
     }
 
-    private func mountsTable(_ details: TrackBInspectDetails) -> some View {
+    @ViewBuilder
+    private func mountsSection(_ details: TrackBInspectDetails) -> some View {
         let rows = mountRows(details)
-        return VStack(alignment: .leading, spacing: 8) {
-            Text("Mounts")
-                .font(.headline)
-
-            Table(rows, selection: $mountSelection) {
-                TableColumn("Kind") { row in
-                    Label(row.kindLabel.capitalized, systemImage: row.kind.symbol)
-                        .help(row.kind.explanation)
-                }
-                .width(min: 86, ideal: 104)
-                TableColumn("Source") { row in
-                    mountSource(row)
-                }
-                TableColumn("Container Path") { row in
-                    Text(row.destination)
-                        .font(.system(.body, design: .monospaced))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                TableColumn("Access") { row in
-                    Text(row.accessDescription)
-                        .foregroundStyle(.secondary)
-                }
-                TableColumn("") { row in
-                    if let hostPath = row.hostPath {
-                        Button { TrackBFinder.reveal(hostPath) } label: {
-                            Image(systemName: "arrow.up.forward.app")
+        Section("Mounts") {
+            ForEach(rows) { row in
+                LabeledContent {
+                    HStack(spacing: 8) {
+                        VStack(alignment: .trailing, spacing: 2) {
+                            Text(row.destination)
+                                .font(.system(.body, design: .monospaced))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Text(row.accessDescription)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
-                        .accessibilityLabel("Reveal \(hostPath) in Finder")
-                        .help("Reveal in Finder")
+                        if let hostPath = row.hostPath {
+                            Button("Reveal", systemImage: "arrow.up.forward.app") {
+                                TrackBFinder.reveal(hostPath)
+                            }
+                            .accessibilityLabel("Reveal \(hostPath) in Finder")
+                            .help("Reveal in Finder")
+                        }
+                    }
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Label(row.kindLabel.capitalized, systemImage: row.kind.symbol)
+                        mountSource(row)
                     }
                 }
-                .width(28)
-            }
-            .frame(height: tableHeight(rows: rows.count))
-            .contextMenu(forSelectionType: TrackBMountDisplay.ID.self) { ids in
-                mountContextMenu(ids: ids, rows: rows)
+                .contextMenu {
+                    mountContextMenu(row: row)
+                }
             }
 
             if rows.contains(where: { $0.kind == .bind && $0.warning == nil }) {
@@ -344,26 +309,28 @@ struct ContainerOverviewTab: View {
     }
 
     @ViewBuilder
-    private func mountContextMenu(ids: Set<TrackBMountDisplay.ID>, rows: [TrackBMountDisplay]) -> some View {
-        if let id = ids.first, let row = rows.first(where: { $0.id == id }) {
-            if let hostPath = row.hostPath {
-                Button("Reveal in Finder") { TrackBFinder.reveal(hostPath) }
-                Button("Copy Host Path") { MorbPasteboard.copy(hostPath) }
-            } else if row.source != "—" {
-                Button(row.kind == .volume ? "Copy Volume Name" : "Copy Source") {
-                    MorbPasteboard.copy(row.source)
-                }
+    private func mountContextMenu(row: TrackBMountDisplay) -> some View {
+        if let hostPath = row.hostPath {
+            Button("Reveal in Finder") { TrackBFinder.reveal(hostPath) }
+            Button("Copy Host Path") { MorbPasteboard.copy(hostPath) }
+        } else if row.source != "—" {
+            Button(row.kind == .volume ? "Copy Volume Name" : "Copy Source") {
+                MorbPasteboard.copy(row.source)
             }
-            Button("Copy Container Path") { MorbPasteboard.copy(row.destination) }
         }
+        Button("Copy Container Path") { MorbPasteboard.copy(row.destination) }
     }
 
-    private func labelsTable(_ details: TrackBInspectDetails) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Labels")
-                .font(.headline)
-            Table(details.labels) {
-                TableColumn("Key") { label in
+    private func labelsSection(_ details: TrackBInspectDetails) -> some View {
+        Section("Labels") {
+            ForEach(details.labels) { label in
+                LabeledContent {
+                    Text(label.value.isEmpty ? "—" : label.value)
+                        .font(.system(.body, design: .monospaced))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .textSelection(.enabled)
+                } label: {
                     Text(label.key)
                         .font(.system(.body, design: .monospaced))
                         .foregroundStyle(.secondary)
@@ -371,20 +338,8 @@ struct ContainerOverviewTab: View {
                         .truncationMode(.tail)
                         .textSelection(.enabled)
                 }
-                TableColumn("Value") { label in
-                    Text(label.value.isEmpty ? "—" : label.value)
-                        .font(.system(.body, design: .monospaced))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .textSelection(.enabled)
-                }
             }
-            .frame(height: tableHeight(rows: details.labels.count))
         }
-    }
-
-    private func tableHeight(rows: Int) -> CGFloat {
-        28 + CGFloat(min(max(rows, 1), 8)) * 26
     }
 }
 
