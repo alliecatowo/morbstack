@@ -1,8 +1,7 @@
 // Copyright 2026 The Morbstack Authors.
 // Licensed under the Apache License, Version 2.0 (the "License").
 //
-// The Builds screen — BuildKit's cache, which is the closest thing to build history the
-// engine exposes.
+// The Builds screen — distinct BuildKit cache and Buildx completed-build collections.
 //
 // Docker's classic builder has no notion of "a build" as a first-class object: it keeps
 // a graph of cache records shared across every build that has ever run against the
@@ -12,16 +11,11 @@
 // act on it as a whole, the same constraint the Disk screen's build-cache row already
 // lives with.
 //
-// What is NOT here, and why: a build's step-by-step log, its duration, and which image
-// tag it produced are BuildKit solver-session data that `docker buildx history` reads
-// from BuildKit's own `~/.docker/buildx/history` store, over a gRPC API this app has no
-// client for — `/system/df`'s cache records are shared across every build that ever
-// ran and do not group into "builds." If that history is wanted, the backend work is a
-// `buildx history`-shaped client added to `MorbstackKit`; this screen reads real data
-// (`AppModel.buildCache`, backed by `DockerClient.buildCacheRecords()`) rather than a
-// fixture, because unlike Kubernetes' cluster state, the cache list genuinely is
-// available today — it was just being discarded after `diskUsage()` folded it into a
-// single total.
+// The two collections remain intentionally separate. `/system/df` cache records are
+// shared across builds and do not identify one completed build, while `buildx history
+// ls` reports completed-build metadata for its active builder. The history scope shows
+// only records returned by that explicit, read-only Buildx query; it never infers a
+// build history from cache layers or locally fabricated state.
 
 import SwiftUI
 import UniformTypeIdentifiers
@@ -84,6 +78,55 @@ enum BuildCacheList {
     }
 }
 
+private enum BuildDataScope: Hashable {
+    case cache
+    case history
+}
+
+private enum BuildHistorySortKey: String, CaseIterable, Hashable {
+    case name, status, createdAt, duration
+}
+
+private struct BuildHistoryComparator: SortComparator {
+    var key: BuildHistorySortKey
+    var order: SortOrder = .forward
+
+    func compare(_ lhs: BuildxHistoryRecord, _ rhs: BuildxHistoryRecord) -> ComparisonResult {
+        let result: ComparisonResult
+        switch key {
+        case .name:
+            result = MorbSort.string(lhs.name, rhs.name)
+        case .status:
+            result = lhs.status == rhs.status
+                ? MorbSort.string(lhs.name, rhs.name)
+                : MorbSort.string(lhs.status, rhs.status)
+        case .createdAt:
+            let left = lhs.createdAt ?? .distantPast
+            let right = rhs.createdAt ?? .distantPast
+            result = left == right
+                ? MorbSort.string(lhs.name, rhs.name)
+                : MorbSort.date(left, right)
+        case .duration:
+            let left = lhs.duration ?? ""
+            let right = rhs.duration ?? ""
+            result = left == right
+                ? MorbSort.string(lhs.name, rhs.name)
+                : MorbSort.string(left, right)
+        }
+        return order == .forward ? result : result.reversed
+    }
+}
+
+private enum BuildHistoryList {
+    static func matches(_ record: BuildxHistoryRecord, query: String) -> Bool {
+        let needle = query.trimmingCharacters(in: .whitespaces)
+        guard !needle.isEmpty else { return true }
+        return record.name.localizedCaseInsensitiveContains(needle)
+            || record.status.localizedCaseInsensitiveContains(needle)
+            || record.id.localizedCaseInsensitiveContains(needle)
+    }
+}
+
 // MARK: - Root
 
 struct BuildsRootView: View {
@@ -91,8 +134,13 @@ struct BuildsRootView: View {
     let model: AppModel
 
     @State private var query = ""
+    @State private var scope: BuildDataScope = .cache
     @State private var sortOrder: [BuildComparator] = [BuildComparator(key: .size, order: .reverse)]
     @State private var selection: BuildCacheRecord.ID?
+    @State private var historySortOrder: [BuildHistoryComparator] = [
+        BuildHistoryComparator(key: .createdAt, order: .reverse),
+    ]
+    @State private var historySelection: BuildxHistoryRecord.ID?
     @State private var showsInspector = true
     @State private var isRefreshing = false
     @State private var isPruning = false
@@ -115,9 +163,15 @@ struct BuildsRootView: View {
         records.filter { BuildCacheList.matches($0, query: query) }.sorted(using: sortOrder)
     }
 
+    private var visibleHistory: [BuildxHistoryRecord] {
+        model.buildHistory
+            .filter { BuildHistoryList.matches($0, query: query) }
+            .sorted(using: historySortOrder)
+    }
+
     private var unusedCount: Int { BuildCacheList.unused(records).count }
 
-    private var subtitle: String {
+    private var cacheSubtitle: String {
         if case .running(let request) = buildPhase { return "Building \(request.displayName)…" }
         if isPruning { return "Pruning unused cache…" }
 
@@ -144,11 +198,45 @@ struct BuildsRootView: View {
         return records.first { $0.id == selection }
     }
 
+    private var selectedHistoryRecord: BuildxHistoryRecord? {
+        guard let historySelection else { return nil }
+        return model.buildHistory.first { $0.id == historySelection }
+    }
+
+    private var subtitle: String {
+        scope == .cache ? cacheSubtitle : historySubtitle
+    }
+
+    private var historySubtitle: String {
+        switch model.buildHistoryState {
+        case .idle:
+            return "Buildx history not loaded"
+        case .loading:
+            return "Loading Buildx history…"
+        case .loaded:
+            let count = model.buildHistory.count
+            return count == 0
+                ? "No completed builds"
+                : "\(count) completed build\(count == 1 ? "" : "s")"
+        case .unavailable:
+            return "Buildx history unavailable"
+        }
+    }
+
+    private var isHistoryRefreshing: Bool {
+        if case .loading = model.buildHistoryState { return true }
+        return false
+    }
+
+    private var isRefreshingCurrentScope: Bool {
+        scope == .cache ? isRefreshing : isHistoryRefreshing
+    }
+
     var body: some View {
         content
             .navigationTitle("Builds")
             .navigationSubtitle(subtitle)
-            .searchable(text: $query, placement: .toolbar, prompt: "Description, type, ID")
+            .searchable(text: $query, placement: .toolbar, prompt: searchPrompt)
             .toolbar { toolbarContent }
             .sheet(isPresented: $showsBuildSheet, onDismiss: resetBuildSheetIfIdle) {
                 buildSheet
@@ -220,10 +308,20 @@ struct BuildsRootView: View {
                 if selection == nil { selection = visible.first?.id }
             }
             .onChange(of: query) { _, _ in
-                selectFirstVisibleRecordIfNeeded()
+                selectFirstVisibleRecordIfNeeded(for: scope)
             }
             .onChange(of: records) { _, _ in
-                selectFirstVisibleRecordIfNeeded()
+                selectFirstVisibleRecordIfNeeded(for: .cache)
+            }
+            .onChange(of: model.buildHistory) { _, _ in
+                selectFirstVisibleRecordIfNeeded(for: .history)
+            }
+            .onChange(of: scope) { _, newScope in
+                query = ""
+                selectFirstVisibleRecordIfNeeded(for: newScope)
+                if newScope == .history {
+                    Task { await refreshBuildHistory() }
+                }
             }
             .onChange(of: selection) { _, newValue in
                 if newValue != nil { showsInspector = true }
@@ -239,51 +337,65 @@ struct BuildsRootView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        ToolbarItem(id: "builds.start", placement: .primaryAction) {
-            Button {
-                showsBuildSheet = true
-            } label: {
-                Image(systemName: "plus")
+        ToolbarItem(id: "builds.scope", placement: .automatic) {
+            Picker("Build data", selection: $scope) {
+                Text("Cache").tag(BuildDataScope.cache)
+                Text("History").tag(BuildDataScope.history)
             }
-            .accessibilityLabel("Build an image")
-            .help("Build an image from a local Dockerfile")
-            .disabled(isPruning)
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .accessibilityLabel("Build data")
+            .help("Choose BuildKit cache or Buildx history")
+        }
+        if scope == .cache {
+            ToolbarItem(id: "builds.start", placement: .primaryAction) {
+                Button {
+                    showsBuildSheet = true
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .accessibilityLabel("Build an image")
+                .help("Build an image from a local Dockerfile")
+                .disabled(isPruning)
+            }
         }
         ToolbarItem(id: "builds.refresh", placement: .secondaryAction) {
             Button {
-                Task { await refreshBuildCache() }
+                Task { await refreshCurrentScope() }
             } label: {
-                if isRefreshing {
+                if isRefreshingCurrentScope {
                     ProgressView()
                         .controlSize(.small)
-                        .accessibilityLabel("Refreshing build cache")
+                        .accessibilityLabel("Refreshing \(scope == .cache ? "build cache" : "Buildx history")")
                 } else {
                     Image(systemName: "arrow.clockwise")
                 }
             }
-            .accessibilityLabel("Refresh build cache")
-            .help("Refresh the BuildKit cache records")
-            .disabled(isRefreshing || isPruning)
+            .accessibilityLabel(scope == .cache ? "Refresh build cache" : "Refresh Buildx history")
+            .help(scope == .cache ? "Refresh the BuildKit cache records" : "Refresh completed builds reported by Buildx")
+            .disabled(isRefreshingCurrentScope || isPruning)
         }
-        ToolbarItem(id: "builds.prune", placement: .secondaryAction) {
-            Button(role: .destructive) {
-                showsPruneConfirmation = true
-            } label: {
-                if isPruning {
-                    ProgressView()
-                        .controlSize(.small)
-                } else {
-                    Image(systemName: "trash")
+        if scope == .cache {
+            ToolbarItem(id: "builds.prune", placement: .secondaryAction) {
+                Button(role: .destructive) {
+                    showsPruneConfirmation = true
+                } label: {
+                    if isPruning {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: "trash")
+                    }
                 }
+                .accessibilityLabel(isPruning ? "Pruning unused build cache" : "Prune unused build cache")
+                .help(
+                    unusedCount == 0
+                        ? "No unused build cache to prune"
+                        : "Prune \(unusedCount) unused cache record\(unusedCount == 1 ? "" : "s")")
+                .disabled(unusedCount == 0 || isPruning || isRefreshing)
             }
-            .accessibilityLabel(isPruning ? "Pruning unused build cache" : "Prune unused build cache")
-            .help(
-                unusedCount == 0
-                    ? "No unused build cache to prune"
-                    : "Prune \(unusedCount) unused cache record\(unusedCount == 1 ? "" : "s")")
-            .disabled(unusedCount == 0 || isPruning || isRefreshing)
         }
-        if !records.isEmpty {
+        if scope == .cache ? !records.isEmpty : !model.buildHistory.isEmpty {
             ToolbarItem(id: "builds.inspector", placement: .secondaryAction) {
                 Button {
                     showsInspector.toggle()
@@ -300,6 +412,15 @@ struct BuildsRootView: View {
 
     @ViewBuilder
     private var content: some View {
+        if scope == .cache {
+            cacheContent
+        } else {
+            historyContent
+        }
+    }
+
+    @ViewBuilder
+    private var cacheContent: some View {
         if records.isEmpty {
             ContentUnavailableView {
                 Label("No Build Cache", systemImage: "hammer")
@@ -370,6 +491,69 @@ struct BuildsRootView: View {
         }
     }
 
+    @ViewBuilder
+    private var historyContent: some View {
+        switch model.buildHistoryState {
+        case .idle:
+            ContentUnavailableView {
+                Label("Build History Not Loaded", systemImage: "clock.arrow.circlepath")
+            } description: {
+                Text("Load completed builds reported by Buildx for Morbstack’s active builder.")
+            } actions: {
+                Button {
+                    Task { await refreshBuildHistory() }
+                } label: {
+                    Label("Load Build History", systemImage: "arrow.clockwise")
+                }
+            }
+        case .loading:
+            ContentUnavailableView {
+                Label("Loading Build History", systemImage: "clock.arrow.circlepath")
+            } description: {
+                ProgressView("Checking the active Buildx builder…")
+            }
+        case .unavailable(let detail):
+            ContentUnavailableView {
+                Label("Build History Unavailable", systemImage: "exclamationmark.triangle")
+            } description: {
+                Text(detail)
+            } actions: {
+                Button {
+                    Task { await refreshBuildHistory() }
+                } label: {
+                    Label("Retry", systemImage: "arrow.clockwise")
+                }
+                .disabled(isHistoryRefreshing)
+            }
+        case .loaded:
+            if model.buildHistory.isEmpty {
+                ContentUnavailableView {
+                    Label("No Completed Builds", systemImage: "clock.arrow.circlepath")
+                } description: {
+                    Text("The active Buildx builder has not reported any completed builds.")
+                } actions: {
+                    Button {
+                        Task { await refreshBuildHistory() }
+                    } label: {
+                        Label("Refresh", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(isHistoryRefreshing)
+                }
+            } else if visibleHistory.isEmpty {
+                ContentUnavailableView.search(text: query)
+            } else {
+                historyTable
+                    .inspector(isPresented: $showsInspector) {
+                        historyDetailPane
+                            .inspectorColumnWidth(
+                                min: 280,
+                                ideal: 340,
+                                max: 460)
+                    }
+            }
+        }
+    }
+
     private func descriptionCell(_ record: BuildCacheRecord) -> some View {
         Text(record.description)
             .font(.system(.callout, design: .monospaced))
@@ -382,6 +566,40 @@ struct BuildsRootView: View {
             ? (record.inUse ? "In Use · Shared" : "Unused · Shared")
             : (record.inUse ? "In Use" : "Unused"))
             .foregroundStyle(.secondary)
+    }
+
+    private var historyTable: some View {
+        Table(visibleHistory, selection: $historySelection, sortOrder: $historySortOrder) {
+            TableColumn("Name", sortUsing: BuildHistoryComparator(key: .name)) { record in
+                Text(record.name)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            TableColumn("Status", sortUsing: BuildHistoryComparator(key: .status)) { record in
+                Text(record.status)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .width(min: 90, ideal: 120, max: 180)
+            TableColumn("Created", sortUsing: BuildHistoryComparator(key: .createdAt)) { record in
+                Text(record.createdAt.map { Formatters.compactDuration(since: $0) } ?? "Not reported")
+                    .monospacedDigit()
+                    .help(record.createdAt.map(Formatters.absoluteDate) ?? "Buildx did not report a creation time")
+            }
+            .width(min: 100, ideal: 122, max: 154)
+            TableColumn("Duration", sortUsing: BuildHistoryComparator(key: .duration)) { record in
+                Text(record.duration ?? "Not reported")
+                    .monospacedDigit()
+                    .foregroundStyle(record.duration == nil ? .secondary : .primary)
+            }
+            .width(min: 88, ideal: 104, max: 132)
+        }
+        .tableStyle(.automatic)
+        .contextMenu(forSelectionType: BuildxHistoryRecord.ID.self) { ids in
+            if let id = ids.first, let record = model.buildHistory.first(where: { $0.id == id }) {
+                Button("Copy Build ID") { MorbPasteboard.copy(record.id) }
+            }
+        }
     }
 
     // MARK: Detail pane
@@ -448,6 +666,48 @@ struct BuildsRootView: View {
         }
     }
 
+    @ViewBuilder
+    private var historyDetailPane: some View {
+        if let record = selectedHistoryRecord {
+            Form {
+                Section("Completed Build") {
+                    LabeledContent("Name") {
+                        Text(record.name)
+                            .textSelection(.enabled)
+                            .lineLimit(3)
+                    }
+                    LabeledContent("Status", value: record.status)
+                    LabeledContent("Created", value: record.createdAt.map(Formatters.absoluteDate) ?? "Not reported")
+                    LabeledContent("Duration", value: record.duration ?? "Not reported")
+                    LabeledContent("Build ID") {
+                        Text(record.id)
+                            .font(.system(.callout, design: .monospaced))
+                            .textSelection(.enabled)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+                Section("Actions") {
+                    Button {
+                        MorbPasteboard.copy(record.id)
+                    } label: {
+                        Label("Copy Build ID", systemImage: "doc.on.doc")
+                    }
+                }
+                Section("Availability") {
+                    Text(
+                        "Buildx reports completed-build metadata for its active builder. This is not a BuildKit cache record.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+        } else {
+            ContentUnavailableView(
+                "No Build Selected",
+                systemImage: "clock.arrow.circlepath",
+                description: Text("Select a completed build to view the metadata Buildx reported."))
+        }
+    }
+
     // MARK: Operations
 
     @MainActor
@@ -455,6 +715,20 @@ struct BuildsRootView: View {
         isRefreshing = true
         defer { isRefreshing = false }
         await model.refreshBuildCache()
+    }
+
+    @MainActor
+    private func refreshBuildHistory() async {
+        await model.refreshBuildHistory()
+    }
+
+    @MainActor
+    private func refreshCurrentScope() async {
+        if scope == .cache {
+            await refreshBuildCache()
+        } else {
+            await refreshBuildHistory()
+        }
     }
 
     @MainActor
@@ -474,14 +748,29 @@ struct BuildsRootView: View {
         }
     }
 
-    private func selectFirstVisibleRecordIfNeeded() {
-        guard let selection else {
-            self.selection = visible.first?.id
-            return
+    private func selectFirstVisibleRecordIfNeeded(for scope: BuildDataScope) {
+        switch scope {
+        case .cache:
+            guard let selection else {
+                self.selection = visible.first?.id
+                return
+            }
+            if !visible.contains(where: { $0.id == selection }) {
+                self.selection = visible.first?.id
+            }
+        case .history:
+            guard let historySelection else {
+                self.historySelection = visibleHistory.first?.id
+                return
+            }
+            if !visibleHistory.contains(where: { $0.id == historySelection }) {
+                self.historySelection = visibleHistory.first?.id
+            }
         }
-        if !visible.contains(where: { $0.id == selection }) {
-            self.selection = visible.first?.id
-        }
+    }
+
+    private var searchPrompt: String {
+        scope == .cache ? "Description, type, ID" : "Name, status, ID"
     }
 
     // MARK: Local build workflow
