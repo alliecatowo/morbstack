@@ -12,14 +12,16 @@ See [`../README.md`](../README.md) Status section and
 
 ## What Morbstack is
 
-Morbstack is a Docker Desktop replacement for macOS. It runs unmodified
-upstream `dockerd` + `containerd` inside a single lightweight Linux VM,
-managed via Apple's `Virtualization.framework`, and does all product
-differentiation on the macOS side: native SwiftUI host app, fast VM
-lifecycle, host-integrated filesystem sync, host-integrated networking and
-DNS, and first-class Apple platform features (App Intents, MCP). It is not
-a from-scratch container runtime — the guest is boring, unmodified Docker,
-on purpose (see "The load-bearing decision" below).
+Morbstack is a Docker Desktop replacement for macOS. It runs upstream Moby
+inside a single lightweight Linux VM, managed via Apple's
+`Virtualization.framework` — `containerd` unmodified, `dockerd` carrying one
+small, pinned, in-repo Morbstack patch (`guest/moby-patches/0001-morbstack-publish-all-host-allocator.patch`,
+~174 lines) that adds the host-side port allocator `docker run -P` needs —
+and does all product differentiation on the macOS side: native SwiftUI host
+app, fast VM lifecycle, host-integrated filesystem sync, host-integrated
+networking and DNS, and first-class Apple platform features (App Intents,
+MCP). It is not a from-scratch container runtime — the guest is boring,
+real Docker, on purpose (see "The load-bearing decision" below).
 
 ## System diagram
 
@@ -136,9 +138,15 @@ retrying a restore known to fail — see "VM lifecycle" below),
   bringing up `eth0` + DHCP, starting and supervising `containerd` and
   `dockerd` (not a separately supervised `buildkitd` — see below), and serving the vsock control
   channel (MRB0 framing in M0; see `docs/protocol.md`).
-- **containerd + dockerd** — unmodified upstream binaries (static Docker
-  29.7.1 aarch64 release). Morbstack does not fork or patch the Docker
-  Engine. `supervisor.rs`'s service table (`default_services`) starts exactly
+- **containerd + dockerd** — static Docker 29.7.1 aarch64 release binaries.
+  `containerd` is unmodified upstream. `dockerd` carries one small,
+  version-pinned Morbstack patch
+  (`guest/moby-patches/0001-morbstack-publish-all-host-allocator.patch`,
+  ~174 lines) that adds the host-side port allocator `docker run -P`
+  requires; `scripts/mkinitramfs.sh` hard-fails without the patched build
+  and installs it as `dockerd`, so this is not optional. Morbstack does not
+  otherwise fork or reimplement the Docker Engine.
+  `supervisor.rs`'s service table (`default_services`) starts exactly
   two services, `containerd` and `dockerd`; it intentionally does not
   supervise a separate `buildkitd` daemon. That is not a classic-builder
   fallback: the selected upstream dockerd exposes the Engine BuildKit path,
@@ -360,7 +368,8 @@ pins of its own any more.
 ## The load-bearing decision: one shared VM, not per-container microVMs
 
 Morbstack runs a single guest VM shared by every container, running
-unmodified `dockerd`/`containerd` inside it, rather than giving each
+upstream `dockerd`/`containerd` inside it (`dockerd` with Morbstack's one
+host-port-allocator patch; `containerd` unmodified), rather than giving each
 container (or each Compose project) its own microVM. This is the decision
 the rest of the architecture is built around, and it is deliberate:
 

@@ -109,7 +109,7 @@
                     <td><strong>Morbstack</strong></td>
                     <td><code class="inline">Virtualization.framework</code></td>
                     <td>one shared VM for all containers</td>
-                    <td>unmodified upstream <code class="inline">dockerd</code> + <code class="inline">containerd</code> (static 29.7.1)</td>
+                    <td>upstream <code class="inline">dockerd</code> (+ one ~174-line Morbstack patch) + unmodified <code class="inline">containerd</code> (static 29.7.1)</td>
                     <td>VirtioFS, same-absolute-path bind mounts</td>
                     <td>outbound NAT only (M0); no <code class="inline">morbnet</code>/DNS/host-routable IPs yet</td>
                     <td>native SwiftUI, zero web views (planned; not part of M0)</td>
@@ -240,7 +240,7 @@ $ nm -g /Applications/Docker.app/Contents/MacOS/com.docker.virtualization | grep
                 </tbody>
               </table>
             </div>
-            <p class="mt-5">Morbstack, Podman Desktop, Rancher Desktop, Colima, and Apple's <code class="inline">container</code> are all genuinely free-forever open source with no commercial trigger — on licensing terms alone, Morbstack is tied with four established projects, not uniquely differentiated from all of them. Its real differentiation is narrower: it is the only one of the six simultaneously (a) free with no commercial-use asterisk, (b) built around an unmodified, off-the-shelf <code class="inline">dockerd</code>/<code class="inline">containerd</code> rather than a different or closed engine, and (c) aimed at drop-in Docker Desktop replacement rather than a CLI-only tool or a different API surface entirely. Whether it <em>achieves</em> that combination today is a feature-completeness and quality question, covered honestly in §5 and §6.</p>
+            <p class="mt-5">Morbstack, Podman Desktop, Rancher Desktop, Colima, and Apple's <code class="inline">container</code> are all genuinely free-forever open source with no commercial trigger — on licensing terms alone, Morbstack is tied with four established projects, not uniquely differentiated from all of them. Its real differentiation is narrower: it is the only one of the six simultaneously (a) free with no commercial-use asterisk, (b) built around real, off-the-shelf upstream <code class="inline">dockerd</code>/<code class="inline">containerd</code> — <code class="inline">containerd</code> unmodified, <code class="inline">dockerd</code> with a single small pinned Morbstack patch — rather than a different or closed engine, and (c) aimed at drop-in Docker Desktop replacement rather than a CLI-only tool or a different API surface entirely. Whether it <em>achieves</em> that combination today is a feature-completeness and quality question, covered honestly in §5 and §6.</p>
           </section>
 
           <section class="docs-section" id="features">
@@ -380,7 +380,7 @@ $ nm -g /Applications/Docker.app/Contents/MacOS/com.docker.virtualization | grep
               <dt>Use Apple's <code class="inline">container</code> if:</dt>
               <dd>per-container VM-grade isolation matters more to you than Docker ecosystem compatibility, you're on macOS 26 with Apple silicon, and you're comfortable with a CLI that doesn't speak the Docker API and has no Compose story today.</dd>
               <dt>Use Morbstack if:</dt>
-              <dd>you want a free-forever, Apache-2.0, source-visible Docker Desktop replacement built around an unmodified upstream Docker Engine — <strong>and</strong> you are comfortable being an early adopter of pre-alpha software with one maintainer, no security audit, missing <code class="inline">host.docker.internal</code>/zero-config discovery/buildx-out-of-the-box, and the specific <code class="inline">/tmp</code> bind-mount and inotify gotchas documented above. If any of those gaps would break your actual workflow today, use one of the other six until Morbstack's roadmap closes them.</dd>
+              <dd>you want a free-forever, Apache-2.0, source-visible Docker Desktop replacement built around a real upstream Docker Engine (one small, pinned, in-repo Morbstack patch to <code class="inline">dockerd</code>; <code class="inline">containerd</code> unmodified) — <strong>and</strong> you are comfortable being an early adopter of pre-alpha software with one maintainer, no security audit, missing <code class="inline">host.docker.internal</code>/zero-config discovery/buildx-out-of-the-box, and the specific <code class="inline">/tmp</code> bind-mount and inotify gotchas documented above. If any of those gaps would break your actual workflow today, use one of the other six until Morbstack's roadmap closes them.</dd>
             </dl>
           </section>
 

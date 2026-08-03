@@ -37,6 +37,17 @@ one explicit product decision before any UI or host integration:
 | `*.morb.test` | **Recommended canonical name.** `.test` avoids the `.local` mDNS collision, but still requires a narrowly scoped resolver configuration. It is not a license to intercept unrelated DNS. |
 | Both names or an alias | Not in v1. An alias doubles collision, certificate, revocation, and support state. |
 
+**UNRESOLVED — this document contradicts the source it describes.** This table
+recommends `*.morb.test` as the canonical name and flags `*.morb.local` as
+conditional on a resolver-safety proof that has not been done. But
+`MorbLocalDomain.suffix` in `mac/Sources/MorbstackKit/MorbLocalDomain.swift`
+is already hardcoded to `"morb.local"` — the candidate this document itself
+says should not ship without further proof. Nothing here picks a winner
+between the doc's recommendation and the source constant; that is a product
+decision for someone with authority over S5.0, not something to resolve by
+editing prose. Until it is resolved, the suffix used anywhere in code should
+not be treated as the decided name.
+
 Until that decision changes source and is accepted on supported macOS releases,
 no documentation, UI, CLI, or marketing may say that `morb.local` resolves.
 

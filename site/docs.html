@@ -139,7 +139,7 @@ docker compose version</pre>
                   <tr><td><code class="inline">mcp</code></td><td>Model Context Protocol server, read-only unless granted otherwise.</td></tr>
                   <tr><td><code class="inline">migrate</code></td><td>Import images, volumes, and config from another runtime. Never destructive, never writes to another runtime's state.</td></tr>
                   <tr><td><code class="inline">bench</code></td><td>Run the open benchmark suite and report the numbers — the <code class="inline">morb bench</code> tool referenced in the roadmap's performance targets.</td></tr>
-                  <tr><td><code class="inline">scan</code></td><td>SBOM and CVE scan an image, entirely on this machine.</td></tr>
+                  <tr><td><code class="inline">scan</code></td><td>SBOM and CVE scan an image using optional <code class="inline">syft</code>/<code class="inline">grype</code> tools you supply yourself (not bundled); building the CVE database requires a network fetch.</td></tr>
                   <tr><td><code class="inline">debug</code></td><td>Open a toolbox shell in a container, even a distroless one.</td></tr>
                   <tr><td><code class="inline">context</code></td><td>Manage the <code class="inline">morbstack</code> docker context — <code class="inline">status</code> / <code class="inline">create</code> / <code class="inline">use</code>.</td></tr>
                   <tr><td><code class="inline">install-cli-plugins</code></td><td>Symlink <code class="inline">docker-compose</code>/<code class="inline">docker-buildx</code> into <code class="inline">~/.docker/cli-plugins</code>.</td></tr>
@@ -188,7 +188,7 @@ docker compose version</pre>
               <ul>
                 <li><strong>Unmodified <code class="inline">docker</code> CLI.</strong> Any stock <code class="inline">docker</code> binary works against Morbstack's relayed Engine API — no patched client, ever.</li>
                 <li><strong>Docker contexts are respected, never stomped.</strong> Morbstack adds itself as a context; it never silently rewrites your existing default.</li>
-                <li><strong>Engine API = upstream moby, verbatim.</strong> No added, removed, or reshaped endpoints — whatever the bundled <code class="inline">dockerd</code> version exposes is what you get.</li>
+                <li><strong>Engine API surface = upstream moby.</strong> No added, removed, or reshaped endpoints — whatever the bundled <code class="inline">dockerd</code> version exposes is what you get. (<code class="inline">dockerd</code> itself carries one small, pinned Morbstack patch for host-side port allocation; it does not change the API contract. <code class="inline">containerd</code> is unmodified.)</li>
                 <li><strong>Compose v2 and buildx are bundled</strong>, from M1 onward. As of today, Compose already works end-to-end with a one-time manual plugin symlink; buildx is not fetched or tested yet at any milestone so far.</li>
                 <li><strong><code class="inline">~/.docker/config.json</code> is honored</strong> — credential helpers, the macOS keychain helper, and registry mirrors, the same way stock Docker tooling reads it.</li>
               </ul>
