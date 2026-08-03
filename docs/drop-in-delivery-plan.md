@@ -112,12 +112,13 @@ non-Morbstack configuration.
    host FSEvents watcher alone would be false progress. Require scoped roots,
    acknowledgement, overflow/rescan behavior, stop/restart recovery, and
    real Node/Python/Go watcher evidence.
-2. **Finish escape-hatch workflows.** Complete the existing reviewed
-   image/volume migration foundation with a real two-engine matrix, then a
-   native volume transfer only after that proof. Add grow-only disk expansion
-   only with a stopped-VM journal, guest filesystem resize, and postcondition
-   check. Keep `morb debug` unavailable until a verified toolbox asset,
-   consented acquisition, isolation, cleanup, and duplex TTY are all real.
+2. **Finish escape-hatch workflows.** Run the existing reviewed native
+   image/volume migration workflows through a real two-engine matrix, then
+   harden volume transfer with a final reprepare/review at Transfer time. Add
+   grow-only disk expansion only with a stopped-VM journal, guest filesystem
+   resize, and postcondition check. Keep `morb debug` unavailable until a
+   verified toolbox asset, consented acquisition, isolation, cleanup, and
+   duplex TTY are all real.
 3. **Turn local services into a Mac-native advantage.** After P0/P1.1,
    implement opt-in exact `*.morb.local` claim reconciliation, narrow
    loopback HTTP routing, and only then separately consented local HTTPS/CA

@@ -51,7 +51,7 @@ guarantee.
 | Direct Docker discovery and durable ownership | `e329140` creates `~/.docker/run/docker.sock` only when it is safely absent; `1dda777` adds an explicit signed per-user `SMAppService` LaunchAgent; `ddac4a3` offers it default-off in first run. | Implemented; registration and clean-profile live verification pending. |
 | Diagnostics and recovery | `e329140` adds an offline, bounded, redacted `morb diagnose`; `cacda50` exposes actual Kubernetes startup diagnostics and an escape path; `2e44f05` adds the same `MorbDiagnostics` collector to the native engine-error state. The app asks for an explicit parent folder, never starts or contacts Docker/the daemon during collection, tells the person to review the bundle, and offers Finder reveal rather than upload/share. | Implemented; support-bundle smoke checked. The native recovery route has source/HIG evidence but awaits serialized real-window acceptance, and the full real-VM recovery matrix remains pending. |
 | Operational UI | `9c0cee5` adds a reviewed, native BuildKit local-build workflow; `e066891` adds a native selected-images migration workflow; `d77b81a` makes the native Migration inspector show the read-only named-volume eligibility plan; `6b3aa92` adds real container network statistics; `34f3353` adds pod log/event inspection; `acd0925` makes disk-capacity and resize-readiness states truthful. | Implemented pending the corresponding real-engine acceptance paths. The full-window Computer Use review is recorded for safe routes; no build, migration, or Kubernetes mutation was performed during it. |
-| Migration transfer boundary | `MigrationReadOnlyPlanner` reads image and named-volume inventories without mutation. `ImageMigrationTransaction` supports the selected-image native/CLI workflow; `bd7d7d0` adds `VolumeMigrationTransaction`, used by the separately confirmed `morb migrate volumes` CLI path. | Mechanically implemented pending a real two-engine matrix. Volume transfer is selected missing `local` volumes only, with fresh destination checks, separate helper-image network consent, helper cleanup, and a durable report; it never overwrites, merges, deletes, or inspects existing destination contents. The native app intentionally shows volume eligibility only, not a volume-copy action. |
+| Migration transfer boundary | `MigrationReadOnlyPlanner` reads image and named-volume inventories without mutation. `ImageMigrationTransaction` supports the selected-image native/CLI workflow; `VolumeMigrationTransaction` backs the separately confirmed CLI **and native** selected-volume workflows. | Mechanically implemented pending a real two-engine matrix. The native document-modal flow starts with an empty selection of eligible records, re-prepares those exact names before review, gates a missing helper-image pull behind separate default-off consent, reports completed-volume count plus real archive bytes without a false percentage/cancel/verification claim, and presents the durable report. It never offers `--all`, overwrites, merges, deletes, or inspects existing destination contents. A final Transfer-click reprepare/review state remains a hardening task; current per-item execution still rechecks helper and destination state before creation. |
 | Port behavior | The fixed-TCP Docker create/start path retains a real loopback listener through a bounded create-ID response and exact-204 handoff. `46d0b23` adds restart-safe recovery: after VM/daemon shutdown deliberately releases the listener, a bodyless canonical-full-ID start can inspect the same stopped container's fixed loopback TCP `HostConfig.PortBindings` and atomically re-reserve/associate it before relaying the unchanged start. | Fixed supported TCP publications are race-resistant through the recognized exchange, including the bounded exact-ID restart recovery path. Dynamic/range ports, UDP synchronous leases, opaque framing, name/ID-prefix starts, unsupported inspect shapes, and live VM/Docker acceptance evidence remain incomplete. |
 
 ## The parity program
@@ -102,12 +102,11 @@ guarantee.
    container exec/debug, safe image/volume export and inspection, and
    Kubernetes exec/port-forward with reasons and recovery. Container
    logs/stats and selected-pod logs/events already use real read-only APIs.
-5. Finish migration beyond the implemented native selected-image
-   preparation/review/progress/verification/report workflow and selected-volume CLI
-   transaction: run real source/destination acceptance for the local-volume archive
-   path, add a native reviewed volume-transfer workflow only after that evidence,
-   then add bind-mount transfer, resumable cancellation, rollback guidance, and
-   explicit credential remediation.
+5. Finish migration beyond the implemented native selected-image and selected-volume
+   preparation/review/progress/report workflows: run real source/destination acceptance
+   for the local-volume archive path, add a final Transfer-click reprepare/review state,
+   then add bind-mount transfer, resumable cancellation, rollback guidance, and explicit
+   credential remediation.
 
 ### P2 — exceed the competing native experience
 
