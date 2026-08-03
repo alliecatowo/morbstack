@@ -373,6 +373,12 @@ must preserve:
   is what keeps `docker build -` / `docker run -i` (client closes stdin,
   still wants the response) working; tearing down both halves on the first
   EOF truncates in-flight response bytes on either end.
+- **Backpressured, bounded copying.** Each direction uses one fixed 64 KiB
+  buffer and does not read another chunk until that chunk has reached its
+  sink. A paused `docker cp` receiver or `docker logs --follow` consumer is
+  therefore backpressured by the normal socket buffers instead of making the
+  host collect an unbounded userspace write queue. The relay still has no
+  HTTP framing, endpoint classification, or body buffering on this path.
 - **Guest-side connection cap**: `MAX_CONNECTIONS = 64` in `proxy.rs`
   (each proxied connection costs the guest two threads — a copy-in and a
   copy-out — so this bounds morbinit's own thread usage). The host-side

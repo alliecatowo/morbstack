@@ -7,10 +7,9 @@ import Foundation
 
 /// The two descriptors a relay owns, with a close-exactly-once guard.
 ///
-/// Kept in its own object so the `DispatchIO` cleanup handlers can hold it strongly:
-/// they must still close the descriptor even if the relay itself has been released,
-/// and they must never close it twice — a double `close(2)` in a daemon that is also
-/// opening sockets is how you end up relaying one client's bytes to another client.
+/// Kept in its own object so the two copy workers can independently finish or abort
+/// without closing the other side twice. A double `close(2)` in a daemon that is also
+/// opening sockets is how one client's stream is relayed to another client.
 final class RelayDescriptors {
 
     private let lock = NSLock()
@@ -40,73 +39,85 @@ final class RelayDescriptors {
         Darwin.close(fd)
     }
 
-    /// Shuts down the write half of `index`, if it is still open.
-    func shutdownWrite(_ index: Int) {
+    /// Shuts down one half of a descriptor if it is still open.
+    func shutdown(_ index: Int, how: Int32) {
         lock.lock()
         let fd = closed[index] ? nil : fds[index]
         lock.unlock()
         guard let fd else { return }
-        _ = Darwin.shutdown(fd, SHUT_WR)
+        _ = Darwin.shutdown(fd, how)
+    }
+
+    /// Shuts down the write half of `index`, if it is still open.
+    func shutdownWrite(_ index: Int) {
+        shutdown(index, how: SHUT_WR)
+    }
+
+    /// Wakes both copy workers after an unrecoverable error or cancellation.
+    ///
+    /// Descriptors are deliberately not closed here: closing an FD from another
+    /// thread can race a blocked syscall with descriptor reuse. `shutdown` wakes the
+    /// operation, and the last exiting worker owns the final close.
+    func shutdownAll() {
+        shutdown(0, how: SHUT_RDWR)
+        shutdown(1, how: SHUT_RDWR)
     }
 }
 
-/// A bidirectional byte pump between two file descriptors, with half-close semantics.
+/// A bidirectional, backpressured byte pump between two file descriptors.
 ///
-/// `FDRelay` is what turns `~/.morbstack/run/docker.sock` into the guest's Docker
-/// Engine API: one descriptor is the accepted CLI connection, the other is a vsock
-/// connection to the VM.
+/// `FDRelay` turns `~/.morbstack/run/docker.sock` into the guest's Docker Engine
+/// API: one descriptor is the accepted CLI connection and the other is a vsock
+/// connection to the VM. It deliberately knows nothing about HTTP. That preserves
+/// Engine connection upgrades (`exec`/`attach`), `logs --follow`, keep-alive reuse,
+/// and the tar streams used by `docker cp`.
 ///
-/// Each direction is tracked independently. When a source reaches EOF the relay
-/// **finishes flushing whatever is still queued towards the opposite descriptor** and
-/// only then issues `shutdown(fd, SHUT_WR)` on it, so the peer sees a clean EOF after
-/// the last byte rather than a truncated stream. Tearing both halves down on the first
-/// EOF — the obvious implementation — silently cuts Docker API responses in half:
-/// `dockerd` closes its side as soon as it has written the last chunk of a response,
-/// and `DispatchIO.close(flags: .stop)` at that moment discards every write that has
-/// not yet drained into the client socket.
+/// Each direction has one blocking copy worker and a fixed 64 KiB buffer. A write
+/// must drain before that worker reads again, which lets the kernel apply ordinary
+/// socket backpressure instead of collecting an unbounded `DispatchIO` write queue
+/// when a client pauses a large archive or follow stream. The guest caps proxy
+/// connections separately; this class bounds memory per live connection.
 ///
-/// The relay owns both descriptors and closes each exactly once.
+/// EOF is directional. Once all bytes from one source have reached its sink, the
+/// relay sends `shutdown(fd, SHUT_WR)` to that sink but continues copying the opposite
+/// direction. This preserves the Docker pattern of closing stdin while still reading
+/// an exec/build response.
 public final class FDRelay {
+
+    /// Maximum bytes retained by either directional worker at one time.
+    ///
+    /// Kept small enough that a full guest-side connection cap cannot turn a stalled
+    /// `docker cp` or `logs -f` consumer into a host-memory spike, while still large
+    /// enough to avoid per-packet syscall churn for tar streams.
+    public static let copyBufferBytes = 64 * 1024
 
     /// Direction metadata for an optional passive byte observer.
     ///
     /// Observers are notification-only: they receive a copy of bytes immediately
-    /// before the relay writes them and have no way to alter or suppress the
-    /// stream. DockerProxy uses this narrow hook to recognize normal create/start
-    /// responses while preserving every Engine byte for the client.
+    /// before the relay writes them and have no way to alter or suppress the stream.
+    /// DockerProxy uses this narrow hook to recognize normal create/start responses
+    /// while preserving every Engine byte for the client.
     public enum Direction: Sendable {
         case firstToSecond
         case secondToFirst
     }
 
-    /// Per-direction bookkeeping, indexed by the *sink* channel.
-    private struct FlowState {
-        /// The source for this direction has reached EOF.
-        var sourceAtEOF = false
-        /// Writes issued towards the sink that have not completed yet.
-        var pendingWrites = 0
-        /// `shutdown(sink, SHUT_WR)` has already been issued.
-        var halfClosed = false
-    }
-
     private let queue: DispatchQueue
     private let owned: RelayDescriptors
     private let observer: ((Direction, Data) -> Void)?
-    private var channels: [DispatchIO] = []
-
+    private let stateLock = NSLock()
     private var completion: (() -> Void)?
-    private var finished = false
-    private var openChannels = 2
-
-    /// `directions[i]` describes the flow whose **sink** is channel `i`.
-    private var directions: [FlowState] = [FlowState(), FlowState()]
+    private var started = false
+    private var cancellationRequested = false
+    private var terminal = false
+    private var completedWorkers = 0
 
     /// Creates a relay. Call ``start()`` to begin pumping.
     ///
     /// - Parameters:
     ///   - fdA: First descriptor; ownership transfers to the relay.
     ///   - fdB: Second descriptor; ownership transfers to the relay.
-    ///   - queue: Serial queue used for all I/O callbacks and internal state.
+    ///   - queue: Queue on which completion runs after both descriptors close.
     ///   - observer: Optional notification of each byte chunk before its relay write.
     ///   - completion: Called once, on `queue`, after both descriptors are closed.
     public init(
@@ -121,137 +132,169 @@ public final class FDRelay {
         self.owned = RelayDescriptors(fdA, fdB)
         self.observer = observer
 
-        // Every stored property now has a value, so `self` may be captured below.
-        for (index, fd) in [fdA, fdB].enumerated() {
+        for fd in [fdA, fdB] {
             // A peer that disappears mid-response must produce EPIPE, not SIGPIPE.
             POSIXSocketSupport.suppressSIGPIPE(fd)
-            let descriptors = owned
-            let channel = DispatchIO(type: .stream, fileDescriptor: fd, queue: queue) { [weak self] _ in
-                // Closing the descriptor must happen whether or not the relay is
-                // still alive; the completion bookkeeping only if it is.
-                descriptors.close(index)
-                self?.channelDidClose()
-            }
-            // Deliver reads as soon as a single byte is available; this is a proxy,
-            // not a batch pipeline, and Docker's API is latency sensitive.
-            channel.setLimit(lowWater: 1)
-            channels.append(channel)
+            // The workers use ordinary blocking reads and writes so the socket
+            // buffers, rather than an unbounded userspace queue, enforce flow control.
+            POSIXSocketSupport.setNonBlocking(fd, false)
         }
+    }
+
+    deinit {
+        // Normal users retain the relay through completion. This only covers an
+        // abandoned relay before `start()` and remains safe after normal completion.
+        owned.shutdownAll()
+        owned.close(0)
+        owned.close(1)
     }
 
     /// Begins pumping in both directions.
     public func start() {
-        queue.async { [weak self] in
-            guard let self, !self.finished else { return }
-            self.pump(sourceIndex: 0)
-            self.pump(sourceIndex: 1)
+        stateLock.lock()
+        guard !started, !terminal else {
+            stateLock.unlock()
+            return
+        }
+        started = true
+        stateLock.unlock()
+
+        // A serial callback queue is intentional at the call sites. The copy workers
+        // must nevertheless run concurrently: a full stdout socket must not prevent
+        // stdin from reaching an interactive `docker exec -it` session.
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            copy(sourceIndex: 0, sinkIndex: 1, direction: .firstToSecond)
+        }
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            copy(sourceIndex: 1, sinkIndex: 0, direction: .secondToFirst)
         }
     }
 
     /// Tears the relay down early; the completion handler still fires exactly once.
     public func cancel() {
-        queue.async { [weak self] in
-            self?.finish()
+        stateLock.lock()
+        guard !terminal else {
+            stateLock.unlock()
+            return
+        }
+        cancellationRequested = true
+        let completeImmediately = !started
+        if completeImmediately { terminal = true }
+        stateLock.unlock()
+
+        if completeImmediately {
+            owned.close(0)
+            owned.close(1)
+            deliverCompletion()
+        } else {
+            owned.shutdownAll()
         }
     }
 
-    // MARK: - Pumping
+    // MARK: - Backpressured copying
 
-    private func pump(sourceIndex: Int) {
-        let sinkIndex = 1 - sourceIndex
-        let source = channels[sourceIndex]
-        let sink = channels[sinkIndex]
+    private func copy(sourceIndex: Int, sinkIndex: Int, direction: Direction) {
+        defer { workerDidFinish() }
+        guard let source = owned.descriptor(sourceIndex),
+              let sink = owned.descriptor(sinkIndex)
+        else { return }
 
-        // `length: .max` with a streaming channel means "call me whenever bytes arrive".
-        source.read(offset: 0, length: Int.max, queue: queue) { [weak self] done, data, error in
-            guard let self, !self.finished else { return }
-
-            if let data, !data.isEmpty {
-                self.observer?(
-                    sourceIndex == 0 ? .firstToSecond : .secondToFirst,
-                    Data(data))
-                self.directions[sinkIndex].pendingWrites += 1
-                sink.write(offset: 0, data: data, queue: self.queue) { [weak self] writeDone, _, writeError in
-                    // The handler is called repeatedly as the write drains; only the
-                    // final invocation retires the outstanding-write count.
-                    guard writeDone, let self else { return }
-                    self.writeDidComplete(sinkIndex: sinkIndex, error: writeError)
+        var buffer = [UInt8](repeating: 0, count: Self.copyBufferBytes)
+        while !isCancellationRequested {
+            let count = buffer.withUnsafeMutableBytes { raw -> Int in
+                guard let base = raw.baseAddress else { return -1 }
+                while true {
+                    let result = Darwin.read(source, base, raw.count)
+                    if result < 0, errno == EINTR { continue }
+                    return result
                 }
             }
 
-            if error != 0 {
-                // A read error is not a graceful close: there is nothing sensible to
-                // flush, so tear the whole relay down.
-                self.finish()
+            if count > 0 {
+                // This copy exists only on the narrow response-observer paths. The
+                // raw transport itself writes directly from its fixed worker buffer.
+                if let observer {
+                    observer(direction, Data(buffer[0..<count]))
+                }
+                let wrote = buffer.withUnsafeBytes { raw -> Bool in
+                    guard let base = raw.baseAddress else { return false }
+                    return writeAll(sink, bytes: base, count: count)
+                }
+                if !wrote {
+                    if !isCancellationRequested { requestAbort() }
+                    return
+                }
+                continue
+            }
+
+            if count == 0 {
+                // Every already-read byte has reached `sink`, so this is the one
+                // safe point to propagate EOF without truncating the reverse stream.
+                if !isCancellationRequested { owned.shutdownWrite(sinkIndex) }
                 return
             }
-            if done {
-                // Any `done` is EOF. `DispatchIO` is documented to be allowed to
-                // deliver the final bytes *and* `done` in one callback, and today's
-                // Darwin implementation happens not to for a stream channel read with
-                // `length: .max` — it always closes with a separate empty delivery.
-                // Gating the half-close on that empty delivery therefore works by
-                // luck: the day a final chunk arrives alongside `done`, the shutdown
-                // is never issued and the opposite peer waits forever for an
-                // end-of-stream, which for a response with no Content-Length means a
-                // hung `docker` client. Treating `done` as EOF outright costs nothing
-                // — the write above has already bumped `pendingWrites`, and
-                // `halfCloseIfDrained` refuses to act until that drains, so the flush
-                // still strictly precedes the shutdown.
-                self.sourceDidReachEOF(sinkIndex: sinkIndex)
-            }
-        }
-    }
 
-    /// One direction's source hit EOF. Must run on `queue`.
-    private func sourceDidReachEOF(sinkIndex: Int) {
-        guard !directions[sinkIndex].sourceAtEOF else { return }
-        directions[sinkIndex].sourceAtEOF = true
-        halfCloseIfDrained(sinkIndex: sinkIndex)
-    }
-
-    /// A write towards `sinkIndex` finished. Must run on `queue`.
-    private func writeDidComplete(sinkIndex: Int, error: Int32) {
-        directions[sinkIndex].pendingWrites = max(0, directions[sinkIndex].pendingWrites - 1)
-        if error != 0 {
-            // The peer is gone or the socket broke; further flushing is pointless.
-            finish()
+            if !isCancellationRequested { requestAbort() }
             return
         }
-        halfCloseIfDrained(sinkIndex: sinkIndex)
     }
 
-    /// Issues the half-close once the source is at EOF and every queued write drained.
-    private func halfCloseIfDrained(sinkIndex: Int) {
-        guard !finished else { return }
-        guard directions[sinkIndex].sourceAtEOF,
-              directions[sinkIndex].pendingWrites == 0,
-              !directions[sinkIndex].halfClosed
-        else { return }
-        directions[sinkIndex].halfClosed = true
-
-        // SHUT_WR, not close: the opposite direction may still be carrying data.
-        owned.shutdownWrite(sinkIndex)
-
-        // Only when both halves are done is the connection really over.
-        if directions[0].halfClosed && directions[1].halfClosed {
-            finish()
+    /// Writes a complete buffer or reports a socket failure. The caller owns a
+    /// fixed-size buffer, so this never allocates in proportion to a tar/log stream.
+    private func writeAll(_ fd: Int32, bytes: UnsafeRawPointer, count: Int) -> Bool {
+        var offset = 0
+        while offset < count {
+            let written = Darwin.write(fd, bytes.advanced(by: offset), count - offset)
+            if written > 0 {
+                offset += written
+                continue
+            }
+            if written < 0, errno == EINTR { continue }
+            return false
         }
+        return true
     }
 
-    /// Idempotently closes both channels. Must run on `queue`.
-    private func finish() {
-        guard !finished else { return }
-        finished = true
-        for channel in channels { channel.close(flags: .stop) }
+    private var isCancellationRequested: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return cancellationRequested
     }
 
-    /// Called from each cleanup handler; fires the completion after the second one.
-    private func channelDidClose() {
-        openChannels -= 1
-        guard openChannels <= 0 else { return }
-        let handler = completion
-        completion = nil  // break the retain on whatever captured the relay
-        handler?()
+    /// Fails both directions together after an actual read/write failure.
+    private func requestAbort() {
+        stateLock.lock()
+        let shouldWake = !terminal && !cancellationRequested
+        cancellationRequested = true
+        stateLock.unlock()
+        if shouldWake { owned.shutdownAll() }
+    }
+
+    private func workerDidFinish() {
+        stateLock.lock()
+        guard !terminal else {
+            stateLock.unlock()
+            return
+        }
+        completedWorkers += 1
+        let completeNow = completedWorkers == 2
+        if completeNow { terminal = true }
+        stateLock.unlock()
+
+        guard completeNow else { return }
+        owned.close(0)
+        owned.close(1)
+        deliverCompletion()
+    }
+
+    /// Runs completion on the caller-supplied queue and breaks its retained closure.
+    private func deliverCompletion() {
+        queue.async { [self] in
+            stateLock.lock()
+            let handler = completion
+            completion = nil
+            stateLock.unlock()
+            handler?()
+        }
     }
 }
