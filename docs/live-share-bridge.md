@@ -18,7 +18,7 @@ absent:
 | --- | --- | --- |
 | Root scope and overflow policy | `MorbLiveShareBridge` validates at most eight explicit `live_share_paths`, each a strict descendant of a configured VirtioFS share. Its 1,024-record `EventBuffer` turns overflow, drops, root moves, wrapping IDs, and overlong paths into explicit `rescan` records. | A lifecycle owner that starts a real FSEvent stream only after the selected shares and an actual receiver are ready. |
 | Host-to-guest transport | `VMManager` observes the additive `share_event_bridge` field and `Daemon` reports a read-only diagnostic. | A bounded, acknowledged data channel. MRB0 on vsock 1024 is request/reply only; its current request family has no share-event message or long-lived receiver. |
-| Guest delivery | `morbinit` reports `share_event_bridge: "unavailable"` in `guest/morbinit/src/control.rs`. | A Linux filesystem/kernel mechanism that makes the intended guest/container watchers observe a host-originated change. The guest contains no inotify, fsnotify, fanotify, FUSE-notify, or equivalent receiver. |
+| Guest delivery | `morbinit` reports `share_event_bridge: "unavailable"` plus `share_event_bridge_contract_version: 1` in `guest/morbinit/src/control.rs`. The version reserves the event-record schema only. | A Linux filesystem/kernel mechanism that makes the intended guest/container watchers observe a host-originated change. The guest contains no inotify, fsnotify, fanotify, FUSE-notify, or equivalent receiver. |
 
 Linux inotify descriptors are kernel-owned; host code cannot inject an event
 into arbitrary container watchers. Therefore changing the advertised capability
@@ -42,9 +42,11 @@ Once that mechanism exists, the smallest host lifecycle is:
    one immutable session record; never infer broad paths such as `/Users` or
    `/Volumes`.
 2. Wait for the exact backing VirtioFS/sync root to be mounted and for the
-   guest to advertise a versioned **ready** receiver. Until both facts are
-   observed, state remains `waiting-for-guest-mount` or
-   `delivery-unavailable`; no FSEvent stream exists.
+   guest to advertise a versioned **ready** receiver. The additive
+   `share_event_bridge_contract_version: 1` field alone is only a schema
+   reservation; it cannot satisfy this gate. Until both facts are observed,
+   state remains `waiting-for-guest-mount` or `delivery-unavailable`; no
+   FSEvent stream exists.
 3. Create the FSEvent stream in a daemon-owned lifecycle object. Feed its
    callback directly into the existing `EventBuffer`; retain the current
    scoped-path filtering, 4 KiB path bound, and rescan conversion rules.

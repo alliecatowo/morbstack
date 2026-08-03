@@ -38,6 +38,16 @@ const MAX_PAYLOAD: u32 = 1 << 20;
 /// reload. See docs/protocol.md §5.4.
 pub const SHARE_EVENT_BRIDGE_CAPABILITY: &str = "unavailable";
 
+/// The reserved schema version for a future acknowledged share-event receiver.
+///
+/// This describes the event-record shape in `docs/protocol.md` §5.4 only. It is
+/// deliberately independent of ``SHARE_EVENT_BRIDGE_CAPABILITY``: reporting version
+/// 1 while the capability remains `unavailable` does not advertise a receiver,
+/// transport, acknowledgement path, or hot-reload support. A future host must require
+/// both an exact supported version and an explicit `ready` capability before it starts
+/// an FSEvents stream.
+pub const SHARE_EVENT_BRIDGE_CONTRACT_VERSION: i64 = 1;
+
 /// Guest capability for a future stop-only host disk-growth transaction.
 ///
 /// The initramfs contains filesystem utilities, but that is not a resize protocol:
@@ -412,6 +422,10 @@ pub fn handle_request(payload: &[u8], ctx: &ControlContext) -> (Vec<u8>, bool) {
                 (
                     "share_event_bridge",
                     Value::Str(SHARE_EVENT_BRIDGE_CAPABILITY.to_string()),
+                ),
+                (
+                    "share_event_bridge_contract_version",
+                    Value::Int(SHARE_EVENT_BRIDGE_CONTRACT_VERSION),
                 ),
                 (
                     "disk_resize",
@@ -794,6 +808,10 @@ mod tests {
         assert_eq!(
             fields.get("share_event_bridge"),
             Some(&Value::Str("unavailable".to_string()))
+        );
+        assert_eq!(
+            fields.get("share_event_bridge_contract_version"),
+            Some(&Value::Int(1))
         );
         assert_eq!(
             fields.get("disk_resize"),

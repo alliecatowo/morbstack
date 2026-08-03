@@ -824,11 +824,20 @@ guest reports this explicit additive `info` capability:
 
 ```text
 share_event_bridge: "unavailable"
+share_event_bridge_contract_version: 1
 ```
 
 `"unavailable"` means there is no guest filesystem/kernel injection endpoint. An
 absent field means an older guest did not report a capability. Neither value authorizes
 the host to start FSEvents or claim hot reload.
+
+`share_event_bridge_contract_version` is additive metadata that reserves the shape of
+the future acknowledged delivery records below. It is **not** receiver negotiation:
+the current guest reports version `1` while `share_event_bridge` remains
+`"unavailable"`. A future host must require both an exact version it implements and
+an explicit `"ready"` receiver capability with a separately documented duplex,
+acknowledged transport before constructing an FSEvent stream. An absent version from an
+older guest is unsupported, not version `1` by default.
 
 `MorbLiveShareBridge` defines the preparatory host contract. It is deliberately
 opt-in through `live_share_paths = []`, separate from broad `shared_paths` defaults.
