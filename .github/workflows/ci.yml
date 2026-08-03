@@ -51,6 +51,7 @@ jobs:
   # ---------------------------------------------------------------------
   build-and-test:
     runs-on: macos-26
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -108,6 +109,32 @@ jobs:
       - name: Build
         run: mise run build
 
+      # `mise run build` runs `swift build`, which does NOT compile the test
+      # target. Four test files were once committed in a state where they could
+      # never compile, because every check anyone ran was a plain `swift build`.
+      # This step is cheap (it reuses the objects the step above just produced)
+      # and it is the exact gate that would have caught them. Keep it separate
+      # from the test run so a compile break reads as a compile break rather
+      # than as a mysterious test failure.
+      - name: Build the test target
+        run: swift build --package-path mac --build-tests
+
+      # The same class of hole on the Rust side, and a worse one: ~85
+      # `#[cfg(target_os = "linux")]` gates across 19 of 22 files mean a macOS
+      # `cargo build`/`cargo test` never type-checks the code that actually runs
+      # inside the VM. The live-share transport shipped with 13 errors for the
+      # real target while the host suite reported 217 passing tests. `cargo
+      # check` needs the target's std but no cross-linker, so this costs seconds
+      # and does not require the full musl toolchain the guest-image job installs.
+      - name: Add the guest Rust target
+        run: rustup target add aarch64-unknown-linux-musl
+
+      - name: Check the guest's Linux-only code
+        run: cargo check --manifest-path guest/morbinit/Cargo.toml --target aarch64-unknown-linux-musl --all-targets
+
+      # Runs BOTH suites and fails if either did. Not `... | tail`: a pipeline
+      # reports the exit status of its last command, which would mask a failing
+      # suite behind a successful `tail`.
       - name: Test
         run: mise run test
 
@@ -121,12 +148,30 @@ jobs:
   # ---------------------------------------------------------------------
   lint:
     runs-on: macos-26
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: jdx/mise-action@v2
 
       - name: Set up toolchain
         run: mise trust && mise install
+
+      # The build recipes live in mise-tasks/ as ordinary executable scripts.
+      # That is what makes them shellcheckable at all — shellcheck cannot see
+      # inside a TOML `run = """..."""` string, which is how a task could
+      # previously carry a shell bug (e.g. an undefined variable in an error
+      # path) with nothing to catch it. Every task must stay executable, parse,
+      # and describe itself, or `mise tasks` output silently degrades.
+      - name: Validate mise task files
+        run: |
+          set -euo pipefail
+          mise tasks >/dev/null
+          for task in mise-tasks/*; do
+            [ -x "$task" ] || { echo "not executable: $task" >&2; exit 1; }
+            grep -q '^#MISE description=' "$task" \
+              || { echo "missing '#MISE description=': $task" >&2; exit 1; }
+            bash -n "$task"
+          done
 
       - name: Cargo fmt check
         run: cd guest/morbinit && mise x -- cargo fmt -- --check
@@ -140,7 +185,8 @@ jobs:
       - name: ShellCheck
         run: |
           command -v shellcheck >/dev/null 2>&1 || brew install shellcheck
-          shellcheck scripts/*.sh
+          shellcheck scripts/*.sh scripts/git-hooks/pre-commit
+          shellcheck --shell=bash mise-tasks/*
 
   # ---------------------------------------------------------------------
   # The bootable guest image: cross-compiles morbinit for
@@ -166,9 +212,25 @@ jobs:
       (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
       github.event_name == 'workflow_dispatch'
     runs-on: macos-26
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: jdx/mise-action@v2
+
+      # `mise run guest-image` depends on build-patched-dockerd, which builds the
+      # pinned Moby engine through `docker buildx bake` — and GitHub's hosted
+      # macOS runners ship no Docker at all (that is a Linux-runner convenience).
+      # Fail here, with the reason, rather than 40 minutes later inside a build
+      # script whose error message assumes a developer's laptop.
+      - name: Require Docker Buildx for the Moby build
+        run: |
+          docker buildx version >/dev/null 2>&1 || {
+            echo "::error::this job needs a working 'docker buildx' to build the pinned Moby engine." >&2
+            echo "GitHub's hosted macOS runners do not provide one. Either provision a" >&2
+            echo "Docker-capable runner, or split build-patched-dockerd out to a Linux job" >&2
+            echo "that publishes the engine binaries as an artifact for this job to consume." >&2
+            exit 1
+          }
 
       - name: Install aarch64-unknown-linux-musl cross toolchain
         run: |

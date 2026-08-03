@@ -168,7 +168,7 @@ impl Default for SequenceCursor {
 
 /// A validation failure safe to surface to a peer. It deliberately
 /// contains no capability bytes or file contents.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ValidationError {
     UnsupportedContractVersion {
         actual: i64,

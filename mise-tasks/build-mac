@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+#MISE description="Build morbstackd and morb (Swift), host arch"
+set -euo pipefail
+
+# mise runs a multi-line task body as ONE shell, so a bare `cd` would leak into
+# every later line. File tasks get their own process, but the subshell habit is
+# kept everywhere in this directory so a body can be moved between tasks safely.
+cd "${MISE_PROJECT_ROOT:-$PWD}"
+
+(cd mac && swift build)

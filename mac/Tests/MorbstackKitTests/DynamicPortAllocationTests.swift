@@ -77,13 +77,22 @@ final class DynamicPortAllocationTests: XCTestCase {
                 transport: .udp, hostIP: "", hostPort: 0, containerPort: 53)])
     }
 
-    func testDynamicAllocatorRejectsRangesAndLeavesOrdinaryFixedRequestsAlone() {
+    func testDynamicAllocatorTakesARangeSiblingAndLeavesOrdinaryFixedRequestsAlone() {
+        // A range sibling used to be rejected outright ("not a single port"). The
+        // host-first allocator that landed later takes it instead: the range keeps
+        // its exact spelling in the plan and is rewritten to whichever port the host
+        // atomically held. Pinning the current contract, deliberately, rather than
+        // the superseded refusal.
         let range = Data(
             #"{"HostConfig":{"PortBindings":{"80/tcp":[{"HostPort":""}],"81/tcp":[{"HostPort":"4000-4001"}]}}}"#.utf8)
-        guard case .rejected(let rangeMessage) = DockerPortPublicationPreflight.dynamicPortCreatePlan(in: range) else {
-            return XCTFail("a dynamic request with a range sibling is not bounded")
+        guard case .supported(let plan) = DockerPortPublicationPreflight.dynamicPortCreatePlan(in: range) else {
+            return XCTFail("a dynamic request with a range sibling belongs to the host-first allocator")
         }
-        XCTAssertTrue(rangeMessage.contains("not a single port"))
+        XCTAssertEqual(plan.fixedPlan, DockerFixedPortLeasePlan(tcp: [], udp: []))
+        XCTAssertEqual(plan.requestedPublications.map(\.containerPort), [80, 81])
+        XCTAssertEqual(
+            plan.requestedPublications.map(\.requestedHostPortRange?.stringValue),
+            [nil, "4000-4001"])
 
         let fixed = Data(#"{"HostConfig":{"PortBindings":{"80/tcp":[{"HostPort":"8080"}]}}}"#.utf8)
         guard case .notDynamic = DockerPortPublicationPreflight.dynamicPortCreatePlan(in: fixed) else {

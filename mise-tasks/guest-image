@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+#MISE description="Build the bootable guest initramfs (cross-compiled morbinit + pinned patched Docker Engine)"
+#MISE depends=["cross-build-guest", "build-patched-dockerd"]
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:-$PWD}"
+
+# Builds the bootable initramfs: cross-compiled morbinit as /init, plus the
+# Alpine minirootfs and the static Docker engine binaries from dist/. Writes
+# $MORBSTACK_HOME/data/kernel/initrd.img (default ~/.morbstack, override via the
+# MORBSTACK_HOME env var, honoured by scripts/mkinitramfs.sh itself).
+#
+# `mise run app` does NOT do this. Guest-side changes are not in the bundle until
+# this task runs.
+scripts/mkinitramfs.sh

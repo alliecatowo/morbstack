@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+#MISE description="Build and launch Morbstack.app"
+#MISE depends=["app"]
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:-$PWD}"
+
+open dist/Morbstack.app

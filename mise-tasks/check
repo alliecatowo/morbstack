@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+#MISE description="Fast pre-commit gate: compile everything including tests, then run the unit suites"
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:-$PWD}"
+
+# This repository has no git remote, so CI has never run. Until it does, THIS is
+# the gate. Keep it fast — compile plus unit tests, no bundle assembly, no guest
+# image, no VM — so nobody is tempted to skip it.
+#
+# `swift build` alone does NOT compile the test target. Four test files in this
+# repository were committed in a state where they could never compile, precisely
+# because every check that ran was `swift build` without --build-tests.
+status=0
+
+echo "==> swift build --build-tests"
+swift build --package-path mac --build-tests || status=1
+
+echo "==> cargo build"
+(cd guest/morbinit && cargo build) || status=1
+
+# The host build above type-checks almost none of the code that actually runs in
+# the VM: ~85 `#[cfg(target_os = "linux")]` gates across 19 of 22 files compile
+# away on macOS. The live-share transport shipped with 13 compile errors for the
+# real target while `cargo test` reported 217 passing tests, and a commit titled
+# "Fix live-share transport compilation" fixed only the macOS side. `cargo check`
+# needs the target's std but no cross-linker, so this is seconds, not minutes.
+GUEST_TARGET="aarch64-unknown-linux-musl"
+if (cd guest/morbinit && rustc --print target-libdir --target "$GUEST_TARGET") >/dev/null 2>&1; then
+	echo "==> cargo check --target ${GUEST_TARGET} (the code that really runs in the guest)"
+	(cd guest/morbinit && cargo check --target "$GUEST_TARGET" --all-targets) || status=1
+else
+	echo "warning: ${GUEST_TARGET} std is not installed, so the guest's Linux-only" >&2
+	echo "         code is NOT being checked. Install it with:" >&2
+	echo "           rustup target add ${GUEST_TARGET}" >&2
+	echo "         This is the exact gap that let 13 guest compile errors ship." >&2
+fi
+
+if [ "$status" -ne 0 ]; then
+	echo "error: compilation failed — not running tests" >&2
+	exit "$status"
+fi
+
+echo "==> swift test"
+(cd mac && swift test) || status=1
+
+echo "==> cargo test"
+(cd guest/morbinit && cargo test) || status=1
+
+echo "==> cargo fmt --check"
+(cd guest/morbinit && cargo fmt -- --check) || status=1
+
+if [ "$status" -ne 0 ]; then
+	echo "error: mise run check failed (see output above)" >&2
+fi
+exit "$status"

@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+#MISE description="Remove build outputs from both toolchains"
+#MISE depends=["clean-app"]
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:-$PWD}"
+
+rm -rf mac/.build
+(cd guest/morbinit && cargo clean)

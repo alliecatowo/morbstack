@@ -722,12 +722,16 @@ final class NavTests: XCTestCase {
     func testRawValuesAreStable() {
         XCTAssertEqual(
             Nav.allCases.map(\.rawValue),
-            ["containers", "stacks", "images", "volumes", "networks", "builds", "kubernetes", "disk"])
+            [
+                "containers", "stacks", "images", "volumes", "networks", "builds", "kubernetes",
+                "disk", "migration",
+            ])
     }
 
-    /// ⌘1…⌘8, in sidebar order, with no gaps and no duplicates.
-    func testShortcutIndicesAreOneThroughEight() {
-        XCTAssertEqual(Nav.allCases.map(\.shortcutIndex), Array(1...8))
+    /// ⌘1…⌘9, in sidebar order, with no gaps and no duplicates.
+    func testShortcutIndicesAreOneThroughNine() {
+        XCTAssertEqual(Nav.allCases.map(\.shortcutIndex), Array(1...Nav.allCases.count))
+        XCTAssertEqual(Nav.allCases.count, 9)
     }
 
     func testEverySectionHasATitleAndASymbol() {

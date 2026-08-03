@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+#MISE description="Build everything: mac host binaries and the guest init binary"
+#MISE depends=["build-mac", "build-guest"]
+set -euo pipefail
+
+# Aggregator: all work happens in the dependencies above.

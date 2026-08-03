@@ -92,12 +92,18 @@ final class CommandPolicyTests: XCTestCase {
         // the allow-list should be a deliberate act that breaks this test and
         // makes someone justify it.
         //
-        // The justification for each of the three: `start` and `resume` exist to
+        // The justification for each of the four: `start` and `resume` exist to
         // make the engine available, and `k8s-enable` asks for a cluster, which
         // is asking for the engine it runs on — refusing to start one would make
         // it fail with "the VM is stopped" every time from a cold machine. The
         // other `k8s-*` commands are observations and are deliberately absent.
+        // `disk-grow` is an explicit state-changing request that ends in its own
+        // proof-only VM boot (Daemon.swift routes it through the same
+        // `awaitVMOperation` path as `start`), so it too is asking for an engine
+        // rather than merely observing one. `disk status` stays a local
+        // observation and is deliberately absent.
         XCTAssertEqual(
-            MorbCommandPolicy.autoStartingCommands, ["start", "resume", "k8s-enable"])
+            MorbCommandPolicy.autoStartingCommands,
+            ["start", "resume", "k8s-enable", "disk-grow"])
     }
 }

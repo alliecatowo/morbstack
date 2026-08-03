@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+#MISE description="Build morbinit (Rust, guest PID 1), host arch"
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:-$PWD}"
+
+# NOTE: on macOS this only type-checks the portable subset of morbinit. Roughly
+# 85 `#[cfg(target_os = "linux")]` gates across 19 of 22 source files mean the
+# real guest paths are only compiled by `mise run cross-build-guest`.
+(cd guest/morbinit && cargo build)

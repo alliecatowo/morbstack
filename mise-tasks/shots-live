@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+#MISE description="Run non-visual fixture route probes in real light and dark app windows"
+#MISE depends=["build-mac"]
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:-$PWD}"
+
+# Exercise real MorbstackApp routes against fixtures. This is deliberately **not**
+# a screenshot task: it writes only a text route-probe record and never samples a
+# view cache. See mac/Sources/MorbstackAppCore/Shots/LiveCapture.swift. The
+# offscreen renderer cannot composite the titlebar, toolbar, inspector or Liquid
+# Glass — use Computer Use on the real window for anything visual.
+#
+# `--tour-fixtures` serves the deterministic Docker world checked by `MorbShots`,
+# so no morbstackd and no VM are needed — this never starts the engine. Only
+# build-mac, not sign: nothing here touches the daemon, so morbstackd's
+# virtualization entitlement is irrelevant to this target.
+#
+# Two full launches, not one: SwiftUI's `.preferredColorScheme` is applied when
+# the window is created, so light and dark each need their own process. The app
+# briefly takes focus and shows real windows on screen while each run probes —
+# that is necessary to exercise real navigation in a genuine window.
+mkdir -p dist/fixture-route-probe
+mac/.build/debug/MorbstackApp --tour-fixtures --tour-capture dist/fixture-route-probe \
+	--window-size 1440x900 --appearance light
+mac/.build/debug/MorbstackApp --tour-fixtures --tour-capture dist/fixture-route-probe \
+	--window-size 1440x900 --appearance dark

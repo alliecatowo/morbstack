@@ -59,20 +59,28 @@ final class ComposeProjectSourceInspectionTests: XCTestCase {
             sourceKind: .composeYAML)
 
         XCTAssertEqual(inspection.environmentDeclarations, [])
+        // Tuples cannot conform to Equatable, so each column is asserted on its own:
+        // the arrays are ordered and of equal length, so this is the same assertion.
+        XCTAssertEqual(inspection.serviceEnvironmentDeclarations.map(\.service), ["app", "app"])
+        XCTAssertEqual(inspection.serviceEnvironmentDeclarations.map(\.key), ["PORT", "API_TOKEN"])
         XCTAssertEqual(
-            inspection.serviceEnvironmentDeclarations.map { ($0.service, $0.key, $0.valueSource) },
-            [("app", "PORT", .declaredInSource), ("app", "API_TOKEN", .requiresComposeResolution)])
+            inspection.serviceEnvironmentDeclarations.map(\.valueSource),
+            [.declaredInSource, .requiresComposeResolution])
         XCTAssertTrue(inspection.serviceEnvironmentDeclarations[1].isPotentiallySensitive)
+        XCTAssertEqual(inspection.environmentFileDeclarations.map(\.service), ["app", "app"])
         XCTAssertEqual(
-            inspection.environmentFileDeclarations.map { ($0.service, $0.path, $0.required, $0.format) },
-            [("app", "./base.env", true, "raw"), ("app", "./override.env", nil, nil)])
+            inspection.environmentFileDeclarations.map(\.path), ["./base.env", "./override.env"])
+        XCTAssertEqual(inspection.environmentFileDeclarations.map(\.required), [true, nil])
+        XCTAssertEqual(inspection.environmentFileDeclarations.map(\.format), ["raw", nil])
         XCTAssertEqual(inspection.interpolationReferences.map(\.name), ["IMAGE", "TAG"])
         XCTAssertEqual(inspection.secretDeclarations.map(\.name), ["database_password", "external_api", "project_token"])
         XCTAssertEqual(inspection.secretDeclarations[0].source, .file(path: "./database-password.txt"))
         XCTAssertEqual(inspection.secretDeclarations[1].source, .external)
         XCTAssertEqual(inspection.secretDeclarations[2].source, .environment(variable: "OAUTH_TOKEN"))
+        XCTAssertEqual(inspection.secretGrants.map(\.service), ["app", "app"])
         XCTAssertEqual(
-            inspection.secretGrants.map { ($0.service, $0.secretName, $0.syntax, $0.target) },
-            [("app", "database_password", .short, nil), ("app", "external_api", .long, "/run/project-api")])
+            inspection.secretGrants.map(\.secretName), ["database_password", "external_api"])
+        XCTAssertEqual(inspection.secretGrants.map(\.syntax), [.short, .long])
+        XCTAssertEqual(inspection.secretGrants.map(\.target), [nil, "/run/project-api"])
     }
 }

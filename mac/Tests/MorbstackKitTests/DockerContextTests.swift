@@ -27,7 +27,7 @@ final class DockerContextTests: XCTestCase {
         ]
         try JSONSerialization.data(withJSONObject: config, options: [.sortedKeys]).write(to: credentialConfig)
         try FileManager.default.setAttributes(
-            [.posixPermissions: NSNumber(value: Int16(0o600))], atPath: credentialConfig.path)
+            [.posixPermissions: NSNumber(value: Int16(0o600))], ofItemAtPath: credentialConfig.path)
 
         let configLink = MorbDockerContext.configFile(dockerConfigDirectory: configDirectory)
         try FileManager.default.createSymbolicLink(at: configLink, withDestinationURL: credentialConfig)
@@ -52,8 +52,9 @@ final class DockerContextTests: XCTestCase {
             ((saved?["auths"] as? [String: Any])?["registry.example.test"] as? [String: Any])?["auth"] as? String,
             "dXNlcjpwYXNz")
         XCTAssertEqual(saved?["credsStore"] as? String, "osxkeychain")
-        XCTAssertEqual(
-            (try FileManager.default.attributesOfItem(atPath: credentialConfig.path)[.posixPermissions] as? NSNumber)?.intValue & 0o777,
-            0o600)
+        let permissions = try XCTUnwrap(
+            FileManager.default.attributesOfItem(atPath: credentialConfig.path)[.posixPermissions]
+                as? NSNumber)
+        XCTAssertEqual(permissions.intValue & 0o777, 0o600)
     }
 }

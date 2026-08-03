@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+#MISE description="Trust this config and install pinned toolchains (Rust; Swift comes from Xcode)"
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:-$PWD}"
+
+# Chicken-and-egg warning: on a FRESH clone this task cannot be reached, because
+# mise refuses to parse — and therefore to find any task inside — a config it has
+# not been told to trust. The very first command after cloning must be the literal
+#
+#     mise trust && mise install
+#
+# This task exists for an already-trusted checkout, e.g. after pulling a change
+# that bumps the Rust pin.
+mise trust
+mise install

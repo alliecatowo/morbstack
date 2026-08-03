@@ -109,7 +109,7 @@ index 000000000000..f490e4f4a710
 +	}
 +
 +	writer := bufio.NewWriter(connection)
-+	if _, err := fmt.Fprintf(writer, "ALLOC %s %d\\n", containerID, len(candidates)); err != nil {
++	if _, err := fmt.Fprintf(writer, "ALLOC %s %d\n", containerID, len(candidates)); err != nil {
 +		return nil, err
 +	}
 +	for _, candidate := range candidates {
@@ -121,7 +121,7 @@ index 000000000000..f490e4f4a710
 +		if hostPort == "" {
 +			hostPort = "0"
 +		}
-+		if _, err := fmt.Fprintf(writer, "%s %d %s %s\\n", candidate.port.Proto(), candidate.port.Num(), hostIP, hostPort); err != nil {
++		if _, err := fmt.Fprintf(writer, "%s %d %s %s\n", candidate.port.Proto(), candidate.port.Num(), hostIP, hostPort); err != nil {
 +			return nil, err
 +		}
 +	}
@@ -164,14 +164,14 @@ index 000000000000..f490e4f4a710
 +}
 +
 +func morbstackPublishAllLine(reader *bufio.Reader) (string, error) {
-+	line, err := reader.ReadString('\\n')
++	line, err := reader.ReadString('\n')
 +	if err != nil {
 +		return "", err
 +	}
-+	if len(line) > 512 || !strings.HasSuffix(line, "\\n") {
++	if len(line) > 512 || !strings.HasSuffix(line, "\n") {
 +		return "", fmt.Errorf("Morbstack host port allocator sent an invalid line")
 +	}
-+	return strings.TrimSuffix(line, "\\n"), nil
++	return strings.TrimSuffix(line, "\n"), nil
 +}
 diff --git a/daemon/network.go b/daemon/network.go
 index 5fb4d082daeb..0c5c3780cabe 100644

@@ -1,0 +1,227 @@
+#!/usr/bin/env bash
+#MISE description="Build, assemble, and sign Morbstack.app into dist/"
+#MISE depends=["app-icon"]
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:-$PWD}"
+
+# ---------------------------------------------------------------------------
+# The SwiftUI app bundle.
+#
+# SwiftPM builds executables, not `.app`s, so the bundle is assembled by hand
+# here. That is a feature rather than a workaround: the layout is thirty lines of
+# `cp` and `mkdir` that anyone can read, with no Xcode project to drift out of
+# sync with Package.swift and nothing to regenerate on a fresh clone.
+#
+# This task does NOT rebuild the guest image. Guest-side changes need
+# `mise run guest-image`.
+# ---------------------------------------------------------------------------
+
+# L1's clean-machine contract is that the app bundle, not Docker Desktop or
+# Homebrew, provides one coherent `docker` + Compose + Buildx toolchain. Fail
+# before compiling if the staged files, their manifest, or their bytes are
+# incomplete or mismatched. An executable bit alone is not provenance: without
+# this gate a signed app could truthfully look complete while installing a
+# stale/altered plugin.
+# mise may run this recipe with a sealed toolchain PATH. Resolve the active Xcode
+# toolchain through the stable system `xcrun`, then put that and macOS system
+# tools before the inherited path. The bundled Docker helpers are data under
+# verification, never PATH-provided build tools, so this cannot cause app
+# assembly to pick up a staged `docker` binary.
+XCODE_SWIFT="$(/usr/bin/xcrun --find swift)"
+case "$XCODE_SWIFT" in
+	/*/swift) XCODE_TOOLCHAIN_BIN="${XCODE_SWIFT%/*}" ;;
+	*) echo "error: xcrun could not locate the selected Xcode Swift toolchain" >&2; exit 1 ;;
+esac
+PATH="$XCODE_TOOLCHAIN_BIN:/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"
+export PATH
+
+verify_host_toolchain() {
+	TOOLCHAIN_ROOT="$1"
+	TOOLCHAIN_MODE="$2"
+	TOOLCHAIN_MANIFEST="$TOOLCHAIN_ROOT/TOOLCHAIN.plist"
+	case "$TOOLCHAIN_MODE" in source|sealed) ;; *)
+		echo "error: unknown Docker CLI toolchain verification mode: $TOOLCHAIN_MODE" >&2
+		exit 1
+	esac
+	if [ ! -d "$TOOLCHAIN_ROOT" ] || [ -L "$TOOLCHAIN_ROOT" ] \
+		|| [ ! -f "$TOOLCHAIN_MANIFEST" ] || [ -L "$TOOLCHAIN_MANIFEST" ]; then
+		echo "error: bundled Docker CLI toolchain root or manifest is missing/unsafe: $TOOLCHAIN_ROOT" >&2
+		exit 1
+	fi
+	/usr/bin/plutil -lint "$TOOLCHAIN_MANIFEST" >/dev/null \
+		|| { echo "error: invalid Docker CLI toolchain manifest: $TOOLCHAIN_MANIFEST" >&2; exit 1; }
+	if [ "$(/usr/bin/plutil -extract schema_version raw "$TOOLCHAIN_MANIFEST")" != "1" ] \
+		|| [ "$(/usr/bin/plutil -extract platform raw "$TOOLCHAIN_MANIFEST")" != "darwin-arm64" ]; then
+		echo "error: unsupported Docker CLI toolchain manifest: $TOOLCHAIN_MANIFEST" >&2
+		exit 1
+	fi
+	while IFS='|' read -r TOOL_INDEX TOOL_ID TOOL_RELATIVE_PATH TOOL_VERSION TOOL_SOURCE_SHA256; do
+		if [ "$(/usr/bin/plutil -extract "tools.$TOOL_INDEX.id" raw "$TOOLCHAIN_MANIFEST")" != "$TOOL_ID" ] \
+			|| [ "$(/usr/bin/plutil -extract "tools.$TOOL_INDEX.path" raw "$TOOLCHAIN_MANIFEST")" != "$TOOL_RELATIVE_PATH" ] \
+			|| [ "$(/usr/bin/plutil -extract "tools.$TOOL_INDEX.version" raw "$TOOLCHAIN_MANIFEST")" != "$TOOL_VERSION" ] \
+			|| [ "$(/usr/bin/plutil -extract "tools.$TOOL_INDEX.source_sha256" raw "$TOOLCHAIN_MANIFEST")" != "$TOOL_SOURCE_SHA256" ]; then
+			echo "error: Docker CLI toolchain manifest does not match pinned $TOOL_ID metadata" >&2
+			exit 1
+		fi
+		MANIFEST_SHA256="$(/usr/bin/plutil -extract "tools.$TOOL_INDEX.sha256" raw "$TOOLCHAIN_MANIFEST")"
+		if [ "$TOOLCHAIN_MODE" = source ] && [ "$MANIFEST_SHA256" != "$TOOL_SOURCE_SHA256" ]; then
+			echo "error: source Docker CLI toolchain manifest does not pin $TOOL_ID bytes" >&2
+			exit 1
+		fi
+		TOOL="$TOOLCHAIN_ROOT/$TOOL_RELATIVE_PATH"
+		if [ ! -f "$TOOL" ] || [ -L "$TOOL" ] || [ ! -x "$TOOL" ]; then
+			echo "error: required bundled Docker CLI asset is missing/unsafe: $TOOL" >&2
+			echo "       run scripts/fetch-guest-assets.sh --host-cli first" >&2
+			exit 1
+		fi
+		GOT_SHA256=$(/usr/bin/shasum -a 256 "$TOOL" | /usr/bin/awk '{print $1}')
+		if [ "$GOT_SHA256" != "$MANIFEST_SHA256" ]; then
+			echo "error: bundled Docker CLI asset failed SHA-256 verification: $TOOL" >&2
+			exit 1
+		fi
+	done <<'EOF'
+0|docker|docker|29.7.1|49d98ab806e8678cd6341b09dad6389e5bcd8a46513de7651053bee3d8366e8d
+1|compose|cli-plugins/docker-compose|v5.3.1|32691ba1196d819fa68cbdc0aad9a5569e730a35ae40c6fdd8458110ecd69488
+2|buildx|cli-plugins/docker-buildx|v0.36.0|82c6a3d9df37790c5bdb0d7ca88986d1d17622fc2b88ebe34b275c6c47acd7a6
+EOF
+	if /usr/bin/plutil -extract tools.3.id raw "$TOOLCHAIN_MANIFEST" >/dev/null 2>&1; then
+		echo "error: Docker CLI toolchain manifest contains unexpected tool entries" >&2
+		exit 1
+	fi
+}
+
+seal_host_toolchain() {
+	TOOLCHAIN_ROOT="$1"
+	TOOLCHAIN_MANIFEST="$TOOLCHAIN_ROOT/TOOLCHAIN.plist"
+	while IFS='|' read -r TOOL_INDEX TOOL_RELATIVE_PATH; do
+		TOOL="$TOOLCHAIN_ROOT/$TOOL_RELATIVE_PATH"
+		GOT_SHA256=$(/usr/bin/shasum -a 256 "$TOOL" | /usr/bin/awk '{print $1}')
+		/usr/bin/plutil -replace "tools.$TOOL_INDEX.sha256" -string "$GOT_SHA256" "$TOOLCHAIN_MANIFEST" \
+			|| { echo "error: could not seal Docker CLI toolchain manifest" >&2; exit 1; }
+	done <<'EOF'
+0|docker
+1|cli-plugins/docker-compose
+2|cli-plugins/docker-buildx
+EOF
+}
+
+verify_host_toolchain dist/host-bin source
+
+# `kubectl` is intentionally optional today: there is no port-forward feature to
+# ship until its bounded coordinator and clean-cluster acceptance exist. If a
+# release pipeline has explicitly staged the future helper, however, verify the
+# exact provenance pin here before copying/signing it. A missing helper remains a
+# truthful unavailable state in MorbstackKit; a mismatched or symlinked helper
+# must never become a sealed part of an app bundle.
+KUBECTL=dist/host-bin/kubernetes/kubectl
+if [ -e "$KUBECTL" ] || [ -L "$KUBECTL" ]; then
+	if [ ! -x "$KUBECTL" ] || [ -L "$KUBECTL" ]; then
+		echo "error: optional bundled kubectl is not an executable regular file: $KUBECTL" >&2
+		exit 1
+	fi
+	KUBECTL_SHA256=$(/usr/bin/shasum -a 256 "$KUBECTL" | /usr/bin/awk '{print $1}')
+	if [ "$KUBECTL_SHA256" != "4408c85c83fd3a31adaa555bdf3c7a6c81f74b19449a9060ba31ab91926f023d" ]; then
+		echo "error: optional bundled kubectl failed SHA-256 verification: $KUBECTL" >&2
+		exit 1
+	fi
+fi
+
+# One product per invocation: `swift build` accepts a single `--product`, and
+# passing two silently builds only the last one — which then fails three lines
+# down on a missing binary rather than at the flag that was wrong.
+#
+# This list of three (MorbstackApp, morbstackd, morb) is a curated bundle
+# manifest, not an enumeration of Package.swift's product/target graph — do NOT
+# "helpfully" derive it from the package (e.g. by looping over every
+# `.executable` product, or every target morb depends on). Which binaries belong
+# inside a GUI app bundle is a product decision, not something inferable from the
+# dependency graph: morb pulls in MorbFeatures, MorbMCP, MorbMigrate, MorbBench,
+# MorbScan etc. as internal library targets (not separate top-level executables),
+# and none of that plumbing belongs in Contents/MacOS. If a future product
+# decision adds a fourth binary to the bundle, add it here explicitly, the same
+# way you would have added a fourth `swift build --product` line to the old
+# Makefile recipe.
+(cd mac && swift build -c release --product MorbstackApp)
+(cd mac && swift build -c release --product morbstackd)
+(cd mac && swift build -c release --product morb)
+
+# The runtime version is an immutable payload namespace inside the signed app
+# bundle. Keep it aligned with the host binaries until runtime releases gain
+# their own cadence.
+VERSION=$(sed -n 's/.*public static let string = "\(.*\)".*/\1/p' mac/Sources/MorbstackKit/Version.swift)
+[ -n "$VERSION" ] || { echo "error: could not determine Morbstack runtime version" >&2; exit 1; }
+
+rm -rf dist/Morbstack.app
+mkdir -p dist/Morbstack.app/Contents/MacOS
+mkdir -p dist/Morbstack.app/Contents/Resources
+mkdir -p dist/Morbstack.app/Contents/Library/LaunchAgents
+cp mac/.build/release/MorbstackApp dist/Morbstack.app/Contents/MacOS/MorbstackApp
+cp mac/.build/release/morbstackd dist/Morbstack.app/Contents/MacOS/morbstackd
+cp mac/.build/release/morb dist/Morbstack.app/Contents/MacOS/morb
+cp mac/.build/AppIcon.icns dist/Morbstack.app/Contents/Resources/AppIcon.icns
+# Keep the source tree's host toolchain layout intact inside the bundle. The
+# first-run installer resolves these exact paths and symlinks them only after the
+# person at the keyboard has consented; the toolchain is never fetched from the
+# network, copied out of Docker Desktop, or looked up on PATH at install time.
+cp -R dist/host-bin dist/Morbstack.app/Contents/Resources/host-bin
+# Copying is itself a supply-chain boundary. Verify the copied layout before
+# signing so the sealed app cannot carry a partial or mismatched toolchain.
+verify_host_toolchain dist/Morbstack.app/Contents/Resources/host-bin source
+cp mac/AppResources/LaunchAgents/dev.morbstack.daemon.plist \
+	dist/Morbstack.app/Contents/Library/LaunchAgents/dev.morbstack.daemon.plist
+cp mac/AppResources/Info.plist dist/Morbstack.app/Contents/Info.plist
+printf 'APPL????' > dist/Morbstack.app/Contents/PkgInfo
+
+# A release carries every byte needed to boot Docker and enable Kubernetes. The
+# packager hashes and copies existing assets only; it neither downloads nor
+# builds them, so release automation remains the one place that decides their
+# provenance.
+RUNTIME_SOURCE_ROOT="${MORBSTACK_RUNTIME_SOURCE_ROOT:-${MORBSTACK_HOME:-$HOME/.morbstack}/data}"
+scripts/package-runtime-artifacts.sh \
+	--source-root "$RUNTIME_SOURCE_ROOT" \
+	--destination dist/Morbstack.app/Contents/Resources/runtime \
+	--version "$VERSION"
+
+# Stamp the real version in, so the bundle and `morb version` agree.
+if [ -n "$VERSION" ]; then
+	/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" dist/Morbstack.app/Contents/Info.plist
+	/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" dist/Morbstack.app/Contents/Info.plist
+fi
+
+# Sign inside-out: nested helpers first, then the bundle that contains them.
+#
+# morbstackd needs the virtualization entitlement to open a VM at all, and it is
+# signed separately because the app itself must not carry that entitlement. The
+# order matters and so does the absence of --deep: --deep re-signs nested code
+# with the *outer* invocation's arguments, so signing the app with --deep after
+# signing morbstackd silently re-signs morbstackd with no entitlements at all.
+# The symptom is not a build failure — it is a shipped app whose bundled daemon
+# cannot create a VZVirtualMachine, which is the one thing it is in there to do.
+# Signing the outer bundle on its own seals the helpers by reference through
+# CodeResources and leaves their own signatures, and their entitlements, intact.
+codesign --force --sign - dist/Morbstack.app/Contents/MacOS/morb
+codesign --force --sign - --entitlements mac/Resources/morbstackd.entitlements \
+	dist/Morbstack.app/Contents/MacOS/morbstackd
+# The upstream host binaries execute from inside the app bundle. Sign them before
+# sealing the outer app so a quarantined DMG does not leave a clean-machine user
+# with helpers Gatekeeper refuses to launch. They remain upstream binaries; this
+# adds only the bundle's code-signature envelope.
+codesign --force --sign - dist/Morbstack.app/Contents/Resources/host-bin/docker
+codesign --force --sign - dist/Morbstack.app/Contents/Resources/host-bin/cli-plugins/docker-compose
+codesign --force --sign - dist/Morbstack.app/Contents/Resources/host-bin/cli-plugins/docker-buildx
+if [ -e dist/Morbstack.app/Contents/Resources/host-bin/kubernetes/kubectl ]; then
+	codesign --force --sign - dist/Morbstack.app/Contents/Resources/host-bin/kubernetes/kubectl
+fi
+# Nested-code signatures deliberately change Mach-O bytes. Record those final
+# hashes only after the unsigned source layout passed its upstream-pin check; the
+# outer app signature immediately below then seals the manifest and the exact
+# signed helpers.
+seal_host_toolchain dist/Morbstack.app/Contents/Resources/host-bin
+verify_host_toolchain dist/Morbstack.app/Contents/Resources/host-bin sealed
+codesign --force --sign - dist/Morbstack.app
+
+# Fail loudly rather than shipping a daemon that cannot boot the guest.
+codesign -d --entitlements - dist/Morbstack.app/Contents/MacOS/morbstackd 2>&1 \
+	| grep -q "com.apple.security.virtualization" \
+	|| { echo "error: morbstackd lost its virtualization entitlement during signing" >&2; exit 1; }
+echo "built dist/Morbstack.app"

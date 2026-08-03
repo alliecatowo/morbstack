@@ -14,7 +14,7 @@
 
 use std::ffi::CString;
 use std::io;
-use std::os::fd::{FromRawFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::raw::{c_char, c_int, c_ulong, c_void};
 
 // ---- mount(2) flags (from linux/mount.h / sys/mount.h) ---------------------

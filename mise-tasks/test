@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+#MISE description="Run the Swift and Rust test suites"
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:-$PWD}"
+
+# The Swift suite only exists once mac/Tests is populated, so guard on that to
+# keep this green on a fresh checkout.
+#
+# Both suites always run, and the task fails if EITHER failed. Running only the
+# first one and stopping hides the state of the second, which is how a Rust suite
+# that did not even compile went unnoticed for 273 commits.
+status=0
+
+if [ -d mac/Tests ]; then
+	(cd mac && swift test) || status=1
+fi
+
+(cd guest/morbinit && cargo test) || status=1
+
+if [ "$status" -ne 0 ]; then
+	echo "error: test suite failed (see output above)" >&2
+fi
+exit "$status"

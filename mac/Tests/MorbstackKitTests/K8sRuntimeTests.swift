@@ -215,12 +215,49 @@ final class K8sRuntimeTests: XCTestCase {
         XCTAssertEqual(MorbPaths.kubeconfig.deletingLastPathComponent().path, MorbPaths.root.path)
     }
 
-    func testThePayloadLivesBesideTheKernelNotInsideTheGuestImage() {
+    func testThePayloadLivesBesideTheKernelNotInsideTheGuestImage() throws {
         // If this ever moves into the initramfs, every boot pays 122 MB of guest RAM
         // for a feature that is off by default. The location is the decision.
+        //
+        // Hermetic on purpose. `k8sPayloadDirectory` asks the real filesystem whether
+        // a managed release is staged before answering, so reading the developer's
+        // own ~/.morbstack makes this assertion depend on whatever happens to be
+        // installed on the machine running the suite — which is exactly how it
+        // started failing. Both branches are pinned here instead of whichever one
+        // the ambient filesystem happens to produce.
+        let scratch = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("morbstack-k8s-paths-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        let previousHome = ProcessInfo.processInfo.environment["MORBSTACK_HOME"]
+        setenv("MORBSTACK_HOME", scratch.path, 1)
+        defer {
+            if let previousHome {
+                setenv("MORBSTACK_HOME", previousHome, 1)
+            } else {
+                unsetenv("MORBSTACK_HOME")
+            }
+            try? FileManager.default.removeItem(at: scratch)
+        }
+        try XCTSkipUnless(
+            MorbPaths.root.path == scratch.path,
+            "MORBSTACK_HOME override did not take; refusing to assert against the real home")
+
+        // Source checkout, nothing staged by a release: the legacy
+        // `scripts/fetch-guest-assets.sh --k8s-only` location answers, beside the
+        // kernel under data/.
         XCTAssertEqual(
             MorbPaths.k8sPayloadDirectory.deletingLastPathComponent().path,
             MorbPaths.dataDirectory.path)
         XCTAssertEqual(MorbPaths.k8sPayloadDirectory.lastPathComponent, "k8s")
+
+        // A managed release is staged: that one answers instead — still beside its
+        // own kernel, still never inside the guest image.
+        let managed = MorbPaths.currentRuntimeDirectory
+            .appendingPathComponent("k8s", isDirectory: true)
+        try FileManager.default.createDirectory(at: managed, withIntermediateDirectories: true)
+        XCTAssertEqual(MorbPaths.k8sPayloadDirectory.path, managed.path)
+        XCTAssertEqual(
+            MorbPaths.k8sPayloadDirectory.deletingLastPathComponent().path,
+            MorbPaths.currentRuntimeDirectory.path)
     }
 }

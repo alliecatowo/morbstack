@@ -11,6 +11,25 @@ import XCTest
 /// Coverage for turning Docker Engine API documents into Mac-side listeners.
 final class PortForwardingTests: XCTestCase {
 
+    /// A hermetic stand-in for the real host-endpoint probe.
+    ///
+    /// `inspectContainerCreate` really binds the endpoint it is asked about, so a
+    /// test that names a concrete port otherwise asserts against whatever happens to
+    /// be listening on the machine running it — 5353/udp is mDNSResponder on every
+    /// normal Mac, which is exactly how this was discovered. Tests here are about
+    /// *parsing and policy*, so they inject this. Real bind-conflict behaviour is
+    /// covered separately, against a kernel-assigned port rather than a guessed one.
+    private static let alwaysAvailable: DockerPortPublicationPreflight.HostPortAvailabilityProbe = {
+        port, transport, address in
+        HostPortPreflight.Result(
+            port: port,
+            transport: transport,
+            bindAddress: "\(address)",
+            availability: .available,
+            publication: address.isLoopback ? .loopback : .localNetwork,
+            detail: "hermetic test probe")
+    }
+
     /// A realistic two-container `GET /containers/json` body.
     ///
     /// `web` publishes 8080->80 on both address families the way dockerd really does;
@@ -215,7 +234,8 @@ final class PortForwardingTests: XCTestCase {
             #"{"HostConfig":{"PortBindings":{"80/tcp":[{"HostIp":"0.0.0.0","HostPort":"8080"}],"81/tcp":[{"HostIp":"0.0.0.0","HostPort":"8080"}]}}}"#.utf8)
 
         guard case .rejected(let message) =
-            DockerPortPublicationPreflight.inspectContainerCreate(body: ambiguous)
+            DockerPortPublicationPreflight.inspectContainerCreate(
+                body: ambiguous, availability: Self.alwaysAvailable)
         else {
             return XCTFail("one host listener cannot safely represent two TCP targets")
         }
@@ -227,7 +247,10 @@ final class PortForwardingTests: XCTestCase {
         let create = Data(
             #"{"HostConfig":{"PortBindings":{"53/udp":[{"HostIp":"127.0.0.1","HostPort":"5353"}]}}}"#.utf8)
 
-        XCTAssertEqual(DockerPortPublicationPreflight.inspectContainerCreate(body: create), .allowed)
+        XCTAssertEqual(
+            DockerPortPublicationPreflight.inspectContainerCreate(
+                body: create, availability: Self.alwaysAvailable),
+            .allowed)
         XCTAssertTrue(
             DockerPortPublicationPreflight.explicitTCPBindings(in: create).isEmpty,
             "UDP is event-confirmed; it must not accidentally enter the fixed TCP lease ledger")
@@ -270,17 +293,21 @@ final class PortForwardingTests: XCTestCase {
         }
 
         XCTAssertEqual(plan.fixedPlan, DockerFixedPortLeasePlan(tcp: [], udp: []))
+        // The plan walks `PortBindings.keys.sorted()`, so the order is the sorted
+        // container-port keys ("53/udp" before "80/tcp"), not the order the keys
+        // happen to appear in the JSON text. That determinism is the point: the
+        // rewriter matches the allocator's answers to this list positionally.
         XCTAssertEqual(
             plan.requestedPublications.map(\.requestedHostPortRange?.stringValue),
-            ["8080-8082", "5353-5355", "8080-8082"])
+            ["5353-5355", "8080-8082", "8080-8082"])
 
         let selected = [
             DockerDynamicPortPublication(
-                transport: .tcp, hostIP: "0.0.0.0", hostPort: 8081, containerPort: 80,
-                requestedHostPortRange: DockerHostPortRange(string: "8080-8082")),
-            DockerDynamicPortPublication(
                 transport: .udp, hostIP: "::", hostPort: 5354, containerPort: 53,
                 requestedHostPortRange: DockerHostPortRange(string: "5353-5355")),
+            DockerDynamicPortPublication(
+                transport: .tcp, hostIP: "0.0.0.0", hostPort: 8081, containerPort: 80,
+                requestedHostPortRange: DockerHostPortRange(string: "8080-8082")),
             DockerDynamicPortPublication(
                 transport: .tcp, hostIP: "::", hostPort: 8081, containerPort: 80,
                 requestedHostPortRange: DockerHostPortRange(string: "8080-8082"))
@@ -366,7 +393,8 @@ final class PortForwardingTests: XCTestCase {
         XCTAssertEqual(
             DockerPortPublicationPreflight.inspectContainerCreate(
                 body: fixed,
-                hostNetworkPortPublishing: true),
+                hostNetworkPortPublishing: true,
+                availability: Self.alwaysAvailable),
             .allowed)
         let fixedPlan = DockerPortPublicationPreflight.fixedPortLeasePlan(
             in: fixed,

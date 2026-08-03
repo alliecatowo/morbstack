@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+#MISE description="Cross-compile morbinit for aarch64-unknown-linux-musl (the real guest target)"
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:-$PWD}"
+
+# Where the messense/homebrew-macos-cross-toolchains aarch64-unknown-linux-musl
+# GCC cross toolchain lives (see dist/CROSS_COMPILE.md for the install recipe).
+# Only used by cross-build-guest / guest-image, so a plain build-guest (host-arch
+# dev loop) never needs it on PATH.
+CROSS_TOOLCHAIN_BIN=/opt/homebrew/opt/aarch64-unknown-linux-musl/bin
+if [ ! -x "$CROSS_TOOLCHAIN_BIN/aarch64-unknown-linux-musl-gcc" ]; then
+	echo "error: aarch64-unknown-linux-musl cross toolchain not found at $CROSS_TOOLCHAIN_BIN" >&2
+	echo "       see dist/CROSS_COMPILE.md for the install recipe (brew tap" >&2
+	echo "       messense/macos-cross-toolchains && brew install" >&2
+	echo "       messense/macos-cross-toolchains/aarch64-unknown-linux-musl)" >&2
+	exit 1
+fi
+
+(cd guest/morbinit && \
+	PATH="$CROSS_TOOLCHAIN_BIN:$PATH" \
+	CC_aarch64_unknown_linux_musl="$CROSS_TOOLCHAIN_BIN/aarch64-unknown-linux-musl-gcc" \
+	CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER="$CROSS_TOOLCHAIN_BIN/aarch64-unknown-linux-musl-gcc" \
+	cargo build --release --target aarch64-unknown-linux-musl)

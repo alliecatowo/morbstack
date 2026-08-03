@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+#MISE description="Install the repository git hooks (pre-commit compile gate)"
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:-$PWD}"
+
+# .git/hooks is not tracked, so hooks have to be installed explicitly. This uses
+# core.hooksPath rather than copying files, so the hook stays under version
+# control and an update lands the moment it is pulled.
+git config core.hooksPath scripts/git-hooks
+chmod +x scripts/git-hooks/*
+echo "installed: core.hooksPath -> scripts/git-hooks"
+echo "bypass a single commit with: git commit --no-verify"

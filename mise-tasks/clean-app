@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+#MISE description="Remove the assembled app bundle and icon build products"
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:-$PWD}"
+
+rm -rf dist/Morbstack.app mac/.build/AppIcon.icns mac/.build/AppIcon.iconset

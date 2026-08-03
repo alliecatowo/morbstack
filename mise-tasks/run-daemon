@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+#MISE description="Build, sign, and run the daemon in the foreground for local development"
+#MISE depends=["sign"]
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:-$PWD}"
+
+# Foreground on purpose. Do not wrap this in nohup or background it and forget
+# it: a detached daemon outlives the session that started it and the next person
+# inherits a stale engine. Stop it with the PID you started, never `pkill`.
+exec mac/.build/debug/morbstackd --foreground

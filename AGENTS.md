@@ -5,6 +5,12 @@ Rust guest init in `guest/morbinit/`, and build tasks in `mise.toml`.
 
 ## Start here
 
+- Read [CLAUDE.md](CLAUDE.md) **first**, whatever agent you are. It is the
+  operational source of truth: the codesign/entitlement rule, the `~/.docker`
+  credential-helper hang, the 104-byte socket path limit, daemon lifecycle
+  discipline, and which build lane is safe to hold. This file stays the
+  design/workflow agreement; the split is deliberate — "what should the UI be"
+  here, "how do I run it without breaking the machine" there.
 - Read [docs/design/README.md](docs/design/README.md) for every visible app change. Its
   playbook and HIG coverage audit are the binding design and evidence standards.
 - Keep app behavior truthful to the daemon and Docker API. Place pure logic in testable

@@ -416,7 +416,7 @@ final class SharesTests: XCTestCase {
     func testDoctorReportsEachConfiguredShare() {
         var config = MorbConfig()
         config.sharedPaths = ["/Users", "/private/tmp"]
-        let report = Doctor.run(config: config)
+        let report = Doctor.run(config: config, includeLiveShares: false)
         XCTAssertTrue(report.checks.contains { $0.name == "shares" })
         XCTAssertTrue(report.checks.contains { $0.name == "share /Users" })
         XCTAssertTrue(report.checks.contains { $0.name == "share /private/tmp" })
@@ -428,7 +428,7 @@ final class SharesTests: XCTestCase {
     func testDoctorWarnsWhenPrivateTmpIsNotConfigured() {
         var config = MorbConfig()
         config.sharedPaths = ["/Users"]
-        let report = Doctor.run(config: config)
+        let report = Doctor.run(config: config, includeLiveShares: false)
         let tmpCheck = report.checks.first { $0.name == "shares-tmp" }
         XCTAssertEqual(tmpCheck?.status, .warn)
         XCTAssertTrue(tmpCheck?.detail.contains("not configured") == true)
@@ -437,7 +437,7 @@ final class SharesTests: XCTestCase {
     func testDoctorWarnsWhenSharingIsTurnedOff() {
         var config = MorbConfig()
         config.sharedPaths = []
-        let report = Doctor.run(config: config)
+        let report = Doctor.run(config: config, includeLiveShares: false)
         XCTAssertEqual(report.checks.first { $0.name == "shares" }?.status, .warn)
         XCTAssertTrue(report.healthy, "an empty shared_paths must not fail the report")
     }
@@ -445,7 +445,7 @@ final class SharesTests: XCTestCase {
     func testDoctorShowsTheShareArgumentsOnTheBootCmdline() {
         var config = MorbConfig()
         config.sharedPaths = ["/Users"]
-        let report = Doctor.run(config: config)
+        let report = Doctor.run(config: config, includeLiveShares: false)
         let cmdline = report.checks.first { $0.name == "boot-cmdline" }?.detail ?? ""
         XCTAssertTrue(cmdline.contains("morb.share=morbshare0:/Users"), cmdline)
     }

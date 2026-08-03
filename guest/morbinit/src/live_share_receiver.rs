@@ -53,6 +53,7 @@ mod imp {
     use crate::sha256::Sha256;
     use crate::shares::{MountState, ShareSpec};
     use crate::sys;
+    use std::fmt;
     use std::fs::{self, File};
     use std::io::{self, Read, Write};
     use std::os::fd::AsRawFd;
@@ -151,8 +152,8 @@ mod imp {
 
     fn serve_connection(mut connection: File, context: &ReceiverContext) -> io::Result<()> {
         write_line(&mut connection, &format!("BOOT {}", hex(&context.boot_id)))?;
-        let hello = read_hello(&mut connection, context)?;
-        let session = live_share::validate_hello(hello.message, &context.mounted_shares)
+        let (message, hello) = read_hello(&mut connection, context)?;
+        let session = live_share::validate_hello(message, &context.mounted_shares)
             .map_err(protocol_error)?;
         let ready_body = format!("READY {} {}", hello.session_hex, hex(&context.boot_id));
         write_line(
@@ -193,13 +194,22 @@ mod imp {
         }
     }
 
+    /// The parts of a validated HELLO the connection loop keeps for the life of
+    /// the session. Deliberately does NOT hold the `Hello` itself: `validate_hello`
+    /// consumes that by value, and every later use needs only these `Copy`
+    /// identity fields plus the capability, so keeping the two separate avoids a
+    /// partial move out of a struct we still need to borrow.
     struct ParsedHello {
-        message: Hello,
         capability: [u8; live_share::CAPABILITY_BYTES],
         session_hex: String,
+        session_id: [u8; live_share::SESSION_ID_BYTES],
+        guest_boot_id: [u8; live_share::GUEST_BOOT_ID_BYTES],
     }
 
-    fn read_hello(connection: &mut File, context: &ReceiverContext) -> io::Result<ParsedHello> {
+    fn read_hello(
+        connection: &mut File,
+        context: &ReceiverContext,
+    ) -> io::Result<(Hello, ParsedHello)> {
         let deadline = Instant::now() + HELLO_TIMEOUT;
         let hello_line = read_line_until(connection, MAX_LINE_BYTES, deadline)?;
         let hello_body = strip_line_end(&hello_line)?;
@@ -243,17 +253,21 @@ mod imp {
         {
             return Err(protocol_error("live-share hello commitment did not verify"));
         }
-        Ok(ParsedHello {
-            message: Hello {
+        Ok((
+            Hello {
                 contract_version: PROTOCOL_VERSION,
                 session_id,
                 guest_boot_id: boot_id,
                 peer_capability: capability,
                 roots,
             },
-            capability,
-            session_hex,
-        })
+            ParsedHello {
+                capability,
+                session_hex,
+                session_id,
+                guest_boot_id: boot_id,
+            },
+        ))
     }
 
     fn parse_root(body: &str) -> io::Result<RootClaim> {
@@ -308,8 +322,8 @@ mod imp {
         };
         let header = RecordHeader {
             contract_version: PROTOCOL_VERSION,
-            session_id: hello.message.session_id,
-            guest_boot_id: hello.message.guest_boot_id,
+            session_id: hello.session_id,
+            guest_boot_id: hello.guest_boot_id,
             root_id: fields[2].to_string(),
             epoch: session.epoch_for_root(fields[2]).map_err(protocol_error)?,
             direction: Direction::HostToGuest,
@@ -586,8 +600,13 @@ mod imp {
         result
     }
 
-    fn protocol_error(message: impl Into<String>) -> io::Error {
-        io::Error::new(io::ErrorKind::InvalidData, message.into())
+    // Takes `Display` rather than `Into<String>` so the same helper accepts both
+    // the literal &str reasons below and a `ValidationError` straight out of
+    // `.map_err(protocol_error)`. `ValidationError` implements `Display` (it is a
+    // `std::error::Error`) but not `Into<String>`, and the mismatch only ever
+    // surfaced when cross-compiling for the real guest target.
+    fn protocol_error(message: impl fmt::Display) -> io::Error {
+        io::Error::new(io::ErrorKind::InvalidData, message.to_string())
     }
 }
 

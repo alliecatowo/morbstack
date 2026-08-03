@@ -309,11 +309,16 @@ final class TrackCResourceListTests: XCTestCase {
         XCTAssertNil(plan.items.first?.bytes)
     }
 
-    func testAVolumeWithAnUnreportedRefCountCountsAsUnused() {
-        // `isUnused` treats a nil refCount as zero, which is the engine's own default
-        // when usage data was not requested. The plan must agree with the row's dot.
-        let plan = TrackCVolumeList.unusedPlan([volume("no_usage_data", size: 10, refCount: nil)])
-        XCTAssertEqual(plan.items.map(\.id), ["no_usage_data"])
+    func testAVolumeWithAnUnreportedRefCountIsNeverOfferedForPruning() {
+        // The Engine omits usage data unless it was asked for, so a nil refCount
+        // means "unknown", not "zero". Offering an unknown-usage volume for deletion
+        // would be offering to delete data that may well be in use — so it stays out
+        // of the plan, and the row says "Usage unreported" rather than showing an
+        // unused dot. The two must keep agreeing.
+        let mystery = volume("no_usage_data", size: 10, refCount: nil)
+        XCTAssertFalse(mystery.isUnused)
+        XCTAssertEqual(mystery.usageStatus, "Usage unreported")
+        XCTAssertEqual(TrackCVolumeList.unusedPlan([mystery]).items.map(\.id), [])
     }
 
     func testVolumeSearchCoversNameDriverAndMountpoint() {

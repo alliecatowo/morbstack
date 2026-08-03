@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+#MISE description="Ad-hoc codesign morbstackd with the virtualization entitlement (must run after any swift build, before starting the daemon)"
+#MISE depends=["build-mac"]
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:-$PWD}"
+
+# Ad-hoc codesign with the entitlements morbstackd needs to open a
+# Virtualization.framework VM (com.apple.security.virtualization, etc.).
+# Development-only: signs with the local machine identity ("-"), not a Developer
+# ID. Depends on build-mac so this works on a fresh checkout instead of failing
+# on a missing binary.
+#
+# The real binary lives at mac/.build/arm64-apple-macosx/debug/morbstackd;
+# mac/.build/debug is a symlink to the per-arch build dir, so signing through it
+# signs the same file `swift build` just produced. This must be the LAST step
+# before starting the daemon: `swift build` strips
+# com.apple.security.virtualization from morbstackd on every rebuild.
+#
+# No --deep, ever. See mise-tasks/app for the full explanation.
+codesign --force --sign - \
+	--entitlements mac/Resources/morbstackd.entitlements \
+	mac/.build/debug/morbstackd
+
+# Same post-check the bundle build does: never hand back a daemon that silently
+# lost the one entitlement it exists to carry.
+codesign -d --entitlements - mac/.build/debug/morbstackd 2>&1 \
+	| grep -q "com.apple.security.virtualization" \
+	|| { echo "error: morbstackd lost its virtualization entitlement during signing" >&2; exit 1; }

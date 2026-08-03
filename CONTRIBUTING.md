@@ -236,10 +236,18 @@ questions:
    against a moving target is expensive for everyone to review.
 2. Keep commits signed off (`git commit -s`) and the sign-off intact
    through any rebase.
-3. `mise run build && mise run test` must pass locally before you open the
-   PR; CI runs the same tasks (see
-   [`.github/workflows/ci.yml`](.github/workflows/ci.yml)) and will not
-   merge on a red build.
+3. **`mise run check` must pass locally before you open the PR.** It compiles
+   everything *including the test target* and then runs both suites. Use it in
+   preference to `mise run build && mise run test`: `swift build` does not
+   compile `mac/Tests`, so a plain build happily accepts a test file that cannot
+   compile at all — which is exactly how four of them were once committed. CI
+   runs the same steps (see
+   [`.github/workflows/ci.yml`](.github/workflows/ci.yml)) and will not merge on
+   a red build.
+
+   Run `mise run install-hooks` once per clone to get the same compile gate as a
+   pre-commit hook. It only builds what you actually touched, so it stays in the
+   seconds range; `git commit --no-verify` bypasses it when you genuinely need to.
 4. Update the relevant `docs/*.md` file in the same PR as the behavior
    change it documents — this project treats stale docs as a defect, not
    a follow-up.

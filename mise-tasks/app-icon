@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+#MISE description="Render AppIcon.icns from mac/AppResources/make-icon.swift"
+#MISE sources=["mac/AppResources/make-icon.swift"]
+#MISE outputs=["mac/.build/AppIcon.icns"]
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:-$PWD}"
+
+# `iconutil` is part of the base system, so this needs nothing installed.
+# The iconset directory is rebuilt from scratch each time the task actually runs:
+# a stale PNG left over from an earlier design silently ends up in the icns, and
+# the only symptom is a Dock icon that is wrong at exactly one size.
+# sources/outputs are declared because the icon is generated procedurally
+# (make-icon.swift draws every shape in code, no external image assets) — safe to
+# skip when that one script hasn't changed.
+rm -rf mac/.build/AppIcon.iconset
+mkdir -p mac/.build/AppIcon.iconset
+swift mac/AppResources/make-icon.swift mac/.build/AppIcon.iconset
+iconutil --convert icns --output mac/.build/AppIcon.icns mac/.build/AppIcon.iconset

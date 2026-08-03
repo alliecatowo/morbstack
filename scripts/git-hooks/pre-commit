@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# Morbstack pre-commit hook.
+#
+# Install with: mise run install-hooks
+# Bypass (rarely, and say so in the commit message): git commit --no-verify
+#
+# WHY THIS EXISTS: this repository has no git remote, so the GitHub Actions
+# workflow has never executed — not once in 273 commits. Four test files were
+# committed in a state where they could never compile, because the only check
+# anyone ran was `swift build`, which does not compile the test target. Until
+# there is a remote and a real CI run, this hook is the gate.
+#
+# It is deliberately compile-only, and only for the languages you actually
+# touched, so it stays in the seconds range and nobody is tempted to bypass it.
+# The full gate is `mise run check`.
+#
+# Caveat, stated plainly: this compiles the WORKING TREE, not the staged index.
+# A partially-staged commit can still break the build. Catching that would need a
+# temporary checkout of the index, which is slower than this hook is allowed to be.
+set -uo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+STAGED="$(git diff --cached --name-only --diff-filter=ACMR)"
+[ -n "$STAGED" ] || exit 0
+
+status=0
+fail() { echo "pre-commit: $*" >&2; status=1; }
+
+# ---------------------------------------------------------------------------
+# 1. Build output and vendored payloads must never be committed.
+# ---------------------------------------------------------------------------
+while IFS= read -r path; do
+	case "$path" in
+		mac/.build/*|*/.build/*|guest/morbinit/target/*|*/DerivedData/*)
+			fail "build output staged: $path" ;;
+		dist/Morbstack.app/*|dist/*.dmg)
+			fail "app bundle/DMG staged: $path (dist/ artifacts are re-buildable, keep them out of git)" ;;
+		dist/*)
+			# Only the provenance records and the toolchain manifest are tracked;
+			# see .gitignore for the allow-list and why.
+			case "$path" in
+				dist/CROSS_COMPILE.md|dist/*/PROVENANCE.txt|dist/*/TOOLCHAIN.plist) ;;
+				*) fail "unexpected dist/ file staged: $path" ;;
+			esac ;;
+		*.p12|*.mobileprovision|*.pem|*.key|*id_rsa*|*id_ed25519*|.env|*/.env)
+			fail "possible secret staged: $path" ;;
+	esac
+done <<EOF
+$STAGED
+EOF
+
+# ---------------------------------------------------------------------------
+# 2. mise task files must stay runnable and self-describing.
+# ---------------------------------------------------------------------------
+for task in mise-tasks/*; do
+	[ -e "$task" ] || continue
+	[ -x "$task" ] || fail "mise task is not executable: $task (chmod +x)"
+	grep -q '^#MISE description=' "$task" \
+		|| fail "mise task has no '#MISE description=' header: $task"
+	bash -n "$task" || fail "mise task has a shell syntax error: $task"
+done
+
+# ---------------------------------------------------------------------------
+# 3. Compile what changed. `swift build` alone does NOT build the test target —
+#    --build-tests is the whole point of this hook.
+# ---------------------------------------------------------------------------
+if printf '%s\n' "$STAGED" | grep -q '^mac/.*\.swift$'; then
+	echo "pre-commit: swift build --build-tests"
+	swift build --package-path mac --build-tests >/dev/null \
+		|| fail "Swift build (including tests) failed"
+fi
+
+if printf '%s\n' "$STAGED" | grep -q '^guest/morbinit/'; then
+	echo "pre-commit: cargo build + fmt"
+	(cd guest/morbinit && cargo build --quiet) || fail "cargo build failed"
+	(cd guest/morbinit && cargo fmt -- --check) || fail "cargo fmt --check failed"
+fi
+
+if [ "$status" -ne 0 ]; then
+	echo "pre-commit: rejected. Fix the above, or bypass with --no-verify and explain why." >&2
+fi
+exit "$status"

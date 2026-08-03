@@ -59,9 +59,11 @@ final class LifecycleTests: XCTestCase {
         VMManager(config: MorbConfig(), log: makeLog())
     }
 
-    private func binding(_ port: Int, container: String = "web") -> DockerPortBinding {
+    private func binding(
+        _ port: Int, container: String = "web", hostIP: String = "0.0.0.0"
+    ) -> DockerPortBinding {
         DockerPortBinding(
-            hostIP: "0.0.0.0", hostPort: port, containerPort: 80, networkProtocol: "tcp",
+            hostIP: hostIP, hostPort: port, containerPort: 80, networkProtocol: "tcp",
             containerID: "id-\(port)", containerName: container)
     }
 
@@ -190,7 +192,13 @@ final class LifecycleTests: XCTestCase {
         defer { forwarder.stop() }
         let generation = forwarder.currentGeneration
 
-        forwarder.openForward(binding(port), generation: generation)
+        // Same address on both sides, deliberately. The squatter's `TCPListener`
+        // convenience initializer binds loopback, and on Darwin a wildcard bind of
+        // 0.0.0.0:P is *permitted* while another socket holds 127.0.0.1:P — so a
+        // binding published on 0.0.0.0 would succeed here and this test would be
+        // asserting the opposite of what its own failure message says.
+        forwarder.openForward(
+            binding(port, hostIP: "127.0.0.1"), generation: generation)
         XCTAssertTrue(forwarder.activeForwards.isEmpty, "the bind cannot have succeeded")
         XCTAssertEqual(forwarder.failedForwards.count, 1)
         let reported = try XCTUnwrap(forwarder.failedForwards.first)
@@ -202,7 +210,10 @@ final class LifecycleTests: XCTestCase {
         // Free the port and ask again straight away: the backoff, not the state of
         // the port, is what decides whether we try.
         squatter.stop()
-        forwarder.openForward(binding(port), generation: generation)
+        // Same endpoint again: the backoff is keyed by host endpoint, so retrying a
+        // *different* address would be a new forward rather than the retry this test
+        // is about.
+        forwarder.openForward(binding(port, hostIP: "127.0.0.1"), generation: generation)
         XCTAssertTrue(
             forwarder.activeForwards.isEmpty,
             "a retry inside the backoff window must be skipped, not attempted")

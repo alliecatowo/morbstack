@@ -396,9 +396,21 @@ public enum DockerPortPublicationPreflight {
     /// Invalid JSON and shapes the Engine owns are allowed through for dockerd to
     /// diagnose. This avoids turning a host-side advisory into a second, incompatible
     /// implementation of Docker's create validator.
+    /// How this preflight learns whether a concrete host endpoint is free.
+    ///
+    /// Injectable for one reason: the default implementation performs a **real
+    /// bind**, so any test naming a concrete port silently depends on what happens
+    /// to be listening on the machine running it. (5353/udp belongs to
+    /// mDNSResponder on every normal Mac, which is how this was noticed.) Production
+    /// callers must keep the default — an advisory that does not actually try the
+    /// bind is not an advisory.
+    public typealias HostPortAvailabilityProbe =
+        (Int, HostPortPreflight.Transport, DockerHostAddress) -> HostPortPreflight.Result
+
     public static func inspectContainerCreate(
         body: Data,
-        hostNetworkPortPublishing: Bool = false
+        hostNetworkPortPublishing: Bool = false,
+        availability: HostPortAvailabilityProbe = HostPortPreflight.check(port:transport:hostAddress:)
     ) -> Verdict {
         guard
             let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
@@ -449,7 +461,14 @@ public enum DockerPortPublicationPreflight {
                     continue
                 }
                 let hostIP = string(entry["HostIp"])?.trimmingCharacters(in: .whitespaces) ?? ""
-                let key = "\(protocolName)|\(hostIP)|\(hostPort)"
+                // The dedup key has to include the container port. Two *different*
+                // container ports published to ONE host endpoint is exactly the
+                // ambiguity the `containerTargetByEndpoint` check below exists to
+                // reject; keying only on the host side made the second declaration
+                // look already-examined and skipped that check entirely, so
+                // `-p 8080:80 -p 8080:81` was admitted and reached the Engine.
+                // Identical repeated declarations still collapse to one probe.
+                let key = "\(protocolName)|\(hostIP)|\(hostPort)|\(containerPort)"
                 guard examined.insert(key).inserted else { continue }
 
                 guard protocolName == "tcp" || protocolName == "udp" else {
@@ -487,10 +506,7 @@ public enum DockerPortPublicationPreflight {
                 }
 
                 let transport: HostPortPreflight.Transport = protocolName == "tcp" ? .tcp : .udp
-                let result = HostPortPreflight.check(
-                    port: port,
-                    transport: transport,
-                    hostAddress: address)
+                let result = availability(port, transport, address)
                 switch result.availability {
                 case .available:
                     continue
