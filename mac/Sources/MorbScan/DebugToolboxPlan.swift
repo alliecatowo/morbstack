@@ -8,6 +8,7 @@
 
 import Foundation
 import MorbFeatures
+import MorbstackKit
 
 /// A prerequisite that must be present before Morbstack can offer a toolbox
 /// session. The stable identifiers make the unavailable state useful to the

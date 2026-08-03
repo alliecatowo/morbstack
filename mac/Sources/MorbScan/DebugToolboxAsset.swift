@@ -164,7 +164,7 @@ public struct DebugToolboxAssetManifest: Codable, Equatable, Sendable {
 
     private static func isSafePolicyString(_ value: String) -> Bool {
         guard (1...512).contains(value.utf8.count) else { return false }
-        return value.unicodeScalars.allSatisfy { !$0.properties.isControl && $0 != "\n" && $0 != "\r" }
+        return value.unicodeScalars.allSatisfy { !CharacterSet.controlCharacters.contains($0) }
     }
 
     private static func isPinnedDigest(_ value: String) -> Bool {
