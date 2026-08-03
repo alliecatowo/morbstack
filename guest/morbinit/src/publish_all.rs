@@ -23,7 +23,10 @@ const HOST_REGISTRATION_WAIT: std::time::Duration = std::time::Duration::from_se
 
 #[cfg(target_os = "linux")]
 mod imp {
-    use super::{io, HOST_REGISTRATION_WAIT, MAX_BINDINGS, MAX_LINE_BYTES, PUBLISH_ALL_SOCKET, VSOCK_PUBLISH_ALL_ALLOCATOR_PORT};
+    use super::{
+        io, HOST_REGISTRATION_WAIT, MAX_BINDINGS, MAX_LINE_BYTES, PUBLISH_ALL_SOCKET,
+        VSOCK_PUBLISH_ALL_ALLOCATOR_PORT,
+    };
     use crate::{log, sys};
     use std::collections::HashMap;
     use std::fs::{self, File};
@@ -74,18 +77,22 @@ mod imp {
     fn accept_host_sessions(listener: sys::VsockListener, sessions: Sessions) {
         loop {
             match listener.accept() {
-            Ok(mut stream) => {
-                let sessions = Arc::clone(&sessions);
-                let spawned = thread::Builder::new()
-                    .name("publish-all-register".to_string())
-                    .spawn(move || register_host_session(&mut stream, sessions));
-                if let Err(error) = spawned {
-                    log::log(&format!("publish-all could not spawn host registration: {}", error));
+                Ok(mut stream) => {
+                    let sessions = Arc::clone(&sessions);
+                    let spawned = thread::Builder::new()
+                        .name("publish-all-register".to_string())
+                        .spawn(move || register_host_session(&mut stream, sessions));
+                    if let Err(error) = spawned {
+                        log::log(&format!(
+                            "publish-all could not spawn host registration: {}",
+                            error
+                        ));
+                    }
                 }
-            }
-            Err(error) => {
-                log::log(&format!("publish-all host accept error: {}", error));
-                thread::sleep(Duration::from_millis(100));
+                Err(error) => {
+                    log::log(&format!("publish-all host accept error: {}", error));
+                    thread::sleep(Duration::from_millis(100));
+                }
             }
         }
     }
@@ -94,7 +101,10 @@ mod imp {
         let line = match read_line(stream) {
             Ok(line) => line,
             Err(error) => {
-                log::log(&format!("publish-all host registration read failed: {}", error));
+                log::log(&format!(
+                    "publish-all host registration read failed: {}",
+                    error
+                ));
                 return;
             }
         };
@@ -106,7 +116,10 @@ mod imp {
             Ok(cloned) => cloned,
             Err(error) => {
                 let _ = stream.write_all(b"ERR session unavailable\n");
-                log::log(&format!("publish-all host registration clone failed: {}", error));
+                log::log(&format!(
+                    "publish-all host registration clone failed: {}",
+                    error
+                ));
                 return;
             }
         };
@@ -121,25 +134,32 @@ mod imp {
             }
         }
         if let Err(error) = stream.write_all(b"READY\n").and_then(|()| stream.flush()) {
-            log::log(&format!("publish-all host registration reply failed: {}", error));
+            log::log(&format!(
+                "publish-all host registration reply failed: {}",
+                error
+            ));
         }
     }
 
     fn accept_local_requests(listener: UnixListener, sessions: Sessions) {
         loop {
             match listener.accept() {
-            Ok((stream, _)) => {
-                let sessions = Arc::clone(&sessions);
-                let spawned = thread::Builder::new()
-                    .name("publish-all-request".to_string())
-                    .spawn(move || handle_local_request(stream, sessions));
-                if let Err(error) = spawned {
-                    log::log(&format!("publish-all could not spawn local request: {}", error));
+                Ok((stream, _)) => {
+                    let sessions = Arc::clone(&sessions);
+                    let spawned = thread::Builder::new()
+                        .name("publish-all-request".to_string())
+                        .spawn(move || handle_local_request(stream, sessions));
+                    if let Err(error) = spawned {
+                        log::log(&format!(
+                            "publish-all could not spawn local request: {}",
+                            error
+                        ));
+                    }
                 }
-            }
-            Err(error) => {
-                log::log(&format!("publish-all local accept error: {}", error));
-                thread::sleep(Duration::from_millis(100));
+                Err(error) => {
+                    log::log(&format!("publish-all local accept error: {}", error));
+                    thread::sleep(Duration::from_millis(100));
+                }
             }
         }
     }
@@ -164,11 +184,16 @@ mod imp {
                 .write_all(forwarded.as_bytes())
                 .and_then(|()| host.flush())
                 .and_then(|()| read_allocation_reply(&mut host, request.count)),
-            Err(_) => Err(io::Error::new(io::ErrorKind::Other, "host allocator lock poisoned")),
+            Err(_) => Err(io::Error::new(
+                io::ErrorKind::Other,
+                "host allocator lock poisoned",
+            )),
         };
         match reply {
             Ok(reply) => {
-                let _ = local.write_all(reply.as_bytes()).and_then(|()| local.flush());
+                let _ = local
+                    .write_all(reply.as_bytes())
+                    .and_then(|()| local.flush());
             }
             Err(error) => {
                 if let Ok(mut sessions) = sessions.lock() {
@@ -188,7 +213,9 @@ mod imp {
                     return Some(Arc::clone(session));
                 }
             }
-            if std::time::Instant::now() >= deadline { return None; }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
             thread::sleep(Duration::from_millis(100));
         }
     }
@@ -214,19 +241,32 @@ mod imp {
         let header = read_line(stream)?;
         let fields: Vec<_> = header.split(' ').collect();
         if fields.len() != 3 || fields[0] != "ALLOC" || !valid_id(fields[1]) {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid ALLOC header"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid ALLOC header",
+            ));
         }
-        let count = fields[2].parse::<usize>().ok().filter(|count| (1..=MAX_BINDINGS).contains(count))
+        let count = fields[2]
+            .parse::<usize>()
+            .ok()
+            .filter(|count| (1..=MAX_BINDINGS).contains(count))
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid ALLOC count"))?;
         let mut lines = Vec::with_capacity(count);
         for _ in 0..count {
             let line = read_line(stream)?;
             if !valid_binding(&line) {
-                return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid ALLOC binding"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "invalid ALLOC binding",
+                ));
             }
             lines.push(line);
         }
-        Ok(AllocationRequest { container_id: fields[1].to_string(), count, lines })
+        Ok(AllocationRequest {
+            container_id: fields[1].to_string(),
+            count,
+            lines,
+        })
     }
 
     fn read_allocation_reply(stream: &mut File, count: usize) -> io::Result<String> {
@@ -236,16 +276,28 @@ mod imp {
         }
         let expected = format!("OK {}", count);
         if header != expected {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid host allocator reply"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid host allocator reply",
+            ));
         }
         let mut reply = format!("{}\n", header);
         for _ in 0..count {
             let line = read_line(stream)?;
-            let Some(port) = line.strip_prefix("PORT ").and_then(|port| port.parse::<u16>().ok()) else {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid allocated port"));
+            let Some(port) = line
+                .strip_prefix("PORT ")
+                .and_then(|port| port.parse::<u16>().ok())
+            else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid allocated port",
+                ));
             };
             if port == 0 {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "allocated port was zero"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "allocated port was zero",
+                ));
             }
             reply.push_str(&line);
             reply.push('\n');
@@ -259,16 +311,27 @@ mod imp {
             return false;
         }
         let port = |value: &str| value.parse::<u16>().ok().filter(|port| *port > 0).is_some();
-        port(fields[1]) && (fields[2] == "-" || fields[2].chars().all(|c| c.is_ascii_hexdigit() || c == '.' || c == ':'))
+        port(fields[1])
+            && (fields[2] == "-"
+                || fields[2]
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() || c == '.' || c == ':'))
             && (fields[3] == "0" || port(fields[3]))
     }
 
     fn valid_id(id: &str) -> bool {
-        id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        id.len() == 64
+            && id
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
     }
 
     fn sanitize(reason: &str) -> String {
-        reason.chars().filter(|c| *c != '\r' && *c != '\n').take(MAX_LINE_BYTES - 5).collect()
+        reason
+            .chars()
+            .filter(|c| *c != '\r' && *c != '\n')
+            .take(MAX_LINE_BYTES - 5)
+            .collect()
     }
 
     fn write_error(stream: &mut UnixStream, reason: &str) -> io::Result<()> {
@@ -281,13 +344,19 @@ mod imp {
         loop {
             let mut byte = [0_u8; 1];
             stream.read_exact(&mut byte)?;
-            if byte[0] == b'\n' { break; }
+            if byte[0] == b'\n' {
+                break;
+            }
             if byte[0] == b'\r' || !byte[0].is_ascii() || bytes.len() >= MAX_LINE_BYTES {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "line is invalid or too long"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "line is invalid or too long",
+                ));
             }
             bytes.push(byte[0]);
         }
-        String::from_utf8(bytes).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "line is not UTF-8"))
+        String::from_utf8(bytes)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "line is not UTF-8"))
     }
 }
 
@@ -295,4 +364,6 @@ mod imp {
 pub use imp::spawn_publish_all_allocator;
 
 #[cfg(not(target_os = "linux"))]
-pub fn spawn_publish_all_allocator() -> io::Result<()> { Ok(()) }
+pub fn spawn_publish_all_allocator() -> io::Result<()> {
+    Ok(())
+}
