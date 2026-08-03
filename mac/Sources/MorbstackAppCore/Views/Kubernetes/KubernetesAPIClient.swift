@@ -7,8 +7,9 @@
 // publishes the local API server only on loopback and writes an app-owned kubeconfig
 // when the person explicitly requests one. This client reads that one configuration,
 // pins its certificate authority, presents its client identity, and issues the two
-// read-only resource requests the native Tables need. It never shells out to `kubectl`,
-// never uses `~/.kube/config`, and never fabricates rows from a status summary.
+// read-only resource requests the native Tables and selected-pod inspector need. It
+// never shells out to `kubectl`, never uses `~/.kube/config`, and never fabricates
+// rows from a status summary.
 
 import Foundation
 import Security
@@ -34,14 +35,68 @@ final class KubernetesAPIClient: @unchecked Sendable {
             pods: podReply.items.compactMap(K8sPodInfo.init(apiObject:)))
     }
 
-    private func request<T: Decodable>(_ path: String, as type: T.Type) async throws -> T {
-        guard let url = URL(string: path, relativeTo: endpoint) else {
+    /// A finite core/v1 event read for exactly one pod. Querying by UID is important:
+    /// a pod name can be reused after deletion, while the UID cannot.
+    func podEvents(namespace: String, uid: String) async throws -> [K8sPodEventInfo] {
+        let reply = try await request(
+            "api/v1/namespaces/\(namespace)/events",
+            queryItems: [URLQueryItem(name: "fieldSelector", value: "involvedObject.uid=\(uid)")],
+            as: KubernetesEventList.self)
+        return reply.items
+            .compactMap(K8sPodEventInfo.init(apiObject:))
+            .sorted { lhs, rhs in
+                (lhs.lastObserved ?? .distantPast) > (rhs.lastObserved ?? .distantPast)
+            }
+    }
+
+    /// Reads a small, non-streaming slice of one regular container's current log.
+    /// Kubernetes owns rotation and retention; `tailLines` bounds the presentation
+    /// request, while omitting `follow` and `previous` prevents a long-lived stream or
+    /// an implied restart-history feature.
+    func podLog(namespace: String, pod: String, container: String) async throws -> String {
+        let data = try await requestData(
+            "api/v1/namespaces/\(namespace)/pods/\(pod)/log",
+            queryItems: [
+                URLQueryItem(name: "container", value: container),
+                URLQueryItem(name: "tailLines", value: "200"),
+                URLQueryItem(name: "timestamps", value: "true"),
+            ],
+            accept: "text/plain")
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    private func request<T: Decodable>(
+        _ path: String,
+        queryItems: [URLQueryItem] = [],
+        as type: T.Type
+    ) async throws -> T {
+        let data = try await requestData(path, queryItems: queryItems, accept: "application/json")
+        do {
+            return try KubernetesJSON.makeDecoder().decode(T.self, from: data)
+        } catch {
+            throw K8sResourceAccessError.unavailable(
+                "The local Kubernetes API returned data Morbstack could not read: \(error.localizedDescription)")
+        }
+    }
+
+    private func requestData(
+        _ path: String,
+        queryItems: [URLQueryItem],
+        accept: String
+    ) async throws -> Data {
+        guard let relativeURL = URL(string: path, relativeTo: endpoint),
+              var components = URLComponents(url: relativeURL, resolvingAgainstBaseURL: true)
+        else {
             throw K8sResourceAccessError.unavailable("The Kubernetes API endpoint is invalid.")
+        }
+        components.queryItems = queryItems.isEmpty ? nil : queryItems
+        guard let url = components.url else {
+            throw K8sResourceAccessError.unavailable("The Kubernetes API request is invalid.")
         }
 
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue(accept, forHTTPHeaderField: "Accept")
         request.timeoutInterval = 12
 
         let delegate = KubernetesAPISessionDelegate(credential: credential)
@@ -58,12 +113,7 @@ final class KubernetesAPIClient: @unchecked Sendable {
                 throw K8sResourceAccessError.unavailable(
                     "The local Kubernetes API returned HTTP \(http.statusCode). Generate a new kubeconfig if the cluster was restarted.")
             }
-            do {
-                return try KubernetesJSON.makeDecoder().decode(T.self, from: data)
-            } catch {
-                throw K8sResourceAccessError.unavailable(
-                    "The local Kubernetes API returned data Morbstack could not read: \(error.localizedDescription)")
-            }
+            return data
         } catch let error as K8sResourceAccessError {
             throw error
         } catch {
@@ -281,7 +331,10 @@ private struct KubernetesPodObject: Decodable {
         var containers: [Container]?
     }
 
-    struct Container: Decodable {}
+    struct Container: Decodable {
+        var name: String?
+        var image: String?
+    }
 
     struct Status: Decodable {
         var phase: String?
@@ -289,6 +342,7 @@ private struct KubernetesPodObject: Decodable {
     }
 
     struct ContainerStatus: Decodable {
+        var name: String?
         var ready: Bool
         var restartCount: Int
         var state: State?
@@ -296,9 +350,17 @@ private struct KubernetesPodObject: Decodable {
 
     struct State: Decodable {
         var waiting: Waiting?
+        var running: Running?
+        var terminated: Terminated?
     }
 
+    struct Running: Decodable {}
+
     struct Waiting: Decodable {
+        var reason: String?
+    }
+
+    struct Terminated: Decodable {
         var reason: String?
     }
 }
@@ -306,8 +368,27 @@ private struct KubernetesPodObject: Decodable {
 private struct KubernetesMetadata: Decodable {
     var name: String?
     var namespace: String?
+    var uid: String?
     var creationTimestamp: Date?
     var labels: [String: String]?
+}
+
+private struct KubernetesEventList: Decodable {
+    var items: [KubernetesEventObject]
+}
+
+/// The classic core/v1 Event endpoint remains widely available to a local k3s
+/// cluster. It reports the object relation as `involvedObject`, unlike the newer
+/// `events.k8s.io/v1` shape, so use the core endpoint deliberately here.
+private struct KubernetesEventObject: Decodable {
+    var metadata: KubernetesMetadata
+    var type: String?
+    var reason: String?
+    var message: String?
+    var count: Int?
+    var eventTime: Date?
+    var lastTimestamp: Date?
+    var firstTimestamp: Date?
 }
 
 private extension K8sNodeInfo {
@@ -336,6 +417,10 @@ private extension K8sPodInfo {
     init?(apiObject: KubernetesPodObject) {
         guard let name = apiObject.metadata.name, !name.isEmpty else { return nil }
         let statuses = apiObject.status?.containerStatuses ?? []
+        let statusByName = Dictionary(
+            uniqueKeysWithValues: statuses.compactMap { status in
+                status.name.map { ($0, status) }
+            })
         let waitingReasons = statuses.compactMap { $0.state?.waiting?.reason }
         let phase: Phase
         if waitingReasons.contains("CrashLoopBackOff") {
@@ -358,6 +443,43 @@ private extension K8sPodInfo {
             totalContainers: max(statuses.count, apiObject.spec?.containers?.count ?? 0),
             restarts: statuses.reduce(into: 0) { $0 += $1.restartCount },
             node: apiObject.spec?.nodeName ?? "",
-            age: apiObject.metadata.creationTimestamp)
+            age: apiObject.metadata.creationTimestamp,
+            uid: apiObject.metadata.uid,
+            containers: (apiObject.spec?.containers ?? []).compactMap { container in
+                guard let name = container.name, !name.isEmpty else { return nil }
+                let status = statusByName[name]
+                return K8sPodContainerInfo(
+                    name: name,
+                    image: container.image ?? "Unavailable",
+                    state: Self.stateLabel(for: status),
+                    ready: status?.ready ?? false,
+                    restarts: status?.restartCount ?? 0)
+            })
     }
+
+    private static func stateLabel(for status: KubernetesPodObject.ContainerStatus?) -> String {
+        guard let status else { return "Unknown" }
+        if let reason = status.state?.waiting?.reason, !reason.isEmpty { return reason }
+        if status.state?.running != nil { return "Running" }
+        if let reason = status.state?.terminated?.reason, !reason.isEmpty { return reason }
+        if status.state?.terminated != nil { return "Terminated" }
+        return status.ready ? "Running" : "Unknown"
+    }
+}
+
+private extension K8sPodEventInfo {
+    init?(apiObject: KubernetesEventObject) {
+        guard let id = apiObject.metadata.uid ?? apiObject.metadata.name, !id.isEmpty else { return nil }
+        self.init(
+            id: id,
+            type: apiObject.type?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty ?? "Normal",
+            reason: apiObject.reason?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty ?? "Event",
+            message: apiObject.message?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty ?? "No message was returned by Kubernetes.",
+            count: max(1, apiObject.count ?? 1),
+            lastObserved: apiObject.eventTime ?? apiObject.lastTimestamp ?? apiObject.firstTimestamp ?? apiObject.metadata.creationTimestamp)
+    }
+}
+
+private extension String {
+    var nonEmpty: String? { isEmpty ? nil : self }
 }

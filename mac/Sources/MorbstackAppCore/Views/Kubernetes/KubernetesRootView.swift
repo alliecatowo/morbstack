@@ -5,6 +5,7 @@
 // The navigation split view owns the surrounding chrome; this file deliberately owns
 // only resource selection, data presentation, and lifecycle commands.
 
+import Foundation
 import MorbstackKit
 import SwiftUI
 
@@ -193,6 +194,15 @@ struct KubernetesRootView: View {
     ]
     @State private var selectedNodeID: K8sNodeInfo.ID?
     @State private var selectedPodID: K8sPodInfo.ID?
+    @State private var selectedPodContainerName = ""
+    @State private var podEvents: [K8sPodEventInfo] = []
+    @State private var podEventsError: String?
+    @State private var isLoadingPodEvents = false
+    @State private var podEventsRequestID = UUID()
+    @State private var podLog = ""
+    @State private var podLogError: String?
+    @State private var isLoadingPodLog = false
+    @State private var podLogRequestID = UUID()
     @State private var showsInspector = true
     @State private var lifecycleRequest: KubernetesLifecycleRequest?
     @State private var kubeconfigCopied = false
@@ -320,6 +330,7 @@ struct KubernetesRootView: View {
             .onChange(of: resource) {
                 selectedNodeID = nil
                 selectedPodID = nil
+                clearPodObservation()
             }
             .onChange(of: query) {
                 reconcileSelectionWithVisibleResource()
@@ -450,6 +461,7 @@ struct KubernetesRootView: View {
             pods = []
             selectedNodeID = nil
             selectedPodID = nil
+            clearPodObservation()
             diagnosis = nil
             clusterError = MorbErrorMessage.text(for: error)
         }
@@ -512,6 +524,7 @@ struct KubernetesRootView: View {
             pods = []
             selectedNodeID = nil
             selectedPodID = nil
+            clearPodObservation()
             return
         }
         do {
@@ -523,6 +536,7 @@ struct KubernetesRootView: View {
         } catch let error as K8sResourceAccessError {
             nodes = []
             pods = []
+            clearPodObservation()
             resourceError = error.localizedDescription
             if case .kubeconfigRequired = error {
                 resourceNeedsKubeconfig = true
@@ -532,12 +546,92 @@ struct KubernetesRootView: View {
         } catch {
             nodes = []
             pods = []
+            clearPodObservation()
             resourceError = MorbErrorMessage.text(for: error)
             resourceNeedsKubeconfig = false
         }
         if !nodes.contains(where: { $0.id == selectedNodeID }) { selectedNodeID = nil }
-        if !pods.contains(where: { $0.id == selectedPodID }) { selectedPodID = nil }
+        if !pods.contains(where: { $0.id == selectedPodID }) {
+            selectedPodID = nil
+            clearPodObservation()
+        } else if let pod = selectedPod {
+            preparePodObservation(for: pod)
+        }
         reconcileSelectionWithVisibleResource()
+    }
+
+    // MARK: - Selected-pod observability
+
+    /// The list is the source of the selected record's identity and regular-container
+    /// inventory. Logs and events remain independent reads so one unavailable
+    /// Kubernetes subresource never hides the other or turns a read into a mutation.
+    private func preparePodObservation(for pod: K8sPodInfo) {
+        podEventsRequestID = UUID()
+        podLogRequestID = UUID()
+        selectedPodContainerName = pod.containers.first?.name ?? ""
+        podEvents = []
+        podEventsError = nil
+        podLog = ""
+        podLogError = nil
+        isLoadingPodEvents = false
+        isLoadingPodLog = false
+
+        Task { await loadPodEvents(for: pod) }
+        if let container = pod.containers.first {
+            Task { await loadPodLog(for: pod, container: container.name) }
+        }
+    }
+
+    private func clearPodObservation() {
+        podEventsRequestID = UUID()
+        podLogRequestID = UUID()
+        selectedPodContainerName = ""
+        podEvents = []
+        podEventsError = nil
+        isLoadingPodEvents = false
+        podLog = ""
+        podLogError = nil
+        isLoadingPodLog = false
+    }
+
+    private func loadPodEvents(for pod: K8sPodInfo) async {
+        let requestID = podEventsRequestID
+        guard selectedPodID == pod.id else { return }
+        isLoadingPodEvents = true
+        podEventsError = nil
+        defer {
+            if selectedPodID == pod.id, podEventsRequestID == requestID {
+                isLoadingPodEvents = false
+            }
+        }
+        do {
+            let events = try await provider.podEvents(for: pod)
+            guard selectedPodID == pod.id, podEventsRequestID == requestID else { return }
+            podEvents = events
+        } catch {
+            guard selectedPodID == pod.id, podEventsRequestID == requestID else { return }
+            podEventsError = MorbErrorMessage.text(for: error)
+        }
+    }
+
+    private func loadPodLog(for pod: K8sPodInfo, container: String) async {
+        let requestID = podLogRequestID
+        guard selectedPodID == pod.id, selectedPodContainerName == container else { return }
+        isLoadingPodLog = true
+        podLogError = nil
+        defer {
+            if selectedPodID == pod.id, selectedPodContainerName == container, podLogRequestID == requestID {
+                isLoadingPodLog = false
+            }
+        }
+        do {
+            let log = try await provider.podLog(for: pod, container: container)
+            guard selectedPodID == pod.id, selectedPodContainerName == container, podLogRequestID == requestID else { return }
+            podLog = log
+        } catch {
+            guard selectedPodID == pod.id, selectedPodContainerName == container, podLogRequestID == requestID else { return }
+            podLogError = MorbErrorMessage.text(for: error)
+        }
     }
 
     // MARK: - Content
@@ -726,9 +820,13 @@ struct KubernetesRootView: View {
             }
         }
         .onChange(of: selectedPodID) { _, selectedID in
-            guard selectedID != nil else { return }
+            guard let selectedID, let pod = pods.first(where: { $0.id == selectedID }) else {
+                clearPodObservation()
+                return
+            }
             selectedNodeID = nil
             showsInspector = true
+            preparePodObservation(for: pod)
         }
     }
 
@@ -807,6 +905,9 @@ struct KubernetesRootView: View {
                     LabeledContent("Node", value: pod.node.isEmpty ? "Not scheduled" : pod.node)
                     LabeledContent("Age", value: pod.age.map(Formatters.absoluteDate) ?? "Unavailable")
                 }
+                podContainersSection(for: pod)
+                podLogSection(for: pod)
+                podEventsSection
                 Section("Actions") {
                     Button("Copy Pod Name") { MorbPasteboard.copy(pod.name) }
                     Button("Copy Namespace") { MorbPasteboard.copy(pod.namespace) }
@@ -841,6 +942,129 @@ struct KubernetesRootView: View {
                 Label("No Selection", systemImage: "sidebar.right")
             } description: {
                 Text("Select a row to view its details.")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func podContainersSection(for pod: K8sPodInfo) -> some View {
+        Section("Containers") {
+            if pod.containers.isEmpty {
+                Text("No regular containers were returned by the Kubernetes API.")
+                    .foregroundStyle(.secondary)
+            } else {
+                Picker(
+                    "Container",
+                    selection: Binding(
+                        get: { selectedPodContainerName },
+                        set: { container in
+                            guard container != selectedPodContainerName else { return }
+                            selectedPodContainerName = container
+                            podLogRequestID = UUID()
+                            podLog = ""
+                            podLogError = nil
+                            Task { await loadPodLog(for: pod, container: container) }
+                        }
+                    )
+                ) {
+                    ForEach(pod.containers) { container in
+                        Text(container.name).tag(container.name)
+                    }
+                }
+                .accessibilityLabel("Pod container")
+
+                if let container = pod.containers.first(where: { $0.name == selectedPodContainerName }) {
+                    LabeledContent("Image") {
+                        Text(container.image)
+                            .font(.system(.body, design: .monospaced))
+                            .textSelection(.enabled)
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                    }
+                    LabeledContent("Status", value: container.state)
+                    LabeledContent("Ready", value: container.ready ? "Yes" : "No")
+                    LabeledContent("Restarts", value: "\(container.restarts)")
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func podLogSection(for pod: K8sPodInfo) -> some View {
+        Section("Recent Log") {
+            if pod.containers.isEmpty {
+                Text("Logs are unavailable because the pod has no reported regular container.")
+                    .foregroundStyle(.secondary)
+            } else if isLoadingPodLog {
+                ProgressView("Loading recent log")
+                    .controlSize(.small)
+            } else if let podLogError {
+                Label(podLogError, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.secondary)
+                Button("Retry Log") {
+                    Task { await loadPodLog(for: pod, container: selectedPodContainerName) }
+                }
+                .disabled(selectedPodContainerName.isEmpty)
+            } else if podLog.isEmpty {
+                Text("No recent log output was returned by Kubernetes.")
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Most recent 200 lines. Kubernetes log retention applies.")
+                    .foregroundStyle(.secondary)
+                ScrollView([.horizontal, .vertical]) {
+                    Text(podLog)
+                        .font(.system(.body, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 2)
+                }
+                .frame(minHeight: 96, maxHeight: 220)
+                .accessibilityLabel("Recent log for \(selectedPodContainerName)")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var podEventsSection: some View {
+        Section("Recent Events") {
+            if isLoadingPodEvents {
+                ProgressView("Loading recent events")
+                    .controlSize(.small)
+            } else if let podEventsError {
+                Label(podEventsError, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.secondary)
+                Button("Retry Events") {
+                    guard let pod = selectedPod else { return }
+                    Task { await loadPodEvents(for: pod) }
+                }
+            } else if podEvents.isEmpty {
+                Text("No retained events were returned by Kubernetes for this pod.")
+                    .foregroundStyle(.secondary)
+            } else {
+                if podEvents.count > 20 {
+                    Text("Showing the 20 most recent of \(podEvents.count) retained events.")
+                        .foregroundStyle(.secondary)
+                }
+                ForEach(podEvents.prefix(20)) { event in
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack {
+                            Text(event.reason)
+                            Text(event.type)
+                                .foregroundStyle(.secondary)
+                            if event.count > 1 {
+                                Text("\(event.count) times")
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        Text(event.message)
+                            .foregroundStyle(.secondary)
+                        if let lastObserved = event.lastObserved {
+                            Text(Formatters.absoluteDate(lastObserved))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
             }
         }
     }

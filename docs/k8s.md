@@ -86,6 +86,39 @@ never switches `current-context` unless asked. Verified directly in this
 pass: after a plain `morb k8s kubeconfig`, `~/.kube/config` did not
 exist — nothing touched it.
 
+### Read-only pod observability in the app
+
+When the cluster is Ready and Morbstack's own kubeconfig exists, the native
+Kubernetes screen reads pods and nodes from the readiness-gated loopback API
+forward. Selecting a pod opens the standard inspector, which shows the regular
+container inventory and makes two additional, independent **read-only** API
+requests:
+
+- a current, timestamped log snapshot for the selected regular container, limited
+  to its most recent 200 lines; and
+- retained `core/v1` Events field-selected by that pod's Kubernetes UID, so an
+  event from an earlier pod with the same name is never presented as current.
+
+The reader uses only `~/.morbstack/kubeconfig`, pins its embedded certificate
+authority, presents its embedded client identity, and connects only to the
+daemon-published `https://127.0.0.1:<port>` endpoint. It never invokes
+`kubectl`, reads `~/.kube/config`, watches a resource, or falls back to
+summary counts. A log error and an event error are shown separately in the
+inspector because either Kubernetes subresource can be unavailable while the
+pod list remains useful.
+
+This is intentionally an inspection feature, not workload control. It cannot
+create, delete, restart, edit, exec into, attach to, or port-forward a
+workload; it does not follow logs or request a previous container's logs.
+Kubernetes controls log rotation and Event retention, so an empty result means
+only that no retained data was returned at that moment.
+
+`morb k8s` remains the control and diagnosis CLI (`status`, `diagnose`,
+`enable`, `disable`, and `kubeconfig`). It does not duplicate the app's
+credential-pinned resource reader. For scripted read-only inspection, generate
+Morbstack's kubeconfig explicitly and use `kubectl --kubeconfig
+~/.morbstack/kubeconfig …`; that remains a separate user-directed command.
+
 ### Reaching a Service from the Mac
 
 k3s's `servicelb` (klipper-lb) is deliberately kept on (`traefik` and
@@ -175,10 +208,12 @@ Mac cannot represent that regardless of which package hits it next.
 
 ## What is not covered
 
-- **`kubectl exec` / `kubectl port-forward` / `kubectl logs -f`** were not
-  exercised by this pass. `kubectl logs` (non-follow) and `kubectl
-  describe` both work; the streaming/exec paths were not verified either
-  way and no claim is made about them here.
+- **Streaming or workload-control paths.** The app's log inspector is a
+  bounded non-follow snapshot only. `kubectl exec`, `kubectl attach`,
+  `kubectl port-forward`, `kubectl logs -f`, previous-container logs,
+  workload edits, and workload deletion are not app features. `kubectl logs`
+  (non-follow) and `kubectl describe` both work; the streaming/exec paths
+  were not verified either way and no claim is made about them here.
 - **Multi-node.** The node is fixed as `morbstack`; there is no join flow
   and none is planned — this is a local single-node cluster, not a
   cluster simulator.

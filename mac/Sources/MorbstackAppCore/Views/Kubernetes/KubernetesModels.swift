@@ -14,6 +14,35 @@ import MorbstackKit
 
 // MARK: - Node and pod summaries
 
+/// One regular container reported by a pod's `spec.containers` and status.
+///
+/// Kubernetes also has init and ephemeral containers. This small observability surface
+/// deliberately starts with regular containers because they are the containers exposed
+/// by the normal pod-log API workflow; it does not imply that the other kinds do not
+/// exist.
+struct K8sPodContainerInfo: Identifiable, Equatable, Sendable {
+    var name: String
+    var image: String
+    var state: String
+    var ready: Bool
+    var restarts: Int
+
+    var id: String { name }
+}
+
+/// One retained core/v1 Event associated with a selected pod.
+///
+/// Event retention is owned by Kubernetes. `lastObserved` may be absent on older
+/// events, so the inspector shows that fact rather than manufacturing a timestamp.
+struct K8sPodEventInfo: Identifiable, Equatable, Sendable {
+    var id: String
+    var type: String
+    var reason: String
+    var message: String
+    var count: Int
+    var lastObserved: Date?
+}
+
 /// One node, as the screen displays it. Not `MorbstackKit.K8s` because a node is a
 /// Kubernetes API object, not a control-channel concept — this is the screen's own
 /// shape, small enough to fixture and small enough to replace.
@@ -60,6 +89,10 @@ struct K8sPodInfo: Identifiable, Equatable, Sendable {
     var restarts: Int
     var node: String
     var age: Date?
+    /// Kubernetes assigns this immutable value. It scopes the event query so events
+    /// for a deleted-and-recreated pod with the same name never bleed into its detail.
+    var uid: String? = nil
+    var containers: [K8sPodContainerInfo] = []
 
     var id: String { "\(namespace)/\(name)" }
 
@@ -122,6 +155,12 @@ protocol K8sClusterProviding: AnyObject {
     func diagnosis() async throws -> K8s.Diagnosis
     func setEnabled(_ enabled: Bool) async throws -> K8s.Status
     func resources() async throws -> K8sClusterResources
+    /// Lists retained core/v1 events for this exact pod. It never watches or mutates
+    /// the cluster, and a failure is surfaced separately from pod logs.
+    func podEvents(for pod: K8sPodInfo) async throws -> [K8sPodEventInfo]
+    /// Reads a bounded, non-following log snapshot for one regular container. It
+    /// deliberately never invokes exec, attaches a stream, or requests previous logs.
+    func podLog(for pod: K8sPodInfo, container: String) async throws -> String
     /// Writes only Morbstack's private, app-owned kubeconfig. It never edits
     /// `~/.kube/config`; that remains the CLI's separately confirmed merge action.
     func generateKubeconfig() async throws -> URL
@@ -158,6 +197,20 @@ final class K8sDaemonClient: K8sClusterProviding {
     func resources() async throws -> K8sClusterResources {
         let client = try KubernetesAPIClient(kubeconfigURL: K8s.defaultKubeconfigURL)
         return try await client.resources()
+    }
+
+    func podEvents(for pod: K8sPodInfo) async throws -> [K8sPodEventInfo] {
+        guard let uid = pod.uid, !uid.isEmpty else {
+            throw K8sResourceAccessError.unavailable(
+                "The Kubernetes API did not return an identity for this pod, so Morbstack cannot scope its events safely.")
+        }
+        let client = try KubernetesAPIClient(kubeconfigURL: K8s.defaultKubeconfigURL)
+        return try await client.podEvents(namespace: pod.namespace, uid: uid)
+    }
+
+    func podLog(for pod: K8sPodInfo, container: String) async throws -> String {
+        let client = try KubernetesAPIClient(kubeconfigURL: K8s.defaultKubeconfigURL)
+        return try await client.podLog(namespace: pod.namespace, pod: pod.name, container: container)
     }
 
     func generateKubeconfig() async throws -> URL {
@@ -234,9 +287,34 @@ final class K8sFixtureClient: K8sClusterProviding {
         return K8sClusterResources(nodes: allNodes, pods: allPods)
     }
 
+    func podEvents(for pod: K8sPodInfo) async throws -> [K8sPodEventInfo] {
+        guard status.phase == .ready else {
+            throw K8sResourceAccessError.unavailable("Kubernetes is not ready.")
+        }
+        return .fixture.filter { $0.id.hasPrefix("\(pod.id):") }
+    }
+
+    func podLog(for pod: K8sPodInfo, container: String) async throws -> String {
+        guard status.phase == .ready else {
+            throw K8sResourceAccessError.unavailable("Kubernetes is not ready.")
+        }
+        guard pod.containers.contains(where: { $0.name == container }) else {
+            throw K8sResourceAccessError.unavailable(
+                "The selected container is no longer reported by this pod. Refresh Kubernetes resources and try again.")
+        }
+        return Self.fixtureLog(for: pod, container: container)
+    }
+
     func generateKubeconfig() async throws -> URL {
         throw K8sResourceAccessError.unavailable(
             "Kubeconfig generation is unavailable in the deterministic tour fixture.")
+    }
+
+    private static func fixtureLog(for pod: K8sPodInfo, container: String) -> String {
+        """
+        2026-01-01T12:00:00.000000000Z fixture \(container) started in \(pod.namespace)/\(pod.name)
+        2026-01-01T12:00:01.000000000Z serving deterministic tour traffic
+        """
     }
 }
 
@@ -258,30 +336,50 @@ extension [K8sPodInfo] {
         K8sPodInfo(
             name: "coredns-7f9c69d9d8-4wqxr", namespace: "kube-system", phase: .running,
             readyContainers: 1, totalContainers: 1, restarts: 0, node: "morbstack-vm",
-            age: Date(timeIntervalSinceNow: -6 * 86_400)),
+            age: Date(timeIntervalSinceNow: -6 * 86_400), uid: "fixture-coredns",
+            containers: [K8sPodContainerInfo(name: "coredns", image: "rancher/mirrored-coredns-coredns:1.11.1", state: "Running", ready: true, restarts: 0)]),
         K8sPodInfo(
             name: "local-path-provisioner-6c5cb99958-8jz2p", namespace: "kube-system", phase: .running,
             readyContainers: 1, totalContainers: 1, restarts: 0, node: "morbstack-vm",
-            age: Date(timeIntervalSinceNow: -6 * 86_400)),
+            age: Date(timeIntervalSinceNow: -6 * 86_400), uid: "fixture-local-path",
+            containers: [K8sPodContainerInfo(name: "local-path-provisioner", image: "rancher/local-path-provisioner:v0.0.28", state: "Running", ready: true, restarts: 0)]),
         K8sPodInfo(
             name: "metrics-server-648b5df564-k7vnh", namespace: "kube-system", phase: .running,
             readyContainers: 1, totalContainers: 1, restarts: 1, node: "morbstack-vm",
-            age: Date(timeIntervalSinceNow: -6 * 86_400)),
+            age: Date(timeIntervalSinceNow: -6 * 86_400), uid: "fixture-metrics-server",
+            containers: [K8sPodContainerInfo(name: "metrics-server", image: "rancher/mirrored-metrics-server:v0.7.1", state: "Running", ready: true, restarts: 1)]),
         K8sPodInfo(
             name: "svclb-shopfront-web-6f2c9", namespace: "kube-system", phase: .running,
             readyContainers: 1, totalContainers: 1, restarts: 0, node: "morbstack-vm",
-            age: Date(timeIntervalSinceNow: -3 * 3600)),
+            age: Date(timeIntervalSinceNow: -3 * 3600), uid: "fixture-shopfront",
+            containers: [K8sPodContainerInfo(name: "lb-tcp-8080", image: "rancher/klipper-lb:v0.4.13", state: "Running", ready: true, restarts: 0)]),
         K8sPodInfo(
             name: "hello-web-6d9c8f7b7-x4n2q", namespace: "default", phase: .running,
             readyContainers: 1, totalContainers: 1, restarts: 0, node: "morbstack-vm",
-            age: Date(timeIntervalSinceNow: -2 * 3600)),
+            age: Date(timeIntervalSinceNow: -2 * 3600), uid: "fixture-hello-web",
+            containers: [K8sPodContainerInfo(name: "hello-web", image: "local/hello-web:v1", state: "Running", ready: true, restarts: 0)]),
         K8sPodInfo(
             name: "migrate-schema-28j4k", namespace: "default", phase: .completed,
             readyContainers: 0, totalContainers: 1, restarts: 0, node: "morbstack-vm",
-            age: Date(timeIntervalSinceNow: -2 * 3600 - 600)),
+            age: Date(timeIntervalSinceNow: -2 * 3600 - 600), uid: "fixture-migrate-schema",
+            containers: [K8sPodContainerInfo(name: "migrate", image: "local/hello-web:v1", state: "Completed", ready: false, restarts: 0)]),
         K8sPodInfo(
             name: "flaky-worker-7d8f9c6b5-p2m9v", namespace: "default", phase: .crashLoop,
             readyContainers: 0, totalContainers: 1, restarts: 14, node: "morbstack-vm",
-            age: Date(timeIntervalSinceNow: -3 * 3600)),
+            age: Date(timeIntervalSinceNow: -3 * 3600), uid: "fixture-flaky-worker",
+            containers: [K8sPodContainerInfo(name: "worker", image: "local/worker:v1", state: "CrashLoopBackOff", ready: false, restarts: 14)]),
+    ]
+}
+
+extension [K8sPodEventInfo] {
+    static let fixture: [K8sPodEventInfo] = [
+        K8sPodEventInfo(
+            id: "kube-system/coredns-7f9c69d9d8-4wqxr:scheduled", type: "Normal", reason: "Scheduled",
+            message: "Successfully assigned kube-system/coredns-7f9c69d9d8-4wqxr to morbstack-vm",
+            count: 1, lastObserved: Date(timeIntervalSinceNow: -6 * 86_400)),
+        K8sPodEventInfo(
+            id: "default/flaky-worker-7d8f9c6b5-p2m9v:backoff", type: "Warning", reason: "BackOff",
+            message: "Back-off restarting failed container worker in pod flaky-worker-7d8f9c6b5-p2m9v_default",
+            count: 14, lastObserved: Date(timeIntervalSinceNow: -15 * 60)),
     ]
 }
