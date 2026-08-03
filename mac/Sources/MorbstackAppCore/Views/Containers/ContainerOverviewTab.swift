@@ -183,16 +183,22 @@ struct ContainerOverviewTab: View {
                 } label: {
                     Image(systemName: revealed.contains(variable.id) ? "eye.slash" : "eye")
                 }
-                .accessibilityLabel(revealed.contains(variable.id) ? "Hide value" : "Reveal value")
-                .help(revealed.contains(variable.id) ? "Hide value" : "Reveal value")
+                .accessibilityLabel(
+                    revealed.contains(variable.id)
+                        ? "Hide \(variable.key) value"
+                        : "Reveal \(variable.key) value")
+                .help(
+                    revealed.contains(variable.id)
+                        ? "Hide \(variable.key) value"
+                        : "Reveal \(variable.key) value")
 
                 Button {
                     MorbPasteboard.copy(variable.value)
                 } label: {
                     Image(systemName: "doc.on.doc")
                 }
-                .accessibilityLabel("Copy value")
-                .help("Copy value")
+                .accessibilityLabel("Copy \(variable.key) value")
+                .help("Copy \(variable.key) value")
             }
         } label: {
             environmentLabel(variable)

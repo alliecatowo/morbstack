@@ -99,10 +99,10 @@ struct ContainerDetailView: View {
                 tabBody(for: .inspect)
             }
         }
-        .task(id: container.id) { await loadInspect() }
-        .onChange(of: container.state) { _, _ in
-            Task { await loadInspect() }
-        }
+        // Container state changes require a fresh inspect document.  Giving the task a
+        // state-aware identity lets SwiftUI cancel the superseded read rather than
+        // allowing an older response to overwrite the current inspector.
+        .task(id: "\(container.id):\(container.state)") { await loadInspect() }
         .onChange(of: model.logsTabRequest) { _, _ in
             if model.consumeLogsTabRequest(for: container.id) { tab = .logs }
         }
@@ -134,15 +134,23 @@ struct ContainerDetailView: View {
     }
 
     private func loadInspect() async {
-        isLoadingInspect = inspectJSON.isEmpty
+        isLoadingInspect = true
+        inspectError = nil
         do {
             let json = try await model.client.inspectContainer(id: container.id)
+            guard !Task.isCancelled else { return }
             inspectJSON = json
             details = TrackBInspectDetails(json: json)
             inspectError = details == nil ? "The engine returned a document that is not JSON." : nil
         } catch {
+            guard !Task.isCancelled else { return }
+            // A previously loaded document describes an earlier engine state.  Do not
+            // leave it visible as though this refresh had succeeded.
+            inspectJSON = ""
+            details = nil
             inspectError = TrackBErrorText.short(error)
         }
+        guard !Task.isCancelled else { return }
         isLoadingInspect = false
     }
 }
