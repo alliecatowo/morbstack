@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+#MISE description="Report staleness and drift: is what is RUNNING what you actually BUILT?"
+set -uo pipefail
+cd "${MISE_PROJECT_ROOT:-$PWD}"
+
+# Every serious error in this project's history came from trusting a NAME over
+# its CONTENTS:
+#
+#   - a daemon at the right path with an older inode still mapped, so a fixed
+#     bug was re-filed as an open blocker;
+#   - an initrd that predated its own source by 19 hours, so guest-side commits
+#     were "tested" against code that was never in the image;
+#   - a shipped dockerd that was stock upstream, not the patched build;
+#   - a staged runtime that verified itself against its own manifest and so
+#     could never be superseded;
+#   - a `grep` that matched nothing because the directory had a different name.
+#
+# None of those are subtle once you look. The problem is that nothing ever
+# looked. This task looks. It is read-only: it never builds, signs, starts or
+# stops anything.
+#
+# Exit 0 = no drift. Exit 1 = at least one thing you are running is not the
+# thing you built.
+
+MORBSTACK_HOME="${MORBSTACK_HOME:-$HOME/.morbstack}"
+BUNDLE="dist/Morbstack.app"
+problems=0
+notes=0
+
+red()   { printf '\033[31m%s\033[0m\n' "$*"; }
+green() { printf '\033[32m%s\033[0m\n' "$*"; }
+warn()  { printf '\033[33m%s\033[0m\n' "$*"; }
+
+fail() { red   "  FAIL  $1"; problems=$((problems + 1)); }
+note() { warn  "  NOTE  $1"; notes=$((notes + 1)); }
+ok()   { green "  ok    $1"; }
+
+# mtime as epoch seconds, or 0 when the file is absent.
+mtime() { [ -e "$1" ] && stat -f %m "$1" 2>/dev/null || echo 0; }
+human() { [ -e "$1" ] && stat -f "%Sm" -t "%Y-%m-%d %H:%M" "$1" 2>/dev/null || echo "(absent)"; }
+
+echo "== guest image =="
+
+INITRD_BUILT="${MORBSTACK_HOME}/data/kernel/initrd.img"
+# `current` is a symlink to a version directory, and the bundle nests its payload
+# under that same version. Resolve both rather than hardcoding "0.1.0-m0", so this
+# keeps working after a version bump instead of quietly checking nothing.
+INITRD_STAGED="${MORBSTACK_HOME}/data/runtime/current/kernel/initrd.img"
+BUNDLE_INITRD=$(ls -1 "${BUNDLE}"/Contents/Resources/runtime/*/kernel/initrd.img 2>/dev/null | head -1)
+BUNDLE_INITRD="${BUNDLE_INITRD:-${BUNDLE}/Contents/Resources/runtime/<version>/kernel/initrd.img}"
+
+# A check that silently does not run is the same disease this task exists to
+# cure, so assert the paths we are about to compare actually exist.
+for probe in "$BUNDLE_INITRD:bundle" "$INITRD_STAGED:staged"; do
+	p="${probe%:*}"; label="${probe##*:}"
+	[ -e "$p" ] || note "no ${label} initrd at ${p} — that comparison is being skipped"
+done
+
+# A check that silently does not run is the same disease this task exists to
+# cure, so assert the paths we are about to compare actually exist.
+for probe in "$BUNDLE_INITRD:bundle" "$INITRD_STAGED:staged"; do
+	p="${probe%:*}"; label="${probe##*:}"
+	[ -e "$p" ] || note "no ${label} initrd at ${p} — that comparison is being skipped"
+done
+
+# The daemon boots runtime/current, which is staged FROM THE APP BUNDLE -- not
+# data/kernel/, which is where `mise run guest-image` writes. So the loop is
+# guest-image -> app -> restart. Running guest-image alone changes nothing at
+# runtime, which is exactly the trap that cost hours.
+if [ ! -e "$INITRD_BUILT" ]; then
+	fail "no guest image built at ${INITRD_BUILT} — run: mise run guest-image"
+else
+	guest_src_mtime=0
+	while IFS= read -r f; do
+		m=$(mtime "$f")
+		[ "$m" -gt "$guest_src_mtime" ] && guest_src_mtime=$m
+	done < <(find guest -type f \( -name '*.rs' -o -name '*.patch' -o -name '*.toml' \) 2>/dev/null)
+
+	if [ "$guest_src_mtime" -gt "$(mtime "$INITRD_BUILT")" ]; then
+		fail "guest/ is NEWER than the built image — your guest changes are not in it"
+		echo "          built:  $(human "$INITRD_BUILT")"
+		echo "          source: $(date -r "$guest_src_mtime" '+%Y-%m-%d %H:%M')"
+		echo "          fix:    mise run guest-image && mise run app"
+	else
+		ok "built image is newer than guest/ ($(human "$INITRD_BUILT"))"
+	fi
+
+	# Is the built image the one that will actually boot?
+	if [ -e "$BUNDLE_INITRD" ]; then
+		if ! cmp -s "$INITRD_BUILT" "$BUNDLE_INITRD"; then
+			fail "the app bundle carries a DIFFERENT guest image than you last built"
+			echo "          fix: mise run app   (re-stages the bundle from dist/)"
+		else
+			ok "app bundle carries the image you built"
+		fi
+	fi
+	if [ -e "$INITRD_STAGED" ] && [ -e "$BUNDLE_INITRD" ]; then
+		if ! cmp -s "$INITRD_STAGED" "$BUNDLE_INITRD"; then
+			fail "the STAGED runtime differs from the bundle — the VM boots the staged copy"
+			echo "          staged: $(human "$INITRD_STAGED")"
+			echo "          fix:    restart the daemon so it re-stages, or morb stop && morb start"
+		else
+			ok "staged runtime matches the bundle (this is what boots)"
+		fi
+	fi
+fi
+
+echo
+echo "== patched Docker Engine =="
+
+# "Unmodified upstream dockerd" is the project's headline claim and it is false:
+# mkinitramfs.sh hard-fails without the patched build. A stock binary here means
+# `docker run -P` cannot work no matter what the host side does.
+PATCHED="dist/guest-bin/morbstack-dockerd"
+if [ ! -e "$PATCHED" ]; then
+	fail "no patched engine at ${PATCHED} — run: mise run build-patched-dockerd"
+elif [ "$(strings "$PATCHED" 2>/dev/null | grep -c morbstack)" -eq 0 ]; then
+	fail "${PATCHED} contains no morbstack symbols — it is STOCK upstream, not patched"
+else
+	ok "patched engine present with morbstack symbols ($(human "$PATCHED"))"
+	patch_mtime=$(mtime guest/moby-patches/0001-morbstack-publish-all-host-allocator.patch)
+	[ "$patch_mtime" -gt "$(mtime "$PATCHED")" ] && \
+		fail "the Moby patch is newer than the built engine — rebuild it"
+fi
+
+echo
+echo "== running daemon =="
+
+# Same path, different inode. This one re-filed a fixed bug as an open blocker.
+daemon_pid=$(pgrep -f "Morbstack.app/Contents/MacOS/morbstackd" | head -1)
+if [ -z "$daemon_pid" ]; then
+	note "no daemon running (fine if you meant that)"
+else
+	on_disk="${BUNDLE}/Contents/MacOS/morbstackd"
+	running_path=$(ps -o comm= -p "$daemon_pid" 2>/dev/null)
+	if [ -e "$on_disk" ]; then
+		disk_mtime=$(mtime "$on_disk")
+		# Process start time in epoch seconds.
+		started=$(ps -o lstart= -p "$daemon_pid" 2>/dev/null)
+		started_epoch=$(date -j -f "%a %b %d %T %Y" "$started" +%s 2>/dev/null || echo 0)
+		if [ "$started_epoch" -ne 0 ] && [ "$disk_mtime" -gt "$started_epoch" ]; then
+			fail "daemon PID ${daemon_pid} started BEFORE the binary on disk was built"
+			echo "          started: $(date -r "$started_epoch" '+%Y-%m-%d %H:%M')"
+			echo "          binary:  $(human "$on_disk")"
+			echo "          it has the OLD inode mapped. Results from it are stale."
+			echo "          fix:     morb stop && morb start"
+		else
+			ok "daemon PID ${daemon_pid} is newer than its binary"
+		fi
+	fi
+	[ -n "$running_path" ] && echo "          argv: ${running_path}"
+fi
+
+echo
+echo "== code signing =="
+
+# `swift build` strips the virtualization entitlement, and `codesign --deep`
+# silently strips it too. Without it the engine can never boot a VM -- and the
+# app looks perfectly fine until someone tries.
+SIGNED_D="${BUNDLE}/Contents/MacOS/morbstackd"
+if [ -e "$SIGNED_D" ]; then
+	if codesign -d --entitlements - "$SIGNED_D" 2>/dev/null | grep -q "com.apple.security.virtualization"; then
+		ok "morbstackd carries the virtualization entitlement"
+	else
+		fail "morbstackd has NO virtualization entitlement — it cannot boot a VM"
+		echo "          fix: mise run app   (signs inside-out; never use codesign --deep)"
+	fi
+else
+	note "no assembled bundle — run: mise run app"
+fi
+
+echo
+echo "== toolchain =="
+
+if rustc --print target-libdir --target aarch64-unknown-linux-musl >/dev/null 2>&1; then
+	ok "guest Rust target installed (aarch64-unknown-linux-musl)"
+else
+	fail "guest Rust target missing — the guest's Linux-only code is NOT type-checked"
+	echo "          this is how 13 guest compile errors shipped while 217 host tests passed"
+	echo "          fix: rustup target add aarch64-unknown-linux-musl"
+fi
+
+echo
+echo "== repository =="
+
+if [ -z "$(git remote 2>/dev/null)" ]; then
+	fail "no git remote — CI cannot run, and has never run"
+else
+	ok "remote: $(git remote get-url origin 2>/dev/null)"
+fi
+
+if [ -e .git/hooks/pre-commit ]; then
+	ok "pre-commit hook installed"
+else
+	note "pre-commit hook not installed — run: mise run install-hooks"
+fi
+
+echo
+if [ "$problems" -eq 0 ]; then
+	green "no drift detected${notes:+ (${notes} note(s) above)}"
+	exit 0
+fi
+red "${problems} problem(s): what you are running is not what you built"
+exit 1
