@@ -32,6 +32,7 @@ enum Nav: String, CaseIterable, Identifiable, Sendable {
     case builds
     case kubernetes
     case disk
+    case migration
 
     var id: String { rawValue }
 
@@ -45,6 +46,7 @@ enum Nav: String, CaseIterable, Identifiable, Sendable {
         case .builds: return "Builds"
         case .kubernetes: return "Kubernetes"
         case .disk: return "Disk"
+        case .migration: return "Migration"
         }
     }
 
@@ -58,10 +60,11 @@ enum Nav: String, CaseIterable, Identifiable, Sendable {
         case .builds: return "hammer"
         case .kubernetes: return "helm"
         case .disk: return "chart.pie"
+        case .migration: return "arrow.left.arrow.right"
         }
     }
 
-    /// The `⌘1`…`⌘8` accelerator for this section.
+    /// The `⌘1`…`⌘9` accelerator for this section.
     var shortcutIndex: Int { (Nav.allCases.firstIndex(of: self) ?? 0) + 1 }
 }
 

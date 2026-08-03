@@ -271,6 +271,7 @@ struct RootWindow: View {
 private enum SidebarSection: String, CaseIterable, Identifiable {
     case workloads = "Workloads"
     case resources = "Resources"
+    case utilities = "Utilities"
 
     var id: String { rawValue }
 
@@ -278,6 +279,7 @@ private enum SidebarSection: String, CaseIterable, Identifiable {
         switch self {
         case .workloads: return [.containers, .stacks, .kubernetes]
         case .resources: return [.images, .volumes, .networks, .builds, .disk]
+        case .utilities: return [.migration]
         }
     }
 }
@@ -455,7 +457,7 @@ struct DetailHost: View {
                 LoadingView()
                     .navigationTitle(model.selection.title)
                     .navigationSubtitle("Connecting…")
-            } else if !model.engine.isRunning {
+            } else if !model.engine.isRunning && model.selection != .migration {
                 EngineStoppedView(model: model)
                     .navigationTitle(model.selection.title)
                     .navigationSubtitle(model.engine.headline)
@@ -517,6 +519,7 @@ struct DetailHost: View {
         case .disk: DiskRootView(model: model)
         case .kubernetes: KubernetesRootView(model: model)
         case .builds: BuildsRootView(model: model)
+        case .migration: MigrationRootView(model: model)
         }
     }
 
