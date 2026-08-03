@@ -211,8 +211,19 @@ class DaemonClient: @unchecked Sendable {
     }
 
     private func kubernetesCommand(_ command: String) async throws -> [String: AnyCodableValue] {
-        let response = try await roundTrip(
-            DaemonRequest(cmd: command), timeout: Self.kubernetesTimeout)
+        let request = DaemonRequest(cmd: command)
+        let response = try await roundTrip(request, timeout: Self.kubernetesTimeout)
+        if DaemonUpdateCompatibility.restartRequirement(for: request, rejectedBy: response) != nil {
+            // This is an observation-only `version` request. The caller reached a
+            // daemon successfully, but it predates the additive command in this app.
+            // Do not turn a native error state into an implicit service/engine restart.
+            let daemonVersion = await version()
+            if let requirement = DaemonUpdateCompatibility.restartRequirement(
+                for: request, rejectedBy: response, daemonVersion: daemonVersion)
+            {
+                throw MorbError.unsupported(requirement.message)
+            }
+        }
         guard response.ok else {
             throw MorbError.vm(response.error ?? "morbstackd rejected \(command)")
         }

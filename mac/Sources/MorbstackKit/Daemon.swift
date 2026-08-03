@@ -666,7 +666,7 @@ public final class Daemon {
             return awaitVMOperation("resume", timeout: 120) { self.vm.resume(completion: $0) }
 
         default:
-            return .failure("unknown command `\(request.cmd)`")
+            return .unknownCommand(request.cmd)
         }
     }
 

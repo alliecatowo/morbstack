@@ -255,19 +255,27 @@ Failure:
   constrained further at the protocol level in M0 (each `cmd` defines its
   own `data` contents, e.g. `status` returns VM lifecycle state).
 - `error`: present iff `ok == false`. Human-readable message, safe to print
-  directly to the CLI user. Not machine-parsed in M0 — there is no
-  structured error code field yet.
+  directly to the CLI user.
+- `error_code`: optional on failures. A daemon that supports it emits a stable,
+  lowercase-hyphenated code alongside the human `error`; clients must tolerate it
+  being absent because M0 daemons predate the field. Unknown future code strings are
+  not a decode error and must still display the associated human `error`.
 
 ### Error semantics
 
 - An unrecognized `cmd` produces `{"ok": false, "error": "..."}`; it never
-  closes the connection abruptly or crashes morbstackd. The exact text, from
-  `Daemon.handle(_:)` (`mac/Sources/MorbstackKit/Daemon.swift`), is:
+  closes the connection abruptly or crashes morbstackd. Current daemons additionally
+  emit the stable `error_code: "unknown-command"`:
   ```json
-  {"ok": false, "error": "unknown command `reticulate_splines`"}
+  {"ok": false, "error": "unknown command `reticulate_splines`", "error_code": "unknown-command"}
   ```
-  (backtick-quoted, not double-quoted, and no leading "unrecognized"/"bad" —
-  match on `ok == false`, not on this string, if you're writing a client.)
+  Clients that understand `error_code` may use it. For an M0 daemon without the
+  field, Morbstack's update-continuity adapter recognizes only the canonical legacy
+  response for one known additive command (`k8s-diagnose`) and turns it into a
+  `restart-required` client-side error. It first may make the existing read-only
+  `version` probe for diagnostic context; it never starts, stops, or re-registers a
+  service/engine. Every other legacy error remains human-readable prose, not a
+  machine-parsed protocol surface.
 - A malformed request line (invalid JSON, missing `cmd`) produces a
   `{"ok": false, "error": "..."}` response on that same connection: the
   connection-handling loop in `Daemon.serveControlClient` wraps the

@@ -212,12 +212,43 @@ func spawnDaemon(forCommand command: String = "") -> Result<Void, SpawnFailure> 
 /// Sends `request`, auto-starting the daemon once if the socket is not
 /// answering *and* this command is one that may do so
 /// (see ``MorbCommandPolicy``).
+///
+/// A daemon which was already running before an app update can answer the control
+/// socket yet not know a command introduced by this bundled `morb`. That is not a
+/// reason for a CLI observation to kill or restart it. `compatibilityAwareResponse`
+/// turns the one known additive-command response into a clear, equally non-mutating
+/// instruction instead.
+func compatibilityAwareResponse(
+    _ response: DaemonResponse,
+    for request: DaemonRequest,
+    socketPath: String
+) -> DaemonResponse {
+    guard DaemonUpdateCompatibility.restartRequirement(for: request, rejectedBy: response) != nil else {
+        return response
+    }
+
+    // `version` is a short, read-only request supported by the M0 daemon. It is
+    // diagnostic context only; a failed version probe must not erase the already
+    // established update-skew explanation or cause a daemon to be spawned.
+    let daemonVersion: String? = {
+        guard let versionResponse = try? UnixSocketClient.roundTrip(
+            path: socketPath, request: DaemonRequest(cmd: "version"), timeout: 5),
+            versionResponse.ok,
+            case .string(let value)? = versionResponse.data?["version"]
+        else { return nil }
+        return value
+    }()
+
+    return DaemonUpdateCompatibility.restartRequirement(
+        for: request, rejectedBy: response, daemonVersion: daemonVersion)?.response ?? response
+}
+
 func callDaemon(
     _ request: DaemonRequest, timeout: TimeInterval = Daemon.clientTimeout
 ) -> DaemonResponse {
     let socketPath = MorbPaths.controlSocket.path
     if let response = try? UnixSocketClient.roundTrip(path: socketPath, request: request, timeout: timeout) {
-        return response
+        return compatibilityAwareResponse(response, for: request, socketPath: socketPath)
     }
 
     guard MorbCommandPolicy.mayAutoStartDaemon(request.cmd) else {
@@ -257,7 +288,7 @@ func callDaemon(
     let deadline = Date().addingTimeInterval(3)
     while Date() < deadline {
         if let response = try? UnixSocketClient.roundTrip(path: socketPath, request: request, timeout: timeout) {
-            return response
+            return compatibilityAwareResponse(response, for: request, socketPath: socketPath)
         }
         usleep(100_000)
     }

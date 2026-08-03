@@ -153,6 +153,25 @@ final class FramingTests: XCTestCase {
         let decoded = try IPCCodec.decodeLine(DaemonResponse.self, from: try IPCCodec.encodeLine(response))
         XCTAssertFalse(decoded.ok)
         XCTAssertEqual(decoded.error, "kernel not found")
+        XCTAssertNil(decoded.errorCode)
+    }
+
+    func testStructuredDaemonFailureUsesSnakeCaseErrorCode() throws {
+        let response = DaemonResponse.failure("unknown command `future-command`", code: .unknownCommand)
+        let decoded = try IPCCodec.decodeLine(DaemonResponse.self, from: try IPCCodec.encodeLine(response))
+        XCTAssertEqual(decoded.errorCode, DaemonResponse.ErrorCode.unknownCommand.rawValue)
+
+        let encoded = String(decoding: try IPCCodec.encodeLine(response), as: UTF8.self)
+        XCTAssertTrue(encoded.contains("\"error_code\""), encoded)
+        XCTAssertFalse(encoded.contains("errorCode"), encoded)
+    }
+
+    func testDaemonResponseAcceptsLegacyFailureWithoutErrorCode() throws {
+        let legacy = try IPCCodec.decodeLine(
+            DaemonResponse.self,
+            from: Data(#"{"ok":false,"error":"unknown command `k8s-diagnose`"}"#.utf8))
+        XCTAssertFalse(legacy.ok)
+        XCTAssertNil(legacy.errorCode)
     }
 
     func testAnyCodableValuePreservesTypes() throws {

@@ -152,18 +152,51 @@ public enum MorbCommandPolicy {
 ///
 /// Exactly one of `data` (on success) or `error` (on failure) is meaningful.
 public struct DaemonResponse: Codable, Equatable, Sendable {
+    /// Stable error codes for failures a client can safely distinguish without parsing
+    /// prose. Unknown future strings remain valid on the wire: ``errorCode`` is a
+    /// `String?`, rather than this enum, specifically so a newer daemon cannot make
+    /// an older client fail to decode a useful error reply.
+    public enum ErrorCode: String, Codable, Equatable, Sendable {
+        /// The daemon received a syntactically valid control command it does not
+        /// implement. This is the normal signal for a client newer than a running
+        /// daemon after an app update.
+        case unknownCommand = "unknown-command"
+        /// A newer client translated an old daemon's unknown-command reply into an
+        /// actionable, non-mutating update-continuity instruction.
+        case restartRequired = "restart-required"
+    }
+
     /// Whether the command succeeded.
     public var ok: Bool
     /// Command-specific result payload; present when ``ok`` is `true`.
     public var data: [String: AnyCodableValue]?
     /// Human-readable failure message; present when ``ok`` is `false`.
     public var error: String?
+    /// Optional machine-readable failure classification, encoded as `error_code`.
+    ///
+    /// Older daemons omit this field. Clients must therefore retain a narrowly scoped
+    /// legacy fallback where update continuity matters, rather than assuming absence
+    /// means success or attempting to restart anything automatically.
+    public var errorCode: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case ok
+        case data
+        case error
+        case errorCode = "error_code"
+    }
 
     /// Creates a response.
-    public init(ok: Bool, data: [String: AnyCodableValue]? = nil, error: String? = nil) {
+    public init(
+        ok: Bool,
+        data: [String: AnyCodableValue]? = nil,
+        error: String? = nil,
+        errorCode: String? = nil
+    ) {
         self.ok = ok
         self.data = data
         self.error = error
+        self.errorCode = errorCode
     }
 
     /// Convenience constructor for a successful reply.
@@ -172,8 +205,91 @@ public struct DaemonResponse: Codable, Equatable, Sendable {
     }
 
     /// Convenience constructor for a failed reply.
-    public static func failure(_ message: String) -> DaemonResponse {
-        DaemonResponse(ok: false, data: nil, error: message)
+    public static func failure(_ message: String, code: ErrorCode? = nil) -> DaemonResponse {
+        DaemonResponse(ok: false, data: nil, error: message, errorCode: code?.rawValue)
+    }
+
+    /// A structured form of the long-standing unknown-command response.
+    ///
+    /// Keeping the human sentence stable preserves terminal readability and lets
+    /// pre-`error_code` clients continue to explain it. New clients can use the code
+    /// instead of treating arbitrary daemon prose as a protocol surface.
+    public static func unknownCommand(_ command: String) -> DaemonResponse {
+        failure("unknown command `\(command)`", code: .unknownCommand)
+    }
+}
+
+/// The small, deliberately conservative compatibility layer between a new app/CLI
+/// and a daemon that was already running when it was updated.
+///
+/// The control protocol has always required old daemons to return a normal failure for
+/// a command they do not understand. That keeps the daemon safe, but a raw
+/// `unknown command` is not useful to someone who just installed the app version that
+/// introduced the command. This type recognizes only *known additive commands*, never
+/// a generic error string, and turns that particular update-skew signal into a clear
+/// instruction. It is pure data transformation: it does not connect to a socket,
+/// register a service, or start/stop the engine.
+public enum DaemonUpdateCompatibility {
+    /// A single additive feature has this compatibility path today. Add a command here
+    /// only when its prior daemon absence is known to mean an app/daemon update skew,
+    /// not merely because it happens to return a failed response.
+    private static let restartRequiredCommands: [String: String] = [
+        "k8s-diagnose": "Kubernetes diagnosis",
+    ]
+
+    /// The user-facing result of detecting a known newer-client/older-daemon mismatch.
+    public struct RestartRequirement: Equatable, Sendable {
+        /// The control command the old daemon did not implement.
+        public let command: String
+        /// A concise name for the feature, suitable for a native unavailable state.
+        public let feature: String
+        /// Best-effort daemon version from its safe `version` command.
+        public let daemonVersion: String?
+
+        public init(command: String, feature: String, daemonVersion: String?) {
+            self.command = command
+            self.feature = feature
+            self.daemonVersion = daemonVersion
+        }
+
+        /// Explains the exact recovery without implying that the client changed
+        /// engine state. Restarting is intentionally left to the person: some
+        /// installations use a foreground daemon, others opt into a LaunchAgent.
+        public var message: String {
+            let version = daemonVersion.map { " (version \($0))" } ?? ""
+            return "The running Morbstack service\(version) does not support \(feature). "
+                + "Restart Morbstack, then try again. This request did not start, stop, or change the engine."
+        }
+
+        /// A failure suitable for forwarding through the CLI's existing JSON and text
+        /// renderers, or for converting to a native app unavailable state.
+        public var response: DaemonResponse {
+            DaemonResponse.failure(message, code: .restartRequired)
+        }
+    }
+
+    /// Returns a restart requirement only for a known additive command that an older
+    /// daemon rejected. A current daemon supplies `error_code: unknown-command`; the
+    /// exact legacy fallback supports the older M0 reply that lacked an error code.
+    /// No other error text is interpreted as protocol data.
+    public static func restartRequirement(
+        for request: DaemonRequest,
+        rejectedBy response: DaemonResponse,
+        daemonVersion: String? = nil
+    ) -> RestartRequirement? {
+        guard !response.ok,
+              let feature = restartRequiredCommands[request.cmd]
+        else { return nil }
+
+        let structuredUnknownCommand = response.errorCode == DaemonResponse.ErrorCode.unknownCommand.rawValue
+        let legacyUnknownCommand = response.errorCode == nil
+            && response.error == "unknown command `\(request.cmd)`"
+        guard structuredUnknownCommand || legacyUnknownCommand else { return nil }
+
+        return RestartRequirement(
+            command: request.cmd,
+            feature: feature,
+            daemonVersion: daemonVersion)
     }
 }
 
