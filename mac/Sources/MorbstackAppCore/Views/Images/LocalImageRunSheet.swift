@@ -32,10 +32,10 @@ struct LocalImageRunSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var requestedName = ""
     @State private var showsConfirmation = false
-    @State private var state: State = .review
+    @State private var state: RunState = .review
     @FocusState private var nameIsFocused: Bool
 
-    private enum State {
+    private enum RunState {
         case review
         case working(LocalImageRunProgress)
         case succeeded(LocalImageRunResult)
