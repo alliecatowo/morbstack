@@ -367,8 +367,6 @@ struct BuildsRootView: View {
                 Button("Copy Description") { MorbPasteboard.copy(record.description) }
                 Button("Copy Record ID") { MorbPasteboard.copy(record.id) }
             }
-        } primaryAction: { ids in
-            if let id = ids.first { selection = id }
         }
     }
 
@@ -435,7 +433,6 @@ struct BuildsRootView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                cacheMaintenance
                 Section("Build History") {
                     Text(
                         "This is a cache record, not one completed build. Docker Engine does not expose "
@@ -458,39 +455,6 @@ struct BuildsRootView: View {
         isRefreshing = true
         defer { isRefreshing = false }
         await model.refreshBuildCache()
-    }
-
-    @ViewBuilder
-    private var cacheMaintenance: some View {
-        Section {
-            if isPruning {
-                ProgressView("Pruning unused cache…")
-            }
-
-            Button("Prune Unused Cache…", role: .destructive) {
-                showsPruneConfirmation = true
-            }
-            .disabled(unusedCount == 0 || isPruning || isRefreshing)
-
-            if let lastPrunedBytes {
-                LabeledContent("Last Prune") {
-                    Text(
-                        lastPrunedBytes > 0
-                            ? "\(Formatters.bytesString(lastPrunedBytes)) reclaimed"
-                            : "No space reclaimed")
-                }
-            }
-        } header: {
-            Text("Cache Maintenance")
-        } footer: {
-            if unusedCount > 0 {
-                Text(
-                    "Docker decides which unused cache records are eligible when pruning begins. "
-                        + "The list is for review only; individual cache records cannot be deleted.")
-            } else {
-                Text("There are no unused cache records to prune.")
-            }
-        }
     }
 
     @MainActor
