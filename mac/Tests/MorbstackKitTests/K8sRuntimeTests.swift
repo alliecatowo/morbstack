@@ -165,6 +165,29 @@ final class K8sRuntimeTests: XCTestCase {
         XCTAssertEqual(K8s.guestAPIServerPort, 6443)
     }
 
+    func testApiForwardPublicationRequiresARunningReadyCluster() {
+        let ready = K8s.Status(installed: true, enabled: true, phase: .ready)
+        let starting = K8s.Status(installed: true, enabled: true, phase: .starting)
+        let disabled = K8s.Status(installed: true, enabled: false, phase: .stopped)
+
+        XCTAssertEqual(
+            K8sAPIForwardPublication.action(vmState: .running, status: ready), .publish,
+            "the guest's ready phase is the contract that kubectl can work")
+        XCTAssertEqual(
+            K8sAPIForwardPublication.action(vmState: .running, status: starting), .awaitReadiness,
+            "a starting cluster must not be advertised through a bound host socket")
+        XCTAssertEqual(
+            K8sAPIForwardPublication.action(vmState: .running, status: nil), .awaitReadiness,
+            "an unreachable control channel cannot prove an API endpoint is usable")
+        XCTAssertEqual(
+            K8sAPIForwardPublication.action(vmState: .running, status: disabled), .stop)
+        XCTAssertEqual(
+            K8sAPIForwardPublication.action(vmState: .stopped, status: ready), .stop)
+        XCTAssertEqual(
+            K8sAPIForwardPublication.action(vmState: .error("boot failed"), status: ready), .stop,
+            "a status result from an older VM must never keep a host listener alive")
+    }
+
     // MARK: - Command policy
 
     func testOnlyK8sEnableMayStartADaemon() {

@@ -87,7 +87,7 @@ final class TrackEShareStatusTests: XCTestCase {
         let chip = TrackEShareStatus.chip(live, engineRunning: true)
 
         XCTAssertEqual(chip?.text, "1 folder not shared")
-        XCTAssertEqual(chip?.tone, .warn)
+        XCTAssertEqual(chip?.symbol, "folder.badge.questionmark")
         XCTAssertTrue(chip?.detail.contains("/Volumes") ?? false)
         XCTAssertFalse(chip?.detail.contains("/Users") ?? true, "a healthy root must not be listed")
     }
@@ -131,64 +131,56 @@ final class TrackEShareStatusTests: XCTestCase {
 
     // MARK: - Settings row wording
 
-    func testMountedRowIsGood() {
-        let (text, tone) = TrackEShareStatus.rowSummary(
+    func testMountedRowStatesMounted() {
+        let text = TrackEShareStatus.rowSummary(
             share("/Users", mounted: true), source: .daemon, engineRunning: true)
         XCTAssertEqual(text, "mounted")
-        XCTAssertEqual(tone, .good)
     }
 
     func testMountedReadOnlyRowSaysSo() {
-        let (text, tone) = TrackEShareStatus.rowSummary(
+        let text = TrackEShareStatus.rowSummary(
             share("/Users", mounted: true, readOnly: true), source: .daemon, engineRunning: true)
         XCTAssertEqual(text, "mounted, read-only")
-        XCTAssertEqual(tone, .good)
     }
 
     /// "Not mounted because nothing is running" and "not mounted and something is wrong"
-    /// are identical in the data and opposite in meaning. Only the second is a fault, and
-    /// only the second gets a warning colour.
-    func testStoppedEngineRowIsNeutralNotAWarning() {
-        let (text, tone) = TrackEShareStatus.rowSummary(
+    /// are identical in the data and opposite in meaning, so the wording must distinguish them.
+    func testStoppedEngineRowExplainsTheEngineIsStopped() {
+        let text = TrackEShareStatus.rowSummary(
             share("/Users", mounted: false), source: .config, engineRunning: false)
         XCTAssertTrue(text.contains("engine is not running"))
-        XCTAssertEqual(tone, .neutral)
     }
 
-    func testRunningEngineWithAnUnmountedRootIsAWarning() {
-        let (text, tone) = TrackEShareStatus.rowSummary(
+    func testRunningEngineWithAnUnmountedRootStatesThatItIsNotMounted() {
+        let text = TrackEShareStatus.rowSummary(
             share("/Users", mounted: false), source: .daemon, engineRunning: true)
         XCTAssertEqual(text, "not mounted")
-        XCTAssertEqual(tone, .warn)
     }
 
     func testRowSummaryPrefersTheReasonWhenThereIsOne() {
-        let (text, tone) = TrackEShareStatus.rowSummary(
+        let text = TrackEShareStatus.rowSummary(
             share("/Volumes", mounted: false, error: "virtiofs mount failed"),
             source: .daemon,
             engineRunning: true)
         XCTAssertTrue(text.contains("virtiofs mount failed"))
-        XCTAssertEqual(tone, .warn)
     }
 
     /// A root the host planner skipped is reported even with the engine down: the reason
     /// is a host fact, and it is the same reason the guest will not have it next boot.
     func testSkippedRootIsExplainedEvenWithTheEngineStopped() {
-        let (text, tone) = TrackEShareStatus.rowSummary(
+        let text = TrackEShareStatus.rowSummary(
             share("/nope", mounted: false, skippedReason: "does not exist"),
             source: .config,
             engineRunning: false)
         XCTAssertTrue(text.contains("does not exist"))
-        XCTAssertEqual(tone, .warn)
     }
 
     func testStaleRootIsCalledOut() {
-        let (text, tone) = TrackEShareStatus.rowSummary(
+        let text = TrackEShareStatus.rowSummary(
             share("/Users", mounted: true, configured: false),
             source: .daemon,
             engineRunning: true)
         XCTAssertTrue(text.contains("no longer listed"))
-        XCTAssertEqual(tone, .warn)
     }
 
     // MARK: - Rosetta, before any daemon answers

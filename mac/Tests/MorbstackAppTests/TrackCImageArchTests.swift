@@ -72,7 +72,7 @@ final class TrackCImageArchTests: XCTestCase {
             for: ImageArchitecture(os: "linux", arch: "amd64"), hostArch: "arm64")
         XCTAssertEqual(badge, .translated("amd64"))
         XCTAssertTrue(badge?.isNoteworthy ?? false)
-        XCTAssertEqual(badge?.tone, .warn)
+        XCTAssertEqual(badge?.symbol, "arrow.triangle.2.circlepath")
         XCTAssertEqual(badge?.consequenceLabel, "translated")
     }
 
@@ -82,7 +82,8 @@ final class TrackCImageArchTests: XCTestCase {
         for arch in ["arm", "386", "s390x", "ppc64le", "riscv64"] {
             let badge = TrackCImageArch.badge(
                 for: ImageArchitecture(os: "linux", arch: arch), hostArch: "arm64")
-            XCTAssertEqual(badge?.tone, .bad, "\(arch) must not read as merely slow")
+            XCTAssertEqual(badge, .foreign(arch), "\(arch) must not read as merely slow")
+            XCTAssertEqual(badge?.symbol, "exclamationmark.triangle.fill")
             XCTAssertEqual(badge?.consequenceLabel, "unsupported")
         }
     }

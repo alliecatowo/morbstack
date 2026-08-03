@@ -767,34 +767,35 @@ final class EngineStatusTests: XCTestCase {
     }
 }
 
-// MARK: - Status tones
+// MARK: - Operational state
 
-final class StatusToneTests: XCTestCase {
+final class OperationalStateTests: XCTestCase {
 
     func testContainerStates() {
-        XCTAssertEqual(StatusTone.forContainer(state: "running"), .running)
-        XCTAssertEqual(StatusTone.forContainer(state: "running", unhealthy: true), .bad)
-        XCTAssertEqual(StatusTone.forContainer(state: "restarting"), .busy)
-        XCTAssertEqual(StatusTone.forContainer(state: "paused"), .paused)
-        XCTAssertEqual(StatusTone.forContainer(state: "dead"), .bad)
-        XCTAssertEqual(StatusTone.forContainer(state: "exited"), .idle)
+        XCTAssertEqual(OperationalState.container(state: "running"), .running)
+        XCTAssertEqual(OperationalState.container(state: "running", unhealthy: true), .failed)
+        XCTAssertEqual(OperationalState.container(state: "restarting"), .changing)
+        XCTAssertEqual(OperationalState.container(state: "paused"), .paused)
+        XCTAssertEqual(OperationalState.container(state: "dead"), .failed)
+        XCTAssertEqual(OperationalState.container(state: "exited"), .stopped)
     }
 
     func testEngineStates() {
-        XCTAssertEqual(StatusTone.forEngine(.unknown), .idle)
+        XCTAssertEqual(OperationalState.engine(.unknown), .stopped)
         XCTAssertEqual(
-            StatusTone.forEngine(EngineStatus(state: "running", vmState: "", version: nil, reachable: true)),
+            OperationalState.engine(EngineStatus(state: "running", vmState: "", version: nil, reachable: true)),
             .running)
         XCTAssertEqual(
-            StatusTone.forEngine(EngineStatus(state: "error", vmState: "", version: nil, reachable: true)),
-            .bad)
+            OperationalState.engine(EngineStatus(state: "error", vmState: "", version: nil, reachable: true)),
+            .failed)
     }
 
-    /// Colour alone fails for a red/green deficiency and fails again in a greyscale
-    /// screenshot, so every tone carries a distinct symbol too.
-    func testEveryToneHasADistinctSymbol() {
-        let tones: [StatusTone] = [.running, .idle, .busy, .paused, .bad]
-        XCTAssertEqual(Set(tones.map(\.symbol)).count, tones.count)
+    /// State remains distinguishable outside a particular visual treatment, including
+    /// in menus, VoiceOver labels, and a greyscale screenshot.
+    func testEveryOperationalStateHasADistinctSymbolAndLabel() {
+        let states: [OperationalState] = [.running, .stopped, .changing, .paused, .failed]
+        XCTAssertEqual(Set(states.map(\.symbol)).count, states.count)
+        XCTAssertEqual(Set(states.map(\.label)).count, states.count)
     }
 }
 

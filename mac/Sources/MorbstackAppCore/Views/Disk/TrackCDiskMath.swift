@@ -11,9 +11,10 @@
 // are covered by `TrackCDiskMathTests`.
 //
 // The honesty rule for this file: never invent a number. Where the engine does not
-// report enough to be exact — container writable-layer sizes are not in the list
-// endpoints, and build-cache records are not enumerable through anything the app
-// already calls — the result is marked `isEstimate` and the UI says so out loud.
+// report enough to be exact — for example, container writable-layer sizes are not in
+// the list endpoints — the result is marked `isEstimate` and the UI says so out loud.
+// Build cache records have their own review surface in Builds. Disk therefore never
+// turns its aggregate cache total into a destructive preview.
 
 import Foundation
 import MorbstackKit
@@ -63,7 +64,7 @@ enum TrackCDiskCategory: String, CaseIterable, Identifiable, Sendable {
         case .volumes:
             return "Removes unused anonymous volumes. Named volumes are kept even when nothing is using them."
         case .buildCache:
-            return "Removes build cache records that are not in use by the current image graph."
+            return "Review cache records in Builds. Docker cannot remove an individual cache record."
         }
     }
 
@@ -156,7 +157,6 @@ enum TrackCPruneTarget: String, CaseIterable, Identifiable, Sendable {
     case containers
     case images
     case volumes
-    case buildCache
 
     var id: String { rawValue }
 
@@ -165,7 +165,6 @@ enum TrackCPruneTarget: String, CaseIterable, Identifiable, Sendable {
         case .containers: return .containers
         case .images: return .images
         case .volumes: return .volumes
-        case .buildCache: return .buildCache
         }
     }
 }
@@ -406,8 +405,6 @@ enum TrackCDiskMath {
             return imagePreview(images)
         case .volumes:
             return volumePreview(volumes)
-        case .buildCache:
-            return buildCachePreview(usage)
         }
     }
 
@@ -481,29 +478,6 @@ enum TrackCDiskMath {
             },
             knownBytes: removable.reduce(Int64(0)) { $0 + max(0, $1.size ?? 0) },
             hasUnknownSizes: removable.contains { $0.size == nil })
-    }
-
-    private static func buildCachePreview(_ usage: DiskUsage?) -> TrackCPrunePreview {
-        // The app never lists build cache records — nothing else needs them, and adding
-        // an endpoint just to itemise a sheet is not worth a round trip. So the preview
-        // is a single honest summary row rather than a fabricated inventory.
-        let total = max(0, usage?.buildCacheTotal ?? 0)
-        guard total > 0 else {
-            return TrackCPrunePreview(
-                target: .buildCache, items: [], kept: [], knownBytes: 0, hasUnknownSizes: false)
-        }
-        return TrackCPrunePreview(
-            target: .buildCache,
-            items: [
-                TrackCPruneItem(
-                    id: "build-cache",
-                    title: "Unused build cache",
-                    detail: "\(Formatters.bytesString(total)) of cache records, minus anything still in use",
-                    bytes: nil)
-            ],
-            kept: [],
-            knownBytes: 0,
-            hasUnknownSizes: true)
     }
 
     // MARK: Sparse file footprint

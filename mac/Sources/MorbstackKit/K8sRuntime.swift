@@ -290,6 +290,39 @@ public final class K8sAPIServerForward {
     }
 }
 
+/// The only states in which it is honest to expose a host Kubernetes endpoint.
+///
+/// A listener is not the API server. In particular, a just-booted guest can answer
+/// its control channel while k3s is still bringing the API server up. The guest's
+/// `ready` phase is explicitly the contract that `kubectl` can work, so this small
+/// policy keeps lifecycle code from mistaking a bound loopback socket for a usable
+/// cluster. It is deliberately pure so stopped/error transitions can be covered
+/// without booting a VM or binding a host port.
+enum K8sAPIForwardPublication {
+    enum Action: Equatable {
+        /// Close any existing listener and do not schedule another attempt.
+        case stop
+        /// Close any existing listener and ask the guest again later.
+        case awaitReadiness
+        /// The guest has reported a usable cluster; publish the loopback forward.
+        case publish
+    }
+
+    static func action(vmState: VMState, status: K8s.Status?) -> Action {
+        guard vmState == .running else { return .stop }
+        guard let status else { return .awaitReadiness }
+        guard status.enabled else { return .stop }
+        switch status.phase {
+        case .ready:
+            return .publish
+        case .starting:
+            return .awaitReadiness
+        case .notInstalled, .stopped:
+            return .stop
+        }
+    }
+}
+
 // MARK: - The manager
 
 /// Everything `morb k8s ...` needs, in one object the daemon owns.
@@ -371,13 +404,10 @@ public final class K8sManager {
         let after = try withControl {
             try K8s.requestStatus($0, action: "enable", timeout: Self.controlTimeout)
         }
-        // The API server is about to start listening in the guest; have the Mac-side
-        // port ready before the user's first `kubectl`.
-        do {
-            try forward.start()
-        } catch {
-            log.warn("kubernetes is enabled but its API server could not be published: \(error)")
-        }
+        // Do not bind a host port merely because the persisted toggle is on. The
+        // daemon reconciles the forward after the guest reports `.ready`, whose
+        // contract is that `kubectl` can work. Publishing during `.starting` would
+        // advertise a local endpoint that can only accept and then close clients.
         return after
     }
 
@@ -397,6 +427,15 @@ public final class K8sManager {
     /// `~/.morbstack/kubeconfig` with mode 0600.
     @discardableResult
     public func writeHostKubeconfig() throws -> (path: URL, hostPort: Int) {
+        let status = try status()
+        guard status.enabled else {
+            throw MorbError.io("Kubernetes is disabled; enable it before generating a kubeconfig.")
+        }
+        guard status.phase == .ready else {
+            throw MorbError.io(
+                "Kubernetes is \(status.phase.summary), so its API endpoint is not ready yet. "
+                    + "Wait for `morb k8s status` to report ready, then try again.")
+        }
         let hostPort = try forward.boundPort ?? forward.start()
         let reply = try withControl { try K8s.requestKubeconfig($0, timeout: Self.controlTimeout) }
         let rewritten = K8s.rewriteKubeconfig(reply.kubeconfig, hostPort: hostPort)

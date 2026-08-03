@@ -72,6 +72,12 @@ keyboard focus, menus, unavailable states, and safe confirmation paths. Computer
 authoritative full-window UX review because it sees the actual titlebar, traffic lights,
 toolbar, sidebars, materials, and transitions.
 
+On a new Mac, macOS must authorize Xcode Helper under **Privacy & Security > Accessibility**
+before an XCUITest can enable automation. If macOS asks for administrator authentication, let
+the person complete it; do not replace the blocked test with an offscreen image. This local
+permission is documented in the harness README and is intentionally not stored in repository
+configuration.
+
 ## Subagent roles
 
 Delegate independent, bounded work by responsibility:

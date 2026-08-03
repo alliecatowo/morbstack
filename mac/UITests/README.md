@@ -55,6 +55,15 @@ MORBSTACK_APP_PATH="$PWD/dist/Morbstack.app" \
     test
 ```
 
+Before the first macOS UI-test run on a machine, authorize Xcode Helper in **System
+Settings > Privacy & Security > Accessibility** when macOS prompts. Current macOS releases
+can also request administrator authentication to enable UI automation; that authorization is
+cached by the system for a limited time. This is a local privacy permission, not repository
+configuration, so the harness fails rather than working around it with a synthetic capture.
+
+Apple documents this requirement in [Recording UI automation for testing](https://developer.apple.com/documentation/XCUIAutomation/recording-ui-automation-for-testing)
+and [User Interface Testing](https://developer.apple.com/library/archive/documentation/DeveloperTools/Conceptual/testing_with_xcode/chapters/09-ui_testing.html).
+
 `MORBSTACK_APP_PATH` is deliberately explicit in automation. When it is absent, a
 checkout-local test defaults to `dist/Morbstack.app`; it fails with an actionable error
 if that bundle or `Contents/MacOS/MorbstackApp` is missing. The harness does not silently

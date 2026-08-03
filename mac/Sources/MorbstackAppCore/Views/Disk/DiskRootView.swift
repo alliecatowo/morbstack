@@ -12,12 +12,15 @@ import SwiftUI
 // MARK: - Prune targets
 
 extension TrackCDiskCategory {
-    var pruneTarget: TrackCPruneTarget {
+    /// Docker exposes an exact enough preview for the first three resource families.
+    /// Build cache is intentionally excluded: the only Docker operation would prune
+    /// every unused cache record globally, which this screen cannot review by record.
+    var pruneTarget: TrackCPruneTarget? {
         switch self {
         case .images: return .images
         case .containers: return .containers
         case .volumes: return .volumes
-        case .buildCache: return .buildCache
+        case .buildCache: return nil
         }
     }
 }
@@ -464,15 +467,25 @@ struct DiskRootView: View {
                     }
                 }
 
-                if let category = selectedRow.category {
+                if let category = selectedRow.category, let target = category.pruneTarget {
                     Section {
                         Button("Prune \(category.title)…", role: .destructive) {
-                            pruning = category.pruneTarget
+                            pruning = target
                         }
-                        .disabled(busy || !canPrune(category.pruneTarget))
+                        .disabled(busy || !canPrune(target))
                         .help(category.pruneSummary)
                     } footer: {
                         Text(category.pruneSummary)
+                    }
+                } else if case .some(.buildCache) = selectedRow.category {
+                    Section {
+                        Button("Show Build Cache") {
+                            model.selection = .builds
+                        }
+                    } footer: {
+                        Text(
+                            "Docker can only remove every unused cache record at once. "
+                                + "Review individual records in Builds; Morbstack does not run that broader cleanup here.")
                     }
                 }
 
@@ -591,7 +604,6 @@ struct DiskRootView: View {
             case .containers: _ = try await model.client.pruneContainers()
             case .images: _ = try await model.client.pruneImages()
             case .volumes: _ = try await model.client.pruneVolumes()
-            case .buildCache: _ = try await model.client.pruneBuildCache()
             }
             await model.refreshAll()
             await loadFootprint()

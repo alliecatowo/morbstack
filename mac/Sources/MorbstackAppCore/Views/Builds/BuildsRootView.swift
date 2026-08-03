@@ -76,14 +76,6 @@ enum BuildCacheList {
     }
 }
 
-/// An operation failure is domain state for a standard system alert; it carries no
-/// custom presentation or visual treatment.
-private struct BuildOperationFailure: Identifiable {
-    let id = UUID()
-    let title: String
-    let message: String
-}
-
 // MARK: - Root
 
 struct BuildsRootView: View {
@@ -94,10 +86,7 @@ struct BuildsRootView: View {
     @State private var sortOrder: [BuildComparator] = [BuildComparator(key: .size, order: .reverse)]
     @State private var selection: BuildCacheRecord.ID?
     @State private var showsInspector = true
-    @State private var busy = false
     @State private var isRefreshing = false
-    @State private var showsPruneConfirmation = false
-    @State private var operationFailure: BuildOperationFailure?
 
     private var records: [BuildCacheRecord] { model.buildCache }
 
@@ -106,7 +95,6 @@ struct BuildsRootView: View {
     }
 
     private var unusedCount: Int { BuildCacheList.unused(records).count }
-    private var unusedBytes: Int64 { BuildCacheList.totalSize(BuildCacheList.unused(records)) }
 
     private var subtitle: String {
         guard !records.isEmpty else { return "No cache" }
@@ -127,28 +115,6 @@ struct BuildsRootView: View {
             .navigationSubtitle(subtitle)
             .searchable(text: $query, placement: .toolbar, prompt: "Description, type, ID")
             .toolbar { toolbarContent }
-            .confirmationDialog(
-                "Remove unused build cache?",
-                isPresented: $showsPruneConfirmation,
-                titleVisibility: .visible
-            ) {
-                Button("Remove \(unusedCount) Unused Record\(unusedCount == 1 ? "" : "s")", role: .destructive) {
-                    Task { await pruneUnused() }
-                }
-            } message: {
-                Text("This frees about \(Formatters.bytesString(unusedBytes)). Active cache records are kept.")
-            }
-            .alert(
-                operationFailure?.title ?? "",
-                isPresented: Binding(
-                    get: { operationFailure != nil },
-                    set: { if !$0 { operationFailure = nil } }),
-                presenting: operationFailure
-            ) { _ in
-                Button("OK", role: .cancel) {}
-            } message: { failure in
-                Text(failure.message)
-            }
             .task {
                 if selection == nil { selection = visible.first?.id }
             }
@@ -181,21 +147,7 @@ struct BuildsRootView: View {
             }
             .accessibilityLabel("Refresh build cache")
             .help("Refresh the BuildKit cache records")
-            .disabled(isRefreshing || busy)
-        }
-        ToolbarItem(id: "builds.pruneUnused", placement: .secondaryAction) {
-            Button(role: .destructive) {
-                showsPruneConfirmation = true
-            } label: {
-                Image(systemName: "trash")
-            }
-            .accessibilityLabel("Remove unused build cache")
-            .disabled(unusedCount == 0 || busy)
-            .help(
-                unusedCount == 0
-                    ? "Every cache record is in use"
-                    : "Remove \(unusedCount) unused cache record\(unusedCount == 1 ? "" : "s"), "
-                        + "freeing about \(Formatters.bytesString(unusedBytes))")
+            .disabled(isRefreshing)
         }
         if !records.isEmpty {
             ToolbarItem(id: "builds.inspector", placement: .primaryAction) {
@@ -340,11 +292,11 @@ struct BuildsRootView: View {
                         Label("Copy Record ID", systemImage: "doc.on.doc")
                     }
                     if !record.inUse {
-                        Button(role: .destructive) {
-                            showsPruneConfirmation = true
-                        } label: {
-                            Label("Remove All Unused Cache", systemImage: "trash")
-                        }
+                        LabeledContent("Removal", value: "Unavailable")
+                        Text(
+                            "Docker can only prune every unused cache record at once; it cannot remove the "
+                                + "reviewed records by ID. Morbstack does not run that broader operation.")
+                            .foregroundStyle(.secondary)
                     }
                 }
             }
@@ -379,17 +331,4 @@ struct BuildsRootView: View {
         }
     }
 
-    @MainActor
-    private func pruneUnused() async {
-        busy = true
-        defer { busy = false }
-        do {
-            _ = try await model.client.pruneBuildCache()
-            await model.refreshBuildCache()
-        } catch {
-            operationFailure = BuildOperationFailure(
-                title: "Couldn’t Remove Build Cache",
-                message: MorbErrorMessage.text(for: error))
-        }
-    }
 }

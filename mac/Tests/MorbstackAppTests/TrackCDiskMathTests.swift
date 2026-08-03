@@ -351,23 +351,10 @@ final class TrackCDiskMathTests: XCTestCase {
         XCTAssertEqual(preview.knownBytes, 0)
     }
 
-    func testBuildCachePreviewIsASingleSummaryRowAndIsEmptyWhenThereIsNoCache() {
-        let withCache = DiskUsage(
-            layersSize: 0, imagesTotal: 0, volumesTotal: 0,
-            buildCacheTotal: 12_345, containersTotal: 0, reclaimable: 12_345)
-
-        let populated = TrackCDiskMath.prunePreview(
-            target: .buildCache, usage: withCache, containers: [], images: [], volumes: [])
-        XCTAssertEqual(populated.items.count, 1)
-        XCTAssertTrue(populated.hasUnknownSizes)
-
-        let empty = TrackCDiskMath.prunePreview(
-            target: .buildCache, usage: .zero, containers: [], images: [], volumes: [])
-        XCTAssertTrue(empty.isEmpty)
-
-        let missing = TrackCDiskMath.prunePreview(
-            target: .buildCache, usage: nil, containers: [], images: [], volumes: [])
-        XCTAssertTrue(missing.isEmpty)
+    func testPruneTargetsOnlyIncludeResourcesWithReviewableCandidates() {
+        XCTAssertEqual(
+            TrackCPruneTarget.allCases.map(\.rawValue),
+            ["containers", "images", "volumes"])
     }
 
     func testCountLabelReadsAsEnglish() {

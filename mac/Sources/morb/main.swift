@@ -1054,9 +1054,12 @@ case "rosetta":
 
         if willEnable {
             do {
-                var config = try MorbConfig.load()
+                let loaded = try MorbConfig.load()
+                var config = loaded
                 config.rosetta = true
-                try config.save()
+                try config.savePreservingFile(
+                    expected: loaded,
+                    changing: MorbConfig.changedKeys(from: loaded, to: config))
             } catch {
                 fail(
                     "Rosetta is installed, but \(MorbPaths.configFile.path) could not be updated:\n"

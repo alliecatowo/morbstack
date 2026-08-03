@@ -114,6 +114,19 @@ public final class Daemon {
     /// it. Serial, so a fast running → stopped → running flap cannot reorder into a
     /// stop that lands after the start it preceded.
     private let forwarderQueue = DispatchQueue(label: "dev.morbstack.forwarder.lifecycle")
+    /// Performs Kubernetes readiness reads away from the VM and idle queues.
+    ///
+    /// A k3s status read can wait for a guest-control timeout while a cluster is
+    /// booting. That must not stall the VM callback that tears down listeners, or an
+    /// unrelated idle check that needs the Docker API.
+    private let kubernetesQueue = DispatchQueue(label: "dev.morbstack.k8s.reconciliation", qos: .utility)
+    /// Monitors a booting or enabled cluster without making a listener look healthy
+    /// before the guest says it is. One check is in flight at a time.
+    private static let kubernetesReconciliationDelay: DispatchTimeInterval = .seconds(2)
+    private static let kubernetesHealthCheckDelay: DispatchTimeInterval = .seconds(5)
+    /// Queue-confined to ``forwarderQueue``. Invalidates status reads from an older
+    /// VM lifecycle before they can re-bind a listener on a stopped VM.
+    private var kubernetesForwardGeneration: UInt64 = 0
 
     /// How long the idle check gives the engine to list running containers.
     ///
@@ -194,12 +207,7 @@ public final class Daemon {
                 guard let self else { return }
                 if state == .running {
                     self.forwarder.start()
-                    // The Kubernetes API server's loopback forward, if the guest came
-                    // back up with a cluster enabled. Asked on a background queue and
-                    // never awaited: it is a control-channel round trip, and a guest
-                    // that is slow to answer must not delay the port forwarder or the
-                    // state-change callback behind it.
-                    self.republishKubernetesAPIServer()
+                    self.beginKubernetesAPIServerReconciliationOnForwarderQueue()
                 } else {
                     // Tearing the listeners down is right *while restore is unavailable
                     // on this host*: a suspend degrades to a stop, so the containers
@@ -208,6 +216,11 @@ public final class Daemon {
                     // working here, this becomes wrong and the listeners should be held
                     // across the pause instead.
                     self.forwarder.stop(reason: "vm \(state.token)")
+                    // Kubernetes is an independent loopback listener rather than a
+                    // Docker-published port, so it needs the same lifecycle teardown
+                    // explicitly. This also cancels a status read that began while a
+                    // previous VM was still running.
+                    self.stopKubernetesAPIServerForwardOnForwarderQueue()
                 }
             }
         }
@@ -295,21 +308,82 @@ public final class Daemon {
         }
     }
 
-    /// Bring the Kubernetes API forward up iff the guest says a cluster is enabled.
-    ///
-    /// Conditional rather than unconditional because binding 6443 on the user's Mac
-    /// is a visible side effect: a machine where Kubernetes is off — the default —
-    /// must not find Morbstack squatting the port that some other cluster wanted.
-    private func republishKubernetesAPIServer() {
-        idleQueue.async { [weak self] in
+    /// Starts a readiness-gated loopback-forward reconciliation on the lifecycle
+    /// queue. Safe from a concurrent control request because it only enqueues work.
+    private func beginKubernetesAPIServerReconciliation() {
+        forwarderQueue.async { [weak self] in
+            self?.beginKubernetesAPIServerReconciliationOnForwarderQueue()
+        }
+    }
+
+    private func beginKubernetesAPIServerReconciliationOnForwarderQueue() {
+        kubernetesForwardGeneration &+= 1
+        reconcileKubernetesAPIServerOnForwarderQueue(generation: kubernetesForwardGeneration)
+    }
+
+    /// Tears down the independent Kubernetes listener and invalidates every older
+    /// status result. In particular, this prevents a slow read from a VM that has
+    /// stopped or failed from publishing 127.0.0.1:6443 after the fact.
+    private func stopKubernetesAPIServerForward() {
+        forwarderQueue.async { [weak self] in
+            self?.stopKubernetesAPIServerForwardOnForwarderQueue()
+        }
+    }
+
+    private func stopKubernetesAPIServerForwardOnForwarderQueue() {
+        kubernetesForwardGeneration &+= 1
+        k8s.forward.stop()
+    }
+
+    /// Reads the guest's cached Kubernetes readiness away from the lifecycle queue,
+    /// then returns the decision to that queue before touching a listener.
+    private func reconcileKubernetesAPIServerOnForwarderQueue(generation: UInt64) {
+        kubernetesQueue.async { [weak self] in
             guard let self else { return }
-            guard let status = try? self.k8s.status(), status.enabled else { return }
-            do {
-                let port = try self.k8s.forward.start()
-                self.log.info("kubernetes was left enabled; API server republished on 127.0.0.1:\(port)")
-            } catch {
-                self.log.warn("could not republish the Kubernetes API server: \(error)")
+            let status = try? self.k8s.status()
+            self.forwarderQueue.async { [weak self] in
+                guard let self, generation == self.kubernetesForwardGeneration else { return }
+
+                switch K8sAPIForwardPublication.action(vmState: self.vm.state, status: status) {
+                case .stop:
+                    self.k8s.forward.stop()
+
+                case .awaitReadiness:
+                    // An open listener is a promise that the endpoint can serve a
+                    // client. Close it while control readiness is unknown or the
+                    // guest explicitly says k3s is still starting, then retry.
+                    self.k8s.forward.stop()
+                    self.scheduleKubernetesAPIServerReconciliation(
+                        generation: generation, after: Self.kubernetesReconciliationDelay)
+
+                case .publish:
+                    let wasPublished = self.k8s.forward.boundPort != nil
+                    do {
+                        let port = try self.k8s.forward.start()
+                        if !wasPublished {
+                            self.log.info(
+                                "Kubernetes reports Ready; API forward published on 127.0.0.1:\(port)")
+                        }
+                        // Keep the listener reconciled after a later k3s failure or
+                        // disable without relying on an unrelated VM state change.
+                        self.scheduleKubernetesAPIServerReconciliation(
+                            generation: generation, after: Self.kubernetesHealthCheckDelay)
+                    } catch {
+                        self.log.warn("could not publish the ready Kubernetes API server: \(error)")
+                        self.scheduleKubernetesAPIServerReconciliation(
+                            generation: generation, after: Self.kubernetesReconciliationDelay)
+                    }
+                }
             }
+        }
+    }
+
+    private func scheduleKubernetesAPIServerReconciliation(
+        generation: UInt64, after delay: DispatchTimeInterval
+    ) {
+        forwarderQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, generation == self.kubernetesForwardGeneration else { return }
+            self.reconcileKubernetesAPIServerOnForwarderQueue(generation: generation)
         }
     }
 
@@ -331,10 +405,14 @@ public final class Daemon {
                 return .success(try k8s.status().ipcFields)
             case "k8s-enable":
                 markBusy()
-                return .success(try k8s.enable().ipcFields)
+                let status = try k8s.enable()
+                beginKubernetesAPIServerReconciliation()
+                return .success(status.ipcFields)
             case "k8s-disable":
                 markBusy()
-                return .success(try k8s.disable().ipcFields)
+                let status = try k8s.disable()
+                stopKubernetesAPIServerForward()
+                return .success(status.ipcFields)
             case "k8s-kubeconfig":
                 markBusy()
                 let merge = request.args?["merge"] == "true"

@@ -117,6 +117,89 @@ private struct NetworkOperationAlert {
     var focusID: NetworkSummary.ID?
 }
 
+/// One precisely identified network captured before a multi-network removal starts.
+///
+/// Docker's single-network delete endpoint accepts this ID. Keeping it alongside the
+/// displayed name ensures confirmation and execution describe the same records, even
+/// if the network list changes while the review sheet is open.
+private struct UnusedNetworkRemovalTarget: Identifiable, Hashable {
+    let id: NetworkSummary.ID
+    let name: String
+    let driver: String
+    let scope: String
+}
+
+/// The exact set of currently-unused user-defined networks that the review sheet shows.
+private struct UnusedNetworkRemovalPlan: Identifiable {
+    let id = UUID()
+    let targets: [UnusedNetworkRemovalTarget]
+
+    init(networks: [NetworkSummary]) {
+        targets = TrackCNetworkList.unused(networks)
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            .map {
+                UnusedNetworkRemovalTarget(
+                    id: $0.id,
+                    name: $0.name,
+                    driver: $0.driver,
+                    scope: $0.scope)
+            }
+    }
+
+    var countLabel: String {
+        "\(targets.count) unused network\(targets.count == 1 ? "" : "s")"
+    }
+}
+
+/// A system sheet that reviews the exact network IDs passed to Docker for removal.
+private struct UnusedNetworkRemovalReview: View {
+    let plan: UnusedNetworkRemovalPlan
+    let onConfirm: ([UnusedNetworkRemovalTarget]) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    Text(
+                        "Review these networks before removing them. Containers created on a removed "
+                            + "network will need it recreated.")
+                }
+
+                Section("Will Be Removed") {
+                    ForEach(plan.targets) { target in
+                        VStack(alignment: .leading) {
+                            Text(target.name)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Text("\(target.driver) · \(target.scope) · \(String(target.id.prefix(12)))")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Remove Unused Networks")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Remove \(plan.countLabel)", role: .destructive) {
+                        dismiss()
+                        onConfirm(plan.targets)
+                    }
+                    .disabled(plan.targets.isEmpty)
+                }
+            }
+        }
+        .frame(minWidth: 460, minHeight: 340)
+    }
+}
+
 // MARK: - Root
 
 struct NetworksRootView: View {
@@ -127,8 +210,8 @@ struct NetworksRootView: View {
     @State private var sortOrder: [TrackCNetworkComparator] = [TrackCNetworkComparator(key: .name)]
     @State private var selection: NetworkSummary.ID?
 
+    @State private var unusedRemovalPlan: UnusedNetworkRemovalPlan?
     @State private var removal: NetworkSummary?
-    @State private var showingPruneConfirmation = false
     @State private var busy = false
     @State private var operationAlert: NetworkOperationAlert?
     /// Whether the trailing inspector column is open. SwiftUI restores this across
@@ -163,23 +246,10 @@ struct NetworksRootView: View {
             .navigationSubtitle(subtitle)
             .searchable(text: $query, placement: .toolbar, prompt: "Name, driver, ID")
             .toolbar { toolbarContent }
-            .confirmationDialog(
-                "Remove unused networks?",
-                isPresented: $showingPruneConfirmation,
-                titleVisibility: .visible
-            ) {
-                let unused = TrackCNetworkList.unused(model.networks)
-                Button(
-                    "Remove \(unused.count) Unused Network\(unused.count == 1 ? "" : "s")",
-                    role: .destructive
-                ) {
-                    Task { await pruneUnused() }
+            .sheet(item: $unusedRemovalPlan) { plan in
+                UnusedNetworkRemovalReview(plan: plan) { targets in
+                    Task { await removeUnused(targets) }
                 }
-            } message: {
-                let unused = TrackCNetworkList.unused(model.networks)
-                Text(
-                    "These \(unused.count) user-defined network\(unused.count == 1 ? "" : "s") have no "
-                        + "attached containers. Compose recreates a network the next time its stack starts.")
             }
             .alert(
                 removal.map { "Remove \($0.name)?" } ?? "",
@@ -249,7 +319,7 @@ struct NetworksRootView: View {
                     .accessibilityLabel("Removing networks")
             } else {
                 Button(role: .destructive) {
-                    showingPruneConfirmation = true
+                    reviewUnusedNetworks()
                 } label: {
                     Image(systemName: "trash")
                 }
@@ -430,6 +500,12 @@ struct NetworksRootView: View {
 
     // MARK: Operations
 
+    private func reviewUnusedNetworks() {
+        let plan = UnusedNetworkRemovalPlan(networks: model.networks)
+        guard !plan.targets.isEmpty else { return }
+        unusedRemovalPlan = plan
+    }
+
     @MainActor
     private func remove(_ network: NetworkSummary) async {
         guard !network.isBuiltIn, !busy else { return }
@@ -448,20 +524,37 @@ struct NetworksRootView: View {
     }
 
     @MainActor
-    private func pruneUnused() async {
-        guard !busy else { return }
+    private func removeUnused(_ targets: [UnusedNetworkRemovalTarget]) async {
+        guard !targets.isEmpty, !busy else { return }
         busy = true
         defer { busy = false }
-        do {
-            // `/networks/prune` reclaims no bytes worth reporting, so the toast counts
-            // networks instead of pretending a disk saving happened.
-            _ = try await model.client.pruneNetworks()
-            await model.refreshAll()
-        } catch {
-            operationAlert = NetworkOperationAlert(
-                title: "Could not remove unused networks",
-                message: MorbErrorMessage.text(for: error),
-                focusID: TrackCNetworkList.unused(model.networks).first?.id)
+
+        var removed = 0
+        var failures: [UnusedNetworkRemovalTarget] = []
+
+        for target in targets {
+            do {
+                try await model.client.removeNetwork(id: target.id)
+                removed += 1
+                if selection == target.id { selection = nil }
+            } catch {
+                failures.append(target)
+            }
         }
+
+        if failures.isEmpty {
+            // The refreshed table and subtitle provide the native acknowledgement.
+        } else if removed > 0 {
+            operationAlert = NetworkOperationAlert(
+                title: "Removed \(removed) of \(targets.count) networks",
+                message: "Still in use or unavailable: \(failures.prefix(3).map(\.name).joined(separator: ", ")).",
+                focusID: failures.first?.id)
+        } else {
+            operationAlert = NetworkOperationAlert(
+                title: "No networks were removed",
+                message: "The selected networks are still in use or unavailable.",
+                focusID: failures.first?.id)
+        }
+        await model.refreshAll()
     }
 }

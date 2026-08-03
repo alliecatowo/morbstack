@@ -171,6 +171,12 @@ final class TrackDSettingsStore {
 
     /// What is on disk, as of the last load or save.
     private(set) var saved: MorbConfig
+    /// The unmodified document values from the last load or successful save.
+    ///
+    /// `saved` is clamped for the controls, while this remains the exact semantic
+    /// baseline for the conflict check in ``MorbConfig/savePreservingFile(to:expected:changing:)``.
+    /// Keeping both avoids treating display-range normalization as a user edit.
+    private var onDisk: MorbConfig
     /// What the controls are showing.
     var draft: MorbConfig
     /// What the currently running VM booted with, as best we can know it.
@@ -200,6 +206,7 @@ final class TrackDSettingsStore {
             failure = MorbErrorMessage.text(for: error)
         }
         let clamped = TrackDConfigEditor.clamped(loaded, limits: limits)
+        self.onDisk = loaded
         self.saved = clamped
         self.draft = clamped
         self.applied = clamped
@@ -222,9 +229,13 @@ final class TrackDSettingsStore {
     func save() -> Bool {
         let candidate = TrackDConfigEditor.clamped(draft, limits: limits)
         do {
-            try candidate.save(to: url)
-            saved = candidate
-            draft = candidate
+            let changed = MorbConfig.changedKeys(from: saved, to: candidate)
+            let persisted = try candidate.savePreservingFile(
+                to: url, expected: onDisk, changing: changed)
+            let visible = TrackDConfigEditor.clamped(persisted, limits: limits)
+            onDisk = persisted
+            saved = visible
+            draft = visible
             saveError = nil
             loadError = nil
             return true
@@ -242,9 +253,11 @@ final class TrackDSettingsStore {
     /// Re-reads the file, discarding the draft. Used when something else edited it.
     func reload() {
         do {
-            let loaded = TrackDConfigEditor.clamped(try MorbConfig.load(from: url), limits: limits)
-            saved = loaded
-            draft = loaded
+            let loaded = try MorbConfig.load(from: url)
+            let visible = TrackDConfigEditor.clamped(loaded, limits: limits)
+            onDisk = loaded
+            saved = visible
+            draft = visible
             loadError = nil
         } catch {
             loadError = MorbErrorMessage.text(for: error)

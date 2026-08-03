@@ -127,6 +127,18 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(config.diskSizeGiB, 64)
     }
 
+    func testUnknownTOMLValuesDoNotBlockAnOlderBinary() throws {
+        let config = try MorbConfig.parse("""
+            cpus = 4
+            [future]
+            advanced = { cache = true, replicas = 2 }
+            release = 1.5
+            """)
+
+        XCTAssertEqual(config.cpus, 4)
+        XCTAssertEqual(config.memoryMiB, MorbConfig().memoryMiB)
+    }
+
     func testStringEscapesRoundTrip() throws {
         let original = MorbConfig(kernelCmdline: #"console=hvc0 tag="a\b" rw"#)
         let parsed = try MorbConfig.parse(original.toTOML())

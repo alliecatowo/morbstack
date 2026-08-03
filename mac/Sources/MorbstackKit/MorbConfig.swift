@@ -160,6 +160,24 @@ public struct MorbConfig: Equatable, Codable, Sendable {
 
     // MARK: - Persistence
 
+    /// A field persisted in `config.toml`.
+    ///
+    /// The Settings window uses this to make a narrow edit to a hand-maintained
+    /// configuration file. Keeping the field list here, next to the parser and
+    /// renderer, makes it impossible for the UI to invent a second persistence
+    /// contract.
+    public enum PersistedKey: String, CaseIterable, Hashable, Sendable {
+        case cpus
+        case memoryMiB = "memory_mib"
+        case diskSizeGiB = "disk_size_gib"
+        case kernelPath = "kernel_path"
+        case initrdPath = "initrd_path"
+        case kernelCmdline = "kernel_cmdline"
+        case rosetta
+        case autoSuspendMinutes = "auto_suspend_minutes"
+        case sharedPaths = "shared_paths"
+    }
+
     /// Loads a configuration from disk, returning defaults when the file does not exist.
     ///
     /// - Throws: ``MorbError/config(_:)`` when the file exists but cannot be parsed.
@@ -180,6 +198,244 @@ public struct MorbConfig: Equatable, Codable, Sendable {
             try toTOML().write(to: url, atomically: true, encoding: .utf8)
             try FileManager.default.setAttributes(
                 [.posixPermissions: NSNumber(value: Int16(0o600))], ofItemAtPath: url.path)
+        } catch let error as MorbError {
+            throw error
+        } catch {
+            throw MorbError.io("could not write \(url.path): \(error.localizedDescription)")
+        }
+    }
+
+    /// The persisted fields whose values differ between two configurations.
+    ///
+    /// This deliberately considers only concrete configuration values, not a
+    /// textual representation. It is used to distinguish an edit made in Settings
+    /// from an unrelated change a person made in their editor.
+    public static func changedKeys(from baseline: MorbConfig, to candidate: MorbConfig) -> Set<PersistedKey> {
+        var changed: Set<PersistedKey> = []
+        if baseline.cpus != candidate.cpus { changed.insert(.cpus) }
+        if baseline.memoryMiB != candidate.memoryMiB { changed.insert(.memoryMiB) }
+        if baseline.diskSizeGiB != candidate.diskSizeGiB { changed.insert(.diskSizeGiB) }
+        if baseline.kernelPath != candidate.kernelPath { changed.insert(.kernelPath) }
+        if baseline.initrdPath != candidate.initrdPath { changed.insert(.initrdPath) }
+        if baseline.kernelCmdline != candidate.kernelCmdline { changed.insert(.kernelCmdline) }
+        if baseline.rosetta != candidate.rosetta { changed.insert(.rosetta) }
+        if baseline.autoSuspendMinutes != candidate.autoSuspendMinutes { changed.insert(.autoSuspendMinutes) }
+        if baseline.sharedPaths != candidate.sharedPaths { changed.insert(.sharedPaths) }
+        return changed
+    }
+
+    /// Applies selected fields to a hand-maintained config without discarding the rest.
+    ///
+    /// `expected` is the configuration that the caller originally loaded. Before
+    /// writing, this method parses the current file again. Edits to keys outside
+    /// `keys` are merged; an edit to the same key is surfaced as a conflict rather
+    /// than silently overwritten. Comments, blank lines, unknown keys, and unknown
+    /// sections are retained byte-for-byte except for the assignment lines selected
+    /// by `keys`.
+    ///
+    /// The replacement is made from a same-directory temporary file. The source is
+    /// re-read immediately before replacement, which catches an external edit made
+    /// after the three-way comparison. A non-cooperating editor can still race the
+    /// filesystem replacement itself, but it cannot cause a partial config file.
+    ///
+    /// Use ``save(to:)`` when a caller intentionally wants the canonical full-file
+    /// rendering, such as first-run creation. Interactive editors should use this
+    /// method instead.
+    @discardableResult
+    public func savePreservingFile(
+        to url: URL = MorbPaths.configFile,
+        expected: MorbConfig,
+        changing keys: Set<PersistedKey>
+    ) throws -> MorbConfig {
+        let fileManager = FileManager.default
+        let source: String?
+        if fileManager.fileExists(atPath: url.path) {
+            do {
+                source = try String(contentsOf: url, encoding: .utf8)
+            } catch {
+                throw MorbError.config("could not read \(url.path): \(error.localizedDescription)")
+            }
+        } else {
+            source = nil
+        }
+
+        let current: MorbConfig
+        do {
+            current = try source.map { try Self.parse($0) } ?? MorbConfig()
+        } catch {
+            throw error
+        }
+
+        let conflicts = keys.filter {
+            current.value(for: $0) != expected.value(for: $0)
+                && current.value(for: $0) != value(for: $0)
+        }
+        guard conflicts.isEmpty else {
+            let names = conflicts.map(\.rawValue).sorted().joined(separator: ", ")
+            throw MorbError.config(
+                "configuration changed on disk for \(names); reload Settings before saving your edit")
+        }
+
+        var merged = current
+        for key in keys {
+            merged.setValue(value(for: key), for: key)
+        }
+
+        guard let source else {
+            try Self.replaceAtomically(merged.toTOML(), at: url, expecting: nil)
+            return merged
+        }
+
+        let updated = Self.render(source, replacing: merged, keys: keys)
+        guard updated != source else { return merged }
+        try Self.replaceAtomically(updated, at: url, expecting: source)
+        return merged
+    }
+
+    private func value(for key: PersistedKey) -> TOMLValue {
+        switch key {
+        case .cpus: .integer(cpus)
+        case .memoryMiB: .integer(memoryMiB)
+        case .diskSizeGiB: .integer(diskSizeGiB)
+        case .kernelPath: .string(kernelPath ?? "")
+        case .initrdPath: .string(initrdPath ?? "")
+        case .kernelCmdline: .string(kernelCmdline ?? "")
+        case .rosetta: .boolean(rosetta)
+        case .autoSuspendMinutes: .integer(autoSuspendMinutes)
+        case .sharedPaths: .stringArray(sharedPaths)
+        }
+    }
+
+    private mutating func setValue(_ value: TOMLValue, for key: PersistedKey) {
+        switch (key, value) {
+        case (.cpus, .integer(let value)): cpus = value
+        case (.memoryMiB, .integer(let value)): memoryMiB = value
+        case (.diskSizeGiB, .integer(let value)): diskSizeGiB = value
+        case (.kernelPath, .string(let value)): kernelPath = value.isEmpty ? nil : value
+        case (.initrdPath, .string(let value)): initrdPath = value.isEmpty ? nil : value
+        case (.kernelCmdline, .string(let value)): kernelCmdline = value.isEmpty ? nil : value
+        case (.rosetta, .boolean(let value)): rosetta = value
+        case (.autoSuspendMinutes, .integer(let value)): autoSuspendMinutes = value
+        case (.sharedPaths, .stringArray(let value)): sharedPaths = value
+        default:
+            assertionFailure("PersistedKey and TOMLValue no longer agree")
+        }
+    }
+
+    private static func render(
+        _ source: String,
+        replacing configuration: MorbConfig,
+        keys: Set<PersistedKey>
+    ) -> String {
+        var lines = source.components(separatedBy: "\n")
+        var lastAssignment: [PersistedKey: Int] = [:]
+        var firstSection: Int?
+
+        for index in lines.indices {
+            let line = lines[index]
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if firstSection == nil, trimmed.hasPrefix("[") { firstSection = index }
+            if let key = persistedKey(in: line) { lastAssignment[key] = index }
+        }
+
+        for key in keys {
+            if let index = lastAssignment[key] {
+                lines[index] = replacingValue(in: lines[index], with: configuration.tomlValue(for: key))
+            }
+        }
+
+        let missing = keys.filter { lastAssignment[$0] == nil }.sorted { $0.rawValue < $1.rawValue }
+        if !missing.isEmpty {
+            let assignments = missing.map { "\($0.rawValue) = \(configuration.tomlValue(for: $0))" }
+            let insertionIndex = firstSection ?? max(0, lines.count - (source.hasSuffix("\n") ? 1 : 0))
+            lines.insert(contentsOf: assignments, at: insertionIndex)
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private static func persistedKey(in line: String) -> PersistedKey? {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, !trimmed.hasPrefix("#"), let equals = trimmed.firstIndex(of: "=") else {
+            return nil
+        }
+        let rawKey = trimmed[..<equals].trimmingCharacters(in: .whitespaces)
+        return PersistedKey(rawValue: String(rawKey))
+    }
+
+    private static func replacingValue(in line: String, with value: String) -> String {
+        guard let equals = line.firstIndex(of: "=") else { return line }
+        let prefix = String(line[...equals])
+        let fragment = String(line[line.index(after: equals)...])
+        return "\(prefix) \(value)\(trailingComment(in: fragment))"
+    }
+
+    private static func trailingComment(in fragment: String) -> String {
+        var inString = false
+        var escaped = false
+
+        for index in fragment.indices {
+            let character = fragment[index]
+            if escaped {
+                escaped = false
+                continue
+            }
+            switch character {
+            case "\\" where inString:
+                escaped = true
+            case "\"":
+                inString.toggle()
+            case "#" where !inString:
+                var start = index
+                while start > fragment.startIndex {
+                    let previous = fragment.index(before: start)
+                    guard fragment[previous].isWhitespace else { break }
+                    start = previous
+                }
+                return String(fragment[start...])
+            default:
+                continue
+            }
+        }
+        return ""
+    }
+
+    private func tomlValue(for key: PersistedKey) -> String {
+        switch value(for: key) {
+        case .string(let value): Self.quote(value)
+        case .integer(let value): String(value)
+        case .boolean(let value): String(value)
+        case .stringArray(let value): Self.quoteArray(value)
+        }
+    }
+
+    private static func replaceAtomically(_ text: String, at url: URL, expecting source: String?) throws {
+        let fileManager = FileManager.default
+        do {
+            if let source {
+                guard fileManager.fileExists(atPath: url.path) else {
+                    throw MorbError.config("configuration was removed while Settings was open")
+                }
+                let latest = try String(contentsOf: url, encoding: .utf8)
+                guard latest == source else {
+                    throw MorbError.config("configuration changed on disk; reload Settings before saving your edit")
+                }
+            } else if fileManager.fileExists(atPath: url.path) {
+                throw MorbError.config("configuration was created while Settings was open; reload before saving")
+            }
+
+            let directory = url.deletingLastPathComponent()
+            let temporary = directory.appendingPathComponent(
+                ".\(url.lastPathComponent).\(UUID().uuidString).tmp", isDirectory: false)
+            defer { try? fileManager.removeItem(at: temporary) }
+
+            try text.write(to: temporary, atomically: false, encoding: .utf8)
+            try fileManager.setAttributes(
+                [.posixPermissions: NSNumber(value: Int16(0o600))], ofItemAtPath: temporary.path)
+            if fileManager.fileExists(atPath: url.path) {
+                _ = try fileManager.replaceItemAt(url, withItemAt: temporary, backupItemName: nil, options: [])
+            } else {
+                try fileManager.moveItem(at: temporary, to: url)
+            }
         } catch let error as MorbError {
             throw error
         } catch {
@@ -263,8 +519,11 @@ public struct MorbConfig: Equatable, Codable, Sendable {
     /// * `key = value` where *value* is a double-quoted string, an integer, `true`/`false`,
     ///   or a single-line array of double-quoted strings
     ///
-    /// Unknown keys are ignored. Known keys with the wrong value type are an error, because
-    /// silently ignoring `memory_mib = "lots"` would be far more confusing than failing.
+    /// Unknown keys are ignored without parsing their value syntax. That is important
+    /// for forward compatibility: a newer version can add a TOML value this small
+    /// parser does not understand, and an older version can still safely preserve it.
+    /// Known keys with the wrong value type are an error, because silently ignoring
+    /// memory_mib = "lots" would be far more confusing than failing.
     public static func parse(_ text: String) throws -> MorbConfig {
         var config = MorbConfig()
         var lineNumber = 0
@@ -283,36 +542,37 @@ public struct MorbConfig: Equatable, Codable, Sendable {
             guard !key.isEmpty else {
                 throw MorbError.config("line \(lineNumber): empty key")
             }
+            guard let knownKey = PersistedKey(rawValue: String(key)) else {
+                continue  // Forward compatibility: leave an unknown TOML value untouched.
+            }
             let value = try parseValue(stripTrailingComment(rest), line: lineNumber)
 
-            switch key {
-            case "cpus":
+            switch knownKey {
+            case .cpus:
                 config.cpus = try requireInt(value, key: key, line: lineNumber, minimum: 0)
-            case "memory_mib":
+            case .memoryMiB:
                 config.memoryMiB = try requireInt(value, key: key, line: lineNumber, minimum: 1)
-            case "disk_size_gib":
+            case .diskSizeGiB:
                 config.diskSizeGiB = try requireInt(value, key: key, line: lineNumber, minimum: 1)
-            case "kernel_path":
+            case .kernelPath:
                 let path = try requireString(value, key: key, line: lineNumber)
                 config.kernelPath = path.isEmpty ? nil : path
-            case "initrd_path":
+            case .initrdPath:
                 let path = try requireString(value, key: key, line: lineNumber)
                 config.initrdPath = path.isEmpty ? nil : path
-            case "kernel_cmdline":
+            case .kernelCmdline:
                 // An empty string means "use the boot-mode default", matching the
                 // commented-out placeholder the canonical writer emits.
                 let cmdline = try requireString(value, key: key, line: lineNumber)
                 config.kernelCmdline = cmdline.isEmpty ? nil : cmdline
-            case "rosetta":
+            case .rosetta:
                 config.rosetta = try requireBool(value, key: key, line: lineNumber)
-            case "auto_suspend_minutes":
+            case .autoSuspendMinutes:
                 config.autoSuspendMinutes = try requireInt(value, key: key, line: lineNumber, minimum: 0)
-            case "shared_paths":
+            case .sharedPaths:
                 // An explicit `[]` really does mean "share nothing"; only an absent key
                 // falls back to the defaults, which `MorbConfig()` already installed.
                 config.sharedPaths = try requireStringArray(value, key: key, line: lineNumber)
-            default:
-                continue  // forward compatibility
             }
         }
         return config

@@ -216,17 +216,22 @@ final class TrackDConfigRoundTripTests: XCTestCase {
     }
 
     @MainActor
-    func testSavingDoesNotLoseKeysSettingsDoesNotEdit() throws {
-        // A hand-written file, complete with a comment and two keys the Settings window
-        // has no control for.
+    func testSavingPreservesCommentsAndForwardCompatibleContent() throws {
+        // A hand-written file, complete with comments, a section, and values the
+        // Settings window has no control for.
         let original = """
             # my machine
-            cpus = 2
+            cpus = 2 # deliberately conservative
             memory_mib = 4096
             disk_size_gib = 128
             kernel_cmdline = "console=hvc0 quiet"
             rosetta = false
             auto_suspend_minutes = 30
+
+            [future-runtime]
+            keep_this = "yes"
+            nested_limit = 12
+            advanced = { cache = true, replicas = 2 }
             """
         try original.write(to: configURL, atomically: true, encoding: .utf8)
 
@@ -241,6 +246,66 @@ final class TrackDConfigRoundTripTests: XCTestCase {
         XCTAssertEqual(reloaded.kernelCmdline, "console=hvc0 quiet", "cmdline survived")
         XCTAssertFalse(reloaded.rosetta, "rosetta survived")
         XCTAssertEqual(reloaded.autoSuspendMinutes, 30, "auto-suspend survived")
+
+        let written = try String(contentsOf: configURL, encoding: .utf8)
+        XCTAssertTrue(written.contains("# my machine"))
+        XCTAssertTrue(written.contains("cpus = 2 # deliberately conservative"))
+        XCTAssertTrue(written.contains("[future-runtime]"))
+        XCTAssertTrue(written.contains("keep_this = \"yes\""))
+        XCTAssertTrue(written.contains("nested_limit = 12"))
+        XCTAssertTrue(written.contains("advanced = { cache = true, replicas = 2 }"))
+    }
+
+    @MainActor
+    func testSavingMergesAnExternalEditToAnUntouchedKey() throws {
+        try """
+            # keep this note
+            cpus = 2
+            memory_mib = 4096
+            rosetta = true
+            [future]
+            feature = "still here"
+            """.write(to: configURL, atomically: true, encoding: .utf8)
+
+        let store = TrackDSettingsStore(url: configURL, limits: limits)
+        TrackDConfigEditor.applyMemoryGiB(9, to: &store.draft, limits: limits)
+
+        // Another editor changed Rosetta after Settings loaded the document.
+        try """
+            # keep this note
+            cpus = 2
+            memory_mib = 4096
+            rosetta = false
+            [future]
+            feature = "still here"
+            """.write(to: configURL, atomically: true, encoding: .utf8)
+
+        XCTAssertTrue(store.save())
+        let reloaded = try MorbConfig.load(from: configURL)
+        XCTAssertEqual(reloaded.memoryMiB, 9 * 1024)
+        XCTAssertFalse(reloaded.rosetta, "an untouched external edit must win")
+        let written = try String(contentsOf: configURL, encoding: .utf8)
+        XCTAssertTrue(written.contains("# keep this note"))
+        XCTAssertTrue(written.contains("[future]"))
+        XCTAssertTrue(written.contains("feature = \"still here\""))
+    }
+
+    @MainActor
+    func testSavingRejectsAnExternalEditToTheSameKey() throws {
+        try "memory_mib = 4096\nrosetta = true\n".write(
+            to: configURL, atomically: true, encoding: .utf8)
+        let store = TrackDSettingsStore(url: configURL, limits: limits)
+        TrackDConfigEditor.applyMemoryGiB(9, to: &store.draft, limits: limits)
+
+        try "memory_mib = 7168\nrosetta = true\n".write(
+            to: configURL, atomically: true, encoding: .utf8)
+
+        XCTAssertFalse(store.save())
+        XCTAssertNotNil(store.saveError)
+        XCTAssertEqual(
+            try String(contentsOf: configURL, encoding: .utf8),
+            "memory_mib = 7168\nrosetta = true\n",
+            "a conflicting external edit must remain untouched")
     }
 
     @MainActor
