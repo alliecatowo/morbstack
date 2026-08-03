@@ -384,7 +384,7 @@ struct BuildsRootView: View {
 
     @ViewBuilder
     private var cacheMaintenance: some View {
-        Section("Cache Maintenance") {
+        Section {
             if isPruning {
                 ProgressView("Pruning unused cache…")
             }
@@ -402,6 +402,8 @@ struct BuildsRootView: View {
                             : "No space reclaimed")
                 }
             }
+        } header: {
+            Text("Cache Maintenance")
         } footer: {
             if unusedCount > 0 {
                 Text(

@@ -344,7 +344,7 @@ struct FirstRunCLISetupSheet: View {
     private func completionView() -> some View {
         Form {
             Section {
-                if let result {
+                if let result = model.result {
                     Label(
                         result.contextError == nil ? "Docker CLI Is Ready" : "Docker CLI Installed",
                         systemImage: "checkmark.circle"
