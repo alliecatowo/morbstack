@@ -452,6 +452,10 @@ private struct TrackDResourceSettings: View {
 private struct TrackDAdvancedSettings: View {
 
     let store: TrackDSettingsStore
+    /// This snapshot reads existing CLI integration state only. It is deliberately
+    /// separate from first-run setup: Settings explains what is present, while the
+    /// reviewed setup sheet owns every file-system change.
+    @State private var commandLineTools = TrackDCommandLineToolsStatus.inspect()
 
     private var homeIsOverridden: Bool {
         !(ProcessInfo.processInfo.environment["MORBSTACK_HOME"] ?? "").isEmpty
@@ -488,6 +492,8 @@ private struct TrackDAdvancedSettings: View {
                 }
             }
 
+            commandLineToolsSection
+
             Section("Diagnostics") {
                 LabeledContent("Logs") {
                     Button("Open Folder", systemImage: "folder") {
@@ -509,6 +515,69 @@ private struct TrackDAdvancedSettings: View {
         .formStyle(.grouped)
     }
 
+    private var commandLineToolsSection: some View {
+        Section("Command-Line Tools") {
+            LabeledContent("Morbstack context") {
+                Text(commandLineTools.contextSummary)
+            }
+            LabeledContent("Saved selection") {
+                commandLineValue(commandLineTools.context.currentContext)
+            }
+            LabeledContent("Context endpoint") {
+                commandLineValue(commandLineTools.context.registeredHost ?? "Not registered")
+            }
+            Text(commandLineTools.contextGuidance)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            LabeledContent("Discovery socket") {
+                commandLineValue(commandLineTools.directSocket.path)
+            }
+            LabeledContent("Discovery status") {
+                Text(commandLineTools.directSocketSummary)
+            }
+            Text(commandLineTools.directSocketGuidance)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            LabeledContent("Bundled toolchain") {
+                Text(commandLineTools.toolchainSummary)
+            }
+            Text(commandLineTools.toolchainGuidance)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            LabeledContent("Shell overrides") {
+                commandLineValue(commandLineTools.environmentSummary)
+            }
+            Text(commandLineTools.environmentGuidance)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Button("Refresh", systemImage: "arrow.clockwise") {
+                commandLineTools = .inspect()
+            }
+            .help("Re-read Docker context and bundled command-line tool status")
+        } footer: {
+            Text(
+                "Settings only reads this status. Choose Morbstack > Set Up Command-Line Tools… "
+                    + "to review any context, socket, or CLI-link changes before applying them."
+            )
+        }
+    }
+
+    private func commandLineValue(_ value: String) -> some View {
+        Text(value)
+            .font(.system(.body, design: .monospaced))
+            .lineLimit(1)
+            .truncationMode(.middle)
+            .textSelection(.enabled)
+    }
+
     @ViewBuilder
     private func pathValue(_ label: String, path: String) -> some View {
         LabeledContent(label) {
@@ -525,5 +594,119 @@ private struct TrackDAdvancedSettings: View {
                 .help("Copy \(label.lowercased())")
             }
         }
+    }
+}
+
+/// A read-only snapshot of the standard Docker integration locations.  All three
+/// source APIs inspect the current process and file system; no command is spawned and
+/// none of the mutating installer/context APIs is reachable from this type.
+private struct TrackDCommandLineToolsStatus {
+    let context: MorbDockerContext.Status
+    let installationPlan: MorbCliInstallation.Plan
+    let pluginPlan: MorbCliPlugins.Plan
+
+    static func inspect() -> Self {
+        Self(
+            context: MorbDockerContext.status(),
+            installationPlan: MorbCliInstallation.plan(),
+            pluginPlan: MorbCliPlugins.plan())
+    }
+
+    var directSocket: MorbDockerContext.DirectSocketStatus {
+        installationPlan.directSocket
+    }
+
+    var contextSummary: String {
+        guard context.registered else { return "Not registered" }
+        guard context.matchesSocket else { return "Needs repair" }
+        return context.isCurrent ? "Current" : "Registered"
+    }
+
+    var contextGuidance: String {
+        if !context.registered {
+            return "No morbstack Docker context is registered. Re-enter command-line setup to review creating it."
+        }
+        if !context.matchesSocket {
+            let endpoint = context.registeredHost ?? "an unrecognized endpoint"
+            return "The existing morbstack context points at \(endpoint). Morbstack leaves it unchanged; repair or rename that context, then review setup again."
+        }
+        if !context.isCurrent {
+            return "The morbstack context is registered, but Docker’s saved selection is \(context.currentContext). Setup preserves a non-default selection."
+        }
+        return "The saved morbstack context points at this installation’s Docker Engine API socket."
+    }
+
+    var directSocketSummary: String {
+        switch directSocket.state {
+        case .correct: return "Linked to Morbstack"
+        case .missing: return "Not linked"
+        case .pointsElsewhere: return "Points elsewhere"
+        case .occupied: return "Occupied"
+        case .unavailable: return "Unavailable"
+        }
+    }
+
+    var directSocketGuidance: String {
+        switch directSocket.state {
+        case .correct:
+            return "The standard per-user Docker discovery path resolves to this installation’s Docker socket."
+        case .missing:
+            return "The standard per-user discovery link is absent. Re-enter command-line setup to review creating only that user-owned link."
+        case .pointsElsewhere(let destination):
+            return "This path points at \(destination). Morbstack preserves that existing link; choose its owner deliberately before changing it."
+        case .occupied(let kind):
+            return "A \(kind) already occupies this path. Morbstack will not replace it automatically."
+        case .unavailable(let reason):
+            return "The discovery path could not be used safely: \(reason)"
+        }
+    }
+
+    var toolchainSummary: String {
+        guard installationPlan.hasCompleteToolchain else { return "Incomplete" }
+        let managedItems = [installationPlan.docker] + installationPlan.plugins
+        return managedItems.allSatisfy(\.alreadyCorrect) && pluginPlan.items.allSatisfy(\.alreadyCorrect)
+            ? "Available and linked"
+            : "Available"
+    }
+
+    var toolchainGuidance: String {
+        guard installationPlan.hasCompleteToolchain else {
+            let missing = [installationPlan.docker] + installationPlan.plugins
+            let names = missing.filter { $0.source == nil }.map(\.name).joined(separator: ", ")
+            return "This Morbstack installation is missing \(names). Reinstall or repair the app bundle, then refresh this status."
+        }
+        let managedItems = [installationPlan.docker] + installationPlan.plugins
+        if managedItems.allSatisfy(\.alreadyCorrect) {
+            return "The bundled docker client, Compose plugin, and Buildx plugin are linked where Docker will discover them."
+        }
+        let unresolvedPlugins = pluginPlan.items
+            .filter { !$0.alreadyCorrect }
+            .map { "docker-\($0.plugin)" }
+            .joined(separator: ", ")
+        if unresolvedPlugins.isEmpty {
+            return "The bundled docker client is available. Re-enter command-line setup to review its missing or user-owned link."
+        }
+        return "The bundled docker client, Compose plugin, and Buildx plugin are available. Re-enter command-line setup to review \(unresolvedPlugins)."
+    }
+
+    var environmentSummary: String {
+        var entries: [String] = []
+        if let environmentContext = context.environmentContext {
+            entries.append("DOCKER_CONTEXT=\(environmentContext)")
+        }
+        if context.hasDockerHostOverride {
+            entries.append("DOCKER_HOST is set")
+        }
+        return entries.isEmpty ? "None" : entries.joined(separator: ", ")
+    }
+
+    var environmentGuidance: String {
+        if let environmentContext = context.environmentContext {
+            return "DOCKER_CONTEXT selects \(environmentContext) for commands launched with this environment. Docker gives it precedence over DOCKER_HOST and the saved context."
+        }
+        if context.hasDockerHostOverride {
+            return "DOCKER_HOST overrides the saved Docker context for commands launched with this environment. Clear it in the shell that set it to use the saved selection."
+        }
+        return "A shell that sets DOCKER_CONTEXT or DOCKER_HOST can target a different endpoint than the saved Docker context."
     }
 }
