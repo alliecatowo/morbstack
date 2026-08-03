@@ -85,7 +85,7 @@ mechanism for selecting an Engine ([socket security](https://docs.docker.com/eng
 - Morbstack is not yet a publicly proven out-of-the-box Docker Desktop
   replacement; the clean-profile matrix is **not run**.
 - It does not currently provide host-originated inotify/hot reload, full
-  dynamic or range-publication parity, synchronous dynamic-UDP leases, all
+  dynamic or raw-host-range-publication parity, synchronous dynamic-UDP leases, all
   arbitrary Docker proxy framing/start shapes, or a general host-networking
   promise. The bounded TCP creation path for omitted, empty, or literal-zero
   `HostPort` is implementation evidence, not that broader compatibility claim.

@@ -135,7 +135,8 @@ the client. This removes the prior success-with-no-listener race without changin
 Docker request/response bytes. The claim is intentionally narrower than complete
 Docker Desktop parity: a bounded Phase 1 now transforms a recognized explicit-empty
 TCP `HostPort` create into a held Mac listener before the guest sees it, but it still
-needs a live VM run before it can count as verified parity. Ranged allocation, `-P`,
+needs a live VM run before it can count as verified parity. Raw dynamic host-port
+range allocation, `-P`,
 dynamic UDP, opaque/chunked framing, name-based/nonstandard start handoff, and lease
 survival across VM/daemon shutdown still need their own allocation or lifecycle
 contract. UDP datagrams and reply flows now cross a dedicated framed vsock relay, but

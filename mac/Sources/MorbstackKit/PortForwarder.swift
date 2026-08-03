@@ -472,9 +472,11 @@ public final class PortForwarder {
     /// guest. The returned token is later associated with the Engine's container ID
     /// and promoted into `forwards` without ever closing and reopening its sockets.
     ///
-    /// Dynamic host ports, ranges, UDP, and unsupported host addresses never reach
-    /// this method. A conflict here is definitive: unlike HostPortPreflight, the
-    /// listener remains open after this method returns.
+    /// Dynamic host ports, raw dynamic host-port ranges, UDP, and unsupported host
+    /// addresses never reach this method. A normal Docker CLI equal-length fixed
+    /// range arrives as multiple concrete bindings and deliberately does reach this
+    /// method as one atomic lease. A conflict here is definitive: unlike
+    /// HostPortPreflight, the listener remains open after this method returns.
     func reserveExplicitTCPPorts(
         _ publications: [DockerExplicitTCPPortBinding]
     ) throws -> TCPPortLease {

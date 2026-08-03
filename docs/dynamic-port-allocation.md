@@ -15,9 +15,16 @@ create or start is useful reconciliation, but it is not an allocation contract.
 
 The existing fixed-TCP lease remains the deliberately smaller mechanism: it sees a
 concrete port without consuming the request, binds that port on the Mac, and only
-observes the normal Engine response. Existing UDP forwarding remains event-confirmed
-once Docker reports a concrete endpoint. Neither mechanism can make an Engine-chosen
-dynamic port match a previously reserved Mac endpoint.
+observes the normal Engine response. This is also the standard Docker CLI path for a
+fixed equal-length `-p` range: the CLI validates the spans and expands it into one
+concrete `PortBindings` entry per container port before it sends the create request.
+The [Docker CLI](https://github.com/docker/cli/blob/master/cli/command/container/opts.go#L400-L432)
+hands publish options to `nat.ParsePortSpecs`; its
+[upstream parser](https://github.com/docker/go-connections/blob/master/nat/nat.go#L159-L219)
+rejects unequal container/host spans and produces those individual concrete mappings.
+Existing UDP forwarding remains event-confirmed once Docker reports a concrete
+endpoint. Neither mechanism can make an Engine-chosen dynamic port match a previously
+reserved Mac endpoint.
 
 ## Why this cannot be added to the passive relay
 
@@ -72,7 +79,8 @@ uses the same immutable image/config resolution as the create operation, asks th
 allocator to hold every selected loopback TCP endpoint before the Engine persists it,
 and defines the corresponding stop/start/restart reallocation protocol. It must reject
 the complete operation before guest side effects when the resolved set contains UDP,
-SCTP, ranges, a non-loopback address, or any ambiguous/unsupported form. A proxy-only
+SCTP, raw dynamic host-port ranges, a non-loopback address, or any
+ambiguous/unsupported form. A proxy-only
 request rewriter may support a clearly labeled direct-API subset whose complete
 `ExposedPorts` set is already in the body, but that is not compatible support for the
 standard Docker CLI `-P image` path and must not be advertised as such.
@@ -119,12 +127,14 @@ body does not completely identify.
 | `-p 8080:80` or `-p 8080:80/tcp` | One concrete TCP `HostPort`; no explicit address, `""`, or `"0.0.0.0"` host address spelling | A held `127.0.0.1:8080` listener is reserved before create, associated with the returned full ID, and activated before the exact successful start response. | Morbstack deliberately exposes the Mac loopback endpoint, not an external interface. |
 | `-p 127.0.0.1:8080:80` | Concrete TCP `HostPort` with `HostIp: "127.0.0.1"` | Same fixed-TCP lease path. | Live Docker/VM evidence is still pending. |
 | `-p <container-port>`, `-p :<container-port>`, or `-p 0:<container-port>` | TCP `HostPort` omitted, exact `""`, or exact `"0"` | The create transaction holds a kernel-selected loopback listener and rewrites only that planned entry with its concrete port before the Engine sees it. | Fixed-length, bounded JSON/HTTP only; not a general HTTP transformer. |
-| Multiple compatible TCP `-p` flags | Multiple distinct concrete or recognized dynamic TCP entries | One atomic lease holds every requested listener; dynamic entries are rewritten with the reserved values. | A duplicate host port may only name one guest target; ranges remain excluded. |
+| Multiple compatible TCP `-p` flags | Multiple distinct concrete or recognized dynamic TCP entries | One atomic lease holds every requested listener; dynamic entries are rewritten with the reserved values. | A duplicate host port may only name one guest target. |
 | `-p 8080:80/udp` | Concrete IPv4/default UDP publication | The existing IPv4 UDP data plane reconciles the Engine-confirmed endpoint. | There is no synchronous held UDP allocation guarantee yet; IPv6-literal UDP publication is rejected rather than falsely forwarded through IPv4. |
 | `-p '[::1]:8080:80'` | Concrete TCP `HostPort` with `HostIp: "::1"` | The preflight, held create/start lease, and event reconciler bind the actual local IPv6 endpoint `[::1]:8080`. | Live Docker/VM evidence is still pending. |
 | `-p '[::]:8080:80'` | Concrete TCP `HostPort` with wildcard IPv6 `HostIp: "::"` | Morbstack keeps the publication local and binds `[::1]:8080`, not an external wildcard address. | This is an intentional local-desktop safety policy, not external-interface parity. |
 | One container described on both IPv4 and IPv6 at the same numeric port | Dual-family records for the same proven target | The one-listener ledger chooses IPv4 when both families are present, preserving ordinary `127.0.0.1` access. | A simultaneous `127.0.0.1` **and** `[::1]` lease for one Docker mapping remains future dual-stack parity work. |
-| `-p 8080-8081:80-81` | Host-port/container-port range | Rejected from the synchronous lease path. | Needs a dedicated one-to-one range mapping and lifecycle contract. |
+| `-p 8080-8081:80-81` | Docker CLI validates equal spans, then emits concrete `8080`→`80` and `8081`→`81` TCP bindings | The existing fixed-TCP path preflights, reserves, associates, activates, and recovers the complete concrete set as one atomic lease. | The recognized create window is 256 KiB and the held lease rejects more than 128 distinct concrete TCP host ports before guest create; this is source-level evidence, not live Docker/VM acceptance. |
+| A fixed equal-length TCP range with more than 128 concrete host ports | Docker CLI-normalized concrete bindings | Rejected before guest create. | Holding listeners occurs under one ledger lock; the explicit cap prevents an oversized set from becoming a partial host lease. |
+| `-p 8080-8081:80` | One container port with a host-port allocation range | Rejected before guest create as a raw dynamic host-port range. | Docker's parser deliberately preserves this as a range string for Engine-side selection; Morbstack must not partially reserve it. |
 | `-P` / `--publish-all` | `HostConfig.PublishAllPorts: true` | Rejected before a guest create for the bounded dynamic path. | It is not another spelling of `-p <container-port>`; see the source audit above. |
 
 The concrete implementation evidence is `DockerPortPublicationPreflight` for
@@ -152,7 +162,8 @@ all other responses leave the lease inactive.
 
 This is not durable host-side lease persistence or general lifecycle interception. A
 name/unique-prefix start or restart, inspect or lifecycle failure, a running container
-with no existing full-ID lease, empty or zero host port, range, UDP/non-TCP,
+with no existing full-ID lease, empty or zero host port, raw dynamic host-port range,
+UDP/non-TCP,
 unsupported address, malformed/ambiguous binding, or a non-bodyless request remains
 an unchanged relay with no synchronous recovery claim. If a fully proved endpoint
 cannot be bound on macOS, the start or restart is rejected before it reaches the
@@ -169,8 +180,10 @@ The following remain unsupported or explicitly outside this transaction:
 - `HostConfig.PublishAllPorts` (`docker run -P`). The standard CLI body omits image
   `EXPOSE` entries; an allocation contract needs atomic guest image/config resolution
   and separate stop/start/restart semantics, as documented in the source audit above.
-- Host-port ranges, which need an unambiguous container-port-to-host-port mapping
-  before any listener can be reserved.
+- Raw dynamic host-port ranges (for example `-p 8080-8081:80`), which Docker keeps
+  as one Engine-side allocation range rather than a fixed one-to-one mapping. The
+  ordinary equal-length fixed range has already been normalized by the Docker CLI and
+  is covered by the fixed-TCP row above.
 - Dynamic UDP, dynamic TCP combined with a non-TCP sibling, non-loopback addresses,
   missing/ambiguous binding fields, and unsupported protocols. UDP's existing
   post-start datagram forwarding remains unchanged; it is not a held dynamic lease.
@@ -184,7 +197,8 @@ event reconciliation, and loopback-only address/protocol validation are unchange
 When event reconciliation cannot bind an endpoint that Docker has already reported,
 `morb status` calls it an **unavailable host forward** and explicitly says that the
 Docker CLI may still display it as published. This is a post-create diagnostic, not a
-retroactive allocation guarantee: it does not make `-P`, ranges, dynamic UDP,
+retroactive allocation guarantee: it does not make `-P`, raw dynamic host-port
+ranges, dynamic UDP,
 omitted-host-port, or opaque/chunked creates synchronously supported.
 
 ## Required work beyond Phase 1
@@ -197,7 +211,9 @@ Further allocation work must preserve these invariants:
    contract; forwarding one dynamically would restore the race this design removes.
 2. Parse the create JSON exactly enough to identify published TCP and UDP bindings,
    loopback address spelling, and direct-API `ExposedPorts`. Reject unsupported
-   protocols, addresses, ambiguous duplicates, and ranges before a guest side effect.
+   protocols, addresses, ambiguous duplicates, and raw dynamic host-port ranges
+   before a guest side effect. Do not add a second parser for ordinary equal-length
+   CLI ranges: Docker CLI has already normalized them to concrete `PortBindings`.
    TCP and UDP use independent reservations, so they may legitimately share one
    numeric port. Do not mistake this request-visible subset for normal CLI `-P`: its
    complete image-derived set is available only during guest Engine image resolution.
@@ -252,9 +268,10 @@ for all non-dynamic calls:
 3. Add `PublishAllPorts` only after its guest image-resolution, held-allocation, and
    stop/start/restart contract exists; cover image-tag replacement, image-provided
    TCP/UDP/SCTP exposure, explicit `-p` precedence, `--expose`, conflict, destroy, and
-   restart reallocation. Add ranges only after their mappings have dedicated parser,
-   collision, lifecycle, and recovery coverage. Do not infer range semantics from
-   string splitting.
+   restart reallocation. Treat raw dynamic host-port ranges and UDP as separate
+   allocation protocols with dedicated collision, lifecycle, and recovery coverage;
+   do not infer either from string splitting. Ordinary equal-length fixed CLI ranges
+   already use the fixed-TCP lease path.
 
 The integration matrix must cover direct Docker API clients as well as Docker CLI,
 create without start, start retry, create/start failure, client disconnect, destroy,

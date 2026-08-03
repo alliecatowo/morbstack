@@ -3,9 +3,11 @@
 //
 // Admission parsing for explicit `HostConfig.PortBindings` in a Docker
 // container-create request. The parser admits only fixed loopback TCP/UDP bindings
-// it can inspect without consuming bytes. `DockerProxy` turns fixed TCP bindings into
-// held listener leases; UDP is event-confirmed after Docker has assigned a concrete
-// endpoint, so dynamic/range allocations remain outside the synchronous contract.
+// it can inspect without consuming bytes. `DockerProxy` turns concrete fixed TCP
+// bindings into held listener leases. The Docker CLI expands a fixed equal-length
+// `-p` range into just such bindings before it sends the Engine request. UDP is
+// event-confirmed after Docker has assigned a concrete endpoint, so dynamic host-port
+// ranges remain outside the synchronous contract.
 
 import Foundation
 
@@ -141,6 +143,15 @@ struct DockerDynamicTCPCreatePlan {
 /// verify before it relays the request to the guest Engine.
 public enum DockerPortPublicationPreflight {
 
+    /// Maximum number of distinct concrete TCP host endpoints one create may reserve.
+    ///
+    /// Docker CLI normalizes a fixed equal-length range into a collection of ordinary
+    /// bindings, so this is intentionally a lease-size limit rather than a second
+    /// range parser. Holding listeners runs under the forwarder's ledger lock before
+    /// a guest create; beyond this bounded amount, refusing the request is safer than
+    /// creating a container while only some of its requested endpoints are held.
+    public static let maximumSynchronousFixedTCPBindings = 128
+
     public enum Verdict: Equatable, Sendable {
         case allowed
         case rejected(message: String)
@@ -171,6 +182,7 @@ public enum DockerPortPublicationPreflight {
         }
 
         var examined: Set<String> = []
+        var fixedTCPHostPorts: Set<Int> = []
         // Morbstack has exactly one safe loopback listener per transport/host-port
         // pair. Docker can describe its dual-stack representation more than once,
         // but two different container targets cannot both be delivered through that
@@ -217,7 +229,14 @@ public enum DockerPortPublicationPreflight {
                 }
                 guard let port = Int(hostPort) else {
                     return .rejected(
-                        message: "published \(protocolName.uppercased()) host port \(hostPort) is not a single port; dynamic and range allocations are not preflighted")
+                        message: "published \(protocolName.uppercased()) host port \(hostPort) is not a concrete port; dynamic host-port ranges are not supported")
+                }
+
+                if protocolName == "tcp",
+                   fixedTCPHostPorts.insert(port).inserted,
+                   fixedTCPHostPorts.count > maximumSynchronousFixedTCPBindings {
+                    return .rejected(
+                        message: "published TCP mapping has more than \(maximumSynchronousFixedTCPBindings) concrete host ports; Morbstack refuses a partial port lease")
                 }
 
                 if let targetPort = Self.containerPort(in: containerPort) {
@@ -256,10 +275,13 @@ public enum DockerPortPublicationPreflight {
     /// Returns the fixed TCP publications that the host can actually reserve.
     ///
     /// Call this only after ``inspectContainerCreate(body:)`` returned `.allowed`.
-    /// It intentionally returns no value for dynamic host ports, ranges, malformed
-    /// Engine-owned shapes, UDP, and a host address outside the loopback-only
-    /// forwarder contract. The proxy leaves all of those byte-for-byte opaque rather
-    /// than inventing a partial Docker allocator.
+    /// It intentionally returns no value for dynamic host ports (including a raw
+    /// host-port range), malformed Engine-owned shapes, UDP, and a host address
+    /// outside the loopback-only forwarder contract. A normal Docker CLI fixed
+    /// equal-length range has already been expanded into individual concrete entries,
+    /// so it deliberately follows this same fixed binding path. The proxy leaves all
+    /// other forms byte-for-byte opaque rather than inventing a partial Docker
+    /// allocator.
     public static func explicitTCPBindings(in body: Data) -> [DockerExplicitTCPPortBinding] {
         guard
             let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
@@ -384,8 +406,10 @@ public enum DockerPortPublicationPreflight {
                       let hostPort = Int(rawHostPort),
                       (1...65535).contains(hostPort)
                 else {
-                    // Empty, zero, missing, and ranged values are all Engine-owned
-                    // allocation shapes. A recovery must leave them opaque.
+                    // Empty, zero, missing, and raw host-port range values are all
+                    // Engine-owned allocation shapes. A normal CLI fixed range has
+                    // already been persisted as individual concrete entries; a
+                    // recovery must leave the remaining forms opaque.
                     return nil
                 }
                 let hostIP = string(entry["HostIp"])?.trimmingCharacters(in: .whitespaces) ?? ""
@@ -421,9 +445,9 @@ public enum DockerPortPublicationPreflight {
     }
 
     /// Recognizes Docker's empty, omitted, or literal `"0"` `HostPort` TCP bindings
-    /// for the stateful Phase 1 allocator. `PublishAllPorts`, ranges, UDP, invalid
-    /// address/protocol values, and opaque sibling entries are rejected rather than
-    /// silently falling back to an Engine-owned allocation.
+    /// for the stateful Phase 1 allocator. `PublishAllPorts`, raw dynamic host-port
+    /// ranges, UDP, invalid address/protocol values, and opaque sibling entries are
+    /// rejected rather than silently falling back to an Engine-owned allocation.
     static func dynamicTCPCreatePlan(in body: Data) -> DynamicTCPVerdict {
         guard
             let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
@@ -527,7 +551,7 @@ public enum DockerPortPublicationPreflight {
                           (1...65535).contains(hostPort)
                     else {
                         unsupportedSiblingMessage = unsupportedSiblingMessage
-                            ?? "published \(protocolName.uppercased()) host port \(rawHostPort ?? "missing") is not a single port; dynamic ranges are not supported yet"
+                            ?? "published \(protocolName.uppercased()) host port \(rawHostPort ?? "missing") is not a concrete port; dynamic host-port ranges are not supported yet"
                         continue
                     }
                     if protocolName != "tcp" { sawNonTCPPublication = true }

@@ -510,7 +510,7 @@ the inspect response proves the same stopped ID and a fully understood set of fi
 loopback TCP `HostConfig.PortBindings`, Morbstack atomically rebinds and associates
 those listeners in the current forwarder generation; the existing exact-204 handoff
 then activates them. Inspect failures, names or ID prefixes, running containers,
-dynamic/ranged/UDP/non-loopback/ambiguous bindings, and lifecycle-generation changes
+dynamic/raw-host-range/UDP/non-loopback/ambiguous bindings, and lifecycle-generation changes
 remain raw start relays with no synchronous recovery guarantee. A concrete Mac bind
 failure instead returns Docker-style HTTP 500 before dockerd starts the container.
 
@@ -540,7 +540,7 @@ recognized bounded TCP create whose `HostPort` is omitted, exact `""`, or exact
 before the guest sees it, associates the full ID from the complete `201`, and only
 then exposes the `201`. The ordinary `MSG_PEEK` path still does not remove bytes, and
 unrecognized responses release a provisional TCP lease rather than guessing. `-P`,
-ranges, UDP, unsupported addresses, every other dynamic spelling or opaque create,
+raw dynamic host-port ranges, UDP, unsupported addresses, every other dynamic spelling or opaque create,
 start by name, and nonstandard start framing have no synchronous **TCP** create/start
 lease guarantee. The exact normal-`-p` matrix, including the remaining paired
 dual-family gap, is in [`dynamic-port-allocation.md`](dynamic-port-allocation.md#normal--p-compatibility-matrix).
