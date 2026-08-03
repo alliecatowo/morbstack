@@ -61,11 +61,14 @@ consented `--make-default` option is required to put Morbstack's client ahead
 of it. Unsupported shells and a temporary `MORBSTACK_HOME` override are never
 silently written into a persistent profile.
 
-The graphical first-run sheet invokes this same plan/transaction only after
-showing the exact links, PATH effect, and Docker-context effect. Its native
-`Form` provides `Not Now`, explicit `Set Up Morbstack`, error/retry, and
-completion states; it never enables `--make-default` behavior. The terminal
-commands remain available for inspection and for automation.
+The graphical first-run sheet invokes this same host-integration transaction
+only after showing the exact links, PATH effect, Docker-context effect, and
+socket effect. Its native `Form` provides `Not Now`, a visible mutually
+exclusive engine-verification choice, and an explicit confirmation action:
+`Set Up and Start` when the person chooses to start Morbstack, or `Set Up
+Morbstack` when they choose host setup only. It never enables
+`--make-default` behavior. The terminal commands remain available for
+inspection and automation.
 
 ## Optional background service
 
@@ -106,6 +109,18 @@ listening. It sends Docker's read-only `GET /_ping` only after that status says
 the VM is running and Docker is ready. If no daemon or engine is already
 running, the report says so and skips the Docker socket probe; it never starts
 a daemon, VM, or background service to make a completion screen look healthy.
+
+The app's selected `Start Morbstack and verify Docker` path is a distinct,
+one-time, explicitly confirmed action before the verifier runs. It starts only
+Morbstack's own daemon and VM, waits at most one minute for Docker to become
+ready, and then invokes the same read-only verifier. It does not start
+containers, change another Docker runtime, or access credentials. `Set up
+tools without starting Morbstack` performs only the host-integration portion.
+If the selected engine start or health check fails, the completion sheet keeps
+the verified host-setup outcome and offers a repair action that repeats only
+the already-confirmed Morbstack start plus read-only health check. It never
+reapplies links, shell/profile changes, Docker context/socket setup, or the
+Login Item selection.
 
 This is host-setup evidence, not the clean-machine release gate. The full
 first-ten-minutes transaction still needs serialized live evidence for a new
