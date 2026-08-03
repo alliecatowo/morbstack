@@ -42,7 +42,7 @@ public struct RegistryImageSearchRequest: Equatable, Sendable {
         guard !query.isEmpty,
               query.count <= Self.maximumQueryCharacters,
               query.utf8.count <= Self.maximumQueryUTF8Bytes,
-              query.unicodeScalars.allSatisfy({ !$0.properties.isControl })
+              query.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) })
         else {
             throw RegistryImageDiscoveryFailure.invalidQuery
         }
@@ -311,7 +311,7 @@ public final class PublicImageDiscovery: @unchecked Sendable {
     private static func boundedSummary(_ raw: String?) -> String? {
         guard let raw else { return nil }
         let visible = String(raw.filter { character in
-            !character.unicodeScalars.contains(where: { $0.properties.isControl })
+            !character.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
         })
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !visible.isEmpty else { return nil }
