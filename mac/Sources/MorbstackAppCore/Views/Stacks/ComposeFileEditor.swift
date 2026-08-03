@@ -388,7 +388,11 @@ struct ComposeFileEditorSheet: View {
     // sheet first communicates source provenance and the redaction boundary instead
     // of turning its Form into a dense property grid.
     @State private var environmentDeclarationsExpanded = false
+    @State private var serviceEnvironmentExpanded = false
+    @State private var environmentFilesExpanded = false
+    @State private var interpolationReferencesExpanded = false
     @State private var sourceSecretsExpanded = false
+    @State private var secretGrantsExpanded = false
 
     private var sourceInspection: ComposeProjectSourceInspection? {
         guard let sourceKind = editor.sourceKind else { return nil }
@@ -425,7 +429,7 @@ struct ComposeFileEditorSheet: View {
                     }
                 }
                 .formStyle(.automatic)
-                .frame(maxHeight: editor.isEnvironmentFile ? 280 : 240)
+                .frame(maxHeight: editor.isEnvironmentFile ? 300 : 320)
 
                 if editor.isEnvironmentFile && !environmentValuesAreRevealed {
                     ContentUnavailableView {
@@ -606,7 +610,11 @@ struct ComposeFileEditorSheet: View {
         .onChange(of: editor.fileURL) { _, _ in
             environmentValuesAreRevealed = false
             environmentDeclarationsExpanded = false
+            serviceEnvironmentExpanded = false
+            environmentFilesExpanded = false
+            interpolationReferencesExpanded = false
             sourceSecretsExpanded = false
+            secretGrantsExpanded = false
         }
     }
 
@@ -629,11 +637,46 @@ struct ComposeFileEditorSheet: View {
                     }
                 }
             }
+            interpolationSection(inspection)
         } else {
-            Section("Secret Declarations") {
-                LabeledContent("Interpretation", value: "Top-level source names only")
+            Section("Environment") {
+                LabeledContent("Effective Values", value: "Not evaluated")
+                LabeledContent("Default .env", value: "Not inferred")
+                LabeledContent("Host Environment", value: "Not read")
                 DisclosureGroup(
-                    "Recognized declarations (\(inspection.secretDeclarations.count))",
+                    "Service environment (\(inspection.serviceEnvironmentDeclarations.count))",
+                    isExpanded: $serviceEnvironmentExpanded)
+                {
+                    if inspection.serviceEnvironmentDeclarations.isEmpty {
+                        Text("No block-style service environment declarations were recognized in this source file.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(inspection.serviceEnvironmentDeclarations) { declaration in
+                            serviceEnvironmentDeclarationRow(declaration)
+                        }
+                    }
+                }
+                DisclosureGroup(
+                    "Declared environment files (\(inspection.environmentFileDeclarations.count))",
+                    isExpanded: $environmentFilesExpanded)
+                {
+                    if inspection.environmentFileDeclarations.isEmpty {
+                        Text("No block-style service env_file references were recognized in this source file.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(inspection.environmentFileDeclarations) { declaration in
+                            environmentFileDeclarationRow(declaration)
+                        }
+                    }
+                }
+            }
+            interpolationSection(inspection)
+            Section("Secrets") {
+                LabeledContent("Interpretation", value: "Source declarations only")
+                LabeledContent("Secret Values", value: "Not read or revealed")
+                LabeledContent("Access", value: "Requires a service grant")
+                DisclosureGroup(
+                    "Top-level declarations (\(inspection.secretDeclarations.count))",
                     isExpanded: $sourceSecretsExpanded)
                 {
                     if inspection.secretDeclarations.isEmpty {
@@ -641,14 +684,70 @@ struct ComposeFileEditorSheet: View {
                             .foregroundStyle(.secondary)
                     } else {
                         ForEach(inspection.secretDeclarations) { declaration in
-                            LabeledContent("Name") {
+                            LabeledContent {
+                                HStack(spacing: 8) {
+                                    Text(secretSourceLabel(declaration.source))
+                                        .foregroundStyle(.secondary)
+                                    Text("Line \(declaration.line)")
+                                        .foregroundStyle(.tertiary)
+                                }
+                            } label: {
                                 Text(declaration.name)
                                     .font(.system(.body, design: .monospaced))
                                     .textSelection(.enabled)
                             }
-                            .accessibilityLabel("Source secret \(declaration.name), line \(declaration.line)")
-                            .help("Declared on source line \(declaration.line)")
+                            .accessibilityLabel(
+                                "Source secret \(declaration.name), \(secretSourceLabel(declaration.source)), line \(declaration.line)")
+                            .help("Source declaration only; no secret value is read")
                         }
+                    }
+                }
+                DisclosureGroup(
+                    "Service grants (\(inspection.secretGrants.count))",
+                    isExpanded: $secretGrantsExpanded)
+                {
+                    if inspection.secretGrants.isEmpty {
+                        Text("No block-style service secret grants were recognized in this source file.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(inspection.secretGrants) { grant in
+                            secretGrantRow(grant)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func interpolationSection(_ inspection: ComposeProjectSourceInspection) -> some View {
+        Section("Interpolation") {
+            LabeledContent("Resolution", value: "Not evaluated")
+            DisclosureGroup(
+                "Possible source references (\(inspection.interpolationReferences.count))",
+                isExpanded: $interpolationReferencesExpanded)
+            {
+                if inspection.interpolationReferences.isEmpty {
+                    Text("No $VAR or ${VAR} tokens outside single-quoted source spans were recognized.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(inspection.interpolationReferences) { reference in
+                        LabeledContent {
+                            Text("Line \(reference.line)")
+                                .foregroundStyle(.secondary)
+                        } label: {
+                            if reference.isPotentiallySensitive {
+                                Label(reference.name, systemImage: "key.fill")
+                                    .font(.system(.body, design: .monospaced))
+                                    .textSelection(.enabled)
+                            } else {
+                                Text(reference.name)
+                                    .font(.system(.body, design: .monospaced))
+                                    .textSelection(.enabled)
+                            }
+                        }
+                        .accessibilityLabel("Possible interpolation reference \(reference.name), source line \(reference.line)")
+                        .help("Possible source interpolation input; its value is not read")
                     }
                 }
             }
@@ -689,6 +788,84 @@ struct ComposeFileEditorSheet: View {
                 : "Source declaration; its value is not shown in this summary")
     }
 
+    @ViewBuilder
+    private func serviceEnvironmentDeclarationRow(
+        _ declaration: ComposeProjectSourceInspection.ServiceEnvironmentDeclaration
+    ) -> some View {
+        LabeledContent {
+            HStack(spacing: 8) {
+                Text(serviceEnvironmentSourceLabel(declaration.valueSource))
+                    .foregroundStyle(.secondary)
+                Text("Line \(declaration.line)")
+                    .foregroundStyle(.tertiary)
+            }
+        } label: {
+            let label = "\(declaration.service).\(declaration.key)"
+            if declaration.isPotentiallySensitive {
+                Label(label, systemImage: "key.fill")
+                    .font(.system(.body, design: .monospaced))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+            } else {
+                Text(label)
+                    .font(.system(.body, design: .monospaced))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+            }
+        }
+        .accessibilityLabel(
+            "\(declaration.service) environment \(declaration.key), \(serviceEnvironmentSourceLabel(declaration.valueSource)), source line \(declaration.line)")
+        .help("Source declaration only; no environment value is shown or resolved")
+    }
+
+    @ViewBuilder
+    private func environmentFileDeclarationRow(
+        _ declaration: ComposeProjectSourceInspection.EnvironmentFileDeclaration
+    ) -> some View {
+        LabeledContent {
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(declaration.path ?? "Path not recognized")
+                    .font(.system(.body, design: .monospaced))
+                    .textSelection(.enabled)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(environmentFileDetailLabel(declaration))
+                    .foregroundStyle(.secondary)
+            }
+        } label: {
+            Text(declaration.service)
+                .font(.system(.body, design: .monospaced))
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+        .accessibilityLabel(
+            "\(declaration.service) declared environment file \(declaration.path ?? "path not recognized"), source line \(declaration.line)")
+        .help("Compose source reference only; Morbstack does not open this file")
+    }
+
+    @ViewBuilder
+    private func secretGrantRow(_ grant: ComposeProjectSourceInspection.SecretGrant) -> some View {
+        LabeledContent {
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(grant.secretName ?? "Source name not recognized")
+                    .font(.system(.body, design: .monospaced))
+                    .textSelection(.enabled)
+                Text(secretGrantDetailLabel(grant))
+                    .foregroundStyle(.secondary)
+            }
+        } label: {
+            Text(grant.service)
+                .font(.system(.body, design: .monospaced))
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+        .accessibilityLabel(
+            "\(grant.service) source secret grant \(grant.secretName ?? "not recognized"), source line \(grant.line)")
+        .help("Source grant only; Compose resolves whether the secret exists")
+    }
+
     private func environmentDispositionLabel(
         _ disposition: ComposeProjectSourceInspection.EnvironmentDeclaration.ValueDisposition
     ) -> String {
@@ -697,5 +874,50 @@ struct ComposeFileEditorSheet: View {
         case .set: "Set"
         case .redacted: "Redacted"
         }
+    }
+
+    private func serviceEnvironmentSourceLabel(
+        _ source: ComposeProjectSourceInspection.ServiceEnvironmentDeclaration.ValueSource
+    ) -> String {
+        switch source {
+        case .declaredInSource: "Source value withheld"
+        case .requiresComposeResolution: "Compose resolves (not read)"
+        }
+    }
+
+    private func environmentFileDetailLabel(
+        _ declaration: ComposeProjectSourceInspection.EnvironmentFileDeclaration
+    ) -> String {
+        var details = ["Line \(declaration.line)"]
+        if let required = declaration.required {
+            details.append(required ? "Required" : "Optional")
+        }
+        if let format = declaration.format {
+            details.append("Format \(format)")
+        }
+        return details.joined(separator: " · ")
+    }
+
+    private func secretSourceLabel(_ source: ComposeProjectSourceInspection.SecretDeclaration.Source) -> String {
+        switch source {
+        case .file(let path):
+            path.map { "File \($0) (not read)" } ?? "File source (path not recognized)"
+        case .environment(let variable):
+            variable.map { "Host variable \($0) (not read)" } ?? "Host variable source (name not recognized)"
+        case .external:
+            "External source declaration"
+        case .notDeclared:
+            "Source not recognized"
+        case .ambiguous:
+            "Multiple source keys; validate source"
+        }
+    }
+
+    private func secretGrantDetailLabel(_ grant: ComposeProjectSourceInspection.SecretGrant) -> String {
+        var details = [grant.syntax == .short ? "Short syntax" : "Long syntax", "Line \(grant.line)"]
+        if let target = grant.target {
+            details.append("Target \(target)")
+        }
+        return details.joined(separator: " · ")
     }
 }

@@ -662,6 +662,13 @@ struct ComposeProjectOperationSheet: View {
             Section("What Will Happen") {
                 Text(request.operation.effectDescription)
             }
+            Section("Environment and Secret Sources") {
+                LabeledContent("Host Environment", value: "Not inherited")
+                LabeledContent("Default .env", value: "Disabled")
+                LabeledContent("Keychain Credentials", value: "Not copied or read")
+                Text("Declared service env_file entries and file: secret sources remain Compose source references. The bundled Compose client may read them while processing this reviewed project; Morbstack does not open, copy, or display their contents.")
+                Text("An environment: secret source requires a host environment variable. This reviewed command has no inherited host variables, so that source is unavailable here. Use a reviewed file: or external: secret source when the project needs unattended source-driven operation.")
+            }
             Section("Trust and Cancellation") {
                 Text("Compose files and their explicit include, extends, config, secret, build-context, and provider references are trusted input. Review this project and every referenced source before continuing.")
                 Text("Morbstack verifies the same saved source bytes and the exact non-symbolic-link project root immediately before launch. It disables ambient Docker contexts, credential helpers, default .env loading, Git configuration, SSH agent, and proxy environment.")

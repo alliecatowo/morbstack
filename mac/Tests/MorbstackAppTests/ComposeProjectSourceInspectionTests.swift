@@ -29,24 +29,50 @@ final class ComposeProjectSourceInspectionTests: XCTestCase {
         XCTAssertEqual(inspection.environmentDeclarations[2].valueDisposition, .empty)
     }
 
-    func testComposeInspectionOnlyRecognizesTopLevelBlockSecretNames() {
+    func testComposeInspectionReportsSourceMetadataWithoutEvaluatingValues() {
         let inspection = ComposeProjectSourceInspection.inspect(
             text: """
             name: demo
+            services:
+              app:
+                image: "example:${IMAGE}:${TAG:-latest}"
+                environment:
+                  PORT: "8080"
+                  API_TOKEN:
+                env_file:
+                  - path: ./base.env
+                    required: true
+                    format: raw
+                  - ./override.env
+                secrets:
+                  - database_password
+                  - source: external_api
+                    target: /run/project-api
             secrets:
               database_password:
                 file: ./database-password.txt
               external_api:
                 external: true
-            services:
-              app:
-                secrets:
-                  - database_password
+              project_token:
+                environment: OAUTH_TOKEN
             """,
             sourceKind: .composeYAML)
 
         XCTAssertEqual(inspection.environmentDeclarations, [])
-        XCTAssertEqual(inspection.secretDeclarations.map(\.name), ["database_password", "external_api"])
-        XCTAssertEqual(inspection.secretDeclarations.map(\.line), [3, 5])
+        XCTAssertEqual(
+            inspection.serviceEnvironmentDeclarations.map { ($0.service, $0.key, $0.valueSource) },
+            [("app", "PORT", .declaredInSource), ("app", "API_TOKEN", .requiresComposeResolution)])
+        XCTAssertTrue(inspection.serviceEnvironmentDeclarations[1].isPotentiallySensitive)
+        XCTAssertEqual(
+            inspection.environmentFileDeclarations.map { ($0.service, $0.path, $0.required, $0.format) },
+            [("app", "./base.env", true, "raw"), ("app", "./override.env", nil, nil)])
+        XCTAssertEqual(inspection.interpolationReferences.map(\.name), ["IMAGE", "TAG"])
+        XCTAssertEqual(inspection.secretDeclarations.map(\.name), ["database_password", "external_api", "project_token"])
+        XCTAssertEqual(inspection.secretDeclarations[0].source, .file(path: "./database-password.txt"))
+        XCTAssertEqual(inspection.secretDeclarations[1].source, .external)
+        XCTAssertEqual(inspection.secretDeclarations[2].source, .environment(variable: "OAUTH_TOKEN"))
+        XCTAssertEqual(
+            inspection.secretGrants.map { ($0.service, $0.secretName, $0.syntax, $0.target) },
+            [("app", "database_password", .short, nil), ("app", "external_api", .long, "/run/project-api")])
     }
 }

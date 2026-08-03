@@ -357,6 +357,40 @@ No Compose command, Docker/VM action, build, test, or app launch was performed f
 source-only implementation. Full-window visual acceptance, light/dark, narrow-toolbar,
 keyboard, VoiceOver, and a fixture-backed review/cancellation/result pass remain required.
 
+### 2026-08-03 Compose environment and secrets source inspection
+
+The selected-source document sheet now has a native `Form` hierarchy for the task “understand
+the environment and secret declarations in this one saved source without exposing or resolving
+their values.” A Compose YAML has collapsed `DisclosureGroup`s for block-style service
+`environment`, declared `env_file` references, possible `$VAR`/`${VAR…}` tokens, top-level
+`secrets` source metadata, and explicit service grants. A selected `.env` retains its existing
+separate `ContentUnavailableView` until the person chooses to reveal the document for editing;
+its declaration summary shows names, source-line provenance, and redacted/set/empty state only.
+The Form records that it neither infers a sibling `.env` nor reads host environment/Keychain or
+the contents of a declared `env_file`/secret file. It does not draw a source dashboard, secret
+table, card, or custom material.
+
+Docker Compose’s source semantics require the distinction: service `environment` overrides
+`env_file`; top-level secret declaration alone does not grant service access; grants are explicit
+in each service; and secrets can be file, host-environment, or external sources. The UI reports
+only source structure, so its language is “declared”, “possible”, “not read”, and “not evaluated”
+rather than asserting a live environment or a secret's existence. The reviewed source-operation
+sheet additionally makes its isolation visible: it does not inherit host environment/default
+`.env`/Keychain state, so a top-level `environment:` secret source cannot satisfy that operation;
+explicit `file:` or `external:` sources remain Compose's trusted-source boundary.
+
+Consulted: Apple [Sheets](https://developer.apple.com/design/human-interface-guidelines/sheets/),
+[Form](https://developer.apple.com/documentation/swiftui/form),
+[DisclosureGroup](https://developer.apple.com/documentation/swiftui/disclosuregroup), and
+[ContentUnavailableView](https://developer.apple.com/documentation/swiftui/contentunavailableview),
+plus Docker's [`environment`/`env_file`](https://docs.docker.com/reference/compose-file/services/#environment),
+[variable interpolation](https://docs.docker.com/compose/how-tos/environment-variables/variable-interpolation/),
+and [secrets](https://docs.docker.com/reference/compose-file/secrets/) references. The design
+uses standard sheet/Form/disclosure/unavailable-state semantics exclusively. No app, Docker/VM,
+Compose, or test workload ran for this source change. Full-window light/dark/narrow, keyboard,
+VoiceOver, explicit `.env` reveal/hide, source-operation review, and real Compose acceptance
+remain pending.
+
 ## Charts audit: current concrete rule
 
 `ContainerStatsTab` currently contains the only real time-series visualization. It is
