@@ -282,7 +282,10 @@ struct StacksRootView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        ToolbarItem(id: "stacks.refresh", placement: .primaryAction) {
+        // A Compose project has no one universal primary command: the useful action
+        // depends on the selected project or service and already lives in its
+        // contextual menu below.  Refresh is utility work, so macOS may overflow it.
+        ToolbarItem(id: "stacks.refresh", placement: .secondaryAction) {
             Button {
                 Task { await model.refreshAll() }
             } label: {
@@ -293,7 +296,7 @@ struct StacksRootView: View {
         }
 
         if !services.isEmpty {
-            ToolbarItem(id: "stacks.inspector", placement: .primaryAction) {
+            ToolbarItem(id: "stacks.inspector", placement: .automatic) {
                 Button { showsInspector.toggle() } label: {
                     Image(systemName: "sidebar.right")
                 }
