@@ -52,7 +52,9 @@ does all of the following without administrator access:
    `~/.morbstack/bin` on the PATH of future login shells.
 4. Registers the standard Docker context named `morbstack`. If Docker is on
    its ordinary `default` context, it becomes current; if the person already
-   selected any named context, that selection remains untouched.
+   selected any named context, that selection remains untouched. If a context
+   named `morbstack` already points at another endpoint, setup preserves it and
+   reports the exact repair; it never assumes that same name is ours.
 
 The setup starts no VM and does not alter Docker data, credentials,
 `credHelpers`, `credsStore`, or another Docker context. A Homebrew or Docker

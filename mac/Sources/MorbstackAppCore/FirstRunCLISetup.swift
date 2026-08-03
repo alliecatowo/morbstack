@@ -118,7 +118,7 @@ final class FirstRunCLISetupModel {
         let needsContextRegistration: Bool
         switch plan.contextRegistration {
         case .willCreateAndUse, .willCreateWithoutChangingCurrent,
-             .staleWillReplaceAndUse, .staleWillReplaceWithoutChangingCurrent:
+             .conflictingRegistration:
             needsContextRegistration = true
         case .alreadyCurrent, .alreadyRegisteredWithoutChangingCurrent:
             needsContextRegistration = false
@@ -699,10 +699,8 @@ private extension MorbCliInstallation.ContextRegistration {
             return "The morbstack context is already registered and current."
         case .alreadyRegisteredWithoutChangingCurrent(let current):
             return "Morbstack is registered; the named context \(current) stays current."
-        case .staleWillReplaceAndUse:
-            return "Repairs the stale morbstack context and makes it current because Docker uses its default context."
-        case .staleWillReplaceWithoutChangingCurrent(let current):
-            return "Repairs Morbstack’s stale context and leaves the named context \(current) current."
+        case .conflictingRegistration(let endpoint):
+            return "Leaves the existing morbstack context for \(endpoint) unchanged. Rename or remove it before registering Morbstack."
         }
     }
 }

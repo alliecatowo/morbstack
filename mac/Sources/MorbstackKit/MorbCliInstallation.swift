@@ -98,8 +98,10 @@ public enum MorbCliInstallation {
         case willCreateWithoutChangingCurrent(String)
         case alreadyCurrent
         case alreadyRegisteredWithoutChangingCurrent(String)
-        case staleWillReplaceAndUse
-        case staleWillReplaceWithoutChangingCurrent(String)
+        /// A context using Morbstack's reserved name already points at a different
+        /// endpoint. Its provenance cannot be determined from Docker's meta.json, so
+        /// setup must leave it alone and name the repair rather than overwriting it.
+        case conflictingRegistration(String)
     }
 
     public struct Plan: Equatable, Sendable {
@@ -146,9 +148,7 @@ public enum MorbCliInstallation {
                 ? .alreadyCurrent
                 : .alreadyRegisteredWithoutChangingCurrent(context.currentContext)
         } else if context.registered {
-            contextRegistration = context.wouldRefuseUse
-                ? .staleWillReplaceWithoutChangingCurrent(context.currentContext)
-                : .staleWillReplaceAndUse
+            contextRegistration = .conflictingRegistration(context.registeredHost ?? "an unrecognized endpoint")
         } else {
             contextRegistration = context.wouldRefuseUse
                 ? .willCreateWithoutChangingCurrent(context.currentContext)
@@ -226,15 +226,20 @@ public enum MorbCliInstallation {
         var created = false
         var becameCurrent = false
         var contextError: String?
-        do {
-            created = try MorbDockerContext.create(environment: environment)
-            // `use(force: false)` only writes when the current context is Docker's
-            // ordinary default.  A remote/desktop/etc. context remains untouched.
-            if case .current = try MorbDockerContext.use(force: false, environment: environment) {
-                becameCurrent = true
+        switch installPlan.contextRegistration {
+        case .conflictingRegistration(let endpoint):
+            contextError = "the existing \(MorbDockerContext.name) context points at \(endpoint); Morbstack preserved it. Rename or remove that context, then run setup again."
+        default:
+            do {
+                created = try MorbDockerContext.create(environment: environment)
+                // `use(force: false)` only writes when the current context is Docker's
+                // ordinary default.  A remote/desktop/etc. context remains untouched.
+                if case .current = try MorbDockerContext.use(force: false, environment: environment) {
+                    becameCurrent = true
+                }
+            } catch {
+                contextError = (error as? MorbError)?.description ?? error.localizedDescription
             }
-        } catch {
-            contextError = (error as? MorbError)?.description ?? error.localizedDescription
         }
 
         return InstallResult(

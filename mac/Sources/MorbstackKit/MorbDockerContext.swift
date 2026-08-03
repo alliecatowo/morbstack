@@ -160,7 +160,8 @@ public enum MorbDockerContext {
     /// correct and nothing changed.
     ///
     /// Callers (only `morb context create`) are responsible for confirmation before
-    /// calling this — it writes unconditionally once invoked.
+    /// calling this. It creates a missing context, but refuses to overwrite an
+    /// existing same-named endpoint whose ownership cannot be established.
     @discardableResult
     public static func create(
         socketPath: String = MorbPaths.dockerSocket.path,
@@ -168,8 +169,13 @@ public enum MorbDockerContext {
     ) throws -> Bool {
         let configDir = dockerConfigDirectory(environment: environment)
         let meta = metaFile(dockerConfigDirectory: configDir)
-        if readHost(metaFile: meta) == "unix://\(socketPath)" {
+        let expectedHost = "unix://\(socketPath)"
+        if readHost(metaFile: meta) == expectedHost {
             return false
+        }
+        if let existingHost = readHost(metaFile: meta) {
+            throw MorbError.config(
+                "\(meta.path) already registers the \(name) Docker context for \(existingHost); refusing to overwrite it. Rename or remove that context, then retry.")
         }
         do {
             try FileManager.default.createDirectory(

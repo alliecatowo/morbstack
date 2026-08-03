@@ -788,7 +788,7 @@ case "context":
             out("[!!] context \"\(MorbDockerContext.name)\" is registered but points elsewhere")
             out("     registered: \(status.registeredHost ?? "-")")
             out("     expected:   unix://\(status.socketPath)")
-            out("     Run `morb context create` to fix it.")
+            out("     Morbstack preserves this same-named context; rename or remove it, then run `morb context create`.")
         } else {
             out("[--] context \"\(MorbDockerContext.name)\" is not registered")
             out("     Run `morb context create` to add it.")
@@ -1108,10 +1108,13 @@ case "install-cli":
         }
         out("")
         switch installPlan.contextRegistration {
-        case .willCreateAndUse, .staleWillReplaceAndUse:
+        case .willCreateAndUse:
             out("  Docker context: registers `morbstack` and makes it current because no explicit context owns it.")
-        case .willCreateWithoutChangingCurrent(let current), .staleWillReplaceWithoutChangingCurrent(let current):
+        case .willCreateWithoutChangingCurrent(let current):
             out("  Docker context: registers `morbstack` but leaves explicit current context `\(current)` unchanged.")
+        case .conflictingRegistration(let endpoint):
+            out("  Docker context: preserves the existing `morbstack` context for \(endpoint).")
+            out("                  Rename or remove it before registering Morbstack.")
         case .alreadyCurrent:
             out("  Docker context: `morbstack` is already registered and current.")
         case .alreadyRegisteredWithoutChangingCurrent(let current):
