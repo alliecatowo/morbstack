@@ -598,7 +598,12 @@ case "service":
         renderService(MorbBackgroundService.status(checkControlSocket: true))
     case "enable":
         do {
-            renderService(try MorbBackgroundService.enable())
+            _ = try MorbBackgroundService.enable()
+            // A completed Service Management registration only says launchd may run
+            // the selected agent. Wait briefly for the daemon's host-only control
+            // listener so an explicit `morb service enable` gives a truthful answer
+            // about the no-window Docker path without starting the VM.
+            renderService(MorbBackgroundService.waitForControlSocket())
         } catch {
             fail((error as? MorbError)?.description ?? error.localizedDescription, code: 2)
         }

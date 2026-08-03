@@ -220,7 +220,16 @@ private struct TrackDGeneralSettings: View {
 
         do {
             let status = try await Task.detached(priority: .userInitiated) {
-                try (enabled ? MorbBackgroundService.enable() : MorbBackgroundService.disable())
+                if enabled {
+                    _ = try MorbBackgroundService.enable()
+                    // Registration gives launchd permission to run the agent, but it
+                    // does not synchronously prove that a windowless Docker client
+                    // can reach it. The bounded probe is read-only and never boots
+                    // the VM; surfacing its result keeps this durable preference
+                    // honest after the Settings window closes.
+                    return MorbBackgroundService.waitForControlSocket()
+                }
+                return try MorbBackgroundService.disable()
             }.value
             backgroundServiceStatus = status
             isBackgroundServiceEnabled = status.registration.isRegistered

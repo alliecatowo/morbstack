@@ -107,7 +107,7 @@ public enum MorbSetupVerification {
         integrations.append(verifyContext(context, installation: installation))
         integrations.append(verifyDirectSocket(postInstallPlan.directSocket))
         if case .status(let status) = backgroundService {
-            integrations.append(verifyBackgroundService(status))
+            integrations.append(backgroundServiceCheck(status))
         }
 
         return Report(
@@ -290,10 +290,32 @@ public enum MorbSetupVerification {
         }
     }
 
-    private static func verifyBackgroundService(_ status: MorbBackgroundService.Status) -> Check {
+    /// Separates Service Management authorization from observed launch readiness.
+    ///
+    /// Internal for the focused unit tests: unlike reading a real service's state,
+    /// mapping an already-captured status into setup evidence is pure and must remain
+    /// deterministic. In particular, an enabled Login Item is not a CP-05 pass until
+    /// its host control listener is reachable.
+    static func backgroundServiceCheck(_ status: MorbBackgroundService.Status) -> Check {
         switch status.registration {
         case .enabled:
-            return Check(name: "Background service", status: .pass, detail: status.diagnostic)
+            switch status.controlSocketState {
+            case .responding:
+                return Check(
+                    name: "Background service",
+                    status: .pass,
+                    detail: "\(status.diagnostic) Its control socket is responding.")
+            case .notChecked:
+                return Check(
+                    name: "Background service",
+                    status: .info,
+                    detail: "\(status.diagnostic) Registration succeeded, but this review did not check whether the host service has started.")
+            case .missing, .unresponsive:
+                return Check(
+                    name: "Background service",
+                    status: .warning,
+                    detail: "\(status.diagnostic) The selected service has not made its control socket reachable yet; run `morb service status` for the current diagnostic before relying on Docker with no app window.")
+            }
         case .requiresApproval:
             return Check(name: "Background service", status: .warning, detail: status.diagnostic)
         case .notRegistered, .notFound, .unknown:

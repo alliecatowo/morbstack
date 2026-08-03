@@ -222,6 +222,15 @@ final class FirstRunCLISetupModel {
                 // intentionally on the explicit setup path, never in `prepare()`.
                 progressDescription = "Registering the selected Login Item"
                 backgroundServiceStatus = try MorbBackgroundService.enable()
+                // `register()` authorizes launchd but returns before an agent has
+                // necessarily bound its control socket. Wait off the main actor so
+                // the review sheet can give a truthful no-window handoff without
+                // freezing its native progress UI. This is observation only: it
+                // neither starts the daemon nor boots the VM.
+                progressDescription = "Checking the selected Login Item"
+                backgroundServiceStatus = await Task.detached(priority: .userInitiated) {
+                    MorbBackgroundService.waitForControlSocket()
+                }.value
             }
 
             if startEngine {
@@ -304,8 +313,16 @@ final class FirstRunCLISetupModel {
     private func verifySelectedSetup() async {
         progressDescription = "Verifying the selected setup"
         let serviceVerification: MorbSetupVerification.BackgroundService
-        if enableBackgroundService, let backgroundServiceStatus {
-            serviceVerification = .status(backgroundServiceStatus)
+        if enableBackgroundService, backgroundServiceStatus != nil {
+            // Re-read liveness at the point the setup transaction finishes. In the
+            // start-and-verify path `DaemonClient` may have won the launch race; in
+            // setup-only mode this distinguishes a registered Login Item from a host
+            // service that still has not become available to a later Docker client.
+            let currentServiceStatus = await Task.detached(priority: .userInitiated) {
+                MorbBackgroundService.status(checkControlSocket: true)
+            }.value
+            self.backgroundServiceStatus = currentServiceStatus
+            serviceVerification = .status(currentServiceStatus)
         } else {
             serviceVerification = .notRequested
         }

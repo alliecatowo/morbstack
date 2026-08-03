@@ -100,6 +100,13 @@ The command-line equivalents (`morb service status`, `enable`, `disable`, and
 See [`background-service.md`](background-service.md) for the signed-bundle,
 Service Management, and update-registration requirements.
 
+Immediately after that explicit registration, the setup flow waits briefly for the
+authorized agent's control socket before it reports the no-window service outcome.
+The bounded probe only connects to the host control socket; it does not issue a
+daemon command, boot the VM, or start containers. A Login Items registration that
+has not yet produced a reachable control socket stays a warning with an actionable
+diagnostic instead of being presented as proven Docker availability.
+
 ## Post-setup verification
 
 After the person confirms setup, both the first-run completion sheet and

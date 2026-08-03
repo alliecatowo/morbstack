@@ -125,6 +125,40 @@ public enum MorbBackgroundService {
             diagnostic: diagnostic(for: registration, bundle: bundle))
     }
 
+    /// Waits briefly for an already-authorized LaunchAgent to bind its control socket.
+    ///
+    /// Service Management registration means macOS is allowed to launch the agent; it
+    /// does not mean the agent has already reached its first `listen(2)`. Call this
+    /// after a person explicitly enables the service when the caller needs to hand off
+    /// to a windowless Docker client straight away. It never registers, starts, or
+    /// sends a command to `morbstackd`, so it cannot start the VM or containers.
+    ///
+    /// The timeout deliberately returns a status rather than throwing: Login Items can
+    /// be disabled or the helper can have a release-specific launch failure, and those
+    /// are actionable diagnostics rather than a reason to change the person's service
+    /// selection behind their back.
+    public static func waitForControlSocket(
+        timeout: TimeInterval = 5,
+        pollInterval: TimeInterval = 0.1
+    ) -> Status {
+        let boundedTimeout = max(0, timeout)
+        let boundedPollInterval = max(0.01, pollInterval)
+        let deadline = Date().addingTimeInterval(boundedTimeout)
+        var current = status(checkControlSocket: true)
+
+        while current.registration == .enabled,
+              current.controlSocketState != .responding,
+              Date() < deadline
+        {
+            // This method is invoked from a detached task by SwiftUI callers. The
+            // synchronous sleep also keeps the dependency-free CLI implementation
+            // simple without tying its service contract to an async runtime.
+            Thread.sleep(forTimeInterval: boundedPollInterval)
+            current = status(checkControlSocket: true)
+        }
+        return current
+    }
+
     /// Registers the bundled LaunchAgent, if needed.
     ///
     /// Calling this is an explicit consent-bearing action. The operation is idempotent:

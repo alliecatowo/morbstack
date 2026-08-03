@@ -17,6 +17,14 @@ registers, `enable` treats already-registered as success, `disable` treats an ab
 service as success, and opening Login Items is a separate direct request. No build,
 app launch, daemon start, or installation path registers a background service.
 
+After the explicit `enable` request, Morbstack waits briefly for the authorized
+LaunchAgent to bind its control socket and reports the observed result. This is a
+bounded connection-only probe: it does not send a daemon command, boot the VM, or
+start containers. A successful Login Items registration therefore remains distinct
+from proof that a new shell can immediately reach the windowless Docker host; a
+missing or unresponsive socket is reported for repair rather than papered over by
+starting a second daemon.
+
 If a newer macOS reports a Service Management state this build does not recognize,
 Morbstack does not unregister or replace the existing service. The command reports the
 state and directs the person to Login Items. Likewise, Morbstack records an update
