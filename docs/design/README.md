@@ -16,9 +16,11 @@ system.
    route inventory, and evidence gate.
 3. [Table semantics audit](TABLE-SEMANTICS-AUDIT.md) — the current task-shaped decision
    for every `Table`/`TableColumn` use in the app.
-4. [Tahoe HIG findings](tahoe/HIG-FINDINGS.md) — supporting research notes. When a note
+4. [Inspector pattern decision](INSPECTOR-PATTERN-DECISION.md) — the selected-record
+   inspector, form, tab, source-editor, and long-text decision record.
+5. [Tahoe HIG findings](tahoe/HIG-FINDINGS.md) — supporting research notes. When a note
    and an Apple source conflict, Apple wins.
-5. [SDK Liquid Glass reference](SDK-LIQUID-GLASS.md) — an API/availability field note;
+6. [SDK Liquid Glass reference](SDK-LIQUID-GLASS.md) — an API/availability field note;
    validate a declaration against the SDK and current Apple documentation before use.
 
 The following documents are preserved as **archived historical records**, not current
