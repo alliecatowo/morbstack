@@ -25,13 +25,13 @@ extension TrackCDiskCategory {
     }
 }
 
-// MARK: - Disk list rows
+// MARK: - Disk table rows
 
 /// An individually sized image or volume for the largest-resources section.
 ///
 /// Docker's category values and individual resource sizes overlap: image categories
 /// account for shared layers once, while each image can refer to those same layers. They
-/// must therefore remain separate sections in the native list rather than an outline
+/// must therefore remain separate sections in the native table rather than an outline
 /// whose parent/child affordance would imply that their values add up.
 private struct TrackCDiskLargestItem: Identifiable {
 
@@ -106,6 +106,47 @@ private struct TrackCDiskRow: Identifiable {
     var detail: String? {
         guard case .resource(let resource) = content else { return nil }
         return resource.item.detail
+    }
+}
+
+/// The storage screen contains two deliberately separate accounting collections:
+/// aggregate categories and individual resources. The table can still sort each
+/// collection by the same native header without suggesting that the two totals add up.
+private enum TrackCDiskSortKey: String {
+    case name
+    case type
+    case size
+    case reclaimable
+}
+
+private struct TrackCDiskComparator: SortComparator {
+    var key: TrackCDiskSortKey
+    var order: SortOrder = .forward
+
+    func compare(_ lhs: TrackCDiskRow, _ rhs: TrackCDiskRow) -> ComparisonResult {
+        let result: ComparisonResult
+        switch key {
+        case .name:
+            result = MorbSort.string(lhs.title, rhs.title)
+        case .type:
+            result = lhs.type == rhs.type
+                ? MorbSort.string(lhs.title, rhs.title)
+                : MorbSort.string(lhs.type, rhs.type)
+        case .size:
+            result = lhs.bytes == rhs.bytes
+                ? MorbSort.string(lhs.title, rhs.title)
+                : (lhs.bytes < rhs.bytes ? .orderedAscending : .orderedDescending)
+        case .reclaimable:
+            // Individual images and volumes do not carry an independently reliable
+            // reclaimable measurement. Keep that absence after categories with a
+            // reported zero, rather than turning it into a false zero.
+            let left = lhs.reclaimable?.bytes ?? -1
+            let right = rhs.reclaimable?.bytes ?? -1
+            result = left == right
+                ? MorbSort.string(lhs.title, rhs.title)
+                : (left < right ? .orderedAscending : .orderedDescending)
+        }
+        return order == .forward ? result : result.reversed
     }
 }
 
@@ -205,6 +246,9 @@ struct DiskRootView: View {
     @State private var footprint: TrackCDiskImageFootprint?
     @State private var busy = false
     @State private var selection: TrackCDiskRow.ID?
+    @State private var sortOrder: [TrackCDiskComparator] = [
+        TrackCDiskComparator(key: .size, order: .reverse)
+    ]
     @State private var showsInspector = true
     @State private var operationError: String?
 
@@ -357,17 +401,21 @@ struct DiskRootView: View {
         }
     }
 
-    // MARK: Storage list
+    // MARK: Storage table
 
-    /// These are distinct measurements, not a hierarchy. Keeping their flattened form
-    /// only for selection and inspection lets the native `List` sections communicate
-    /// that category totals and individual resources must not be added together.
+    /// These are distinct measurements, not a hierarchy. The table retains two sections
+    /// so its native selection and columns do not imply that aggregate category totals
+    /// can be added to individual image and volume sizes.
     private var categoryRows: [TrackCDiskRow] {
-        segments.map { TrackCDiskRow(content: .category($0)) }
+        segments
+            .map { TrackCDiskRow(content: .category($0)) }
+            .sorted(using: sortOrder)
     }
 
     private var resourceRows: [TrackCDiskRow] {
-        largestItems.map { TrackCDiskRow(content: .resource($0)) }
+        largestItems
+            .map { TrackCDiskRow(content: .resource($0)) }
+            .sorted(using: sortOrder)
     }
 
     private var diskRows: [TrackCDiskRow] { categoryRows + resourceRows }
@@ -378,64 +426,77 @@ struct DiskRootView: View {
     }
 
     private var diskTable: some View {
-        List(selection: $selection) {
-            Section {
-                ForEach(categoryRows) { row in
-                    diskRow(row)
-                }
-            } header: {
-                Text("Storage Categories")
-            } footer: {
-                Text("Docker reports these as aggregate storage accounting. Do not add them to the individual resource sizes below.")
+        Table(of: TrackCDiskRow.self, selection: $selection, sortOrder: $sortOrder) {
+            TableColumn("Name", sortUsing: TrackCDiskComparator(key: .name)) { row in
+                Label(row.title, systemImage: row.symbol)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
             }
+            .width(min: 150, ideal: 210)
 
-            Section {
-                if resourceRows.isEmpty {
-                    Text("Docker has not reported an individual size for an image or volume.")
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(resourceRows) { row in
-                        diskRow(row)
-                    }
-                }
-            } header: {
-                Text("Largest Individual Resources")
-            } footer: {
-                Text("Image sizes can share layers with one another and with the Images category.")
+            TableColumn("Type", sortUsing: TrackCDiskComparator(key: .type)) { row in
+                Text(row.type)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
+            .width(min: 120, ideal: 148, max: 180)
+
+            TableColumn("Size", sortUsing: TrackCDiskComparator(key: .size)) { row in
+                Text(Formatters.bytesString(row.bytes))
+                    .monospacedDigit()
+            }
+            .width(min: 78, ideal: 94, max: 128)
+
+            TableColumn("Reclaimable", sortUsing: TrackCDiskComparator(key: .reclaimable)) { row in
+                reclaimableCell(for: row)
+            }
+            .width(min: 112, ideal: 138, max: 180)
+        } rows: {
+            Section("Storage Categories") {
+                ForEach(categoryRows) { TableRow($0) }
+            }
+            if !resourceRows.isEmpty {
+                Section("Largest Individual Resources") {
+                    ForEach(resourceRows) { TableRow($0) }
+                }
+            }
+        }
+        .tableStyle(.automatic)
+        .contextMenu(forSelectionType: TrackCDiskRow.ID.self) { ids in
+            contextMenu(for: ids)
+        } primaryAction: { ids in
+            if let id = ids.first { selection = id }
         }
     }
 
-    private func diskRow(_ row: TrackCDiskRow) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            Label {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(row.title)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Text(row.detail ?? row.type)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+    @ViewBuilder
+    private func reclaimableCell(for row: TrackCDiskRow) -> some View {
+        if let reclaimable = row.reclaimable {
+            Text(reclaimableText(bytes: reclaimable.bytes, estimated: reclaimable.estimated))
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+        } else {
+            Text("—")
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Reclaimable storage not reported for this individual resource")
+        }
+    }
+
+    @ViewBuilder
+    private func contextMenu(for ids: Set<TrackCDiskRow.ID>) -> some View {
+        if let id = ids.first, let row = diskRows.first(where: { $0.id == id }) {
+            if let category = row.category, let target = category.pruneTarget {
+                Button("Prune \(category.title)…", role: .destructive) {
+                    pruning = target
                 }
-            } icon: {
-                Image(systemName: row.symbol)
-            }
-
-            Spacer(minLength: 20)
-
-            VStack(alignment: .trailing, spacing: 2) {
-                Text(Formatters.bytesString(row.bytes))
-                    .monospacedDigit()
-                if let reclaimable = row.reclaimable {
-                    Text("Reclaimable \(reclaimableText(bytes: reclaimable.bytes, estimated: reclaimable.estimated))")
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
+                .disabled(busy || !canPrune(target))
+                .help(category.pruneSummary)
+            } else if case .some(.buildCache) = row.category {
+                Button("Show Build Cache") {
+                    model.selection = .builds
                 }
             }
         }
-        .tag(row.id)
-        .help(row.detail ?? row.title)
     }
 
     private func reclaimableText(bytes: Int64, estimated: Bool) -> String {
