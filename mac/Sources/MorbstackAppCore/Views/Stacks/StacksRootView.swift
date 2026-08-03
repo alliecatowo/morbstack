@@ -103,6 +103,8 @@ struct StacksRootView: View {
     @State private var query = ""
     @State private var selection: StackOutlineID?
     @State private var showsInspector = true
+    /// Compose files are supporting metadata, not equal-weight inspector facts.
+    @State private var composeFilesExpanded = false
     @State private var busyProjects: Set<String> = []
     @State private var busyServices: Set<ContainerSummary.ID> = []
     @State private var removalTarget: ContainerSummary?
@@ -229,6 +231,7 @@ struct StacksRootView: View {
                         + "Named volumes are kept.")
             }
             .onChange(of: selection) { _, newValue in
+                composeFilesExpanded = false
                 if newValue != nil { showsInspector = true }
             }
             .onChange(of: visibleRowIDs) { _, _ in
@@ -472,9 +475,9 @@ struct StacksRootView: View {
             projectInspector(stack: stack, project: project)
         } else {
             ContentUnavailableView {
-                Label("No Service Selected", systemImage: "square.stack.3d.up")
+                Label("No Stack Selected", systemImage: "square.stack.3d.up")
             } description: {
-                Text("Select a Compose service to inspect its project, configuration, and lifecycle actions.")
+                Text("Select a Compose project or service to inspect its Docker-reported configuration.")
             }
         }
     }
@@ -516,44 +519,7 @@ struct StacksRootView: View {
                     }
                 }
             }
-
-            Section("Actions") {
-                secondaryServiceActionItems(for: service)
-
-                Menu("Project Actions") {
-                    projectActionItems(for: stack)
-                }
-
-                Button {
-                    TrackDAppBridge.reveal(containerID: service.id, in: model)
-                } label: {
-                    Label("Open in Containers", systemImage: "shippingbox")
-                }
-
-                Button {
-                    TrackDAppBridge.reveal(containerID: service.id, in: model, showingLogs: true)
-                } label: {
-                    Label("View Logs", systemImage: "text.alignleft")
-                }
-
-                if let url = service.ports.compactMap(\.url).first {
-                    Button {
-                        NSWorkspace.shared.open(url)
-                    } label: {
-                        Label("Open Published Port", systemImage: "safari")
-                    }
-                }
-
-                if canRemove(service) {
-                    Button(role: .destructive) {
-                        removalTarget = service
-                    } label: {
-                        Label("Remove Service", systemImage: "trash")
-                    }
-                }
-            }
         }
-        .formStyle(.columns)
         .task(id: stack.id) {
             metadata.load(project: project, containerID: service.id, client: model.client)
         }
@@ -568,12 +534,7 @@ struct StacksRootView: View {
             }
 
             composeMetadataSection(project: project)
-
-            Section("Actions") {
-                projectActionItems(for: stack)
-            }
         }
-        .formStyle(.columns)
         .task(id: stack.id) {
             if let service = stack.containers.first {
                 metadata.load(project: project, containerID: service.id, client: model.client)
@@ -594,15 +555,13 @@ struct StacksRootView: View {
                 }
             }
             if let files = metadata.configFiles[project], !files.isEmpty {
-                LabeledContent("Compose files") {
-                    VStack(alignment: .trailing, spacing: 3) {
-                        ForEach(files, id: \.self) { file in
-                            Text(file)
-                                .font(.system(.callout, design: .monospaced))
-                                .textSelection(.enabled)
-                                .lineLimit(2)
-                                .truncationMode(.middle)
-                        }
+                DisclosureGroup("Compose Files (\(files.count))", isExpanded: $composeFilesExpanded) {
+                    ForEach(files, id: \.self) { file in
+                        Text(file)
+                            .font(.system(.callout, design: .monospaced))
+                            .textSelection(.enabled)
+                            .lineLimit(2)
+                            .truncationMode(.middle)
                     }
                 }
             } else if metadata.configFiles[project] != nil {
@@ -658,20 +617,6 @@ struct StacksRootView: View {
                 .accessibilityLabel("Updating \(service.composeService ?? service.displayName)")
         } else {
             ForEach(service.availableActions.filter { !$0.isDestructive }, id: \.rawValue) { action in
-                Button(action.title) { perform(action, on: service) }
-                    .disabled(isProjectBusy(for: service))
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func secondaryServiceActionItems(for service: ContainerSummary) -> some View {
-        if isServiceBusy(service) {
-            ProgressView()
-                .controlSize(.small)
-                .accessibilityLabel("Updating \(service.composeService ?? service.displayName)")
-        } else {
-            ForEach(secondaryLifecycleActions(for: service), id: \.rawValue) { action in
                 Button(action.title) { perform(action, on: service) }
                     .disabled(isProjectBusy(for: service))
             }
@@ -738,16 +683,19 @@ struct StacksRootView: View {
             Button("Refresh") {
                 Task { await model.refreshAll() }
             }
-            Button("Choose Compose File…") {
-                chooseComposeFile()
-            }
-            .disabled(composeFileEditor.isPresented)
-            Button("Choose Project Environment File…") {
-                chooseProjectEnvironmentFile()
-            }
-            .disabled(composeFileEditor.isPresented)
-            Button("Copy Docker Context Command") {
-                MorbPasteboard.copy(TrackDLinks.dockerContextCommand(socketPath: MorbPaths.dockerSocket.path))
+            Menu("Source and Context") {
+                Button("Choose Compose File…") {
+                    chooseComposeFile()
+                }
+                .disabled(composeFileEditor.isPresented)
+                Button("Choose Project Environment File…") {
+                    chooseProjectEnvironmentFile()
+                }
+                .disabled(composeFileEditor.isPresented)
+                Divider()
+                Button("Copy Docker Context Command") {
+                    MorbPasteboard.copy(TrackDLinks.dockerContextCommand(socketPath: MorbPaths.dockerSocket.path))
+                }
             }
         }
     }
