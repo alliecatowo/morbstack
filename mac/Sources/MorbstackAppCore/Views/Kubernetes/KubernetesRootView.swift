@@ -203,6 +203,10 @@ struct KubernetesRootView: View {
     @State private var podLogError: String?
     @State private var isLoadingPodLog = false
     @State private var podLogRequestID = UUID()
+    @State private var resourceDescription: K8s.ResourceDescription?
+    @State private var resourceDescriptionError: String?
+    @State private var isLoadingResourceDescription = false
+    @State private var resourceDescriptionRequestID = UUID()
     @State private var showsInspector = true
     @State private var lifecycleRequest: KubernetesLifecycleRequest?
     @State private var kubeconfigCopied = false
@@ -266,6 +270,16 @@ struct KubernetesRootView: View {
 
     private var selectedPod: K8sPodInfo? {
         pods.first { $0.id == selectedPodID }
+    }
+
+    private var selectedResourceReference: K8s.ResourceReference? {
+        if let pod = selectedPod {
+            return K8s.ResourceReference(kind: .pod, name: pod.name, namespace: pod.namespace)
+        }
+        if let node = selectedNode {
+            return K8s.ResourceReference(kind: .node, name: node.name)
+        }
+        return nil
     }
 
     /// Search scopes the active table, not merely its visible cells. When a selected
@@ -556,6 +570,11 @@ struct KubernetesRootView: View {
             clearPodObservation()
         } else if let pod = selectedPod {
             preparePodObservation(for: pod)
+        } else if let node = selectedNode {
+            prepareResourceDescription(
+                for: K8s.ResourceReference(kind: .node, name: node.name))
+        } else {
+            clearResourceDescription()
         }
         reconcileSelectionWithVisibleResource()
     }
@@ -576,6 +595,8 @@ struct KubernetesRootView: View {
         isLoadingPodEvents = false
         isLoadingPodLog = false
 
+        prepareResourceDescription(
+            for: K8s.ResourceReference(kind: .pod, name: pod.name, namespace: pod.namespace))
         Task { await loadPodEvents(for: pod) }
         if let container = pod.containers.first {
             Task { await loadPodLog(for: pod, container: container.name) }
@@ -592,6 +613,57 @@ struct KubernetesRootView: View {
         podLog = ""
         podLogError = nil
         isLoadingPodLog = false
+        clearResourceDescription()
+    }
+
+    // MARK: - Selected-resource description
+
+    /// The record selected in the native Table supplies the only describe target. The
+    /// daemon accepts a fixed Pod/Node GET contract and revalidates that target; the
+    /// app never constructs arbitrary Kubernetes paths or falls back to stale details.
+    private func prepareResourceDescription(for reference: K8s.ResourceReference) {
+        resourceDescriptionRequestID = UUID()
+        resourceDescription = nil
+        resourceDescriptionError = nil
+        isLoadingResourceDescription = false
+        Task { await loadResourceDescription(for: reference) }
+    }
+
+    private func clearResourceDescription() {
+        resourceDescriptionRequestID = UUID()
+        resourceDescription = nil
+        resourceDescriptionError = nil
+        isLoadingResourceDescription = false
+    }
+
+    private func loadResourceDescription(for reference: K8s.ResourceReference) async {
+        let requestID = resourceDescriptionRequestID
+        guard selectedResourceReference == reference else { return }
+        isLoadingResourceDescription = true
+        resourceDescriptionError = nil
+        defer {
+            if resourceDescriptionRequestID == requestID {
+                isLoadingResourceDescription = false
+            }
+        }
+        do {
+            let description = try await provider.describe(reference)
+            guard resourceDescriptionRequestID == requestID,
+                  selectedResourceReference == reference,
+                  description.reference == reference
+            else { return }
+            resourceDescription = description
+        } catch {
+            guard resourceDescriptionRequestID == requestID,
+                  selectedResourceReference == reference
+            else { return }
+            resourceDescriptionError = MorbErrorMessage.text(for: error)
+        }
+    }
+
+    private func retryResourceDescription() {
+        guard let reference = selectedResourceReference else { return }
+        prepareResourceDescription(for: reference)
     }
 
     private func loadPodEvents(for pod: K8sPodInfo) async {
@@ -879,8 +951,13 @@ struct KubernetesRootView: View {
             }
         }
         .onChange(of: selectedNodeID) { _, selectedID in
-            guard selectedID != nil else { return }
+            guard let selectedID, let node = nodes.first(where: { $0.id == selectedID }) else {
+                clearPodObservation()
+                return
+            }
             selectedPodID = nil
+            clearPodObservation()
+            prepareResourceDescription(for: K8s.ResourceReference(kind: .node, name: node.name))
             showsInspector = true
         }
     }
@@ -906,6 +983,7 @@ struct KubernetesRootView: View {
                     LabeledContent("Age", value: pod.age.map(Formatters.absoluteDate) ?? "Unavailable")
                 }
                 podContainersSection(for: pod)
+                resourceDescriptionSections
                 podLogSection(for: pod)
                 podEventsSection
                 Section("Actions") {
@@ -932,6 +1010,7 @@ struct KubernetesRootView: View {
                     }
                     LabeledContent("Age", value: node.age.map(Formatters.absoluteDate) ?? "Unavailable")
                 }
+                resourceDescriptionSections
                 Section("Actions") {
                     Button("Copy Node Name") { MorbPasteboard.copy(node.name) }
                 }
@@ -942,6 +1021,100 @@ struct KubernetesRootView: View {
                 Label("No Selection", systemImage: "sidebar.right")
             } description: {
                 Text("Select a row to view its details.")
+            }
+        }
+    }
+
+    /// A standard inspector Form for the daemon's fixed, real Kubernetes API GET.
+    /// The Table's selection owns the identity; this section owns only the bounded
+    /// description state, so an unavailable description never hides table metadata,
+    /// logs, or events that came from different read-only endpoints.
+    @ViewBuilder
+    private var resourceDescriptionSections: some View {
+        Section("Kubernetes API") {
+            if isLoadingResourceDescription {
+                ProgressView("Reading selected resource")
+                    .controlSize(.small)
+            } else if let resourceDescriptionError {
+                Label(resourceDescriptionError, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.secondary)
+                Button("Retry Description", action: retryResourceDescription)
+            } else if let resourceDescription {
+                LabeledContent("Kind", value: resourceDescription.reference.kind.displayName)
+                LabeledContent("Name") {
+                    Text(resourceDescription.reference.displayName)
+                        .font(.system(.body, design: .monospaced))
+                        .textSelection(.enabled)
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                }
+                if let uid = resourceDescription.uid {
+                    LabeledContent("UID") {
+                        Text(uid)
+                            .font(.system(.body, design: .monospaced))
+                            .textSelection(.enabled)
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                    }
+                }
+                if let createdAt = resourceDescription.createdAt {
+                    LabeledContent("Created", value: createdAt)
+                }
+                ForEach(resourceDescription.facts) { fact in
+                    LabeledContent(fact.name) {
+                        Text(fact.value)
+                            .textSelection(.enabled)
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                    }
+                }
+            } else {
+                Text("Select a Kubernetes resource to read its API description.")
+                    .foregroundStyle(.secondary)
+            }
+        }
+
+        if let resourceDescription, !resourceDescription.conditions.isEmpty {
+            Section("Conditions") {
+                ForEach(resourceDescription.conditions) { condition in
+                    LabeledContent(condition.type, value: condition.status)
+                    if let reason = condition.reason {
+                        Text(reason)
+                            .foregroundStyle(.secondary)
+                    }
+                    if let message = condition.message {
+                        Text(message)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+
+        if let resourceDescription, !resourceDescription.labels.isEmpty {
+            Section("Labels") {
+                ForEach(resourceDescription.labels) { label in
+                    LabeledContent(label.name) {
+                        Text(label.value)
+                            .font(.system(.body, design: .monospaced))
+                            .textSelection(.enabled)
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                    }
+                }
+            }
+        }
+
+        if let resourceDescription, !resourceDescription.annotations.isEmpty {
+            Section("Annotations") {
+                ForEach(resourceDescription.annotations) { annotation in
+                    LabeledContent(annotation.name) {
+                        Text(annotation.value)
+                            .font(.system(.body, design: .monospaced))
+                            .textSelection(.enabled)
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                    }
+                }
             }
         }
     }

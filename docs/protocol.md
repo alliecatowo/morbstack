@@ -282,7 +282,7 @@ Failure:
   ```
   Clients that understand `error_code` may use it. For an M0 daemon without the
   field, Morbstack's update-continuity adapter recognizes only the canonical legacy
-  response for one known additive command (`k8s-diagnose`) and turns it into a
+  responses for known additive commands (`k8s-diagnose`, `k8s-describe`) and turns them into
   `restart-required` client-side error. It first may make the existing read-only
   `version` probe for diagnostic context; it never starts, stops, or re-registers a
   service/engine. Every other legacy error remains human-readable prose, not a

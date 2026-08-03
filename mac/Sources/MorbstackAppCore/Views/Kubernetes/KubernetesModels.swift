@@ -155,6 +155,10 @@ protocol K8sClusterProviding: AnyObject {
     func diagnosis() async throws -> K8s.Diagnosis
     func setEnabled(_ enabled: Bool) async throws -> K8s.Status
     func resources() async throws -> K8sClusterResources
+    /// Reads one bounded Pod or Node description through Morbstack's typed daemon
+    /// contract. This is a fixed Kubernetes GET, not an arbitrary `kubectl describe`
+    /// proxy, and cannot create, edit, watch, exec, attach, or port-forward anything.
+    func describe(_ resource: K8s.ResourceReference) async throws -> K8s.ResourceDescription
     /// Lists retained core/v1 events for this exact pod. It never watches or mutates
     /// the cluster, and a failure is surfaced separately from pod logs.
     func podEvents(for pod: K8sPodInfo) async throws -> [K8sPodEventInfo]
@@ -197,6 +201,10 @@ final class K8sDaemonClient: K8sClusterProviding {
     func resources() async throws -> K8sClusterResources {
         let client = try KubernetesAPIClient(kubeconfigURL: K8s.defaultKubeconfigURL)
         return try await client.resources()
+    }
+
+    func describe(_ resource: K8s.ResourceReference) async throws -> K8s.ResourceDescription {
+        try await daemon.describeKubernetesResource(resource)
     }
 
     func podEvents(for pod: K8sPodInfo) async throws -> [K8sPodEventInfo] {
@@ -287,6 +295,51 @@ final class K8sFixtureClient: K8sClusterProviding {
         return K8sClusterResources(nodes: allNodes, pods: allPods)
     }
 
+    func describe(_ resource: K8s.ResourceReference) async throws -> K8s.ResourceDescription {
+        guard status.phase == .ready else {
+            throw K8sResourceAccessError.unavailable("Kubernetes is not ready.")
+        }
+        switch resource.kind {
+        case .pod:
+            guard let namespace = resource.namespace,
+                  let pod = allPods.first(where: { $0.name == resource.name && $0.namespace == namespace })
+            else {
+                throw K8sResourceAccessError.unavailable(
+                    "The selected Kubernetes resource no longer exists. Refresh Kubernetes resources and select it again.")
+            }
+            return K8s.ResourceDescription(
+                reference: resource,
+                uid: pod.uid,
+                createdAt: pod.age.map(Self.fixtureTimestamp),
+                facts: [
+                    K8s.ResourceField(name: "Phase", value: pod.phase.label),
+                    K8s.ResourceField(name: "Node", value: pod.nodeLabel),
+                    K8s.ResourceField(name: "Ready Containers", value: "\(pod.readyContainers) of \(pod.totalContainers)"),
+                    K8s.ResourceField(name: "Restarts", value: "\(pod.restarts)"),
+                ],
+                conditions: [],
+                labels: [],
+                annotations: [])
+        case .node:
+            guard let node = allNodes.first(where: { $0.name == resource.name }) else {
+                throw K8sResourceAccessError.unavailable(
+                    "The selected Kubernetes resource no longer exists. Refresh Kubernetes resources and select it again.")
+            }
+            return K8s.ResourceDescription(
+                reference: resource,
+                uid: nil,
+                createdAt: node.age.map(Self.fixtureTimestamp),
+                facts: [
+                    K8s.ResourceField(name: "Readiness", value: node.ready ? "Ready" : "Not Ready"),
+                    K8s.ResourceField(name: "Roles", value: node.roleLabel),
+                    K8s.ResourceField(name: "Kubelet", value: node.version),
+                ],
+                conditions: [],
+                labels: [],
+                annotations: [])
+        }
+    }
+
     func podEvents(for pod: K8sPodInfo) async throws -> [K8sPodEventInfo] {
         guard status.phase == .ready else {
             throw K8sResourceAccessError.unavailable("Kubernetes is not ready.")
@@ -315,6 +368,10 @@ final class K8sFixtureClient: K8sClusterProviding {
         2026-01-01T12:00:00.000000000Z fixture \(container) started in \(pod.namespace)/\(pod.name)
         2026-01-01T12:00:01.000000000Z serving deterministic tour traffic
         """
+    }
+
+    private static func fixtureTimestamp(_ date: Date) -> String {
+        ISO8601DateFormatter().string(from: date)
     }
 }
 

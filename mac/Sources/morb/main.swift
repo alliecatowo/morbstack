@@ -57,6 +57,10 @@ let usage = """
                              Print exactly what that would do, and stop.
       k8s status             Show whether the cluster is installed, on, and Ready
       k8s diagnose           Show real cluster recovery guidance without changing it
+      k8s describe pod <namespace> <name>
+                             Read one selected Pod through Morbstack's local API
+      k8s describe node <name>
+                             Read one selected Node through Morbstack's local API
       k8s enable             Install the payload if needed, then start the cluster
       k8s disable            Stop the cluster; the payload and its state are kept
       k8s kubeconfig         Write ~/.morbstack/kubeconfig and say how to use it
@@ -1605,7 +1609,7 @@ case "k8s":
     // that `MorbCommandPolicy` can let `enable` start a daemon while `status`
     // stays an observation that does not change what it observes.
     let action = extraArguments.first(where: { !$0.hasPrefix("-") }) ?? "status"
-    let known = ["status", "diagnose", "enable", "disable", "kubeconfig"]
+    let known = ["status", "diagnose", "describe", "enable", "disable", "kubeconfig"]
     guard known.contains(action) else {
         fail("unknown k8s subcommand `\(action)`; expected one of \(known.joined(separator: ", "))", code: 2)
     }
@@ -1673,6 +1677,42 @@ case "k8s":
         }
     }
 
+    /// The same typed daemon payload the native inspector consumes. Keeping the CLI
+    /// formatter here rather than building a second API reader means `morb k8s
+    /// describe` cannot silently acquire a different endpoint, credential source, or
+    /// resource scope than the app.
+    func renderK8sDescription(_ data: [String: AnyCodableValue]) {
+        guard let description = try? K8s.ResourceDescription(ipcFields: data) else {
+            out("[!!] morbstackd returned an invalid Kubernetes resource description")
+            return
+        }
+        out("[ok] \(description.reference.kind.displayName) \(description.reference.displayName)")
+        var rows: [(String, String)] = []
+        if let uid = description.uid { rows.append(("UID", uid)) }
+        if let createdAt = description.createdAt { rows.append(("Created", createdAt)) }
+        rows.append(contentsOf: description.facts.map { ($0.name, $0.value) })
+        if !rows.isEmpty {
+            out("")
+            printAligned(rows)
+        }
+        if !description.conditions.isEmpty {
+            out("\n  Conditions:")
+            for condition in description.conditions {
+                let reason = condition.reason.map { " — \($0)" } ?? ""
+                out("    \(condition.type): \(condition.status)\(reason)")
+                if let message = condition.message { out("      \(message)") }
+            }
+        }
+        if !description.labels.isEmpty {
+            out("\n  Labels:")
+            printAligned(description.labels.map { ($0.name, $0.value) })
+        }
+        if !description.annotations.isEmpty {
+            out("\n  Annotations (first \(description.annotations.count)):")
+            printAligned(description.annotations.map { ($0.name, $0.value) })
+        }
+    }
+
     switch action {
     case "status", "enable", "disable":
         let response = callDaemon(DaemonRequest(cmd: "k8s-\(action)"), timeout: 300)
@@ -1681,6 +1721,29 @@ case "k8s":
     case "diagnose":
         let response = callDaemon(DaemonRequest(cmd: "k8s-diagnose"), timeout: 30)
         finish(response) { data in renderK8sDiagnosis(data) }
+
+    case "describe":
+        let operands = Array(extraArguments.dropFirst().filter { !$0.hasPrefix("-") })
+        guard let rawKind = operands.first,
+              let kind = K8s.ResourceKind(rawValue: rawKind)
+        else {
+            fail("usage: morb k8s describe pod <namespace> <name> | morb k8s describe node <name>", code: 2)
+        }
+        var arguments: [String: String]
+        switch kind {
+        case .pod:
+            guard operands.count == 3 else {
+                fail("usage: morb k8s describe pod <namespace> <name>", code: 2)
+            }
+            arguments = ["kind": kind.rawValue, "namespace": operands[1], "name": operands[2]]
+        case .node:
+            guard operands.count == 2 else {
+                fail("usage: morb k8s describe node <name>", code: 2)
+            }
+            arguments = ["kind": kind.rawValue, "name": operands[1]]
+        }
+        let response = callDaemon(DaemonRequest(cmd: "k8s-describe", args: arguments), timeout: 30)
+        finish(response) { data in renderK8sDescription(data) }
 
     default:  // kubeconfig
         let merge = extraArguments.contains("--merge")

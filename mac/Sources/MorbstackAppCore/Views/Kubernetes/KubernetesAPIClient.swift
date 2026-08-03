@@ -3,12 +3,14 @@
 //
 // The app's intentionally small Kubernetes API reader.
 //
-// Kubernetes resources do not travel over Morbstack's control socket. The daemon
+// Resource lists, logs, and Events do not travel over Morbstack's control socket.
+// The bounded selected Pod/Node description instead uses the daemon's fixed
+// `k8s-describe` payload so the CLI and inspector share one contract. The daemon
 // publishes the local API server only on loopback and writes an app-owned kubeconfig
-// when the person explicitly requests one. This client reads that one configuration,
-// pins its certificate authority, presents its client identity, and issues the two
-// read-only resource requests the native Tables and selected-pod inspector need. It
-// never shells out to `kubectl`, never uses `~/.kube/config`, and never fabricates
+// when the person explicitly requests one. This client reads that configuration,
+// pins its certificate authority, presents its client identity, and issues the
+// remaining read-only API requests the native Tables and selected-pod inspector need.
+// It never shells out to `kubectl`, never uses `~/.kube/config`, and never fabricates
 // rows from a status summary.
 
 import Foundation

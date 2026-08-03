@@ -294,6 +294,157 @@ public enum K8s {
         }
     }
 
+    // MARK: - Bounded resource descriptions
+
+    /// The two Kubernetes API resource kinds Morbstack can describe today.
+    ///
+    /// This is intentionally not a generic `kubectl describe` proxy. The daemon
+    /// permits only a selected Pod or Node, with a fixed GET endpoint and a bounded
+    /// response model. Workload mutation, arbitrary API paths, exec, watch, logs, and
+    /// port forwarding remain outside this contract.
+    public enum ResourceKind: String, Codable, CaseIterable, Equatable, Hashable, Sendable {
+        case pod
+        case node
+
+        public var displayName: String {
+            switch self {
+            case .pod: "Pod"
+            case .node: "Node"
+            }
+        }
+    }
+
+    /// A selected Kubernetes resource. Pod identity includes a namespace; nodes are
+    /// cluster-scoped and deliberately reject one.
+    public struct ResourceReference: Codable, Equatable, Hashable, Sendable {
+        public var kind: ResourceKind
+        public var name: String
+        public var namespace: String?
+
+        public init(kind: ResourceKind, name: String, namespace: String? = nil) {
+            self.kind = kind
+            self.name = name
+            self.namespace = namespace
+        }
+
+        /// A concise, user-facing identity suitable for a native table inspector or
+        /// CLI heading. It is not used to construct an API URL.
+        public var displayName: String {
+            switch kind {
+            case .pod: "\(namespace ?? "default")/\(name)"
+            case .node: name
+            }
+        }
+    }
+
+    /// One bounded, textual value from a Kubernetes object. The API reader truncates
+    /// unbounded server values before constructing these rows, keeping a selected
+    /// describe response useful without turning the daemon protocol into a bulk export.
+    public struct ResourceField: Codable, Equatable, Identifiable, Sendable {
+        public var name: String
+        public var value: String
+
+        public var id: String { name }
+
+        public init(name: String, value: String) {
+            self.name = name
+            self.value = value
+        }
+    }
+
+    /// A Kubernetes condition. `reason` and `message` are optional because the API
+    /// routinely omits either one; absence is preserved instead of inventing a value.
+    public struct ResourceCondition: Codable, Equatable, Identifiable, Sendable {
+        public var type: String
+        public var status: String
+        public var reason: String?
+        public var message: String?
+
+        public var id: String { type }
+
+        public init(type: String, status: String, reason: String?, message: String?) {
+            self.type = type
+            self.status = status
+            self.reason = reason
+            self.message = message
+        }
+    }
+
+    /// A selected-resource description returned by the local Kubernetes API through
+    /// the daemon. It contains real object metadata, a small kind-specific fact set,
+    /// and bounded conditions/labels/annotations; it never includes Secret objects or
+    /// an arbitrary object body.
+    public struct ResourceDescription: Codable, Equatable, Sendable {
+        public var reference: ResourceReference
+        public var uid: String?
+        public var createdAt: String?
+        public var facts: [ResourceField]
+        public var conditions: [ResourceCondition]
+        public var labels: [ResourceField]
+        public var annotations: [ResourceField]
+
+        public init(
+            reference: ResourceReference,
+            uid: String?,
+            createdAt: String?,
+            facts: [ResourceField],
+            conditions: [ResourceCondition],
+            labels: [ResourceField],
+            annotations: [ResourceField]
+        ) {
+            self.reference = reference
+            self.uid = uid
+            self.createdAt = createdAt
+            self.facts = facts
+            self.conditions = conditions
+            self.labels = labels
+            self.annotations = annotations
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case reference, uid
+            case createdAt = "created_at"
+            case facts, conditions, labels, annotations
+        }
+
+        /// The daemon's typed payload, which stays equivalent to the JSON emitted by
+        /// `morb k8s describe --json` so app and CLI cannot drift into two descriptions.
+        public var ipcFields: [String: AnyCodableValue] {
+            [
+                "reference": .object([
+                    "kind": .string(reference.kind.rawValue),
+                    "name": .string(reference.name),
+                    "namespace": reference.namespace.map(AnyCodableValue.string) ?? .null,
+                ]),
+                "uid": uid.map(AnyCodableValue.string) ?? .null,
+                "created_at": createdAt.map(AnyCodableValue.string) ?? .null,
+                "facts": .array(facts.map { .object(["name": .string($0.name), "value": .string($0.value)]) }),
+                "conditions": .array(conditions.map {
+                    .object([
+                        "type": .string($0.type),
+                        "status": .string($0.status),
+                        "reason": $0.reason.map(AnyCodableValue.string) ?? .null,
+                        "message": $0.message.map(AnyCodableValue.string) ?? .null,
+                    ])
+                }),
+                "labels": .array(labels.map { .object(["name": .string($0.name), "value": .string($0.value)]) }),
+                "annotations": .array(annotations.map { .object(["name": .string($0.name), "value": .string($0.value)]) }),
+            ]
+        }
+
+        /// Decodes the exact typed control payload, rejecting malformed data rather
+        /// than presenting a partial resource as if it were current API evidence.
+        public init(ipcFields: [String: AnyCodableValue]) throws {
+            do {
+                self = try JSONDecoder().decode(
+                    Self.self, from: JSONEncoder().encode(ipcFields))
+            } catch {
+                throw MorbError.protocolViolation(
+                    "morbstackd returned an invalid Kubernetes resource description: \(error.localizedDescription)")
+            }
+        }
+    }
+
     /// The guest's `k8s_kubeconfig` reply.
     public struct KubeconfigReply: Codable, Equatable, Sendable {
         public var type: String

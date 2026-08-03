@@ -421,6 +421,29 @@ public final class K8sManager {
         return status
     }
 
+    // MARK: Read-only selected-resource inspection
+
+    /// Reads one bounded Pod or Node description from the local, mTLS-authenticated
+    /// Kubernetes API forward. This never starts a forward, generates a kubeconfig,
+    /// changes the guest, or makes a workload API request other than the fixed GET.
+    ///
+    /// The forward and app-owned kubeconfig must already exist because both are user
+    /// visible prerequisites. Creating either while answering a describe request would
+    /// turn an observation into an unexpected host/guest mutation.
+    public func describe(_ reference: K8s.ResourceReference) throws -> K8s.ResourceDescription {
+        let status = try status()
+        guard status.phase == .ready else {
+            throw MorbError.io(
+                "Kubernetes is \(status.phase.summary), so the selected resource cannot be described yet. "
+                    + "Wait for `morb k8s status` to report ready.")
+        }
+        guard forward.boundPort != nil else {
+            throw MorbError.io(
+                "Kubernetes is ready but its local API forward is still reconciling. Run `morb k8s diagnose` and refresh status.")
+        }
+        return try K8sResourceReader().describe(reference)
+    }
+
     // MARK: Kubeconfig
 
     /// Fetch the guest's kubeconfig, rewrite it for the Mac, and write it to

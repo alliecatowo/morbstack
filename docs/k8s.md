@@ -41,6 +41,8 @@ morb k8s enable      # installs the payload if needed, then starts the cluster
 morb k8s status      # installed / enabled / phase / node & pod readiness
 morb k8s diagnose    # read-only recovery guidance from guest and daemon facts
 morb k8s kubeconfig  # writes ~/.morbstack/kubeconfig
+morb k8s describe pod default hello-web-6d9c8f7b7-x4n2q
+morb k8s describe node morbstack-vm
 morb k8s disable      # stops the cluster; the payload and its data are kept
 ```
 
@@ -113,11 +115,28 @@ workload; it does not follow logs or request a previous container's logs.
 Kubernetes controls log rotation and Event retention, so an empty result means
 only that no retained data was returned at that moment.
 
-`morb k8s` remains the control and diagnosis CLI (`status`, `diagnose`,
-`enable`, `disable`, and `kubeconfig`). It does not duplicate the app's
-credential-pinned resource reader. For scripted read-only inspection, generate
-Morbstack's kubeconfig explicitly and use `kubectl --kubeconfig
-~/.morbstack/kubeconfig …`; that remains a separate user-directed command.
+### Bounded Pod and Node descriptions
+
+`morb k8s describe pod <namespace> <name>` and `morb k8s describe node
+<name>` use the same daemon-owned description contract as the selected native
+table inspector. They are read-only, fixed Kubernetes `GET` requests for one
+DNS-style Pod or Node name; they are not a generic `kubectl describe` proxy.
+The response contains bounded metadata, kind-specific facts, conditions, and
+at most 24 labels and annotations. It does not return arbitrary object bodies,
+Secrets, log streams, watch results, credentials, or any workload-control
+capability.
+
+The daemon first checks the guest's actual Ready state and that its existing
+loopback API forward is published. It **does not** start the engine, create a
+forward, or write a kubeconfig while answering the command. The person must
+have already generated `~/.morbstack/kubeconfig`; the reader pins that file's
+embedded CA/client identity and accepts only its `https://127.0.0.1:<port>`
+endpoint. A stale kubeconfig or a disappeared selection returns an honest error
+and requires refresh or explicit kubeconfig generation.
+
+For broader scripted inspection, generate Morbstack's kubeconfig explicitly
+and use `kubectl --kubeconfig ~/.morbstack/kubeconfig …`; that remains a
+separate user-directed command.
 
 ### Reaching a Service from the Mac
 

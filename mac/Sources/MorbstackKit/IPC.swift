@@ -115,9 +115,10 @@ public enum MorbCommandPolicy {
     /// `k8s-enable` qualifies for the same reason `start` does: asking for a cluster
     /// is asking for the engine it runs on, and refusing to start one would make the
     /// command fail with "the VM is stopped" every single time from a cold machine.
-    /// The other three `k8s-*` commands do not — `k8s-status` describing a stopped
-    /// stack is a correct answer, and conjuring a VM to produce a kubeconfig for a
-    /// cluster that is not running would be worse than saying so.
+    /// The other `k8s-*` commands do not — `k8s-status` and `k8s-describe`
+    /// describing a stopped stack are correct answers, and conjuring a VM to
+    /// produce a kubeconfig for a cluster that is not running would be worse than
+    /// saying so.
     public static let autoStartingCommands: Set<String> = ["start", "resume", "k8s-enable"]
 
     /// Commands the CLI answers itself, with the daemon consulted only if it happens
@@ -230,11 +231,12 @@ public struct DaemonResponse: Codable, Equatable, Sendable {
 /// instruction. It is pure data transformation: it does not connect to a socket,
 /// register a service, or start/stop the engine.
 public enum DaemonUpdateCompatibility {
-    /// A single additive feature has this compatibility path today. Add a command here
-    /// only when its prior daemon absence is known to mean an app/daemon update skew,
-    /// not merely because it happens to return a failed response.
+    /// Each entry is an additive client feature. Add a command here only when its prior
+    /// daemon absence is known to mean app/daemon update skew, not merely because it
+    /// happens to return a failed response.
     private static let restartRequiredCommands: [String: String] = [
         "k8s-diagnose": "Kubernetes diagnosis",
+        "k8s-describe": "Kubernetes resource descriptions",
     ]
 
     /// The user-facing result of detecting a known newer-client/older-daemon mismatch.

@@ -398,7 +398,8 @@ public final class Daemon {
     /// Split into named commands rather than one `k8s` with an argument so
     /// ``MorbCommandPolicy`` can treat them differently: `k8s-enable` is allowed to
     /// bring a daemon up, because "give me a cluster" implies "give me an engine",
-    /// while `k8s-status` must never create the thing it was asked to describe.
+    /// while `k8s-status` and `k8s-describe` must never create the thing they were
+    /// asked to describe.
     private func handleK8s(_ request: DaemonRequest) -> DaemonResponse {
         guard vm.state == .running else {
             return .failure(
@@ -421,6 +422,26 @@ public final class Daemon {
                     kubeconfigExists: FileManager.default.fileExists(
                         atPath: K8s.defaultKubeconfigURL.path))
                 return .success(diagnosis.ipcFields)
+            case "k8s-describe":
+                let args = request.args ?? [:]
+                let allowed = Set(["kind", "name", "namespace"])
+                guard Set(args.keys).isSubset(of: allowed),
+                      let rawKind = args["kind"],
+                      let kind = K8s.ResourceKind(rawValue: rawKind),
+                      let name = args["name"], !name.isEmpty
+                else {
+                    return .failure(
+                        "k8s-describe requires kind=pod|node and a selected resource name")
+                }
+                let namespace = args["namespace"]
+                if kind == .pod, namespace?.isEmpty != false {
+                    return .failure("k8s-describe requires a namespace for a selected Pod")
+                }
+                if kind == .node, namespace != nil {
+                    return .failure("k8s-describe does not accept a namespace for a Node")
+                }
+                let reference = K8s.ResourceReference(kind: kind, name: name, namespace: namespace)
+                return .success(try k8s.describe(reference).ipcFields)
             case "k8s-enable":
                 markBusy()
                 let status = try k8s.enable()
@@ -563,7 +584,7 @@ public final class Daemon {
                 "live_share_bridge": .object(liveShareBridge.ipcFields),
             ])
 
-        case "k8s-status", "k8s-diagnose", "k8s-enable", "k8s-disable", "k8s-kubeconfig":
+        case "k8s-status", "k8s-diagnose", "k8s-describe", "k8s-enable", "k8s-disable", "k8s-kubeconfig":
             return handleK8s(request)
 
         case "start":

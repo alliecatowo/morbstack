@@ -178,6 +178,21 @@ class DaemonClient: @unchecked Sendable {
         try await decodeKubernetesStatus(command: "k8s-disable")
     }
 
+    /// Reads the daemon's bounded selected-resource description. Like status and
+    /// diagnosis, this is an observation: it never starts a VM, publishes a forward,
+    /// or writes a kubeconfig when the required local API prerequisites are absent.
+    func describeKubernetesResource(
+        _ reference: K8s.ResourceReference
+    ) async throws -> K8s.ResourceDescription {
+        var args = [
+            "kind": reference.kind.rawValue,
+            "name": reference.name,
+        ]
+        if let namespace = reference.namespace { args["namespace"] = namespace }
+        let fields = try await kubernetesCommand("k8s-describe", args: args)
+        return try K8s.ResourceDescription(ipcFields: fields)
+    }
+
     /// Asks the daemon to write Morbstack's own 0600 kubeconfig and returns only the
     /// expected app-owned path. This command deliberately has no merge argument: the
     /// UI must never edit a person's `~/.kube/config` as a side effect of browsing a
@@ -210,8 +225,11 @@ class DaemonClient: @unchecked Sendable {
         }
     }
 
-    private func kubernetesCommand(_ command: String) async throws -> [String: AnyCodableValue] {
-        let request = DaemonRequest(cmd: command)
+    private func kubernetesCommand(
+        _ command: String,
+        args: [String: String]? = nil
+    ) async throws -> [String: AnyCodableValue] {
+        let request = DaemonRequest(cmd: command, args: args)
         let response = try await roundTrip(request, timeout: Self.kubernetesTimeout)
         if DaemonUpdateCompatibility.restartRequirement(for: request, rejectedBy: response) != nil {
             // This is an observation-only `version` request. The caller reached a
