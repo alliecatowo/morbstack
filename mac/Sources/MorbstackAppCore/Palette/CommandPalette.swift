@@ -30,6 +30,10 @@ struct CommandPalette: View {
     @State private var selection: String?
     @State private var activity = TrackDPaletteActivity()
     @State private var isSearchPresented = true
+    /// Presentation controls whether the system toolbar search field is visible; focus
+    /// controls its responder status. Keeping both explicit makes ⌘K keyboard-first
+    /// without inserting a custom text field or focus relay.
+    @FocusState private var isSearchFocused: Bool
     /// A destructive palette result is never invoked solely because it was the current
     /// keyboard selection. The standard confirmation dialog supplies the explicit
     /// review boundary before it can run.
@@ -82,6 +86,7 @@ struct CommandPalette: View {
                 isPresented: $isSearchPresented,
                 placement: .toolbar,
                 prompt: "Search commands, containers, and images")
+            .searchFocused($isSearchFocused)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Done") { close() }
@@ -105,7 +110,10 @@ struct CommandPalette: View {
             // The system search field is the initial key target. Setting its standard
             // presentation binding after the sheet enters the responder chain avoids a
             // custom focus relay or fake text field.
-            Task { @MainActor in isSearchPresented = true }
+            Task { @MainActor in
+                isSearchPresented = true
+                isSearchFocused = true
+            }
         }
         .onChange(of: rebuildKey) { _, _ in rebuild() }
         .onKeyPress(.downArrow) { move(1); return .handled }
