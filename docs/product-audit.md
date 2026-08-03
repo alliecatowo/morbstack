@@ -33,6 +33,21 @@ following a repo-only setup guide.
   saves, deliberate destructive-action review, and daemon/Kubernetes
   reconciliation.
 
+## Current implementation evidence
+
+The entries below are deliberately narrower than release claims. They name code
+that is integrated in the current branch; a new-Mac, real-VM compatibility
+matrix is still required before an entry becomes a public out-of-the-box
+guarantee.
+
+| Delivery | Evidence | Status |
+| --- | --- | --- |
+| Self-contained runtime and host CLI | `e329140` packages a signed, versioned runtime manifest plus upstream Docker, Compose, and Buildx in the app; first-run setup links only reviewed user-owned locations. | Implemented; clean-profile live verification pending. |
+| Direct Docker discovery and durable ownership | `e329140` creates `~/.docker/run/docker.sock` only when it is safely absent; `1dda777` adds an explicit signed per-user `SMAppService` LaunchAgent; `ddac4a3` offers it default-off in first run. | Implemented; registration and clean-profile live verification pending. |
+| Diagnostics and recovery | `e329140` adds an offline, bounded, redacted `morb diagnose`; `cacda50` exposes actual Kubernetes startup diagnostics and an escape path. | Implemented; support-bundle smoke checked; full real-VM recovery matrix pending. |
+| Operational UI | `0c45d08` makes BuildKit cache pruning a real engine-wide confirmed action; `317785f` makes disk-capacity states truthful; `51519d5`, `b63c813`, and `c39cf04` record full-window table readability repairs. | Implemented; real-window Computer Use review completed for these routes. |
+| Port behavior | `c04e343` provides an explicit advisory TCP/UDP loopback preflight and records the protocol required for race-free create/start rejection. | Implemented as a diagnostic; synchronous reservation remains P1. |
+
 ## The parity program
 
 ### P0 — make the first ten minutes work
