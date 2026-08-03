@@ -425,7 +425,7 @@ struct FirstRunCLISetupSheet: View {
             backgroundServiceSection
             engineVerificationSection
 
-            Section("Review") {
+            Section {
                 Label(
                     model.transactionSummary,
                     systemImage: "checkmark.shield"
@@ -440,6 +440,8 @@ struct FirstRunCLISetupSheet: View {
                     )
                     .foregroundStyle(.secondary)
                 }
+            } header: {
+                Text("Review")
             } footer: {
                 Text(
                     "This sheet never changes a named Docker context you already selected. You can inspect or remove this setup later with morb uninstall-cli."
