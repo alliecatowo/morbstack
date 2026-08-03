@@ -201,7 +201,11 @@ struct ImagesRootView: View {
             // Select the first row so the system inspector opens with a useful detail
             // view, while retaining its normal explicit show/hide control.
             .task {
-                if selection == nil { selection = sections.tagged.first?.id ?? sections.dangling.first?.id }
+                guard selection == nil else { return }
+                let split = sections
+                let firstTaggedImage = split.tagged.first
+                let firstDanglingImage = split.dangling.first
+                selection = firstTaggedImage?.id ?? firstDanglingImage?.id
             }
     }
 
