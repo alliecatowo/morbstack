@@ -420,8 +420,18 @@ final class SharesTests: XCTestCase {
         XCTAssertTrue(report.checks.contains { $0.name == "shares" })
         XCTAssertTrue(report.checks.contains { $0.name == "share /Users" })
         XCTAssertTrue(report.checks.contains { $0.name == "share /private/tmp" })
+        XCTAssertTrue(report.checks.contains { $0.name == "shares-tmp" })
         // Sharing nothing is a warning, never a failure: the engine still runs.
         XCTAssertTrue(report.checks.first { $0.name == "shares" }?.status != .fail)
+    }
+
+    func testDoctorWarnsWhenPrivateTmpIsNotConfigured() {
+        var config = MorbConfig()
+        config.sharedPaths = ["/Users"]
+        let report = Doctor.run(config: config)
+        let tmpCheck = report.checks.first { $0.name == "shares-tmp" }
+        XCTAssertEqual(tmpCheck?.status, .warn)
+        XCTAssertTrue(tmpCheck?.detail.contains("not configured") == true)
     }
 
     func testDoctorWarnsWhenSharingIsTurnedOff() {

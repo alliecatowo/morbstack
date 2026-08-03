@@ -368,10 +368,18 @@ public struct MCPConfigFile: Sendable {
 
 // MARK: - `--allow` flag parsing
 
+public struct MCPArgumentError: Error, CustomStringConvertible, Equatable, Sendable {
+    public let description: String
+
+    public init(_ description: String) {
+        self.description = description
+    }
+}
+
 /// Parses repeated `--allow <key>` flags from a subcommand's residual arguments.
 /// Any other argument is returned as an error string naming it, so `serve` can
 /// fail fast on a typo'd flag instead of silently ignoring it.
-public func parseAllowFlags(_ arguments: [String]) -> Result<[GrantEntry], String> {
+public func parseAllowFlags(_ arguments: [String]) -> Result<[GrantEntry], MCPArgumentError> {
     var entries: [GrantEntry] = []
     var index = 0
     var nth = 0
@@ -379,7 +387,7 @@ public func parseAllowFlags(_ arguments: [String]) -> Result<[GrantEntry], Strin
         let argument = arguments[index]
         if argument == "--allow" {
             guard index + 1 < arguments.count else {
-                return .failure("--allow requires a value, e.g. --allow containers:write")
+                return .failure(MCPArgumentError("--allow requires a value, e.g. --allow containers:write"))
             }
             nth += 1
             entries.append(GrantEntry(key: arguments[index + 1], origin: .cliFlag(nth: nth)))
@@ -392,7 +400,7 @@ public func parseAllowFlags(_ arguments: [String]) -> Result<[GrantEntry], Strin
             index += 1
             continue
         }
-        return .failure("unrecognized argument `\(argument)`")
+        return .failure(MCPArgumentError("unrecognized argument `\(argument)`"))
     }
     return .success(entries)
 }

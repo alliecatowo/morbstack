@@ -20,15 +20,22 @@ enum DetectCommand {
         let config = DockerCLIConfigReader.read()
         let contexts = DockerContextsStore.readAll(dockerConfigDirectory: DockerCLIConfigReader.dockerConfigDirectory())
 
-        emit(json: json, data: [
-            "runtimes": [dockerDesktop, colima, orbstack, morbstack].map(runtimeJSON),
-            "docker_config": [
-                "current_context": config?.currentContext ?? "default",
-                "creds_store": config?.credsStore ?? NSNull(),
-                "creds_store_is_desktop_helper": config?.credsStoreIsDesktopHelper ?? false,
-                "contexts": contexts.map { ["name": $0.name, "host": $0.host ?? NSNull()] },
-            ],
-        ]) {
+        let runtimes: [[String: Any]] = [dockerDesktop, colima, orbstack, morbstack].map(runtimeJSON)
+        let contextPayloads: [[String: Any]] = contexts.map { context in
+            ["name": context.name, "host": context.host ?? NSNull()]
+        }
+        let dockerConfig: [String: Any] = [
+            "current_context": config?.currentContext ?? "default",
+            "creds_store": config?.credsStore ?? NSNull(),
+            "creds_store_is_desktop_helper": config?.credsStoreIsDesktopHelper ?? false,
+            "contexts": contextPayloads,
+        ]
+        let payload: [String: Any] = [
+            "runtimes": runtimes,
+            "docker_config": dockerConfig,
+        ]
+
+        emit(json: json, data: payload) {
             printHuman(dockerDesktop: dockerDesktop, colima: colima, orbstack: orbstack, morbstack: morbstack,
                        config: config, contexts: contexts)
         }
@@ -93,22 +100,30 @@ enum DetectCommand {
         }
 
         out("")
-        out("What `morb migrate run` would do:")
+        out("Suggested next step:")
         let running = [dockerDesktop, colima, orbstack].filter(\.running)
         if running.isEmpty {
             out("  No other running runtime was found, so there is nothing to migrate from yet.")
             out("  Start Docker Desktop (or Colima, or OrbStack) and run `morb migrate detect` again,")
-            out("  or point directly at a socket with `morb migrate run --from <path>`.")
+            out("  or inspect an explicit source with `morb migrate images --from <runtime-or-socket> --dry-run`.")
         } else if running.count > 1 {
             out("  More than one other runtime is running (\(running.map(\.name).joined(separator: ", "))).")
-            out("  `morb migrate run --from <name>` picks one; nothing runs automatically when it's ambiguous.")
+            out("  Pick one explicitly with `morb migrate images --from <runtime> --dry-run`; nothing runs automatically.")
         } else if let only = running.first {
-            out("  Copy \(only.images.map(String.init) ?? "?") image(s) and \(only.volumes.map(String.init) ?? "?")")
-            out("  volume(s) from \(only.name) into Morbstack, verify each one, and offer (never perform")
-            out("  automatically) a switch of the default docker context afterward. Nothing here has")
-            out("  changed anything yet — `morb migrate run --dry-run` prints the exact plan without")
-            out("  copying anything; `morb migrate run` does the real thing, and still asks before every")
-            out("  step that writes something.")
+            let source = sourceToken(for: only)
+            out("  \(only.name) has \(only.images.map(String.init) ?? "?") image(s) and \(only.volumes.map(String.init) ?? "?") volume(s).")
+            out("  Review each transfer with `morb migrate images --from \(source) --dry-run` and")
+            out("  `morb migrate volumes --from \(source) --dry-run`, then run those commands explicitly")
+            out("  and finish with `morb migrate verify --from \(source)`. The combined `morb migrate run`")
+            out("  workflow is intentionally unavailable until it can write an accurate, scoped report.")
+        }
+    }
+
+    private static func sourceToken(for report: RuntimeReport) -> String {
+        switch report.name {
+        case "Docker Desktop": return "docker-desktop"
+        case "OrbStack": return "orbstack"
+        default: return report.name.lowercased()
         }
     }
 }

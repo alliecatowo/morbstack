@@ -42,8 +42,10 @@ let usage = """
       scan         SBOM and CVE scan an image, entirely on this machine
       debug        Open a toolbox shell in a container, even a distroless one
       context      Manage the `morbstack` docker context (zero-config discovery)
+      install-cli  Install bundled docker, compose, and buildx for this user
+      uninstall-cli Remove only the CLI links/context/profile block Morbstack owns
       install-cli-plugins
-                   Symlink docker-compose/docker-buildx into ~/.docker/cli-plugins
+                   Legacy: install only compose/buildx plugins (prefer install-cli)
 
     SUBCOMMANDS:
       rosetta install        Install Rosetta and enable it. Always asks first.
@@ -60,11 +62,13 @@ let usage = """
       context use            Make it the default context. Always asks; refuses
                              to replace another explicit default without --force
                              (never stomps — see docs/compat.md).
+      install-cli --make-default
+                             Put Morbstack's docker before an existing docker on PATH.
 
     OPTIONS:
       --json     Emit raw JSON instead of human-readable output
       --force    Skip Morbstack's confirmation prompt (reset-disk, context
-                 create, install-cli-plugins), replace another explicit
+                 create, install-cli, uninstall-cli, install-cli-plugins), replace another explicit
                  default context (context use), or stop the VM without asking
                  the guest first (stop). Deliberately refused by
                  `rosetta install`: that installs system software under
@@ -73,7 +77,9 @@ let usage = """
                  `softwareupdate --install-rosetta` yourself.
       --print-plan
                  Print what a command would do and exit without doing it
-                 (rosetta install, install-cli-plugins).
+                 (rosetta install, install-cli, uninstall-cli, install-cli-plugins).
+      --make-default
+                 Let install-cli add ~/.morbstack/bin before an existing docker on PATH.
       --help     Print this help
     """
 
@@ -693,6 +699,160 @@ case "install-cli-plugins":
         }
         out("")
         out("Verify with `docker compose version` and `docker buildx version`.")
+    }
+
+case "install-cli":
+    // The complete L1 setup, intentionally host-only: it never starts a VM or touches
+    // Docker data.  The app's first-run sheet can invoke the same MorbstackKit method
+    // after its own consent UI; this CLI command is the transparent terminal equivalent.
+    let force = extraArguments.contains("--force")
+    let makeDefault = extraArguments.contains("--make-default")
+    let installPlan = MorbCliInstallation.plan(makeDefault: makeDefault)
+
+    guard installPlan.hasCompleteToolchain else {
+        fail(
+            "the bundled Docker CLI toolchain is incomplete.\n"
+                + "       Expected docker, docker-compose, and docker-buildx next to this Morbstack build.\n"
+                + "       A source checkout needs `scripts/fetch-guest-assets.sh --host-cli`;\n"
+                + "       a packaged app is incomplete and should not be installed.", code: 2)
+    }
+
+    func renderInstallPlan() {
+        out("`morb install-cli\(makeDefault ? " --make-default" : "")` will:")
+        out("")
+        let allLinks = [installPlan.docker] + installPlan.plugins
+        for item in allLinks {
+            let relation = item.willReplace ? " (REPLACES existing file/symlink)" : ""
+            out("  \(item.destination) -> \(item.source ?? "-")\(relation)")
+        }
+        out("")
+        switch installPlan.pathRegistration {
+        case .alreadyReachable:
+            out("  PATH: ~/.morbstack/bin is already reachable; no shell file changes.")
+        case .preservesExistingDocker(let existing):
+            out("  PATH: leaves existing docker first: \(existing)")
+            out("        Pass --make-default to add Morbstack before it in your login profile.")
+        case .addToProfile(let profile):
+            out("  PATH: adds one managed Morbstack block to \(profile)")
+        case .profileAlreadyManaged(let profile):
+            out("  PATH: the existing managed block in \(profile) is already correct.")
+        case .skippedForHomeOverride:
+            out("  PATH: skipped because MORBSTACK_HOME is overridden (no temporary path is persisted).")
+        case .unsupportedShell:
+            out("  PATH: not changed; this shell is not one Morbstack can configure safely.")
+        case .malformedExistingBlock(let profile):
+            out("  PATH: not changed; \(profile) has a hand-edited Morbstack marker block.")
+        }
+        out("")
+        switch installPlan.contextRegistration {
+        case .willCreateAndUse, .staleWillReplaceAndUse:
+            out("  Docker context: registers `morbstack` and makes it current because no explicit context owns it.")
+        case .willCreateWithoutChangingCurrent(let current), .staleWillReplaceWithoutChangingCurrent(let current):
+            out("  Docker context: registers `morbstack` but leaves explicit current context `\(current)` unchanged.")
+        case .alreadyCurrent:
+            out("  Docker context: `morbstack` is already registered and current.")
+        case .alreadyRegisteredWithoutChangingCurrent(let current):
+            out("  Docker context: already registered; leaves explicit current context `\(current)` unchanged.")
+        }
+        out("")
+        out("No VM is started. No Docker image, volume, or existing Docker context is removed.")
+    }
+
+    if extraArguments.contains("--print-plan") {
+        renderInstallPlan()
+        out("")
+        out("Nothing was changed.")
+        exit(0)
+    }
+
+    if !force {
+        renderInstallPlan()
+        out("")
+        guard isatty(STDIN_FILENO) == 1 else {
+            fail(
+                "install-cli needs confirmation and stdin is not a terminal.\n"
+                    + "       Re-run with --print-plan to inspect it, or --force to apply this exact plan.", code: 2)
+        }
+        FileHandle.standardOutput.write(Data("Continue? [y/N] ".utf8))
+        let answer = (readLine(strippingNewline: true) ?? "").trimmingCharacters(in: .whitespaces)
+        guard answer.lowercased() == "y" || answer.lowercased() == "yes" else {
+            fail("cancelled; nothing was changed", code: 2)
+        }
+    }
+
+    do {
+        let result = try MorbCliInstallation.install(
+            makeDefault: makeDefault, reviewedPlan: installPlan)
+        for name in ["docker", "docker-compose", "docker-buildx"] {
+            switch result.links[name] {
+            case .linked?: out("[ok] \(name) linked")
+            case .alreadyCorrect?: out("[ok] \(name) already correct")
+            case nil: break
+            }
+        }
+        switch result.pathRegistration {
+        case .addToProfile(let profile): out("[ok] added Morbstack's PATH block to \(profile)")
+        case .profileAlreadyManaged: out("[ok] Morbstack's PATH block was already present")
+        case .alreadyReachable: out("[ok] ~/.morbstack/bin is already on PATH")
+        case .preservesExistingDocker(let path): out("[--] left existing docker first on PATH: \(path)")
+        case .skippedForHomeOverride: out("[--] PATH not persisted because MORBSTACK_HOME is overridden")
+        case .unsupportedShell: out("[--] PATH not changed for this shell")
+        case .malformedExistingBlock(let profile): out("[--] PATH not changed; inspect \(profile)")
+        }
+        if result.contextCreated { out("[ok] registered Docker context `morbstack`") }
+        if result.contextBecameCurrent { out("[ok] current Docker context is now `morbstack`") }
+        if let contextError = result.contextError {
+            out("[!!] CLI links were installed, but Docker context setup failed: \(contextError)")
+            fail("fix the Docker config issue above, then run `morb context create` and `morb context use`", code: 2)
+        }
+        out("")
+        out("Open a new terminal, then verify with `docker version`, `docker compose version`, and `docker buildx version`.")
+    } catch {
+        fail((error as? MorbError)?.description ?? error.localizedDescription, code: 2)
+    }
+
+case "uninstall-cli":
+    let force = extraArguments.contains("--force")
+    func renderUninstallPlan() {
+        out("`morb uninstall-cli` removes only Morbstack-owned CLI integration:")
+        out("  \(MorbCliInstallation.dockerDestination().path) when it is a Morbstack symlink")
+        out("  docker-compose/docker-buildx links in \(MorbCliPlugins.cliPluginsDirectory().path) when they are Morbstack symlinks")
+        out("  the exact managed PATH block from the selected shell profile")
+        out("  the `morbstack` Docker context only when it points at Morbstack's socket")
+        out("")
+        out("It does NOT remove Morbstack.app, ~/.morbstack/data, images, volumes, or another Docker installation.")
+    }
+    if extraArguments.contains("--print-plan") {
+        renderUninstallPlan()
+        out("")
+        out("Nothing was changed.")
+        exit(0)
+    }
+    if !force {
+        renderUninstallPlan()
+        out("")
+        guard isatty(STDIN_FILENO) == 1 else {
+            fail("uninstall-cli needs confirmation and stdin is not a terminal. Re-run with --force if you mean it.", code: 2)
+        }
+        FileHandle.standardOutput.write(Data("Continue? [y/N] ".utf8))
+        let answer = (readLine(strippingNewline: true) ?? "").trimmingCharacters(in: .whitespaces)
+        guard answer.lowercased() == "y" || answer.lowercased() == "yes" else {
+            fail("cancelled; nothing was changed", code: 2)
+        }
+    }
+    do {
+        let result = try MorbCliInstallation.uninstall()
+        if result.removedLinks.isEmpty { out("[--] no Morbstack CLI links to remove") }
+        else { out("[ok] removed: \(result.removedLinks.joined(separator: ", "))") }
+        if !result.preservedLinks.isEmpty { out("[--] preserved non-Morbstack links: \(result.preservedLinks.joined(separator: ", "))") }
+        if result.removedProfileBlock { out("[ok] removed Morbstack's managed PATH block") }
+        switch result.context {
+        case .removed(let wasCurrent): out("[ok] removed Docker context `morbstack`\(wasCurrent ? " and restored Docker's default context" : "")")
+        case .notRegistered: out("[--] no Morbstack Docker context to remove")
+        case .pointsElsewhere(let host): out("[--] preserved `morbstack` context pointing at \(host)")
+        }
+    } catch {
+        fail((error as? MorbError)?.description ?? error.localizedDescription, code: 2)
     }
 
 case "rosetta":

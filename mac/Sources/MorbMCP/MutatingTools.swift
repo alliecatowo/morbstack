@@ -470,6 +470,8 @@ enum MutatingTools {
             return .text(results)
         } catch let error as ArgError {
             return .errorText(error.description)
+        } catch {
+            return .errorText("could not validate prune arguments: \(error.localizedDescription)")
         }
     }
 

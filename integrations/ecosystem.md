@@ -301,8 +301,8 @@ is not.
 ### `TESTCONTAINERS_HOST_OVERRIDE` and `Testcontainers.exposeHostPorts()`
 
 **VERIFIED — this works today, and it does not depend on
-`host.docker.internal` at all**, which is worth calling out given
-`docs/parity.md` #18/#19 document that hostname as completely absent.
+`host.docker.internal` at all**, which is worth calling out because the
+historical `docs/parity.md` #18/#19 audit found those aliases absent.
 `exposeHostPorts()` doesn't use DNS-based host resolution; it spins up a
 `testcontainers/sshd` helper container, publishes its port 22 the normal
 way (which already works on Morbstack per `docs/parity.md` #3/#27), and
@@ -683,12 +683,10 @@ program using the Docker SDK directly.
 ## Roadmap note (out of scope here)
 
 The following are real gaps but out of scope for this document (see
-`docs/parity.md` for the full audit and priority list):
-`host.docker.internal`/`gateway.docker.internal` DNS resolution inside
-containers (absent entirely today; `docs/parity.md` priority #1), and
-`--network host` only ever reaching the guest VM's network, not the
-Mac's (matches Docker Desktop's own long-standing behavior, not a new
-Morbstack gap). Neither blocks anything documented above — Testcontainers'
-`exposeHostPorts()` in particular was verified in this pass to work
-despite the `host.docker.internal` gap, since it doesn't depend on that
-mechanism at all.
+`docs/parity.md` for the full audit and priority list): a live revalidation
+of the newly implemented `host.docker.internal`/`gateway.docker.internal`
+guest DNS path, and `--network host` only ever reaching the guest VM's
+network, not the Mac's (matches Docker Desktop's own long-standing
+behavior, not a new Morbstack gap). Neither blocks anything documented
+above — Testcontainers' `exposeHostPorts()` in particular was verified in
+this pass to work without that mechanism.

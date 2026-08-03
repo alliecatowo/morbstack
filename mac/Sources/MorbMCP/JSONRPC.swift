@@ -73,6 +73,12 @@ public enum JSONRPCCodec {
         guard let method = dictionary["method"] as? String, !method.isEmpty else {
             return .invalidRequest(message: "missing or non-string `method`", id: id, hasID: hasID)
         }
+        if hasID, !isValidRequestID(id) {
+            // Do not echo an invalid array/object identifier back into a response:
+            // JSON-RPC error replies use null when the request id is unusable.
+            return .invalidRequest(
+                message: "`id` must be a string, number, or null", id: NSNull(), hasID: true)
+        }
         var params: [String: Any]?
         if let raw = dictionary["params"] {
             guard let dictionaryParams = raw as? [String: Any] else {
@@ -81,6 +87,17 @@ public enum JSONRPCCodec {
             params = dictionaryParams
         }
         return .request(JSONRPCRequest(id: id, hasID: hasID, method: method, params: params))
+    }
+
+    private static func isValidRequestID(_ value: Any?) -> Bool {
+        guard let value else { return false }
+        if value is NSNull || value is String { return true }
+        guard let number = value as? NSNumber else { return false }
+        // JSONSerialization represents JSON booleans as NSNumber too, but JSON-RPC
+        // ids admit numbers, not booleans. Darwin's Objective-C type encoding makes
+        // this distinction without relying on private Foundation class names.
+        let type = String(cString: number.objCType)
+        return type != "c" && type != "B"
     }
 
     /// Encodes a successful reply. `id` should be the request's own `id`

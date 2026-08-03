@@ -196,6 +196,22 @@ iconutil --convert icns --output mac/.build/AppIcon.icns mac/.build/AppIcon.icon
 description = "Build, assemble, and sign Morbstack.app into dist/"
 depends = ["app-icon"]
 run = """
+# L1's clean-machine contract is that the app bundle, not Docker Desktop or
+# Homebrew, provides `docker`, `docker compose`, and `docker buildx`.  Fail before
+# compiling anything if the verified host toolchain has not been fetched: producing a
+# beautiful but incomplete app bundle would turn the first launch on a clean Mac into
+# an opaque "docker: command not found" failure.
+for TOOL in \
+	dist/host-bin/docker \
+	dist/host-bin/cli-plugins/docker-compose \
+	dist/host-bin/cli-plugins/docker-buildx; do
+	if [ ! -x "$TOOL" ]; then
+		echo "error: required bundled Docker CLI asset is missing: $TOOL" >&2
+		echo "       run scripts/fetch-guest-assets.sh --host-cli first" >&2
+		exit 1
+	fi
+done
+
 # One product per invocation: `swift build` accepts a single `--product`,
 # and passing two silently builds only the last one — which then fails
 # three lines down on a missing binary rather than at the flag that was
@@ -222,6 +238,11 @@ cp mac/.build/release/MorbstackApp dist/Morbstack.app/Contents/MacOS/MorbstackAp
 cp mac/.build/release/morbstackd dist/Morbstack.app/Contents/MacOS/morbstackd
 cp mac/.build/release/morb dist/Morbstack.app/Contents/MacOS/morb
 cp mac/.build/AppIcon.icns dist/Morbstack.app/Contents/Resources/AppIcon.icns
+# Keep the source tree's host toolchain layout intact inside the bundle.  The
+# first-run installer resolves these exact paths and symlinks them only after the
+# person at the keyboard has consented; the toolchain is never fetched from the
+# network, copied out of Docker Desktop, or looked up on PATH at install time.
+cp -R dist/host-bin dist/Morbstack.app/Contents/Resources/host-bin
 cp mac/AppResources/Info.plist dist/Morbstack.app/Contents/Info.plist
 printf 'APPL????' > dist/Morbstack.app/Contents/PkgInfo
 # Stamp the real version in, so the bundle and `morb version` agree.
@@ -245,6 +266,13 @@ fi
 codesign --force --sign - dist/Morbstack.app/Contents/MacOS/morb
 codesign --force --sign - --entitlements mac/Resources/morbstackd.entitlements \
 	dist/Morbstack.app/Contents/MacOS/morbstackd
+# The upstream host binaries execute from inside the app bundle.  Sign them before
+# sealing the outer app so a quarantined DMG does not leave a clean-machine user with
+# helpers Gatekeeper refuses to launch.  They remain upstream binaries; this adds only
+# the bundle's code-signature envelope.
+codesign --force --sign - dist/Morbstack.app/Contents/Resources/host-bin/docker
+codesign --force --sign - dist/Morbstack.app/Contents/Resources/host-bin/cli-plugins/docker-compose
+codesign --force --sign - dist/Morbstack.app/Contents/Resources/host-bin/cli-plugins/docker-buildx
 codesign --force --sign - dist/Morbstack.app
 # Fail loudly rather than shipping a daemon that cannot boot the guest.
 codesign -d --entitlements - dist/Morbstack.app/Contents/MacOS/morbstackd 2>&1 \

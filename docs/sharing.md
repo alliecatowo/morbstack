@@ -39,9 +39,10 @@ shared_paths = ["/Users", "/Volumes", "/private/tmp"]
 
 Those three cover essentially every path a developer bind-mounts:
 everything under a home directory, external and network volumes, and the
-real location of `/tmp` (macOS symlinks `/tmp` to `/private/tmp`, and
-Morbstack resolves symlinks before sharing, so a share of `/tmp` and a
-`-v /tmp/x` both land on `/private/tmp`).
+real location of `/tmp`. macOS makes `/tmp` a symlink to `/private/tmp`;
+after that share mounts, Morbstack aliases the guest's `/tmp` to the same
+VirtioFS content, so `-v /tmp/x` and `-v /private/tmp/x` see the same host
+path too.
 
 Anything **not** under one of these roots is invisible to the VM. `/opt`,
 `/usr/local`, `/etc` and `/` itself are not shared, and deliberately so: a

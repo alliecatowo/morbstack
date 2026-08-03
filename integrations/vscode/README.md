@@ -145,10 +145,11 @@ all.
 
 ### Known gaps
 
-- Morbstack does not resolve `host.docker.internal` or
-  `gateway.docker.internal` inside containers today. A `devcontainer.json` that
-  reaches the host by those names will not work. See `docs/parity.md`, findings
-  18, 19 and 22.
+- The guest now implements `host.docker.internal` and
+  `gateway.docker.internal` through split DNS, but this Dev Containers path has
+  not yet been rerun against a fresh VM. Treat a `devcontainer.json` that uses
+  those names as needing verification rather than relying on the historical
+  `docs/parity.md` findings 18, 19 and 22.
 - Dev Containers detects "Docker is not running" by pattern-matching the
   `docker version` error string, and on macOS may respond by trying to launch
   Docker Desktop. If you see a confusing Docker-Desktop-flavoured error, check

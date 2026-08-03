@@ -58,7 +58,21 @@ public enum MorbCliPlugins {
     /// accidentally reads out of a developer's repo checkout instead of its own bundle.
     public static func sourceBinary(for plugin: Plugin) -> URL? {
         for dir in candidateHostBinDirectories() {
-            let candidate = dir.appendingPathComponent(plugin.binaryName, isDirectory: false)
+            // `host-bin` is the root of the *toolchain*, not Docker's plugin search
+            // directory.  Keeping plugins one level down is what lets the packaged
+            // layout exactly mirror a normal Docker config directory:
+            //
+            //   Contents/Resources/host-bin/docker
+            //   Contents/Resources/host-bin/cli-plugins/docker-compose
+            //   Contents/Resources/host-bin/cli-plugins/docker-buildx
+            //
+            // Looking directly under `host-bin` made every plan report its sources as
+            // missing even after the fetcher had verified the real files.  That was
+            // especially bad on a clean machine: first-run could look complete while
+            // `docker compose` and `docker buildx` were not actually installed.
+            let candidate = dir
+                .appendingPathComponent("cli-plugins", isDirectory: true)
+                .appendingPathComponent(plugin.binaryName, isDirectory: false)
             if FileManager.default.isExecutableFile(atPath: candidate.path) {
                 return candidate
             }
@@ -88,6 +102,22 @@ public enum MorbCliPlugins {
             probe = parent
         }
         return dirs
+    }
+
+    /// The bundled, unmodified `docker` client binary, if this build carries one.
+    ///
+    /// The client and its plugins deliberately share the same lookup roots.  A first
+    /// public binary must not borrow Docker Desktop's client from `/usr/local/bin` on
+    /// the development machine: the app bundle itself is the source of all three host
+    /// executables.
+    public static func sourceDockerCLI() -> URL? {
+        for dir in candidateHostBinDirectories() {
+            let candidate = dir.appendingPathComponent("docker", isDirectory: false)
+            if FileManager.default.isExecutableFile(atPath: candidate.path) {
+                return candidate
+            }
+        }
+        return nil
     }
 
     // MARK: - Planning (pure, no disk writes)

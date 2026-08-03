@@ -236,6 +236,64 @@ public enum MorbDockerContext {
         return .current
     }
 
+    // MARK: - Removing a Morbstack-owned context
+
+    /// The outcome of a conservative context cleanup.
+    public enum RemoveResult: Equatable, Sendable {
+        /// The context pointed at Morbstack's socket and was removed.  If it had been
+        /// current, `currentContext` was removed from config.json first so Docker falls
+        /// back to its ordinary default rather than retaining a dead context name.
+        case removed(wasCurrent: Bool)
+        /// No context with this name was registered.
+        case notRegistered
+        /// A context named `morbstack` exists but points at a different host.  It may
+        /// have been made by a user for another engine, so leave it untouched.
+        case pointsElsewhere(String)
+    }
+
+    /// Removes the standard Morbstack context only when its endpoint is our current
+    /// relay socket.  This is used by the explicit CLI toolchain uninstall path; normal
+    /// app operation never calls it.  It intentionally does not remove any unrelated
+    /// context or overwrite malformed user-owned Docker configuration.
+    @discardableResult
+    public static func remove(
+        socketPath: String = MorbPaths.dockerSocket.path,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> RemoveResult {
+        let configDir = dockerConfigDirectory(environment: environment)
+        let meta = metaFile(dockerConfigDirectory: configDir)
+        guard let host = readHost(metaFile: meta) else { return .notRegistered }
+        guard host == "unix://\(socketPath)" else { return .pointsElsewhere(host) }
+
+        let file = configFile(dockerConfigDirectory: configDir)
+        let current = currentContextName(dockerConfigDirectory: configDir)
+        if current == name {
+            var object: [String: Any] = [:]
+            if let data = try? Data(contentsOf: file), !data.isEmpty {
+                guard let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    throw MorbError.config(
+                        "\(file.path) exists but is not valid JSON — refusing to remove its currentContext key")
+                }
+                object = parsed
+            }
+            object.removeValue(forKey: "currentContext")
+            do {
+                try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
+                let data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
+                try data.write(to: file, options: .atomic)
+            } catch {
+                throw MorbError.io("could not update \(file.path): \(error.localizedDescription)")
+            }
+        }
+
+        do {
+            try FileManager.default.removeItem(at: meta)
+        } catch {
+            throw MorbError.io("could not remove \(meta.path): \(error.localizedDescription)")
+        }
+        return .removed(wasCurrent: current == name)
+    }
+
     // MARK: - /var/run/docker.sock (manual, never automatic)
 
     /// The conventional path several tools (older Testcontainers configurations,

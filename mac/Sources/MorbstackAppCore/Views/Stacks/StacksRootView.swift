@@ -294,6 +294,13 @@ struct StacksRootView: View {
         ) {
             VStack(spacing: Theme.space3) {
                 Button {
+                    Task { await model.refreshAll() }
+                } label: {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                }
+                .morbButton(.standard)
+
+                Button {
                     trackCCopy(TrackDLinks.dockerContextCommand(socketPath: MorbPaths.dockerSocket.path))
                 } label: {
                     Label("Copy docker context command", systemImage: "doc.on.doc")

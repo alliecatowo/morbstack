@@ -44,9 +44,12 @@ scratch space), `/var` (which contains `/var/lib/docker`, the entire layer store
 → `/tmp` — which is exactly the destructive direction, so `MorbShares.normalise` is
 hand-rolled and never resolves symlinks.
 
-Consequence worth knowing: **the guest's `/tmp` is its own tmpfs**, so
-`-v /tmp/x:/y` binds a guest-local directory, not the Mac's. Use `/private/tmp/x`.
-`morb doctor` prints this as the `shares-tmp` note.
+Once the default `/private/tmp` share is mounted, the guest bind-mounts it
+over `/tmp`. This makes a literal `-v /tmp/x:/y` see the same Mac content
+as `/private/tmp/x`, matching macOS. If you intentionally remove
+`/private/tmp` from `shared_paths`, or that share fails to mount, `/tmp`
+remains guest-local and bare `/tmp` bind sources can be empty; `morb doctor`
+reports that as `shares-tmp`.
 
 Guest system roots (`/usr`, `/bin`, `/sbin`, `/lib`, `/proc`, `/sys`, `/dev`, `/run`)
 are refused outright: mounting the Mac's `/usr` at the guest's `/usr` hides dockerd,

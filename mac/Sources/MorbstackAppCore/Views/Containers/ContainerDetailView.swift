@@ -262,7 +262,12 @@ struct ContainerDetailView: View {
         case .logs:
             ContainerLogsTab(container: container, client: model.client, preloadedStore: preloadedLogs)
         case .stats:
-            ContainerStatsTab(container: container, hub: hub, client: model.client)
+            ContainerStatsTab(
+                container: container,
+                hub: hub,
+                client: model.client,
+                onStart: { onAction(.start) },
+                isActionInProgress: isBusy)
         case .inspect:
             ContainerInspectTab(json: inspectJSON, isLoading: isLoadingInspect, errorText: inspectError)
         }

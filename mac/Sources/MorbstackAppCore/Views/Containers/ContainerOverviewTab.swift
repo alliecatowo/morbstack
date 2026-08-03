@@ -115,13 +115,7 @@ struct ContainerOverviewTab: View {
                     MorbKeyValue("Restart policy", policy)
                 }
                 if !details.networks.isEmpty {
-                    MorbKeyValue("Networks") {
-                        HStack(spacing: Theme.space2) {
-                            ForEach(details.networks, id: \.self) { network in
-                                MorbChip(network, symbol: "network", rank: .quiet)
-                            }
-                        }
-                    }
+                    MorbKeyValue("Networks", details.networks.joined(separator: ", "))
                 }
                 if let platform = details.platform, !platform.isEmpty {
                     MorbKeyValue("Platform", platform)
@@ -205,28 +199,96 @@ struct ContainerOverviewTab: View {
                 MorbNoMatches(query: envQuery)
                     .frame(height: Theme.rowRich * 3)
             } else {
-                // Environment values are operational data, not a floating panel.
-                // Keeping the rows on the content surface makes this section share the
-                // same table rhythm as Ports, Mounts and Labels instead of creating a
-                // fourth rounded card inside an already-selected detail pane.
-                VStack(spacing: 0) {
-                    ForEach(matches) { variable in
-                        TrackBEnvRow(
-                            variable: variable,
-                            isRevealed: revealed.contains(variable.id),
-                            onToggleReveal: {
-                                if revealed.contains(variable.id) {
-                                    revealed.remove(variable.id)
-                                } else {
-                                    revealed.insert(variable.id)
-                                }
-                            })
-                        if variable.id != matches.last?.id { MorbRowDivider(rowClass: .standard) }
-                    }
-                }
+                environmentTable(matches)
             }
         }
         .padding(.horizontal, Theme.pagePadding)
+    }
+
+    /// Environment variables are operational data, so they use the exact same native
+    /// `Table` rhythm as Ports, Mounts and Labels. The earlier hand-drawn rows looked
+    /// like a settings card embedded inside an inspector and did not inherit table
+    /// selection, contrast, or column resizing behaviour.
+    private func environmentTable(_ variables: [TrackBInspectDetails.EnvVar]) -> some View {
+        Table(variables) {
+            TableColumn("Name") { variable in
+                HStack(spacing: Theme.space2) {
+                    if TrackBSecretHeuristic.looksSensitive(key: variable.key) {
+                        Image(systemName: "key.fill")
+                            .font(.caption2)
+                            .foregroundStyle(Theme.statusDegraded)
+                            .help("The name suggests this is a secret")
+                    }
+                    Text(variable.key)
+                        .font(.system(.callout, design: .monospaced).weight(.medium))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .textSelection(.enabled)
+                }
+            }
+            .width(min: 180, ideal: 220)
+
+            TableColumn("Value") { variable in
+                environmentValue(variable)
+            }
+
+            TableColumn("") { variable in
+                HStack(spacing: Theme.space1) {
+                    Button {
+                        if revealed.contains(variable.id) {
+                            revealed.remove(variable.id)
+                        } else {
+                            revealed.insert(variable.id)
+                        }
+                    } label: {
+                        Label(
+                            revealed.contains(variable.id) ? "Hide value" : "Reveal value",
+                            systemImage: revealed.contains(variable.id) ? "eye.slash" : "eye")
+                    }
+                    .labelStyle(.iconOnly)
+                    .buttonStyle(.borderless)
+                    .help(revealed.contains(variable.id) ? "Hide value" : "Reveal value")
+
+                    Button {
+                        TrackBClipboard.copy(variable.value)
+                    } label: {
+                        Label("Copy value", systemImage: "doc.on.doc")
+                    }
+                    .labelStyle(.iconOnly)
+                    .buttonStyle(.borderless)
+                    .help("Copy value")
+                }
+            }
+            .width(56)
+        }
+        .tableStyle(.inset)
+        .alternatingRowBackgrounds()
+        .frame(height: tableHeight(rows: variables.count))
+    }
+
+    /// `TextSelectability` uses distinct generic marker types for enabled and disabled,
+    /// so a ternary cannot select between them. Keep the masking decision explicit while
+    /// preserving the value column's identical layout in each state.
+    @ViewBuilder
+    private func environmentValue(_ variable: TrackBInspectDetails.EnvVar) -> some View {
+        let isRevealed = revealed.contains(variable.id)
+        let value = isRevealed ? (variable.value.isEmpty ? "—" : variable.value) : TrackBSecretHeuristic.mask
+
+        if isRevealed {
+            Text(value)
+                .font(.system(.callout, design: .monospaced))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+        } else {
+            Text(value)
+                .font(.system(.callout, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.disabled)
+        }
     }
 
     // MARK: Mounts
@@ -365,78 +427,8 @@ struct ContainerOverviewTab: View {
     // MARK: Placeholder
 
     private var loadingPlaceholder: some View {
-        VStack(alignment: .leading, spacing: Theme.space4) {
-            ForEach(0..<5, id: \.self) { _ in
-                RoundedRectangle(cornerRadius: Theme.radiusChip, style: .continuous)
-                    .fill(.quaternary.opacity(0.5))
-                    .frame(height: 14)
-                    .frame(maxWidth: .infinity)
-            }
-        }
-        .redacted(reason: .placeholder)
-        .padding(.horizontal, Theme.pagePadding)
-        .padding(.top, Theme.space2)
-    }
-}
-
-// MARK: - Env row
-
-struct TrackBEnvRow: View {
-
-    let variable: TrackBInspectDetails.EnvVar
-    let isRevealed: Bool
-    let onToggleReveal: () -> Void
-
-    @State private var hovering = false
-
-    private var sensitive: Bool { TrackBSecretHeuristic.looksSensitive(key: variable.key) }
-
-    /// Selection is enabled only while the value is revealed: a masked value that can be
-    /// dragged into another window would make the mask decorative rather than real.
-    @ViewBuilder
-    private var valueText: some View {
-        if isRevealed {
-            Text(variable.value.isEmpty ? "—" : variable.value).textSelection(.enabled)
-        } else {
-            Text(TrackBSecretHeuristic.mask)
-        }
-    }
-
-    var body: some View {
-        HStack(alignment: .center, spacing: Theme.space4) {
-            HStack(spacing: Theme.space2) {
-                if sensitive {
-                    Image(systemName: "key.fill")
-                        .font(.system(size: 8))
-                        .foregroundStyle(Theme.statusDegraded)
-                        .help("The name suggests this is a secret")
-                }
-                Text(variable.key)
-                    .font(.system(.callout, design: .monospaced).weight(.medium))
-                    .lineLimit(1)
-                    .textSelection(.enabled)
-            }
-            .frame(width: 220, alignment: .leading)
-
-            valueText
-                .font(.system(.callout, design: .monospaced))
-                .foregroundStyle(isRevealed ? .primary : .secondary)
-                .lineLimit(1)
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-            HStack(spacing: Theme.space1) {
-                MorbIconButton(
-                    isRevealed ? "eye.slash" : "eye",
-                    help: isRevealed ? "Hide value" : "Reveal value",
-                    action: onToggleReveal)
-                MorbIconButton("doc.on.doc", help: "Copy value") {
-                    TrackBClipboard.copy(variable.value)
-                }
-                .opacity(hovering ? 1 : 0)
-            }
-        }
-        .morbRow(.standard)
-        .onHover { hovering = $0 }
+        MorbLoading(label: "Loading container configuration…")
+            .frame(height: 180)
     }
 }
 
@@ -463,9 +455,7 @@ struct TrackBInlineError: View {
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
         }
-        .padding(Theme.space4)
+        .padding(.vertical, Theme.space3)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.statusDegraded.opacity(Theme.chipAlpha),
-                    in: RoundedRectangle(cornerRadius: Theme.radiusCard, style: .continuous))
     }
 }

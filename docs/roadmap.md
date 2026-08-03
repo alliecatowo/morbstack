@@ -96,10 +96,11 @@ Goal: a daily-driveable replacement for Docker Desktop's core workflow.
 - `compose` (v2) and `buildx` bundled and working against the relayed
   Engine API. Compose already works as of M0 (`docker compose up -d`
   passes, see `docs/compat.md`), but only via a manual one-time symlink
-  of the fetched plugin binary into `~/.docker/cli-plugins/`; "bundled"
-  here means the install step itself goes away — a first-run flow that
-  wires the plugin in automatically, and `buildx` bundled the same way,
-  neither of which exists yet.
+  of the fetched plugin binary into `~/.docker/cli-plugins/`; a consented,
+  terminal-free first-run flow now wires Compose and Buildx automatically
+  without changing an existing Docker client's PATH priority or a named
+  Docker context. The remaining release gate is clean-machine end-to-end
+  validation of those bundled tools.
 - VM suspend/resume implemented (not yet necessarily hitting the 500ms
   perf target — that's tracked as a perf target, see below — but
   functionally correct).
@@ -288,12 +289,11 @@ these is shipping something that breaks on first contact:
   Testcontainers, most IDE Docker integrations and `docker-py`'s default
   client all fail. First-run should register a context the way a Desktop
   install does.
-- **`host.docker.internal` / `gateway.docker.internal`.** `docs/parity.md`
-  #18/#19: absent, not degraded. #22 shows the network path to the host
-  already works, so this is DNS plumbing rather than new networking.
-- **The `/tmp` bind-mount footgun fixed or made loud.** `docs/parity.md`
-  #9: silently mounts an empty directory instead of the file. `morb doctor`
-  already detects it; the failure itself must stop being silent.
+- **Re-run the guest-parity checks for `host.docker.internal`,
+  `gateway.docker.internal`, and bare `/tmp` bind sources.** The guest now
+  implements the split-DNS/host-gateway path and aliases `/tmp` to a live
+  `/private/tmp` share; `docs/parity.md` deliberately retains the previous
+  live-audit failures until a new VM run verifies them.
 
 Then, and only then:
 

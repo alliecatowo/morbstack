@@ -82,6 +82,13 @@ const UPSTREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 /// reason about.
 const MAX_MESSAGE: usize = 4096;
 
+/// A slow upstream must not make a request for one unrelated hostname delay
+/// the two Docker host aliases for every other container. The stub keeps a
+/// small bounded set of concurrent forwards; above this limit a resolver can
+/// retry rather than making an untrusted container create unbounded threads.
+#[cfg(target_os = "linux")]
+const MAX_CONCURRENT_FORWARDS: usize = 32;
+
 /// Case-insensitively compare a decoded wire-format name against one of
 /// `SPECIAL_NAMES`, tolerating an optional trailing dot (the wire form is
 /// always "rooted"; a resolver's textual form often is not).
@@ -205,9 +212,11 @@ pub fn answer_locally(query: &[u8], answer: Ipv4Addr) -> Option<Vec<u8>> {
 
 #[cfg(target_os = "linux")]
 mod imp {
-    use super::{answer_locally, DNS_PORT, MAX_MESSAGE, UPSTREAM_TIMEOUT};
+    use super::{answer_locally, DNS_PORT, MAX_CONCURRENT_FORWARDS, MAX_MESSAGE, UPSTREAM_TIMEOUT};
     use crate::log;
     use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use std::thread;
 
     /// Bind the stub on every guest address — so both dockerd's own
@@ -233,6 +242,7 @@ mod imp {
     }
 
     fn serve(socket: UdpSocket, answer: Ipv4Addr, upstream: Ipv4Addr) {
+        let in_flight_forwards = Arc::new(AtomicUsize::new(0));
         let mut buf = [0u8; MAX_MESSAGE];
         loop {
             let (len, from) = match socket.recv_from(&mut buf) {
@@ -249,7 +259,70 @@ mod imp {
                         log::log(&format!("split DNS could not reply to {}: {}", from, e));
                     }
                 }
-                None => forward(&socket, query, from, upstream),
+                None => spawn_forward(
+                    &socket,
+                    query,
+                    from,
+                    upstream,
+                    Arc::clone(&in_flight_forwards),
+                ),
+            }
+        }
+    }
+
+    /// Forward ordinary DNS requests off the receive loop. A DNS lookup for
+    /// an unrelated name may wait up to `UPSTREAM_TIMEOUT`; keeping it on
+    /// `serve` would make that one timeout stall the special-name replies
+    /// too. The bounded counter is deliberately acquired before cloning the
+    /// socket or allocating a packet copy.
+    fn spawn_forward(
+        main: &UdpSocket,
+        query: &[u8],
+        from: SocketAddr,
+        upstream: Ipv4Addr,
+        in_flight: Arc<AtomicUsize>,
+    ) {
+        if !try_acquire_forward(&in_flight) {
+            log::log("split DNS forward limit reached — dropping query so the resolver can retry");
+            return;
+        }
+
+        let main = match main.try_clone() {
+            Ok(socket) => socket,
+            Err(e) => {
+                in_flight.fetch_sub(1, Ordering::Release);
+                log::log(&format!("split DNS could not clone receive socket: {}", e));
+                return;
+            }
+        };
+        let query = query.to_vec();
+        let worker_in_flight = Arc::clone(&in_flight);
+        if let Err(e) = thread::Builder::new()
+            .name("split-dns-forward".to_string())
+            .spawn(move || {
+                forward(&main, &query, from, upstream);
+                worker_in_flight.fetch_sub(1, Ordering::Release);
+            })
+        {
+            in_flight.fetch_sub(1, Ordering::Release);
+            log::log(&format!("split DNS could not spawn forwarder: {}", e));
+        }
+    }
+
+    fn try_acquire_forward(in_flight: &AtomicUsize) -> bool {
+        let mut current = in_flight.load(Ordering::Acquire);
+        loop {
+            if current >= MAX_CONCURRENT_FORWARDS {
+                return false;
+            }
+            match in_flight.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(observed) => current = observed,
             }
         }
     }

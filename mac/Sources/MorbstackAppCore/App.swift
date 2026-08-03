@@ -187,6 +187,8 @@ struct RootWindow: View {
     @Binding var isPalettePresented: Bool
 
     @Environment(\.openWindow) private var openWindow
+    @State private var cliSetup = FirstRunCLISetupModel()
+    @State private var isCLISetupPresented = false
 
     /// How far the command palette sits from the top of the window — a Spotlight-ish
     /// ~22% on the window sizes the app actually opens at, not dead centre. Matches the
@@ -226,6 +228,17 @@ struct RootWindow: View {
                 await LiveCaptureRunner.run(model: model, options: options)
             }
         }
+        // Capture and fixture runs must remain deterministic pictures of their target
+        // screen, not an installation prompt whose visibility depends on the host's
+        // shell profile.  Ordinary launches calculate the plan before presenting this
+        // sheet; calculating it makes no changes to the machine.
+        .task {
+            guard !suppressesFirstRunSetup else { return }
+            await cliSetup.prepare()
+            if cliSetup.requiresConsent {
+                isCLISetupPresented = true
+            }
+        }
         .sheet(isPresented: $isPalettePresented) {
             // `CommandPalette`'s own root is just the sized panel — the merge-owned
             // screenshot harness composes it the same way for `paletteScene()`, so the
@@ -242,6 +255,9 @@ struct RootWindow: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .sheet(isPresented: $isCLISetupPresented) {
+            FirstRunCLISetupSheet(model: cliSetup, isPresented: $isCLISetupPresented)
+        }
         // The two cross-track hooks Track D asked for. Installed from the window rather
         // than from `init` because `openWindow` is an environment action and only exists
         // inside a scene's view tree.
@@ -252,6 +268,13 @@ struct RootWindow: View {
             // a no-op — on every launch that never asks `LiveCaptureBridge` to fire it.
             LiveCaptureBridge.setPalettePresented = { isPalettePresented = $0 }
         }
+    }
+
+    /// Tour fixtures, captures and window diagnostics run in developer automation.
+    /// They should never invite that automation to change its own real user account.
+    private var suppressesFirstRunSetup: Bool {
+        options.isTour || options.tourCapture != nil || options.tourFixtures
+            || options.dumpWindow || options.dumpFile != nil
     }
 }
 

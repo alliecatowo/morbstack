@@ -125,11 +125,12 @@ public enum MorbShares {
         }
     }
 
-    /// The note `morb doctor` prints about `/tmp`, kept here so the daemon log and
-    /// the report cannot drift apart.
+    /// The note `morb doctor` prints about the `/tmp` alias, kept here so the daemon
+    /// log and the report cannot drift apart.
     public static let tmpAliasWarning =
-        "the guest's /tmp is its own tmpfs, so `-v /tmp/x:/y` binds a guest-local "
-        + "directory, not the Mac's /tmp — use /private/tmp/x to reach the host"
+        "when /private/tmp is mounted, the guest aliases /tmp to it, so `-v /tmp/x:/y` "
+        + "sees the Mac's files; if that share is omitted or fails, /tmp is guest-local "
+        + "and such bind mounts can be empty"
 
     // MARK: - Planning
 

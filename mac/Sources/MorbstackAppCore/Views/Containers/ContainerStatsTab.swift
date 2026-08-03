@@ -20,6 +20,10 @@ struct ContainerStatsTab: View {
     let container: ContainerSummary
     let hub: TrackBStatsHub
     let client: DockerClient
+    /// The detail pane owns lifecycle operations, so the empty state asks it to start
+    /// the container instead of inventing a second action path here.
+    let onStart: () -> Void
+    let isActionInProgress: Bool
 
     @State private var probe: TrackBStatsProbe?
     /// The pane's height, fed back so the charts can divide it between them.
@@ -69,30 +73,7 @@ struct ContainerStatsTab: View {
                     waiting
                 }
 
-                TrackBChartCard(
-                    title: "CPU",
-                    symbol: "cpu",
-                    reading: Formatters.percent(probe.latest?.cpuPercent ?? 0),
-                    caption: cpuCaption(probe),
-                    tint: cpuTint(probe.latest?.cpuPercent ?? 0),
-                    values: probe.cpuSeries,
-                    // A CPU chart pinned to 100% makes a 3% idle container look flat and
-                    // a 30% one look identical. The axis grows to fit instead, with a
-                    // floor so small numbers do not fill the frame.
-                    upperBound: max(10, (probe.cpuSeries.max() ?? 0) * 1.2),
-                    axisLabel: { Formatters.percent($0) })
-                    .frame(maxHeight: .infinity)
-
-                TrackBChartCard(
-                    title: "Memory",
-                    symbol: "memorychip",
-                    reading: Formatters.bytesString(probe.latest?.memBytes ?? 0),
-                    caption: memoryCaption(probe),
-                    tint: memoryTint(probe.latest),
-                    values: probe.memorySeries,
-                    upperBound: memoryUpperBound(probe),
-                    axisLabel: { Formatters.bytesString(Int64($0)) })
-                    .frame(maxHeight: .infinity)
+                charts(probe)
 
                 if let sample = probe.latest, sample.memLimit > 0 {
                     memoryGauge(sample)
@@ -122,10 +103,50 @@ struct ContainerStatsTab: View {
     }
 
     private var notRunning: some View {
-        MorbEmptyState(
-            "No live statistics",
-            systemImage: "waveform.path.ecg",
-            description: "The engine only reports CPU and memory for a running container.")
+        ContentUnavailableView {
+            Label("No Live Statistics", systemImage: "waveform.path.ecg")
+        } description: {
+            Text("Start this container to monitor CPU and memory.")
+        } actions: {
+            Button("Start Container", action: onStart)
+                .morbButton(.primary)
+                .disabled(isActionInProgress)
+        }
+    }
+
+    /// Operational data belongs on the window background, not in a pair of floating
+    /// dashboard cards. The divider preserves a clear reading order while allowing the
+    /// charts to use the full width of the detail pane.
+    private func charts(_ probe: TrackBStatsProbe) -> some View {
+        VStack(spacing: 0) {
+            TrackBChartSection(
+                title: "CPU",
+                symbol: "cpu",
+                reading: Formatters.percent(probe.latest?.cpuPercent ?? 0),
+                caption: cpuCaption(probe),
+                tint: cpuTint(probe.latest?.cpuPercent ?? 0),
+                values: probe.cpuSeries,
+                // A CPU chart pinned to 100% makes a 3% idle container look flat and
+                // a 30% one look identical. The axis grows to fit instead, with a
+                // floor so small numbers do not fill the frame.
+                upperBound: max(10, (probe.cpuSeries.max() ?? 0) * 1.2),
+                axisLabel: { Formatters.percent($0) })
+                .padding(.vertical, Theme.space4)
+
+            Divider()
+
+            TrackBChartSection(
+                title: "Memory",
+                symbol: "memorychip",
+                reading: Formatters.bytesString(probe.latest?.memBytes ?? 0),
+                caption: memoryCaption(probe),
+                tint: memoryTint(probe.latest),
+                values: probe.memorySeries,
+                upperBound: memoryUpperBound(probe),
+                axisLabel: { Formatters.bytesString(Int64($0)) })
+                .padding(.vertical, Theme.space4)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func memoryGauge(_ sample: StatsSample) -> some View {
@@ -217,10 +238,12 @@ struct ContainerStatsTab: View {
     }
 }
 
-// MARK: - Chart card
+// MARK: - Chart section
 
-/// A titled sparkline with its current reading.
-struct TrackBChartCard: View {
+/// A titled sparkline with its current reading. This deliberately remains flat: its
+/// parent detail pane already provides the content surface, so a GroupBox/card around
+/// every chart would make an operational screen read as a dashboard.
+struct TrackBChartSection: View {
 
     let title: String
     let symbol: String
@@ -232,43 +255,38 @@ struct TrackBChartCard: View {
     let axisLabel: (Double) -> String
 
     var body: some View {
-        MorbCard(padding: Theme.space4) {
-            VStack(alignment: .leading, spacing: Theme.space3) {
-                HStack(alignment: .firstTextBaseline, spacing: Theme.space2) {
-                    Image(systemName: symbol)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(tint)
-                    Text(title)
-                        .font(.system(size: 11, weight: .semibold))
-                        .kerning(0.4)
-                        .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: Theme.space3) {
+            HStack(alignment: .firstTextBaseline, spacing: Theme.space2) {
+                Label(title, systemImage: symbol)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.secondary)
 
-                    Spacer()
+                Spacer()
 
-                    Text(reading)
-                        .font(.system(size: 22, weight: .semibold, design: .rounded))
-                        .monospacedDigit()
-                        .contentTransition(.numericText())
-                        .foregroundStyle(.primary)
-                        .morbAnimation(.fade, value: reading)
-                }
+                Text(reading)
+                    .font(.title3.weight(.semibold))
+                    .monospacedDigit()
+                    .contentTransition(.numericText())
+                    .foregroundStyle(.primary)
+                    .morbAnimation(.fade, value: reading)
+            }
 
-                TrackBSparkline(values: values, upperBound: upperBound, tint: tint)
-                    .frame(minHeight: 64, maxHeight: .infinity)
+            TrackBSparkline(values: values, upperBound: upperBound, tint: tint)
+                .frame(minHeight: 96, maxHeight: .infinity)
 
-                HStack {
-                    Text(caption)
-                        .font(.caption2)
-                        .monospacedDigit()
-                        .foregroundStyle(.tertiary)
-                    Spacer()
-                    Text(axisLabel(upperBound))
-                        .font(.caption2)
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                }
+            HStack {
+                Text(caption)
+                    .font(.caption)
+                    .monospacedDigit()
+                    .foregroundStyle(.tertiary)
+                Spacer()
+                Text(axisLabel(upperBound))
+                    .font(.caption)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

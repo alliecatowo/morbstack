@@ -282,11 +282,11 @@ struct ImagesRootView: View {
                 showingPull = true
             }
         } else if split.tagged.isEmpty && split.dangling.isEmpty {
-            ContentUnavailableView(
-                "No Images Found",
-                systemImage: "magnifyingglass",
-                description: Text("No image matches \(query).")
-            ) {
+            ContentUnavailableView {
+                Label("No Images Found", systemImage: "magnifyingglass")
+            } description: {
+                Text("No image matches \(query).")
+            } actions: {
                 Button("Clear Search") { query = "" }
             }
         } else {
@@ -480,14 +480,15 @@ struct ImagesRootView: View {
             }
             .formStyle(.columns)
         } else {
-            ContentUnavailableView(
-                "No Image Selected",
-                systemImage: "square.on.square",
-                description: Text("Pick an image to see its platform, digest and tags.")) {
-                    Button("Select First Image") {
-                        selection = sections.tagged.first?.id ?? sections.dangling.first?.id
-                    }
+            ContentUnavailableView {
+                Label("No Image Selected", systemImage: "square.on.square")
+            } description: {
+                Text("Pick an image to see its platform, digest and tags.")
+            } actions: {
+                Button("Select First Image") {
+                    selection = sections.tagged.first?.id ?? sections.dangling.first?.id
                 }
+            }
         }
     }
 

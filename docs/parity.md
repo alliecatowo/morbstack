@@ -7,6 +7,28 @@ question honestly: for the claim "same docker CLI, same Engine API, same
 Compose files, same everything," where is that true today, and where does
 it actually break?
 
+## Implementation follow-up
+
+The results below are preserved as the evidence from that live audit; they
+are not silently rewritten as later code lands. Since the audited revision,
+the guest has implemented the two highest-impact guest-parity fixes:
+
+- **#9 `/tmp` bind sources:** once the live `/private/tmp` VirtioFS share is
+  mounted, `morbinit` bind-mounts it over the guest's `/tmp`. A literal
+  `-v /tmp/file:/container/file` therefore sees the same Mac file as
+  `/private/tmp/file`, matching macOS's own alias. If the share is omitted
+  or fails to mount, the guest keeps its private tmpfs and `morb doctor`
+  now warns explicitly.
+- **#18/#19 host aliases:** a guest split-DNS service answers IPv4 A queries
+  for `host.docker.internal` and `gateway.docker.internal` with the VM NAT
+  gateway; dockerd gives containers that resolver and uses the same gateway
+  for `host-gateway`. Non-special queries continue to the DHCP resolver.
+
+These changes have focused unit coverage, but this document must not claim a
+new live PASS until the exact #9/#18/#19 commands are run against a freshly
+built guest. Until then, the historical FAIL rows and tally remain the
+audit record rather than a statement about the current implementation.
+
 ## Method
 
 Built once (`mise run build && mise run sign`), then copied `morbstackd`/`morb` out
@@ -63,7 +85,7 @@ unmodified.
 
 ## Root-cause hypotheses and suggested fixes
 
-**#9 — `/tmp` vs `/private/tmp` silently corrupts single-file bind mounts.**
+**#9 — `/tmp` vs `/private/tmp` silently corrupts single-file bind mounts (fixed after this audit; live revalidation pending).**
 Root cause: `shared_paths` defaults to `/private/tmp`, and nothing resolves
 host-side symlinks before matching a `-v` source against the shared-root
 list or before asking the guest to bind-mount it — so a `/tmp/...` path
@@ -86,22 +108,12 @@ this is the cheapest, highest-leverage fix in this whole report: add
 one-time-plugin-install step exactly the way `docker-compose` already
 works today (`dist/host-bin/docker-compose` → `~/.docker/cli-plugins/`).
 
-**#17/#18/#19 — no zero-config discovery, no `host.docker.internal`, no `gateway.docker.internal`.**
-Root cause: these three are really one gap — Morbstack has no split-DNS or
-well-known-hostname layer at all yet (`README.md` says as much: "No
-`morb.local` DNS/domains, no `morbnet`... no split-DNS integration").
-Given #22 shows the underlying network path to the host already exists
-(the VM gateway IP works), the fix is specifically DNS/hosts-injection,
-not new networking plumbing: have `morbinit` or dockerd's embedded DNS
-inject `host.docker.internal`/`gateway.docker.internal` A records pointing
-at the VM gateway address into every container's resolution path (Docker
-Desktop does this via an internal DNS proxy; Docker Engine on Linux does
-it via `--add-host` /etc-hosts injection at daemon-config level, which
-Morbstack could replicate with a default `dockerd` config in the guest
-image). Separately, for zero-config *socket* discovery, the install
-flow (once there is a host app) should write a `desktop-linux`-equivalent
-context and set it current the way Docker Desktop does on first launch,
-rather than requiring the user to run `docker context create` by hand.
+**#17 — no zero-config discovery.**
+This remains separate from guest networking: the install flow should write a
+`desktop-linux`-equivalent context and set it current rather than requiring
+the user to run `docker context create` by hand. #18/#19's DNS/host-gateway
+implementation is described in the follow-up above and needs a fresh live
+run, not more design work.
 
 **#27 — `docker run` succeeds where Docker Desktop would fail on a taken port.**
 Root cause: architectural, not a bug — the Mac-side `PortForwarder` binds
@@ -120,12 +132,9 @@ this synchronously today.
 
 ## Priority list — what to fix first for a credible "drop-in" claim
 
-1. **`host.docker.internal` / `gateway.docker.internal` resolution.** This
-   is one of the most commonly depended-upon Docker Desktop behaviors in
-   real-world Compose files, dev tooling, and Testcontainers-style host
-   access patterns — and it's not degraded, it's completely absent. The
-   underlying path to the host already works (#22); this is "just" DNS
-   plumbing away from working.
+1. **Re-run #9, #18 and #19 against the current guest.** The old failures
+   have targeted implementations now; a real VM run is the only evidence
+   strong enough to upgrade their results.
 2. **Ship the `docker-buildx` CLI plugin.** Extremely high value for
    extremely low cost — the engine-side BuildKit is already fully
    functional (#14), multi-platform builds and cache mounts work
@@ -136,14 +145,7 @@ this synchronously today.
    path), every ecosystem tool that doesn't respect `DOCKER_HOST` will
    fail to find Morbstack at all. Testcontainers, most IDE integrations,
    and `docker-py`'s default client all fall into this bucket.
-4. **Fix or loudly fail the `/tmp` bind-mount footgun.** Low blast radius
-   per-incident but brutal to debug when it happens (a Flask app failing
-   with "can't find `__main__` module" gives zero hint that the real
-   problem is a symlink), and `/tmp` is an extremely natural path for a
-   Mac user to type. `morb doctor` already knows about this — the fix is
-   either resolving the symlink or making the failure loud instead of
-   silent.
-5. **Document the port-conflict and `docker ps` "0.0.0.0" behavioral
+4. **Document the port-conflict and `docker ps` "0.0.0.0" behavioral
    differences explicitly**, since they're the kind of thing that passes
    every manual test and then breaks exactly one person's CI script that
    greps `docker run`'s exit code or trusts `docker ps`'s port column.

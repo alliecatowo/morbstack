@@ -492,8 +492,25 @@ public enum Doctor {
         if let configError = report.configError {
             checks.append(DoctorCheck(name: "shares-config", status: .fail, detail: configError))
         }
-        if report.shares.contains(where: { $0.path == "/private/tmp" }) {
-            checks.append(DoctorCheck(name: "shares-tmp", status: .info, detail: MorbShares.tmpAliasWarning))
+        if let tmpShare = report.shares.first(where: {
+            $0.path == "/private/tmp" && $0.configured
+        }) {
+            // `/tmp` follows the Mac's `/tmp` -> `/private/tmp` equivalence only when
+            // the latter made it into the guest. Surface the real state here: an
+            // informational line used to repeat the old footgun even after the guest
+            // fixed it, while a failed live share is precisely when the warning matters.
+            checks.append(
+                DoctorCheck(
+                    name: "shares-tmp",
+                    status: live ? (tmpShare.mounted ? .pass : .warn) : .info,
+                    detail: MorbShares.tmpAliasWarning))
+        } else {
+            checks.append(
+                DoctorCheck(
+                    name: "shares-tmp",
+                    status: .warn,
+                    detail: "/private/tmp is not configured, so the guest will not keep aliasing /tmp "
+                        + "to the Mac after its next start; add it to shared_paths before using bare /tmp bind sources"))
         }
     }
 

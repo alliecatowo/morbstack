@@ -207,7 +207,7 @@ a claim could not be confirmed from a primary source it says so.
 | x86-64 emulation | **PASS for what's implemented** — Rosetta binfmt working and verified byte-identical; qemu fallback written but **inert, no binary shipped** ([amd64.md](amd64.md)) | Rosetta + bundled qemu fallback, confirmed present locally | Rosetta-based, vendor docs | Rosetta supported ([Podman Desktop docs](https://podman-desktop.io/docs/podman/rosetta)) | not confirmed — could not verify a first-class story | QEMU software emulation available; no confirmed Rosetta integration | **none at all** — Apple silicon only, no x86 containers |
 | Bind-mount performance | VirtioFS, tier 1; no published benchmark yet, only the parity pass's qualitative pass ([parity.md #8](parity.md), [sharing.md](sharing.md)) | VirtioFS (`com.docker.osxfs`, confirmed locally) | "VirtioFS with custom dynamic caching," vendor performance claims not independently verified | 9p/virtiofs, no independently verified benchmark found | Lima's 9p/virtiofs mount | Lima's 9p/virtiofs mount | selective per-VM mounts, different model |
 | File-watching / inotify across bind mounts | **FAIL, documented** — confirmed zero inotify events across a VirtioFS bind mount; polling (`--legacy-watch`) is the working mitigation ([parity.md #10-#11](parity.md), [sharing.md](sharing.md)) | works (Docker Desktop has shipped an FSEvents bridge for years) | claimed to work (vendor docs describe "low-latency, bidirectional file sharing"; not independently verified here) | not confirmed | not confirmed | not confirmed | per-VM mounts sidestep the cross-boundary watch problem differently; not confirmed either way |
-| `host.docker.internal` | **FAIL** — no DNS/hosts entry at all today, a real Docker Desktop feature Morbstack does not yet provide ([parity.md #18-#19](parity.md)) | native, this is where the name comes from | supported (vendor docs) | supported | supported | not a default; needs manual host networking | not applicable, different networking model |
+| `host.docker.internal` | **implemented; live revalidation pending** — guest split DNS resolves both Docker host aliases to the VM NAT gateway, with the historical audit retained in [parity.md #18-#19](parity.md) until rerun | native, this is where the name comes from | supported (vendor docs) | supported | supported | not a default; needs manual host networking | not applicable, different networking model |
 | Zero-config socket discovery | **FAIL** — no conventional socket path or auto-registered `docker context`; requires manual `DOCKER_HOST`/context setup ([parity.md #17](parity.md)) | native, installs and configures itself | supported (vendor docs) | requires `podman machine` context setup, broadly similar manual step | requires context/socket setup | requires manual `DOCKER_HOST` — Colima explicitly has no GUI or auto-config layer | different CLI, no Docker-socket concept |
 | GUI | **not part of M0** — no host app exists yet in this repo; CLI (`morb`) only today; SwiftUI app is a roadmap item ([README.md](../README.md)) | Electron, confirmed locally | native app (closed source, vendor claim, not independently verified) | Electron-family desktop app | Electron-based desktop app (third-party technical summaries; not independently re-verified here) | **none — CLI only** | CLI only, no bundled GUI |
 | CLI | `morb` — start/stop/status/suspend/resume/shares/rosetta/doctor/k8s/reset-disk | `docker` (bundled) + Docker Desktop's own CLI surface | `orb`/`orbctl` (vendor docs) | `podman` | `rdctl` + bundled `nerdctl`/`docker` | `colima` + bundled `docker`/`nerdctl` | `container` |
@@ -330,13 +330,12 @@ of what its docs say.
 
 ### Things that are broken or absent today, not just "less polished"
 
-- **`host.docker.internal` and `gateway.docker.internal` do not resolve at
-  all.** Not degraded — completely absent. This is one of the most
-  commonly depended-upon Docker Desktop behaviors in real Compose files,
-  dev tooling, and any pattern where a container needs to reach a
-  host-side service. Every other product in this document that runs a
-  Docker-compatible engine supports this in some form; Morbstack does not
-  yet ([parity.md #18-19](parity.md)).
+- **The Docker host aliases need a fresh VM confirmation.** The guest now
+  resolves `host.docker.internal` and `gateway.docker.internal` through a
+  split-DNS service to the VM NAT gateway; this replaces the historical
+  absence recorded in [parity.md #18-19](parity.md). The next parity pass
+  must verify both DNS resolution and a real Mac-side connection before
+  this comparison calls the feature a measured PASS.
 - **No zero-config socket discovery.** A user must manually export
   `DOCKER_HOST` or run `docker context create`. Testcontainers, most IDE
   Docker integrations, and `docker-py`'s default client all try
@@ -367,17 +366,12 @@ of what its docs say.
   including multi-platform builds and cache mounts
   ([parity.md #13-14](parity.md)) — but "the engine works" is not the same
   claim as "buildx ships," and it does not ship yet.
-- **A genuinely nasty, silent bind-mount corruption bug.** A single-file
-  bind mount through an *unresolved* `/tmp/...` path (as opposed to
-  `/private/tmp/...`) does not error — it silently creates an empty
-  directory in the guest where the file should be, because macOS's
-  `/tmp` → `/private/tmp` symlink is not resolved before matching against
-  `shared_paths`. This broke an entire Compose stack during the parity
-  pass with an error message (`can't find '__main__' module`) that gives
-  zero indication of the real cause ([parity.md #9](parity.md)). `morb
-  doctor` already flags this exact gotcha, but the failure mode — silent,
-  not loud — is exactly the worst combination for something this common
-  on macOS.
+- **Bare `/tmp` bind sources need a fresh VM confirmation.** When the
+  `/private/tmp` VirtioFS share is live, the guest now aliases `/tmp` to it
+  so the two source spellings select the same Mac files. If a custom config
+  omits that share or it fails to mount, `morb doctor` warns that `/tmp`
+  remains guest-local. The historical silent-mount failure is retained in
+  [parity.md #9](parity.md) until a live rerun verifies the fix.
 - **No inotify across VirtioFS bind mounts, confirmed directly.** A
   host-side file edit is correct the instant it's read, but the
   change-notification event a hot-reload watcher depends on
@@ -505,11 +499,11 @@ only kind worth writing.
 - **Use Morbstack if:** you want a free-forever, Apache-2.0, source-visible
   Docker Desktop replacement built around an unmodified upstream Docker
   Engine — **and** you are comfortable being an early adopter of pre-alpha
-  software with one maintainer, no security audit, missing
-  `host.docker.internal`/zero-config discovery/buildx-out-of-the-box, and
-  the specific `/tmp` bind-mount and inotify gotchas documented in §6. If
-  any of those gaps would break your actual workflow today, use one of the
-  other six until Morbstack's roadmap closes them — that is exactly what
+  software with one maintainer, no security audit, unverified-newly-added
+  Docker host aliases, missing zero-config discovery/buildx-out-of-the-box,
+  and the inotify limitation documented in §6. If any of those gaps would
+  break your actual workflow today, use one of the other six until
+  Morbstack's roadmap closes them — that is exactly what
   `docs/roadmap.md`'s M1/M2 milestones exist to do, and this document will
   be updated as they land.
 

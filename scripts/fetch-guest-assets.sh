@@ -82,6 +82,7 @@
 #   scripts/fetch-guest-assets.sh --docker-only    # docker binaries only
 #   scripts/fetch-guest-assets.sh --alpine-only    # alpine rootfs only
 #   scripts/fetch-guest-assets.sh --fsutils-only   # btrfs/e2fs/iptables apks only
+#   scripts/fetch-guest-assets.sh --host-cli       # all three host Docker CLI files
 #   scripts/fetch-guest-assets.sh --cli-only       # host docker CLI binary only
 #   scripts/fetch-guest-assets.sh --compose-only   # host docker-compose only
 #   scripts/fetch-guest-assets.sh --buildx-only    # host docker-buildx only
@@ -237,7 +238,7 @@ BUILDX_SHA256="82c6a3d9df37790c5bdb0d7ca88986d1d17622fc2b88ebe34b275c6c47acd7a6"
 
 usage() {
 	cat <<EOF
-Usage: $(basename "$0") [--kernel-only|--docker-only|--alpine-only|--fsutils-only|--cli-only|--compose-only|--buildx-only|--k8s-only] [-h]
+Usage: $(basename "$0") [--kernel-only|--docker-only|--alpine-only|--fsutils-only|--host-cli|--cli-only|--compose-only|--buildx-only|--k8s-only] [-h]
 
 Fetch and verify all pinned third-party guest assets:
   kernel   -> ${MORBSTACK_HOME}/data/kernel/vmlinux
@@ -254,6 +255,7 @@ Options:
   --docker-only    Only fetch/verify the Docker engine binaries
   --alpine-only    Only fetch/verify the Alpine minirootfs
   --fsutils-only   Only fetch/verify the btrfs-progs/e2fsprogs/iptables-legacy apks
+  --host-cli       Fetch/verify docker, docker-compose and docker-buildx for the host Mac
   --cli-only       Only fetch/verify the host docker CLI binary
   --compose-only   Only fetch/verify the host docker-compose CLI plugin
   --buildx-only    Only fetch/verify the host docker-buildx CLI plugin
@@ -1012,6 +1014,16 @@ while [ $# -gt 0 ]; do
 		DO_CLI=0
 		DO_COMPOSE=0
 		DO_BUILDX=0
+		DO_K8S=0
+		;;
+	--host-cli)
+		DO_KERNEL=0
+		DO_DOCKER=0
+		DO_ALPINE=0
+		DO_FSUTILS=0
+		DO_CLI=1
+		DO_COMPOSE=1
+		DO_BUILDX=1
 		DO_K8S=0
 		;;
 	--cli-only)

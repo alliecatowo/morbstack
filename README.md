@@ -72,10 +72,10 @@ verified end to end against a real cold-booted VM (see
 
 - **No packaged app.** You build from source (below). No DMG, no
   Homebrew cask yet.
-- **No `host.docker.internal` / `gateway.docker.internal`.** Not
-  degraded — completely absent. (The underlying network path to the Mac
-  does exist via the VM's own gateway IP, but nothing exposes it as a
-  stable, documented hostname yet.)
+- **No `morb.local` domains or general split-DNS integration.**
+  `host.docker.internal` and `gateway.docker.internal` are the deliberate
+  exception: they resolve to the VM NAT gateway inside containers, so they
+  reach services listening on the Mac.
 - **No zero-config socket discovery.** You must `export DOCKER_HOST=...`
   or create a `docker context` by hand — nothing registers one for you
   automatically the way Docker Desktop's installer does.
@@ -87,11 +87,11 @@ verified end to end against a real cold-booted VM (see
   correct the instant you read it, but hot-reload watchers (`nodemon`,
   `webpack --watch`, `vite`) never see the change-notification event.
   `--legacy-watch`/polling-based watchers work as a mitigation.
-- **The `/tmp` vs `/private/tmp` footgun.** `/tmp` on macOS is a symlink
-  to `/private/tmp`; a bind mount written against the unresolved
-  `/tmp/...` path silently mounts an *empty directory* instead of your
-  file, with no error. Use `/private/tmp/...` (`morb doctor` flags this
-  too).
+- **Custom share lists can still make `/tmp` guest-local.** With the default
+  live `/private/tmp` share, the guest aliases `/tmp` to it and bare
+  `/tmp/...` bind sources work as they do on macOS. If you remove that share
+  or it fails to mount, those sources can still be empty; `morb doctor`
+  reports the condition.
 - **No UDP port forwarding**, and no `morb.local` DNS/domains.
 
 [`docs/parity.md`](docs/parity.md)'s own tally, from a live audit against
@@ -167,12 +167,24 @@ Check the host is capable, and see what setup is outstanding:
 ```
 
 Fetch and hash-verify the pinned guest kernel, Docker engine binaries,
-Alpine minirootfs, guest fsutils, and the host `docker-compose` plugin —
-see [`NOTICE`](NOTICE) for exactly what these are and where they come
-from:
+Alpine minirootfs, guest fsutils, and the complete host Docker toolchain
+(`docker`, Compose, and buildx) — see [`NOTICE`](NOTICE) for exactly what
+these are and where they come from:
 
 ```sh
 ./scripts/fetch-guest-assets.sh
+```
+
+On a clean Mac, install that bundled host toolchain with an explicit,
+inspectable consent step. It links `docker` into `~/.morbstack/bin`, installs
+the standard Docker CLI plugins, and registers the `morbstack` context without
+overwriting another named context. See [`docs/first-run.md`](docs/first-run.md)
+for every file it may touch and the inverse removal command.
+
+```sh
+./mac/.build/debug/morb install-cli --print-plan
+./mac/.build/debug/morb install-cli
+# Open a new login shell after the PATH step, then use docker normally.
 ```
 
 Cross-compile `morbinit` and assemble the bootable initramfs:
@@ -189,27 +201,22 @@ until the first client connects, via socket activation):
 mise run run-daemon
 ```
 
-In another terminal, point Docker tooling at Morbstack's relay socket:
+In another terminal, use Docker normally (the clean-machine `install-cli`
+transaction selected the `morbstack` context):
 
 ```sh
-export DOCKER_HOST=unix://$HOME/.morbstack/run/docker.sock
 docker ps
 docker run --rm hello-world
 docker run -d -p 8080:80 nginx
 curl -fsS http://127.0.0.1:8080   # nginx welcome page, from the Mac
 ```
 
-(Or `docker context create morbstack --docker host=unix://$HOME/.morbstack/run/docker.sock && docker context use morbstack`.)
+If you deliberately kept another Docker context current, use the one-command
+override (`DOCKER_CONTEXT=morbstack docker ps`) or switch explicitly with
+`./mac/.build/debug/morb context use`.
 
-To use `docker compose`, symlink the fetched plugin binary where the
-Docker CLI's plugin resolver looks for it — a one-time step this repo
-fetches and verifies but does not perform for you:
-
-```sh
-mkdir -p ~/.docker/cli-plugins
-ln -sf "$(pwd)/dist/host-bin/docker-compose" ~/.docker/cli-plugins/docker-compose
-docker compose version
-```
+`docker compose version` and `docker buildx version` should now both work
+without a separate plugin-install step.
 
 Full detail, including troubleshooting the `credsStore`/`docker-credential-desktop`
 hang and the port-forwarder retry behavior, lives in

@@ -21,16 +21,14 @@ working" has a precise, checkable answer rather than a marketing claim.
   reshape API endpoints. Version skew concerns are the same ones that
   exist between any two upstream Docker Engine versions, not
   Morbstack-specific ones.
-- **Compose v2 and buildx are bundled.** Both ship as part of Morbstack
-  (from M1 onward per `docs/roadmap.md`) and are unmodified upstream
-  builds, invoked the standard way (`docker compose ...`,
-  `docker buildx ...`). As of M0, `docker compose` already works
-  end-to-end against Morbstack's relayed Engine API using an unmodified
-  upstream `docker/compose` release binary — see `README.md` "Running" —
-  but the plugin is fetched and hash-verified by this repo's tooling, not
-  yet auto-installed into `~/.docker/cli-plugins/`; that install step
-  going away is what "bundled" adds at M1. `buildx` is not fetched or
-  tested yet at any milestone so far.
+- **Compose v2 and buildx are bundled.** The packaged app carries pinned,
+  unmodified upstream `docker`, `docker-compose`, and `docker-buildx`
+  binaries. Its consented first-run transaction puts the client on PATH,
+  installs both plugins in Docker's standard `cli-plugins` directory, and
+  registers a `morbstack` context without overwriting another explicit
+  context. See [`first-run.md`](first-run.md). The guest-side BuildKit
+  capability remains subject to the clean-machine L1 release test; shipping
+  a plugin is necessary but not by itself proof of end-to-end parity.
 - **`~/.docker/config.json` is honored**, including:
   - `credHelpers` (credential helper delegation),
   - the macOS keychain credential helper (`osxkeychain`) specifically,

@@ -11,22 +11,26 @@ import Foundation
 import MorbFeatures
 import MorbstackKit
 
+private struct MeasurementError: Error, CustomStringConvertible {
+    let description: String
+}
+
 /// Runs the shared `top` sample, or produces the shared SKIPPED reason —
 /// used by all three benchmarks below so they refuse identically rather than
 /// with three subtly different messages for the same underlying problem.
-private func sampleDaemon(_ context: BenchContext) -> Result<ProcessSampleWindow, String> {
+private func sampleDaemon(_ context: BenchContext) -> Result<ProcessSampleWindow, MeasurementError> {
     let availability = StackGuard.probe()
     if let reason = StackGuard.idleMeasurementBlockReason(availability) {
-        return .failure(reason)
+        return .failure(MeasurementError(description: reason))
     }
     guard let pid = DaemonProcess.morbstackdPID() else {
-        return .failure("could not determine morbstackd's pid from \(MorbPaths.lockFile.path)")
+        return .failure(MeasurementError(description: "could not determine morbstackd's pid from \(MorbPaths.lockFile.path)"))
     }
     do {
         let window = try ProcessSampler.sample(pid: pid, windowSeconds: context.idleWindowSeconds)
         return .success(window)
     } catch {
-        return .failure("\(error)")
+        return .failure(MeasurementError(description: "\(error)"))
     }
 }
 
@@ -50,7 +54,7 @@ public struct IdleCPUBenchmark: Benchmark {
         let started = Date()
         switch sampleDaemon(context) {
         case .failure(let reason):
-            return .skipped(name: name, reason: reason)
+            return .skipped(name: name, reason: reason.description)
         case .success(let window):
             guard let distribution = window.cpuPercent else {
                 return .skipped(name: name, reason: "top produced no CPU samples")
@@ -85,7 +89,7 @@ public struct IdleWakeupsBenchmark: Benchmark {
         let started = Date()
         switch sampleDaemon(context) {
         case .failure(let reason):
-            return .skipped(name: name, reason: reason)
+            return .skipped(name: name, reason: reason.description)
         case .success(let window):
             guard let distribution = window.idleWakeups else {
                 // Exactly the "say so precisely rather than inventing a number" case
@@ -124,7 +128,7 @@ public struct HostRSSBenchmark: Benchmark {
         let started = Date()
         switch sampleDaemon(context) {
         case .failure(let reason):
-            return .skipped(name: name, reason: reason)
+            return .skipped(name: name, reason: reason.description)
         case .success(let window):
             guard let distribution = window.residentBytes else {
                 return .skipped(name: name, reason: "top produced no RSIZE samples")
