@@ -45,7 +45,7 @@ Read these before making a visual or behavioral judgement:
 
 ## Current branch and commit set
 
-The audited source tip is `8a8957f` on `code/native-content-continuation`.
+The audited source tip is `8190f54` on `code/native-content-continuation`.
 This documentation amendment follows that source commit. Recent work is
 deliberately small-commit, with each commit grouped around one outcome:
 
@@ -57,6 +57,7 @@ deliberately small-commit, with each commit grouped around one outcome:
 | Compose and Buildx | `64912ae`, `52f92ea`, `b6e808e`, `7a2faa4`, `127df9a` |
 | Image/volume operations | `ac26a91`, `abf4230` |
 | Native macOS migration | `e66c25e`, `d8c1193`, `ab413e0`, `f5e436e`, `62c4b0e` |
+| Tahoe window target and chrome | `8190f54` |
 | File-notification transport | `3115ff0`, `8a8957f` (compile repair) |
 | Grow-only Docker disk transaction | `53f6d4a` |
 
@@ -179,16 +180,19 @@ Completed in this work wave:
   for individual commits.
 - A serialized `mise run --raw app` bundle assembly followed by
   `codesign --verify --deep --strict dist/Morbstack.app` succeeded at the
-  `8a8957f` source tip after the final inspector, file-share, guest allocator,
-  and disk commits.
+  `8190f54` source tip after the final inspector, file-share, guest allocator,
+  disk, and Tahoe window-target commits. The Mach-O and bundle floor are both
+  macOS 26.0.
 - Real Computer Use review of the WindowServer-composited app showed actual
   local Docker containers/images and validated safe navigation, selected-record
   inspection, the Resources policies, Stacks selection, and the native
   `NSOpenPanel` Compose-source entry. Stable captures are stored under
   `artifacts/visual/`; they include useful pre-remediation Image/Disk references.
-- The signed `8a8957f` bundle was relaunched in a real WindowServer window and
-  reviewed on the dark Disk route against real local Docker data. Its direct
-  Computer Use capture is in this handoff conversation; the app remains open.
+- The signed `8190f54` bundle was relaunched in a real WindowServer window and
+  reviewed on the dark Containers route against real local Docker data. Its
+  traffic-light/titlebar metrics were compared with Finder on the same macOS
+  26.4 host; the system frame now matches. Its direct Computer Use capture is in
+  this handoff conversation; the app remains open.
 
 Still required after the final commit:
 
