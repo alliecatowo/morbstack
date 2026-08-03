@@ -280,7 +280,7 @@ public enum PortForwardPlan {
                 }
                 .joined(separator: ", ")
             return "Docker reports competing \(networkProtocol.uppercased()) targets for "
-                + "127.0.0.1:\(hostPort) (\(targets)); Morbstack is not forwarding this host port"
+                + "local loopback port \(hostPort) (\(targets)); Morbstack is not forwarding this host port"
         }
     }
 
@@ -302,12 +302,17 @@ public enum PortForwardPlan {
     /// Host addresses whose bindings Morbstack mirrors onto the Mac's loopback.
     ///
     /// `0.0.0.0` and the empty string are "all interfaces"; `127.0.0.1` is explicitly
-    /// loopback. `::` and `::1` are the IPv6 halves Docker publishes alongside the
-    /// IPv4 ones — accepted so that a container published *only* on IPv6 still gets a
-    /// listener, and harmless otherwise because the map below is keyed by host port.
+    /// loopback. `::` and `::1` are the IPv6 spellings Docker may return. A
+    /// publication described only by one of them receives a local `[::1]` TCP
+    /// listener; a same-port dual-family pair still collapses to one listener below.
     /// Anything else is a binding to a specific guest interface address, which does
     /// not correspond to anything on the Mac.
     public static let forwardableHostAddresses: Set<String> = ["", "0.0.0.0", "127.0.0.1", "::", "::1"]
+
+    /// The datagram listener is still IPv4-only. Keep IPv6 out of this set rather
+    /// than reporting a successful Docker UDP publication which only an IPv4 socket
+    /// can receive. TCP's IPv6 loopback lease is intentionally separate.
+    public static let forwardableUDPHostAddresses: Set<String> = ["", "0.0.0.0", "127.0.0.1"]
 
     /// Whether a binding should get a listener on the Mac.
     public static func isForwardable(_ binding: DockerPortBinding) -> Bool {
@@ -322,7 +327,7 @@ public enum PortForwardPlan {
     /// ``isForwardable(_:)`` because TCP and UDP may share one numeric host port.
     public static func isForwardableUDP(_ binding: DockerPortBinding) -> Bool {
         binding.networkProtocol == "udp"
-            && forwardableHostAddresses.contains(binding.hostIP)
+            && forwardableUDPHostAddresses.contains(binding.hostIP)
             && binding.hostPort > 0
             && binding.hostPort <= 65535
     }
@@ -331,9 +336,9 @@ public enum PortForwardPlan {
     ///
     /// Docker reports the same host port twice when it binds both `0.0.0.0` and `::`.
     /// Those records collapse only when they name the same nonempty container ID and
-    /// container port, preferring IPv4 so the recorded address matches what the user
-    /// typed. Different or unidentified targets are reported as conflicts and are
-    /// deliberately absent from `listeners`.
+    /// container port, preferring IPv4 because the current lease ledger owns one
+    /// local listener per numeric port. Different or unidentified targets are
+    /// reported as conflicts and are deliberately absent from `listeners`.
     public static func reconcileTCPListeners(_ bindings: [DockerPortBinding]) -> ListenerReconciliation {
         reconcileListeners(bindings, including: isForwardable)
     }

@@ -542,8 +542,8 @@ then exposes the `201`. The ordinary `MSG_PEEK` path still does not remove bytes
 unrecognized responses release a provisional TCP lease rather than guessing. `-P`,
 ranges, UDP, unsupported addresses, every other dynamic spelling or opaque create,
 start by name, and nonstandard start framing have no synchronous **TCP** create/start
-lease guarantee. The exact normal-`-p` matrix, including the current IPv6-literal
-gap, is in [`dynamic-port-allocation.md`](dynamic-port-allocation.md#normal--p-compatibility-matrix).
+lease guarantee. The exact normal-`-p` matrix, including the remaining paired
+dual-family gap, is in [`dynamic-port-allocation.md`](dynamic-port-allocation.md#normal--p-compatibility-matrix).
 An event-driven running-container snapshot can still promote an already-associated
 lease after an opaque or name-based start, but that happens after the Engine reply and
 is not equivalent to the 204 handoff guarantee. Dynamic publication needs a real

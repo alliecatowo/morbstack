@@ -3,10 +3,11 @@
 //
 // Host-side published-port availability snapshots.
 //
-// A successful probe means only that `127.0.0.1:<port>/<protocol>` bound during this
-// check. It is intentionally *not* a reservation: the descriptor is closed before
-// the result returns, so another process can claim the port before Docker starts a
-// container. Calling a snapshot a reservation would make a race look like a guarantee.
+// A successful probe means only that the requested local loopback endpoint bound
+// during this check. It is intentionally *not* a reservation: the descriptor is
+// closed before the result returns, so another process can claim the port before
+// Docker starts a container. Calling a snapshot a reservation would make a race look
+// like a guarantee.
 
 import Darwin
 import Foundation
@@ -19,7 +20,7 @@ import Foundation
 /// deliberately non-reserving availability snapshot for both transports.
 public enum HostPortPreflight {
 
-    public static let loopbackAddress = "127.0.0.1"
+    public static let loopbackAddress = TCPListener.LoopbackAddress.ipv4.rawValue
 
     public enum Transport: String, Codable, CaseIterable, Equatable, Sendable {
         case tcp
@@ -38,7 +39,7 @@ public enum HostPortPreflight {
     }
 
     public enum Publication: String, Codable, Equatable, Sendable {
-        /// Morbstack's TCP forwarder binds `127.0.0.1`, never every network interface.
+        /// Morbstack binds a local loopback address, never every network interface.
         case loopbackOnly = "loopback_only"
     }
 
@@ -61,13 +62,20 @@ public enum HostPortPreflight {
     /// documents `SO_REUSEPORT` as the option that permits duplicate port bindings;
     /// this probe never sets it. UDP sets neither reuse option, which avoids turning a
     /// diagnostic check into a shared/hijackable UDP endpoint.
-    public static func check(port: Int, transport: Transport) -> Result {
+    public static func check(
+        port: Int,
+        transport: Transport,
+        tcpLoopbackAddress: TCPListener.LoopbackAddress = .ipv4
+    ) -> Result {
         let publication: Publication = .loopbackOnly
+        // UDP remains the existing IPv4-only event-confirmed path. The extra
+        // parameter is solely for fixed and dynamic TCP IPv6-loopback publication.
+        let loopback = transport == .tcp ? tcpLoopbackAddress : .ipv4
         guard (1...65535).contains(port) else {
             return Result(
                 port: port,
                 transport: transport,
-                bindAddress: loopbackAddress,
+                bindAddress: loopback.rawValue,
                 availability: .invalid,
                 publication: publication,
                 detail: "port must be between 1 and 65535")
@@ -75,12 +83,13 @@ public enum HostPortPreflight {
 
         let type: Int32 = transport == .tcp ? SOCK_STREAM : SOCK_DGRAM
         let protocolNumber: Int32 = transport == .tcp ? IPPROTO_TCP : IPPROTO_UDP
-        let fd = socket(AF_INET, type, protocolNumber)
+        let family: Int32 = loopback == .ipv4 ? AF_INET : AF_INET6
+        let fd = socket(family, type, protocolNumber)
         guard fd >= 0 else {
             return Result(
                 port: port,
                 transport: transport,
-                bindAddress: loopbackAddress,
+                bindAddress: loopback.rawValue,
                 availability: .unavailable,
                 publication: publication,
                 detail: "could not create a \(transport.rawValue.uppercased()) socket")
@@ -92,16 +101,35 @@ public enum HostPortPreflight {
             _ = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, socklen_t(MemoryLayout<Int32>.size))
         }
 
-        var address = sockaddr_in()
-        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-        address.sin_family = sa_family_t(AF_INET)
-        address.sin_port = UInt16(truncatingIfNeeded: port).bigEndian
-        address.sin_addr = in_addr(s_addr: UInt32(0x7f00_0001).bigEndian)
-
-        let length = socklen_t(MemoryLayout<sockaddr_in>.size)
-        let bindResult = withUnsafePointer(to: &address) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { generic in
-                POSIXSocketSupport.retryOnInterrupt { Darwin.bind(fd, generic, length) }
+        let bindResult: Int32
+        switch loopback {
+        case .ipv4:
+            var address = sockaddr_in()
+            address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            address.sin_family = sa_family_t(AF_INET)
+            address.sin_port = UInt16(truncatingIfNeeded: port).bigEndian
+            address.sin_addr = in_addr(s_addr: UInt32(0x7f00_0001).bigEndian)
+            bindResult = withUnsafePointer(to: &address) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { generic in
+                    POSIXSocketSupport.retryOnInterrupt {
+                        Darwin.bind(fd, generic, socklen_t(MemoryLayout<sockaddr_in>.size))
+                    }
+                }
+            }
+        case .ipv6:
+            var v6Only: Int32 = 1
+            _ = setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6Only, socklen_t(MemoryLayout<Int32>.size))
+            var address = sockaddr_in6()
+            address.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
+            address.sin6_family = sa_family_t(AF_INET6)
+            address.sin6_port = UInt16(truncatingIfNeeded: port).bigEndian
+            address.sin6_addr = in6addr_loopback
+            bindResult = withUnsafePointer(to: &address) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { generic in
+                    POSIXSocketSupport.retryOnInterrupt {
+                        Darwin.bind(fd, generic, socklen_t(MemoryLayout<sockaddr_in6>.size))
+                    }
+                }
             }
         }
         guard bindResult == 0 else {
@@ -109,18 +137,18 @@ public enum HostPortPreflight {
             return Result(
                 port: port,
                 transport: transport,
-                bindAddress: loopbackAddress,
+                bindAddress: loopback.rawValue,
                 availability: code == EADDRINUSE ? .inUse : .unavailable,
                 publication: publication,
                 detail: code == EADDRINUSE
-                    ? "another process currently owns \(loopbackAddress):\(port)/\(transport.rawValue)"
+                    ? "another process currently owns \(loopback.rawValue):\(port)/\(transport.rawValue)"
                     : "the loopback bind could not be checked (\(String(cString: strerror(code))))")
         }
 
         return Result(
             port: port,
             transport: transport,
-            bindAddress: loopbackAddress,
+            bindAddress: loopback.rawValue,
             availability: .available,
             publication: publication,
             detail: transport == .tcp

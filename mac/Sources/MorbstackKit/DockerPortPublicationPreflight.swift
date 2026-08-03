@@ -12,8 +12,8 @@ import Foundation
 /// One explicit TCP publication that is safe to reserve on the Mac's loopback.
 ///
 /// This retains the original Docker host-address spelling for eventual forwarder
-/// metadata, but the actual listener is always on `127.0.0.1`; that is the existing
-/// PortForwarder safety boundary.
+/// metadata. Morbstack always binds a local loopback endpoint: ordinary/default IPv4
+/// spellings use `127.0.0.1`, while explicit IPv6 loopback spellings use `::1`.
 public struct DockerExplicitTCPPortBinding: Hashable, Sendable {
     public let hostIP: String
     public let hostPort: Int
@@ -208,9 +208,12 @@ public enum DockerPortPublicationPreflight {
                         message: "published \(protocolName.uppercased()) port \(hostPort) is not supported by Morbstack's host forwarder")
                 }
 
-                guard PortForwardPlan.forwardableHostAddresses.contains(hostIP) else {
+                let forwardableAddresses = protocolName == "udp"
+                    ? PortForwardPlan.forwardableUDPHostAddresses
+                    : PortForwardPlan.forwardableHostAddresses
+                guard forwardableAddresses.contains(hostIP) else {
                     return .rejected(
-                        message: "published host address \(hostIP) is not supported; Morbstack forwards TCP and UDP only on loopback")
+                        message: "published host address \(hostIP) is not supported by Morbstack's \(protocolName.uppercased()) loopback forwarder")
                 }
                 guard let port = Int(hostPort) else {
                     return .rejected(
@@ -227,18 +230,23 @@ public enum DockerPortPublicationPreflight {
                 }
 
                 let transport: HostPortPreflight.Transport = protocolName == "tcp" ? .tcp : .udp
-                let result = HostPortPreflight.check(port: port, transport: transport)
+                let tcpLoopbackAddress = TCPListener.LoopbackAddress
+                    .forDockerHostAddress(hostIP)
+                let result = HostPortPreflight.check(
+                    port: port,
+                    transport: transport,
+                    tcpLoopbackAddress: tcpLoopbackAddress)
                 switch result.availability {
                 case .available:
                     continue
                 case .inUse:
                     return .rejected(
-                        message: "driver failed programming external connectivity: Bind for 127.0.0.1:\(port)/\(protocolName) failed: port is already allocated")
+                        message: "driver failed programming external connectivity: Bind for \(result.bindAddress):\(port)/\(protocolName) failed: port is already allocated")
                 case .invalid:
                     return .rejected(message: "published \(protocolName.uppercased()) host port \(hostPort) is invalid")
                 case .unavailable:
                     return .rejected(
-                        message: "could not verify published \(protocolName.uppercased()) port 127.0.0.1:\(port): \(result.detail)")
+                        message: "could not verify published \(protocolName.uppercased()) port \(result.bindAddress):\(port): \(result.detail)")
                 }
             }
         }

@@ -17,8 +17,9 @@ import Foundation
 ///    would either be laggy or wasteful; events alone would miss whatever happened
 ///    while the daemon was not watching, and would have to reconstruct port bindings
 ///    from a stream that does not carry them.
-/// 2. **Listeners.** Each published TCP or UDP port gets the matching loopback socket
-///    on `127.0.0.1`.
+/// 2. **Listeners.** Each published port gets the matching local loopback socket:
+///    TCP preserves an explicit IPv6 loopback publication as `::1`; the existing UDP
+///    data path remains IPv4 loopback-only.
 /// 3. **Transport.** TCP accepts open a vsock stream-dial (2376) and use ``FDRelay``.
 ///    UDP clients instead get a long-lived framed datagram-dial (2378), preserving
 ///    individual messages and their reply flow.
@@ -280,7 +281,7 @@ public final class PortForwarder {
         var errorDescription: String? {
             switch self {
             case .addressInUse(let port):
-                "driver failed programming external connectivity: Bind for 127.0.0.1:\(port) failed: port is already allocated"
+                "driver failed programming external connectivity: Bind for local loopback port \(port) failed: port is already allocated"
             case .unavailable(let message):
                 message
             }
@@ -600,19 +601,24 @@ public final class PortForwarder {
         }
         do {
             for publication in fixedPublications {
+                let loopbackAddress = TCPListener.LoopbackAddress
+                    .forDockerHostAddress(publication.hostIP)
                 guard conflictingTCPForwards[publication.hostPort] == nil else {
                     throw TCPPortLeaseError.unavailable(
-                        "cannot reserve published TCP port 127.0.0.1:\(publication.hostPort): "
+                        "cannot reserve published TCP port \(loopbackAddress.rawValue):\(publication.hostPort): "
                             + "Docker currently reports competing targets for this host port")
                 }
-                let listener = TCPListener(port: publication.hostPort, queue: acceptQueue)
+                let listener = TCPListener(
+                    port: publication.hostPort,
+                    queue: acceptQueue,
+                    loopbackAddress: loopbackAddress)
                 do {
                     try listener.start()
                 } catch TCPListenerError.addressInUse {
                     throw TCPPortLeaseError.addressInUse(port: publication.hostPort)
                 } catch {
                     throw TCPPortLeaseError.unavailable(
-                        "could not reserve published TCP port 127.0.0.1:\(publication.hostPort): \(error.localizedDescription)")
+                        "could not reserve published TCP port \(loopbackAddress.rawValue):\(publication.hostPort): \(error.localizedDescription)")
                 }
                 listeners[publication.hostPort] = listener
             }
@@ -621,12 +627,17 @@ public final class PortForwarder {
                 // Port zero is a kernel allocation request, not an endpoint we will
                 // ever send to dockerd. TCPListener reports its concrete bound port
                 // before this listener becomes part of the lease.
-                let listener = TCPListener(port: 0, queue: acceptQueue)
+                let loopbackAddress = TCPListener.LoopbackAddress
+                    .forDockerHostAddress(publication.hostIP)
+                let listener = TCPListener(
+                    port: 0,
+                    queue: acceptQueue,
+                    loopbackAddress: loopbackAddress)
                 do {
                     try listener.start()
                 } catch {
                     throw TCPPortLeaseError.unavailable(
-                        "could not allocate a dynamic published TCP port on 127.0.0.1: \(error.localizedDescription)")
+                        "could not allocate a dynamic published TCP port on \(loopbackAddress.rawValue): \(error.localizedDescription)")
                 }
                 let allocated = DockerExplicitTCPPortBinding(
                     hostIP: publication.hostIP,
@@ -1528,7 +1539,12 @@ public final class PortForwarder {
         lock.unlock()
         if deferred { return }
 
-        let listener = TCPListener(port: port, queue: acceptQueue)
+        let loopbackAddress = TCPListener.LoopbackAddress
+            .forDockerHostAddress(binding.hostIP)
+        let listener = TCPListener(
+            port: port,
+            queue: acceptQueue,
+            loopbackAddress: loopbackAddress)
         listener.setConnectionHandler { [weak self] fd in
             self?.handleAccepted(clientFD: fd, binding: binding, generation: generation)
         }
@@ -1538,7 +1554,7 @@ public final class PortForwarder {
         } catch TCPListenerError.addressInUse {
             recordFailedBind(
                 binding,
-                reason: "another process holds 127.0.0.1:\(port); will retry")
+                reason: "another process holds \(loopbackAddress.rawValue):\(port); will retry")
             return
         } catch {
             recordFailedBind(binding, reason: "\(error); will retry")
@@ -1557,7 +1573,7 @@ public final class PortForwarder {
             listener.stop()  // the forwarder was torn down while we were binding
             return
         }
-        log.info("port forward added: \(binding.description) on 127.0.0.1:\(port)")
+        log.info("port forward added: \(binding.description) on \(loopbackAddress.rawValue):\(port)")
     }
 
     /// Binds one event-confirmed UDP publication. The listener is a real datagram

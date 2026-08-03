@@ -120,15 +120,17 @@ body does not completely identify.
 | `-p 127.0.0.1:8080:80` | Concrete TCP `HostPort` with `HostIp: "127.0.0.1"` | Same fixed-TCP lease path. | Live Docker/VM evidence is still pending. |
 | `-p <container-port>`, `-p :<container-port>`, or `-p 0:<container-port>` | TCP `HostPort` omitted, exact `""`, or exact `"0"` | The create transaction holds a kernel-selected loopback listener and rewrites only that planned entry with its concrete port before the Engine sees it. | Fixed-length, bounded JSON/HTTP only; not a general HTTP transformer. |
 | Multiple compatible TCP `-p` flags | Multiple distinct concrete or recognized dynamic TCP entries | One atomic lease holds every requested listener; dynamic entries are rewritten with the reserved values. | A duplicate host port may only name one guest target; ranges remain excluded. |
-| `-p 8080:80/udp` | Concrete UDP publication | The existing UDP data plane reconciles the Engine-confirmed endpoint. | There is no synchronous held UDP allocation guarantee yet. |
-| `-p '[::1]:8080:80'` or `-p '[::]:8080:80'` | IPv6 `HostIp` spelling | The current admission set recognizes the spelling, but the concrete listener implementation is IPv4 `127.0.0.1` only. | **Not semantically compatible yet**: do not advertise IPv6-literal publication until the reservation, conflict check, listener, and lifecycle lease are dual-stack. |
+| `-p 8080:80/udp` | Concrete IPv4/default UDP publication | The existing IPv4 UDP data plane reconciles the Engine-confirmed endpoint. | There is no synchronous held UDP allocation guarantee yet; IPv6-literal UDP publication is rejected rather than falsely forwarded through IPv4. |
+| `-p '[::1]:8080:80'` | Concrete TCP `HostPort` with `HostIp: "::1"` | The preflight, held create/start lease, and event reconciler bind the actual local IPv6 endpoint `[::1]:8080`. | Live Docker/VM evidence is still pending. |
+| `-p '[::]:8080:80'` | Concrete TCP `HostPort` with wildcard IPv6 `HostIp: "::"` | Morbstack keeps the publication local and binds `[::1]:8080`, not an external wildcard address. | This is an intentional local-desktop safety policy, not external-interface parity. |
+| One container described on both IPv4 and IPv6 at the same numeric port | Dual-family records for the same proven target | The one-listener ledger chooses IPv4 when both families are present, preserving ordinary `127.0.0.1` access. | A simultaneous `127.0.0.1` **and** `[::1]` lease for one Docker mapping remains future dual-stack parity work. |
 | `-p 8080-8081:80-81` | Host-port/container-port range | Rejected from the synchronous lease path. | Needs a dedicated one-to-one range mapping and lifecycle contract. |
 | `-P` / `--publish-all` | `HostConfig.PublishAllPorts: true` | Rejected before a guest create for the bounded dynamic path. | It is not another spelling of `-p <container-port>`; see the source audit above. |
 
 The concrete implementation evidence is `DockerPortPublicationPreflight` for
 classification/rewrite, `DockerProxy` for the bounded request/response hand-off, and
-`PortForwarder`/`TCPListener` for the retained macOS listener. The IPv6 row is an
-explicit known gap in that chain, not a compatibility claim.
+`PortForwarder`/`TCPListener` for the retained macOS listener. The remaining
+dual-family row is an explicit known gap in that chain, not a compatibility claim.
 
 ## Fixed-TCP recovery after a VM stop
 
