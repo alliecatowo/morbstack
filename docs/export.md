@@ -44,11 +44,19 @@ separately; this feature does not upload or encrypt it.
 
 ## Native-app boundary
 
-This slice intentionally adds no custom app screen. A future native app action
-must start from the selected local image and use the standard macOS save panel,
-then call the same `ImageArchiveExporter` contract. It must surface the selected
-path, replacement decision, local-only scope, byte progress, success, and any
-failure without claiming that an archive was published before the atomic commit.
+The Images route exposes **Export Selected Image…** through the standard macOS
+Image menu, its selection context menu, the selected-image inspector, and a
+symbol-only secondary toolbar control. The action starts from that exact local
+image ID, opens `NSSavePanel` for an explicit location, lets the system present
+its normal replacement decision, then calls the same `ImageArchiveExporter`
+contract as the CLI.
+
+While the Engine streams, the app uses a document-modal `Form` with actual bytes
+written. It shows a determinate `ProgressView` only when Docker supplies a total
+content length; otherwise the indicator stays indeterminate rather than
+inventing a percentage. Cancel requests a stream stop and the service discards
+the private staging file. Success is shown only after the atomic commit; a
+failure or cancellation never claims that an archive was saved.
 
 ## Sources
 

@@ -136,6 +136,7 @@ struct MorbCommands: Commands {
 
     let model: AppModel
     @Binding var isPalettePresented: Bool
+    @FocusedValue(\.imageArchiveExportAction) private var imageArchiveExportAction
 
     var body: some Commands {
         // Keep the system's View > Show Sidebar command and add document navigation
@@ -169,6 +170,13 @@ struct MorbCommands: Commands {
                 .disabled(!model.engine.isRunning || model.isEngineBusy)
             Button("Stop Engine") { Task { await model.engineAction(.stop) } }
                 .disabled(!model.engine.reachable || model.isEngineBusy)
+        }
+
+        CommandMenu("Image") {
+            Button("Export Selected Image…") {
+                imageArchiveExportAction?()
+            }
+            .disabled(imageArchiveExportAction == nil)
         }
 
         CommandGroup(after: .newItem) {

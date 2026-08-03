@@ -9,7 +9,10 @@
 // full tag list and the architecture advice that used to live in a popover. Selection
 // reveals those facts in the system `.inspector(isPresented:)` trailing column.
 
+import AppKit
+import MorbFeatures
 import SwiftUI
+import UniformTypeIdentifiers
 
 // MARK: - Table sort
 //
@@ -84,6 +87,9 @@ struct ImagesRootView: View {
     @State private var operationFailure: ImageOperationFailure?
     @State private var showsPruneConfirmation = false
     @State private var busy = false
+    @State private var imageArchiveExport: ImageArchiveExportOperation?
+    @State private var imageArchiveExportCancellation: ImageArchiveExportCancellation?
+    @State private var imageArchiveExportNotice: ImageArchiveExportNotice?
 
     private var sections: (tagged: [ImageSummary], dangling: [ImageSummary]) {
         let key = sortOrder.first?.key ?? .created
@@ -115,6 +121,13 @@ struct ImagesRootView: View {
             .navigationSubtitle(subtitle)
             .searchable(text: $query, placement: .toolbar, prompt: "Repository, tag, digest")
             .toolbar { toolbarContent }
+            .focusedSceneValue(
+                \.imageArchiveExportAction,
+                selectedImage == nil || imageArchiveExport != nil ? nil : chooseImageArchiveDestination)
+            .sheet(item: $imageArchiveExport) { operation in
+                ImageArchiveExportSheet(operation: operation, cancel: cancelImageArchiveExport)
+                    .interactiveDismissDisabled()
+            }
             .alert(
                 removal.map { $0.inUse ? "\($0.label) is in use" : "Remove \($0.label)?" } ?? "",
                 isPresented: Binding(get: { removal != nil }, set: { if !$0 { removal = nil } }),
@@ -150,6 +163,17 @@ struct ImagesRootView: View {
                 Button("OK", role: .cancel) {}
             } message: { failure in
                 Text(failure.message)
+            }
+            .alert(
+                imageArchiveExportNotice?.title ?? "",
+                isPresented: Binding(
+                    get: { imageArchiveExportNotice != nil },
+                    set: { if !$0 { imageArchiveExportNotice = nil } }),
+                presenting: imageArchiveExportNotice
+            ) { _ in
+                Button("OK", role: .cancel) {}
+            } message: { notice in
+                Text(notice.message)
             }
             .confirmationDialog(
                 "Remove dangling images?",
@@ -197,6 +221,19 @@ struct ImagesRootView: View {
         }
         ToolbarItem(id: "images.pruneDangling", placement: .secondaryAction) {
             pruneDanglingButton
+        }
+        ToolbarItem(id: "images.export", placement: .secondaryAction) {
+            Button {
+                chooseImageArchiveDestination()
+            } label: {
+                Image(systemName: "square.and.arrow.down")
+            }
+            .accessibilityLabel("Export selected image")
+            .help(
+                selectedImage == nil
+                    ? "Select an image to export"
+                    : "Export selected image as a Docker archive")
+            .disabled(selectedImage == nil || imageArchiveExport != nil)
         }
         if !model.images.isEmpty {
             ToolbarItem(id: "images.inspector", placement: .primaryAction) {
@@ -429,6 +466,11 @@ struct ImagesRootView: View {
                 Button("Copy Reference") { MorbPasteboard.copy(reference) }
             }
             Divider()
+            Button("Export Image Archive…") {
+                chooseImageArchiveDestination(for: image)
+            }
+            .disabled(imageArchiveExport != nil)
+            Divider()
             Button("Remove…", role: .destructive) { removal = ImageRemovalConfirmation(image: image) }
         }
     }
@@ -473,6 +515,15 @@ struct ImagesRootView: View {
                                 .textSelection(.enabled)
                         }
                     }
+                }
+
+                Section("Archive") {
+                    Button {
+                        chooseImageArchiveDestination(for: image)
+                    } label: {
+                        Label("Export Image Archive…", systemImage: "square.and.arrow.down")
+                    }
+                    .disabled(imageArchiveExport != nil)
                 }
 
                 Section {
@@ -539,6 +590,102 @@ struct ImagesRootView: View {
     }
 
     // MARK: Operations
+
+    /// Presents the system's save location and replacement flow. There is deliberately
+    /// no app-defined destination: an image archive can contain layer and configuration
+    /// data, so the person exporting it chooses where it belongs every time.
+    @MainActor
+    private func chooseImageArchiveDestination() {
+        guard let selectedImage else { return }
+        chooseImageArchiveDestination(for: selectedImage)
+    }
+
+    @MainActor
+    private func chooseImageArchiveDestination(for image: ImageSummary) {
+        guard imageArchiveExport == nil else { return }
+
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.tarArchive]
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.nameFieldStringValue = "morbstack-image-\(image.shortID).tar"
+        panel.message = "Save a local Docker image archive. The image remains in Morbstack."
+        panel.prompt = "Export"
+
+        guard panel.runModal() == .OK, let outputURL = panel.url else { return }
+
+        // NSSavePanel supplies the system replacement confirmation. The exporter validates
+        // the destination again at atomic commit time, so a partial stream never replaces
+        // an existing archive.
+        let replaceExisting = FileManager.default.fileExists(atPath: outputURL.path)
+        let cancellation = ImageArchiveExportCancellation()
+        let operation = ImageArchiveExportOperation(
+            imageLabel: image.isDangling ? image.shortID : (image.repoTags.first ?? image.shortID),
+            outputURL: outputURL)
+        imageArchiveExport = operation
+        imageArchiveExportCancellation = cancellation
+
+        let operationID = operation.id
+        let imageID = image.id
+        let progressRelay = ImageArchiveExportProgressRelay { progress in
+            self.recordImageArchiveExportProgress(progress, for: operationID)
+        }
+        Task.detached(priority: .userInitiated) {
+            do {
+                let result = try ImageArchiveExporter.export(
+                    imageReference: imageID,
+                    to: outputURL,
+                    replaceExisting: replaceExisting,
+                    onProgress: { progress in
+                        guard !cancellation.isRequested else { return false }
+                        progressRelay.send(progress)
+                        return true
+                    })
+                await self.finishImageArchiveExport(.success(result), for: operationID)
+            } catch {
+                await self.finishImageArchiveExport(.failure(error), for: operationID)
+            }
+        }
+    }
+
+    @MainActor
+    private func cancelImageArchiveExport() {
+        guard var operation = imageArchiveExport, !operation.isCancellationRequested else { return }
+        operation.isCancellationRequested = true
+        imageArchiveExport = operation
+        imageArchiveExportCancellation?.request()
+    }
+
+    @MainActor
+    private func recordImageArchiveExportProgress(
+        _ progress: ImageArchiveExportProgress,
+        for operationID: UUID
+    ) {
+        guard var operation = imageArchiveExport, operation.id == operationID else { return }
+        operation.record(progress)
+        imageArchiveExport = operation
+    }
+
+    @MainActor
+    private func finishImageArchiveExport(
+        _ result: Result<ImageArchiveExportResult, Error>,
+        for operationID: UUID
+    ) {
+        guard imageArchiveExport?.id == operationID else { return }
+        imageArchiveExport = nil
+        imageArchiveExportCancellation = nil
+
+        switch result {
+        case .success(let export):
+            imageArchiveExportNotice = .success(result: export)
+        case .failure(let error):
+            if let exportError = error as? ImageArchiveExportError, exportError == .cancelled {
+                imageArchiveExportNotice = .cancelled()
+            } else {
+                imageArchiveExportNotice = .failure(error)
+            }
+        }
+    }
 
     @MainActor
     private func pull() async {

@@ -99,7 +99,7 @@ let package = Package(
         // below remains a three-line shim over it.
         .target(
             name: "MorbstackAppCore",
-            dependencies: ["MorbstackKit", "MorbMigrate"],
+            dependencies: ["MorbstackKit", "MorbFeatures", "MorbMigrate"],
             swiftSettings: commonSwiftSettings
         ),
         .executableTarget(

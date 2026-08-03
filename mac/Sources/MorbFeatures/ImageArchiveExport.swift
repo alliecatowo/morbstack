@@ -27,10 +27,23 @@ public struct ImageArchiveExportResult: Sendable, Equatable {
     }
 }
 
+/// A byte count reported while an archive is being streamed. Docker may omit a content
+/// length for this endpoint, in which case `totalBytes` stays `nil` and a caller must
+/// show only the actual bytes written rather than inventing a completion percentage.
+public struct ImageArchiveExportProgress: Sendable, Equatable {
+    public let bytesWritten: Int64
+    public let totalBytes: Int64?
+
+    public init(bytesWritten: Int64, totalBytes: Int64?) {
+        self.bytesWritten = bytesWritten
+        self.totalBytes = totalBytes
+    }
+}
+
 /// Errors whose wording is safe for a CLI. The selected path is intentionally not
 /// echoed here: a caller may have supplied control characters, and presentation is
 /// responsible for rendering such a path safely.
-public enum ImageArchiveExportError: Error, CustomStringConvertible, Equatable {
+public enum ImageArchiveExportError: Error, CustomStringConvertible, LocalizedError, Equatable {
     case invalidImageReference
     case invalidOutputURL
     case outputDirectoryUnavailable
@@ -39,6 +52,7 @@ public enum ImageArchiveExportError: Error, CustomStringConvertible, Equatable {
     case outputAlreadyExists
     case stagingFileUnavailable
     case archiveWasEmpty
+    case cancelled
     case writeFailed
     case commitFailed
     case noEngineResponse
@@ -62,6 +76,8 @@ public enum ImageArchiveExportError: Error, CustomStringConvertible, Equatable {
             return "could not create a private staging file beside the requested output"
         case .archiveWasEmpty:
             return "the Docker Engine returned an empty image archive"
+        case .cancelled:
+            return "image archive export was cancelled; no archive was saved"
         case .writeFailed:
             return "could not write the image archive to the staging file"
         case .commitFailed:
@@ -72,6 +88,8 @@ public enum ImageArchiveExportError: Error, CustomStringConvertible, Equatable {
             return "docker engine returned \(status): \(message)"
         }
     }
+
+    public var errorDescription: String? { description }
 }
 
 /// Exports exactly one already-local image as a Docker archive.
@@ -89,7 +107,9 @@ public enum ImageArchiveExporter {
     /// `MorbPaths.root`, including through a symlink. A caller has to explicitly pass
     /// `replaceExisting` before an existing regular file can be atomically replaced.
     /// A failed request, short write, non-2xx response, or failed commit removes the
-    /// private staging file and leaves the destination unchanged.
+    /// private staging file and leaves the destination unchanged. Return `false` from
+    /// `onProgress` to cancel at the next received body chunk; the stream closes and
+    /// the private staging file is discarded rather than being published.
     @discardableResult
     public static func export(
         imageReference: String,
@@ -97,7 +117,7 @@ public enum ImageArchiveExporter {
         replaceExisting: Bool,
         engine: EngineClient = EngineClient(),
         timeout: TimeInterval = 1_800,
-        onProgress: ((Int64) -> Void)? = nil
+        onProgress: ((ImageArchiveExportProgress) -> Bool)? = nil
     ) throws -> ImageArchiveExportResult {
         guard isSafeImageReference(imageReference) else {
             throw ImageArchiveExportError.invalidImageReference
@@ -107,6 +127,7 @@ public enum ImageArchiveExporter {
         var responseHead: HTTPResponseHead?
         var errorBody = Data()
         var writeFailure: Error?
+        var cancellationRequested = false
 
         do {
             try engine.stream(
@@ -118,7 +139,13 @@ public enum ImageArchiveExporter {
                     }
                     do {
                         try staging.write(chunk)
-                        onProgress?(staging.bytes)
+                        let progress = ImageArchiveExportProgress(
+                            bytesWritten: staging.bytes,
+                            totalBytes: responseHead?.contentLength.map { Int64($0) })
+                        if onProgress?(progress) == false {
+                            cancellationRequested = true
+                            return false
+                        }
                         return true
                     } catch {
                         writeFailure = error
@@ -128,6 +155,7 @@ public enum ImageArchiveExporter {
                 onHead: { responseHead = $0 })
 
             if let writeFailure { throw writeFailure }
+            if cancellationRequested { throw ImageArchiveExportError.cancelled }
             guard let responseHead else { throw ImageArchiveExportError.noEngineResponse }
             guard (200..<300).contains(responseHead.statusCode) else {
                 throw ImageArchiveExportError.engineRejected(
