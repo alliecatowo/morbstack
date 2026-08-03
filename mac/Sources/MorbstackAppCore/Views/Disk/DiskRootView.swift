@@ -307,10 +307,7 @@ struct DiskRootView: View {
                     if busy {
                         ProgressView("Starting Engine")
                     } else {
-                        Button(
-                            model.engine.state == "suspended" ? "Resume Engine" : "Start Engine",
-                            systemImage: "play.fill"
-                        ) {
+                        Button("Start Engine", systemImage: "play.fill") {
                             Task { await startEngine() }
                         }
                     }
@@ -377,21 +374,22 @@ struct DiskRootView: View {
                     .truncationMode(.middle)
                     .help(row.detail ?? row.title)
             }
+            .width(min: 160, ideal: 220, max: 420)
             TableColumn("Type") { (row: TrackCDiskRow) in
                 Text(row.type)
                     .foregroundStyle(.secondary)
             }
-            .width(min: 110, ideal: 128, max: 160)
+            .width(min: 92, ideal: 110, max: 130)
             TableColumn("Size") { (row: TrackCDiskRow) in
                 Text(Formatters.bytesString(row.bytes))
                     .monospacedDigit()
             }
-            .width(min: 80, ideal: 96, max: 120)
+            .width(min: 72, ideal: 86, max: 100)
             .alignment(.numeric)
             TableColumn("Reclaimable") { (row: TrackCDiskRow) in
                 reclaimableCell(for: row)
             }
-            .width(min: 112, ideal: 132, max: 168)
+            .width(min: 100, ideal: 120, max: 144)
             .alignment(.numeric)
         }
     }
