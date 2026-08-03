@@ -239,3 +239,16 @@ pub fn default_gateway() -> Option<std::net::Ipv4Addr> {
     let text = std::fs::read_to_string("/proc/net/route").ok()?;
     crate::netaddr::parse_default_gateway(&text)
 }
+
+/// The configured, container-reachable IPv4 DNS resolver.
+///
+/// `bring_up_network` ensures `/etc/resolv.conf` has at least a fallback
+/// resolver before this is called. The NAT route gateway and DHCP's resolver
+/// are often the same address, but they are separate pieces of configuration:
+/// forwarding every non-special lookup to the route gateway would otherwise
+/// make host-alias support break ordinary image pulls on networks whose DHCP
+/// server supplies a different resolver.
+pub fn dns_upstream_ipv4() -> Option<std::net::Ipv4Addr> {
+    let text = std::fs::read_to_string(RESOLV_CONF).ok()?;
+    crate::netaddr::parse_resolv_conf_ipv4_nameserver(&text)
+}

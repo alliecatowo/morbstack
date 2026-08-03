@@ -40,6 +40,30 @@ pub fn parse_default_gateway(text: &str) -> Option<std::net::Ipv4Addr> {
     None
 }
 
+/// Return the first usable IPv4 resolver from an `resolv.conf`-style file.
+///
+/// Docker's `--dns` replaces a container's normal resolver list, so the
+/// split-DNS stub must relay ordinary names to the resolver DHCP actually
+/// supplied, not assume that the VM's route gateway also speaks DNS. Ignore
+/// loopback/unspecified/multicast entries: those are only meaningful inside
+/// the guest's own network namespace and are not a safe forwarding target for
+/// a bridge container.
+pub fn parse_resolv_conf_ipv4_nameserver(text: &str) -> Option<std::net::Ipv4Addr> {
+    text.lines().find_map(|line| {
+        let fields: Vec<&str> = line
+            .split_once('#')
+            .map_or(line, |(before_comment, _)| before_comment)
+            .split_whitespace()
+            .collect();
+        if fields.first().copied() != Some("nameserver") {
+            return None;
+        }
+        let address: std::net::Ipv4Addr = fields.get(1)?.parse().ok()?;
+        (!address.is_loopback() && !address.is_unspecified() && !address.is_multicast())
+            .then_some(address)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,5 +114,24 @@ mod tests {
     fn empty_route_table_is_none() {
         assert_eq!(parse_default_gateway(""), None);
         assert_eq!(parse_default_gateway("Iface\tDestination\tGateway\n"), None);
+    }
+
+    #[test]
+    fn finds_the_first_usable_ipv4_resolver() {
+        let text = "# DHCP generated\nnameserver 127.0.0.53\nnameserver 192.0.2.53 # selected\nnameserver 8.8.8.8\n";
+        assert_eq!(
+            parse_resolv_conf_ipv4_nameserver(text),
+            Some("192.0.2.53".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn resolver_parser_rejects_ipv6_and_unusable_addresses() {
+        assert_eq!(
+            parse_resolv_conf_ipv4_nameserver(
+                "nameserver ::1\nnameserver 0.0.0.0\nnameserver 224.0.0.1\n",
+            ),
+            None
+        );
     }
 }

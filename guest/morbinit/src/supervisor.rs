@@ -269,15 +269,16 @@ pub fn default_services(docker_data_on_disk: bool) -> Vec<ServiceSpec> {
 /// (docs/parity.md #18/#19), onto an already-built `dockerd` spec.
 ///
 /// A separate function rather than extra parameters on `default_services`
-/// itself: those two addresses come from DHCP (`net::guest_ipv4`,
-/// `net::default_gateway`) and can legitimately be unavailable (no network).
-/// In that case this leaves out `--dns`, so dockerd keeps its ordinary
-/// resolver setup rather than pointing containers at a split-DNS listener
-/// that cannot exist. `default_services`'s own five existing call sites
-/// (four of them tests) stay untouched rather than growing two `Option`
-/// parameters they would all have to thread through as `None`.
+/// itself: the listener address is present only after `main` successfully
+/// bound and spawned the split-DNS service; the host-gateway address comes
+/// from DHCP/NAT routing and can legitimately be unavailable (no network).
+/// In either partial case this leaves out `--dns`, so dockerd keeps its
+/// ordinary resolver setup rather than pointing containers at a failed or
+/// nonexistent split-DNS listener. `default_services`'s own five existing
+/// call sites (four of them tests) stay untouched rather than growing two
+/// `Option` parameters they would all have to thread through as `None`.
 ///
-///   * `--dns <guest_ip>`: the address containers' own resolver actually
+///   * `--dns <listener_ip>`: the address containers' own resolver actually
 ///     dials. Must be one of the guest's *own* addresses — see `dns.rs`'s
 ///     module docs for why the legacy default-bridge network requires this
 ///     specifically, not the gateway or loopback.
@@ -292,18 +293,15 @@ pub fn default_services(docker_data_on_disk: bool) -> Vec<ServiceSpec> {
 /// than panicking on a table some future caller reshapes.
 pub fn apply_dns_flags(
     mut services: Vec<ServiceSpec>,
-    guest_ip: Option<std::net::Ipv4Addr>,
+    split_dns_listener_ip: Option<std::net::Ipv4Addr>,
     host_gateway_ip: Option<std::net::Ipv4Addr>,
 ) -> Vec<ServiceSpec> {
     if let Some(dockerd) = services.iter_mut().find(|s| s.name == "dockerd") {
-        // `--dns` is only useful after `main` has started the split-DNS
-        // listener.  That listener needs both DHCP-derived addresses: the
-        // guest address to receive the query and the NAT gateway to answer
-        // the two special names (and forward everything else).  Supplying
-        // only a guest address would instead replace containers' normal DNS
-        // with a listener that does not exist, breaking unrelated lookups
-        // during a partial/no-DHCP boot.
-        if let (Some(ip), Some(_)) = (guest_ip, host_gateway_ip) {
+        // `--dns` is only useful after `main` has bound and spawned the
+        // split-DNS listener. Supplying a guest address based solely on DHCP
+        // state would replace containers' normal DNS with a listener that
+        // failed to start, breaking unrelated lookups during a partial boot.
+        if let Some(ip) = split_dns_listener_ip {
             dockerd.args.push("--dns".to_string());
             dockerd.args.push(ip.to_string());
         }
@@ -1851,7 +1849,10 @@ mod tests {
             Some("192.168.64.1".parse().unwrap()),
         );
         let dockerd = services.iter().find(|s| s.name == "dockerd").unwrap();
-        assert!(dockerd.args.windows(2).any(|w| w == ["--dns", "192.168.64.3"]));
+        assert!(dockerd
+            .args
+            .windows(2)
+            .any(|w| w == ["--dns", "192.168.64.3"]));
         assert!(dockerd
             .args
             .windows(2)
@@ -1871,16 +1872,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_dns_flags_only_sets_dns_when_the_split_dns_listener_can_exist() {
-        let dns_only = apply_dns_flags(
-            default_services(true),
-            Some("10.0.0.5".parse().unwrap()),
-            None,
-        );
-        let args = &dns_only.iter().find(|s| s.name == "dockerd").unwrap().args;
-        assert!(!args.iter().any(|a| a == "--dns"));
-        assert!(!args.iter().any(|a| a == "--host-gateway-ip"));
-
+    fn apply_dns_flags_keeps_ordinary_dns_when_listener_failed_to_start() {
         let gateway_only = apply_dns_flags(
             default_services(true),
             None,
@@ -1893,6 +1885,18 @@ mod tests {
             .args;
         assert!(!args.iter().any(|a| a == "--dns"));
         assert!(args.iter().any(|a| a == "--host-gateway-ip"));
+    }
+
+    #[test]
+    fn apply_dns_flags_uses_a_listener_that_is_known_ready() {
+        let dns_only = apply_dns_flags(
+            default_services(true),
+            Some("10.0.0.5".parse().unwrap()),
+            None,
+        );
+        let args = &dns_only.iter().find(|s| s.name == "dockerd").unwrap().args;
+        assert!(args.windows(2).any(|w| w == ["--dns", "10.0.0.5"]));
+        assert!(!args.iter().any(|a| a == "--host-gateway-ip"));
     }
 
     #[test]

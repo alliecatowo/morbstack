@@ -200,32 +200,49 @@ fn real_init() {
     net::enable_container_forwarding();
 
     // host.docker.internal / gateway.docker.internal (docs/parity.md
-    // #18/#19). Both addresses come from DHCP, so both can legitimately be
-    // absent (no network) — loud but not fatal, matching every other
-    // best-effort step in this boot sequence. Computed before the services
-    // are built below, since `apply_dns_flags` needs them, and the DNS stub
-    // itself is started before dockerd so it is already answering by the
-    // time the first container asks.
+    // #18/#19). The guest address, VM NAT gateway, and DHCP resolver can all
+    // legitimately be absent (no network) — loud but not fatal, matching
+    // every other best-effort step in this boot sequence. Computed before
+    // the services are built below, since `apply_dns_flags` needs a *ready*
+    // listener address, and the DNS stub itself is started before dockerd so
+    // it is already answering by the time the first container asks.
     let guest_ip = net::guest_ipv4();
     let host_gateway_ip = net::default_gateway();
-    match (guest_ip, host_gateway_ip) {
-        (Some(_), Some(gateway_ip)) => {
-            if let Err(e) = dns::spawn_split_dns(gateway_ip, gateway_ip) {
-                log::log(&format!(
-                    "WARNING: could not start the split DNS stub: {} — \
-                     host.docker.internal/gateway.docker.internal will not resolve",
-                    e
-                ));
+    let dns_upstream_ip = net::dns_upstream_ipv4();
+    let split_dns_listener_ip = match (guest_ip, host_gateway_ip, dns_upstream_ip) {
+        (Some(guest_ip), Some(gateway_ip), Some(upstream_ip)) if upstream_ip != guest_ip => {
+            match dns::spawn_split_dns(gateway_ip, upstream_ip) {
+                Ok(()) => Some(guest_ip),
+                Err(e) => {
+                    log::log(&format!(
+                        "WARNING: could not start the split DNS stub: {} — \
+                         host.docker.internal/gateway.docker.internal will not resolve; \
+                         leaving dockerd's ordinary DNS configuration intact",
+                        e
+                    ));
+                    None
+                }
             }
+        }
+        (Some(guest_ip), Some(_), Some(upstream_ip)) => {
+            log::log(&format!(
+                "WARNING: configured DNS resolver {} is this guest's own address {} — \
+                 refusing a split-DNS forwarding loop; leaving dockerd's ordinary DNS \
+                 configuration intact",
+                upstream_ip, guest_ip
+            ));
+            None
         }
         _ => {
             log::log(
-                "WARNING: could not determine the guest's own address and/or the VM \
-                 gateway (no DHCP lease?) — host.docker.internal/gateway.docker.internal \
-                 will not resolve, and --add-host=<name>:host-gateway will not work",
+                "WARNING: could not determine the guest address, VM NAT gateway, and/or \
+                 a usable IPv4 resolver — host.docker.internal/gateway.docker.internal \
+                 will not resolve; --add-host=<name>:host-gateway remains available only \
+                 when the VM NAT gateway was discovered",
             );
+            None
         }
-    }
+    };
 
     // amd64 emulation before the engine starts, so the binfmt_misc entry is
     // already in place by the time the first container can be created. It
@@ -236,7 +253,7 @@ fn real_init() {
     supervisor::prepare_runtime_dirs();
     let services = supervisor::apply_dns_flags(
         supervisor::default_services(docker_data_on_disk),
-        guest_ip,
+        split_dns_listener_ip,
         host_gateway_ip,
     );
     // Captured before the table is handed to the supervisor: the host needs

@@ -21,8 +21,16 @@ the guest has implemented the two highest-impact guest-parity fixes:
   now warns explicitly.
 - **#18/#19 host aliases:** a guest split-DNS service answers IPv4 A queries
   for `host.docker.internal` and `gateway.docker.internal` with the VM NAT
-  gateway; dockerd gives containers that resolver and uses the same gateway
-  for `host-gateway`. Non-special queries continue to the DHCP resolver.
+  gateway; dockerd gives containers that resolver only after it has bound and
+  started successfully, and uses the same gateway for `host-gateway`.
+  Non-special queries forward to the configured IPv4 resolver (normally the
+  DHCP resolver, rather than assuming the route gateway also provides DNS).
+  [Docker Desktop documents](https://docs.docker.com/desktop/features/networking/networking-how-tos/)
+  the names separately—host-internal address versus Docker-VM gateway—but the
+  VZNAT topology exposes the reachable Mac host at its VM gateway, so both
+  resolve to that one address here. A fresh live run must still prove both
+  lookup forms, [`--add-host=…:host-gateway`](https://docs.docker.com/reference/cli/dockerd/#configure-host-gateway-ip),
+  and a real Mac-side connection.
 
 These changes have focused unit coverage, but this document must not claim a
 new live PASS until the exact #9/#18/#19 commands are run against a freshly
