@@ -83,11 +83,12 @@ guarantee.
 ### P1 — make the daily development loop reliable
 
 1. Complete Docker publication parity beyond the fixed-TCP create/start lease: execute
-   the live evidence for Phase 1's explicit-empty TCP allocation transaction and the
-   exact-ID post-VM-stop TCP re-reservation path, then add `-P`, ranges, and dynamic
-   UDP while preserving loopback-safe defaults. The implementation deliberately does
-   not retain a listener while no guest exists; names/prefixes and opaque/unsupported
-   start shapes remain event-reconciled rather than claiming synchronous recovery.
+   the live evidence for Phase 1's omitted, exact-empty, and exact-literal-zero TCP
+   allocation transaction and the exact-ID post-VM-stop TCP re-reservation path, then
+   add dual-stack IPv6-literal handling, `-P`, ranges, and dynamic UDP while preserving
+   loopback-safe defaults. The implementation deliberately does not retain a listener
+   while no guest exists; names/prefixes and opaque/unsupported start shapes remain
+   event-reconciled rather than claiming synchronous recovery.
    UDP already uses a real framed datagram relay after Docker confirms a concrete
    publication, but deliberately has no invented reservation. The dynamic-port
    boundary and delivery constraints are in [`dynamic-port-allocation.md`](dynamic-port-allocation.md).

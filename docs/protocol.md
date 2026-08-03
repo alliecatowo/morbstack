@@ -534,14 +534,16 @@ missing-directory creation behavior only under a verified live share. Named volu
 and malformed shapes remain dockerd's responsibility.
 
 This is deliberately a narrow lease protocol, **not a generic HTTP proxy, dynamic
-port allocator, or filesystem sandbox**. A dedicated transaction now covers only a
-recognized bounded, explicit-empty `HostPort` TCP create: it holds a kernel-selected
-Mac listener, rewrites that one create before the guest sees it, associates the full
-ID from the complete `201`, and only then exposes the `201`. The ordinary `MSG_PEEK`
-path still does not remove bytes, and unrecognized responses release a provisional
-TCP lease rather than guessing. `-P`, ranges, UDP, unsupported addresses, omitted or
-opaque dynamic creates, start by name, and nonstandard start framing have no
-synchronous **TCP** create/start lease guarantee.
+port allocator, or filesystem sandbox**. A dedicated transaction covers only a
+recognized bounded TCP create whose `HostPort` is omitted, exact `""`, or exact
+`"0"`: it holds a kernel-selected Mac listener, rewrites only that planned entry
+before the guest sees it, associates the full ID from the complete `201`, and only
+then exposes the `201`. The ordinary `MSG_PEEK` path still does not remove bytes, and
+unrecognized responses release a provisional TCP lease rather than guessing. `-P`,
+ranges, UDP, unsupported addresses, every other dynamic spelling or opaque create,
+start by name, and nonstandard start framing have no synchronous **TCP** create/start
+lease guarantee. The exact normal-`-p` matrix, including the current IPv6-literal
+gap, is in [`dynamic-port-allocation.md`](dynamic-port-allocation.md#normal--p-compatibility-matrix).
 An event-driven running-container snapshot can still promote an already-associated
 lease after an opaque or name-based start, but that happens after the Engine reply and
 is not equivalent to the 204 handoff guarantee. Dynamic publication needs a real

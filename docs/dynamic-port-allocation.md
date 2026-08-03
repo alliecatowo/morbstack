@@ -103,6 +103,33 @@ the existing 256 KiB preflight window, a single numeric `Content-Length`, no
 and 128 KiB of body. It returns a clear host error rather than exposing an unassociated
 `201` if the response does not meet that contract.
 
+### Normal `-p` compatibility matrix
+
+This is a source audit of the ordinary Docker Engine request path, not substitute
+for the live Docker/VM matrix below. Docker documents `-p` as an explicit mapping
+and distinguishes it from `-P`, which publishes every exposed port to a random host
+port ([Docker port publishing](https://docs.docker.com/engine/network/port-publishing/);
+[CLI reference](https://docs.docker.com/reference/cli/docker/container/run/#publish)).
+The difference matters here: `-p` supplies a `PortBindings` entry that the bounded
+transaction can prove, whereas normal `-P` needs image configuration that the create
+body does not completely identify.
+
+| Docker CLI intent | Recognized create shape | Source-level outcome | Important limit |
+| --- | --- | --- | --- |
+| `-p 8080:80` or `-p 8080:80/tcp` | One concrete TCP `HostPort`; no explicit address, `""`, or `"0.0.0.0"` host address spelling | A held `127.0.0.1:8080` listener is reserved before create, associated with the returned full ID, and activated before the exact successful start response. | Morbstack deliberately exposes the Mac loopback endpoint, not an external interface. |
+| `-p 127.0.0.1:8080:80` | Concrete TCP `HostPort` with `HostIp: "127.0.0.1"` | Same fixed-TCP lease path. | Live Docker/VM evidence is still pending. |
+| `-p <container-port>`, `-p :<container-port>`, or `-p 0:<container-port>` | TCP `HostPort` omitted, exact `""`, or exact `"0"` | The create transaction holds a kernel-selected loopback listener and rewrites only that planned entry with its concrete port before the Engine sees it. | Fixed-length, bounded JSON/HTTP only; not a general HTTP transformer. |
+| Multiple compatible TCP `-p` flags | Multiple distinct concrete or recognized dynamic TCP entries | One atomic lease holds every requested listener; dynamic entries are rewritten with the reserved values. | A duplicate host port may only name one guest target; ranges remain excluded. |
+| `-p 8080:80/udp` | Concrete UDP publication | The existing UDP data plane reconciles the Engine-confirmed endpoint. | There is no synchronous held UDP allocation guarantee yet. |
+| `-p '[::1]:8080:80'` or `-p '[::]:8080:80'` | IPv6 `HostIp` spelling | The current admission set recognizes the spelling, but the concrete listener implementation is IPv4 `127.0.0.1` only. | **Not semantically compatible yet**: do not advertise IPv6-literal publication until the reservation, conflict check, listener, and lifecycle lease are dual-stack. |
+| `-p 8080-8081:80-81` | Host-port/container-port range | Rejected from the synchronous lease path. | Needs a dedicated one-to-one range mapping and lifecycle contract. |
+| `-P` / `--publish-all` | `HostConfig.PublishAllPorts: true` | Rejected before a guest create for the bounded dynamic path. | It is not another spelling of `-p <container-port>`; see the source audit above. |
+
+The concrete implementation evidence is `DockerPortPublicationPreflight` for
+classification/rewrite, `DockerProxy` for the bounded request/response hand-off, and
+`PortForwarder`/`TCPListener` for the retained macOS listener. The IPv6 row is an
+explicit known gap in that chain, not a compatibility claim.
+
 ## Fixed-TCP recovery after a VM stop
 
 The listener itself is intentionally not persisted across a VM/daemon stop: while the
