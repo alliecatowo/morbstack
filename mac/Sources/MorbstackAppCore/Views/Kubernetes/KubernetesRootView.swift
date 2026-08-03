@@ -162,6 +162,18 @@ struct KubernetesRootView: View {
         }
     }
 
+    /// The guest's status message is the authoritative explanation for a cluster
+    /// that is still starting (for example, an API server that has not answered or a
+    /// node that has not become Ready). Keep it in the system unavailable state
+    /// instead of replacing it with generic progress copy.
+    private var startingDetail: String {
+        let detail = status.message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !detail.isEmpty else {
+            return "Setting up k3s and waiting for its node to report ready."
+        }
+        return "Kubernetes is still starting. \(detail)"
+    }
+
     private var filteredNodes: [K8sNodeInfo] {
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !needle.isEmpty else { return nodes }
@@ -237,6 +249,14 @@ struct KubernetesRootView: View {
             .task(id: model.engine.isRunning) {
                 await refreshCluster()
             }
+            // Opening this route after the engine has already begun bringing k3s up
+            // should not leave a static “Starting” screen. The guest's phase remains
+            // authoritative; this task only polls while it says the transition is in
+            // progress and is cancelled automatically when the route or phase changes.
+            .task(id: "\(model.engine.isRunning)-\(status.phase.rawValue)") {
+                guard model.engine.isRunning, status.phase == .starting else { return }
+                await settle()
+            }
             .onChange(of: resource) {
                 selectedNodeID = nil
                 selectedPodID = nil
@@ -269,7 +289,7 @@ struct KubernetesRootView: View {
             }
             .accessibilityLabel("Refresh Kubernetes resources")
             .help("Refresh Kubernetes resources")
-            .disabled(!model.engine.isRunning || status.phase == .starting)
+            .disabled(!model.engine.isRunning)
         }
 
         ToolbarItem(id: "kubernetes.actions", placement: .secondaryAction) {
@@ -297,7 +317,9 @@ struct KubernetesRootView: View {
             }
             .accessibilityLabel("Kubernetes actions")
             .help("Kubernetes actions")
-            .disabled(!model.engine.isRunning || status.phase == .starting)
+            // Disable remains available during startup. A start that cannot reach
+            // Ready must always have a real, reversible escape action.
+            .disabled(!model.engine.isRunning)
         }
 
         if status.phase == .ready {
@@ -319,7 +341,9 @@ struct KubernetesRootView: View {
             do {
                 status = try await provider.setEnabled(request == .enable)
                 clusterError = nil
-                await settle()
+                if status.phase != .starting {
+                    await reloadResources()
+                }
             } catch {
                 clusterError = MorbErrorMessage.text(for: error)
             }
@@ -369,8 +393,13 @@ struct KubernetesRootView: View {
     /// Poll only while the provider reports an in-progress transition. The provider is
     /// authoritative for readiness; the view does not invent a second lifecycle state.
     private func settle() async {
-        while status.phase == .starting {
-            try? await Task.sleep(for: .milliseconds(350))
+        while !Task.isCancelled, status.phase == .starting {
+            do {
+                try await Task.sleep(for: .milliseconds(350))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
             do {
                 status = try await provider.currentStatus()
                 clusterError = nil
@@ -379,6 +408,7 @@ struct KubernetesRootView: View {
                 return
             }
         }
+        guard !Task.isCancelled else { return }
         await reloadResources()
     }
 
@@ -426,7 +456,7 @@ struct KubernetesRootView: View {
             } description: {
                 Text("The cluster runs inside the same virtual machine as your containers. Start the engine to use Kubernetes.")
             } actions: {
-                Button(model.engine.state == "suspended" ? "Resume Engine" : "Start Engine") {
+                Button("Start Engine") {
                     Task { await model.engineAction(.start) }
                 }
                 .disabled(model.isEngineBusy)
@@ -471,10 +501,11 @@ struct KubernetesRootView: View {
         ContentUnavailableView {
             Label("Starting Kubernetes", systemImage: "cube.transparent")
         } description: {
-            Text("Setting up k3s and waiting for its node to report ready.")
+            Text(startingDetail)
         } actions: {
             ProgressView()
                 .controlSize(.small)
+            Button("Refresh Status") { Task { await refreshCluster() } }
         }
     }
 
