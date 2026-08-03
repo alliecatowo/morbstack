@@ -214,7 +214,12 @@ public final class DockerProxy {
 
         case .containerLifecycle(let request):
             let containerIdentifier = request.containerIdentifier
-            if let lease = forwarder.claimStartLease(containerIdentifier: containerIdentifier) {
+            if forwarder.requiresPublishAllAllocator(containerIdentifier: containerIdentifier) {
+                beginPublishAllStart(
+                    clientFD: clientFD,
+                    containerID: containerIdentifier,
+                    operation: request.operation)
+            } else if let lease = forwarder.claimStartLease(containerIdentifier: containerIdentifier) {
                 relayAfterPreflight(
                     clientFD: clientFD,
                     createBody: nil,

@@ -46,7 +46,7 @@ index 000000000000..f490e4f4a710
 +
 +const (
 +	morbstackPublishAllSocket  = "/run/morbstack/publish-all.sock"
-+	morbstackPublishAllTimeout = 15 * time.Second
++	morbstackPublishAllTimeout = 50 * time.Second
 +	morbstackPublishAllMax     = 128
 +)
 +

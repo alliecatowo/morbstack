@@ -78,6 +78,12 @@ if [ ! -d "${GUEST_BIN_DIR}" ] || [ -z "$(ls -A "${GUEST_BIN_DIR}" 2>/dev/null)"
 	exit 1
 fi
 
+if [ ! -x "${PATCHED_DOCKERD_BIN}" ]; then
+	echo "error: ${PATCHED_DOCKERD_BIN} is missing or not executable" >&2
+	echo "       run scripts/build-morbstack-dockerd.sh (or mise run guest-image)" >&2
+	exit 1
+fi
+
 if [ ! -d "${APKS_DIR}" ] || [ -z "$(ls -A "${APKS_DIR}"/*.apk 2>/dev/null)" ]; then
 	echo "error: ${APKS_DIR} is missing or has no .apk files" >&2
 	echo "       run scripts/fetch-guest-assets.sh --fsutils-only first" >&2
@@ -209,10 +215,8 @@ for f in "${GUEST_BIN_DIR}"/*; do
 	[ "${base}" = "morbstack-dockerd" ] && continue
 	install -m 0755 "${f}" "${STAGE_DIR}/usr/local/bin/${base}"
 done
-if [ -x "${PATCHED_DOCKERD_BIN}" ]; then
-	install -m 0755 "${PATCHED_DOCKERD_BIN}" "${STAGE_DIR}/usr/local/bin/dockerd"
-	echo "Using pinned Morbstack-patched dockerd: ${PATCHED_DOCKERD_BIN}"
-fi
+install -m 0755 "${PATCHED_DOCKERD_BIN}" "${STAGE_DIR}/usr/local/bin/dockerd"
+echo "Using pinned Morbstack-patched dockerd: ${PATCHED_DOCKERD_BIN}"
 
 # ---------------------------------------------------------------------------
 # fsutils: btrfs-progs, e2fsprogs, iptables-legacy + their full .so

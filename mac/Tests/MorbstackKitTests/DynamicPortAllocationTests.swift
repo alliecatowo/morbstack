@@ -34,14 +34,12 @@ final class DynamicPortAllocationTests: XCTestCase {
         XCTAssertEqual(tcp.first?["HostPort"] as? String, "49152")
     }
 
-    func testDynamicAllocatorRejectsPublishAllPortsAndAdmitsDynamicUDP() throws {
+    func testDynamicAllocatorDefersPublishAllPortsAndAdmitsDynamicUDP() throws {
         let publishAll = Data(#"{"HostConfig":{"PublishAllPorts":true}}"#.utf8)
-        guard case .rejected(let publishAllMessage) =
-            DockerPortPublicationPreflight.dynamicPortCreatePlan(in: publishAll)
+        guard case .notDynamic = DockerPortPublicationPreflight.dynamicPortCreatePlan(in: publishAll)
         else {
-            return XCTFail("-P must not silently enter the empty-TCP transaction")
+            return XCTFail("-P must bypass the create-time rewrite and reach patched Moby")
         }
-        XCTAssertTrue(publishAllMessage.contains("PublishAllPorts"))
 
         let udp = Data(#"{"HostConfig":{"PortBindings":{"53/udp":[{"HostPort":""}]}}}"#.utf8)
         guard case .supported(let udpPlan) = DockerPortPublicationPreflight.dynamicPortCreatePlan(in: udp) else {

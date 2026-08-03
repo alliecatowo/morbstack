@@ -351,6 +351,10 @@ public final class PortForwarder {
     /// matching start handoff (or container destruction/daemon stop).
     private var leases: [UUID: LeaseRecord] = [:]
     private var leaseByContainerID: [String: UUID] = [:]
+    /// Persistent host sessions for `-P` containers owned by Engine restart
+    /// policy. They survive individual container restarts but are discarded with
+    /// the VM generation, then rebuilt from the Engine's persisted metadata.
+    private var publishAllRestartSessions: [String: PublishAllPortAllocator.Session] = [:]
     private var relays: [UInt64: FDRelay] = [:]
     private var relaySequence: UInt64 = 0
     /// Live forwarded connections, counted **per generation**.
@@ -529,6 +533,19 @@ public final class PortForwarder {
               requests.count <= DockerPortPublicationPreflight.maximumSynchronousFixedPortBindings
         else {
             throw PortLeaseError.unavailable("invalid Docker publish-all allocation request")
+        }
+
+        // Moby reaches this hook only after it has stopped the previous instance.
+        // The Engine event stream is asynchronous, so its `die`/`stop` event may not
+        // have released our old ephemeral lease yet. Retire only a prior `-P` lease
+        // for this same immutable container before atomically choosing its replacement.
+        lock.lock()
+        let previous = leaseByContainerID[containerID].flatMap { identifier in
+            leases[identifier]?.releaseOnStop == true ? identifier : nil
+        }
+        lock.unlock()
+        if let previous {
+            releaseLease(previous, reason: "Moby began a fresh publish-all allocation")
         }
 
         var fixedTCP: [DockerExplicitTCPPortBinding] = []
@@ -873,6 +890,19 @@ public final class PortForwarder {
         return record.lease
     }
 
+    /// `PublishAllPorts` cannot use a retained fixed-port start claim: Moby must
+    /// ask the host allocator again for every start/restart, including an immediate
+    /// stop→start before event reconciliation has observed the stop.
+    func requiresPublishAllAllocator(containerIdentifier: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard DockerPortPublicationPreflight.isFullContainerID(containerIdentifier),
+              let identifier = leaseByContainerID[containerIdentifier],
+              let record = leases[identifier]
+        else { return false }
+        return record.releaseOnStop
+    }
+
     /// Promotes a lease after Docker's normal `204` start reply is observed. The
     /// response observer runs before FDRelay writes those bytes to the client, so the
     /// service never sees a successful start while Morbstack has released its host
@@ -1172,6 +1202,9 @@ public final class PortForwarder {
 
         log.info("port forwarding active; watching the Docker event stream")
         startRetryTimer()
+        workQueue.async { [weak self] in
+            self?.recoverPublishAllRestartPolicySessions()
+        }
         DispatchQueue.global(qos: .utility).async { [weak self] in
             self?.runEventStream(generation: generation)
         }
@@ -1197,6 +1230,8 @@ public final class PortForwarder {
         let closingLeases = leases.values
         leases.removeAll()
         leaseByContainerID.removeAll()
+        let restartSessions = publishAllRestartSessions.values
+        publishAllRestartSessions.removeAll()
         let inFlight = Array(relays.values)
         relays.removeAll()
         // Stale completions are allowed to arrive; they find no entry for their
@@ -1227,6 +1262,7 @@ public final class PortForwarder {
             for listener in lease.udpListeners.values { listener.stop() }
         }
         for relay in inFlight { relay.cancel() }
+        for session in restartSessions { session.invalidate() }
 
         let because = reason.map { " (\($0))" } ?? ""
         if closing.isEmpty, closingUDP.isEmpty, closingLeases.isEmpty {
@@ -1497,6 +1533,7 @@ public final class PortForwarder {
                     self.log.warn("could not reconcile fixed-port leases: \(error)")
                 }
                 self.apply(bindings: bindings, generation: generation, reason: reason)
+                self.recoverPublishAllRestartPolicySessions()
             } catch {
                 guard self.isCurrent(generation) else { return }
                 self.log.warn("could not read published ports (\(reason)): \(error)")
@@ -1527,6 +1564,77 @@ public final class PortForwarder {
         let existing = try DockerAPIDecoding.containerIDs(containersJSON: body)
         for (containerID, identifier) in associated where !existing.contains(containerID) {
             releaseLease(identifier, reason: "container is absent from Docker's all-container snapshot")
+        }
+    }
+
+    /// Re-registers the host endpoint for persisted Engine restart policies after
+    /// each VM generation. Moby's patched `-P` path waits at the guest broker while
+    /// this recovery query runs, so dockerd never falls back to a guest-owned port.
+    /// This executes only on `workQueue`, alongside the Engine snapshot readers.
+    private func recoverPublishAllRestartPolicySessions() {
+        lock.lock()
+        guard running else { lock.unlock(); return }
+        lock.unlock()
+
+        let allContainers: Data
+        do {
+            allContainers = try getEngineJSON(path: DockerAPIDecoding.allContainersPath, timeout: 10)
+        } catch {
+            log.info("publish-all restart-policy recovery will retry after Engine is ready: \(error)")
+            return
+        }
+        guard let identifiers = try? DockerAPIDecoding.containerIDs(containersJSON: allContainers) else {
+            log.warn("could not decode containers while recovering publish-all restart policies")
+            return
+        }
+
+        var wanted: Set<String> = []
+        for containerID in identifiers.prefix(DockerPortPublicationPreflight.maximumSynchronousFixedPortBindings) {
+            guard let inspect = try? getEngineJSON(
+                path: DockerAPIDecoding.containerInspectPath(containerID: containerID),
+                timeout: 5),
+                DockerPortPublicationPreflight.restartPolicyUsesPublishAllPorts(
+                    in: inspect,
+                    expectedContainerID: containerID)
+            else { continue }
+            wanted.insert(containerID)
+        }
+
+        lock.lock()
+        let stale = publishAllRestartSessions.filter { !wanted.contains($0.key) }.map(\.value)
+        publishAllRestartSessions = publishAllRestartSessions.filter { wanted.contains($0.key) }
+        let missing = wanted.filter { publishAllRestartSessions[$0] == nil }
+        lock.unlock()
+        for session in stale { session.invalidate() }
+
+        for containerID in missing {
+            guard case .success(let fd) = vm.connectVsockBlocking(
+                port: MorbVsockPorts.publishAllAllocator,
+                timeout: 5)
+            else {
+                log.info("could not reconnect publish-all allocator for \(String(containerID.prefix(12))) yet")
+                continue
+            }
+            do {
+                let session = PublishAllPortAllocator.Session(
+                    fd: fd,
+                    containerID: containerID,
+                    forwarder: self,
+                    log: log,
+                    remainsAvailableForRestartPolicy: true)
+                try session.start()
+                lock.lock()
+                if running, publishAllRestartSessions[containerID] == nil {
+                    publishAllRestartSessions[containerID] = session
+                    lock.unlock()
+                } else {
+                    lock.unlock()
+                    session.invalidate()
+                }
+            } catch {
+                Darwin.close(fd)
+                log.info("could not register publish-all restart-policy allocator for \(String(containerID.prefix(12))): \(error)")
+            }
         }
     }
 

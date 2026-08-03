@@ -17,16 +17,24 @@ final class PublishAllPortAllocator {
         private let containerID: String
         private let forwarder: PortForwarder
         private let log: MorbLog
+        private let remainsAvailableForRestartPolicy: Bool
         private let queue = DispatchQueue(label: "dev.morbstack.publish-all")
         private let lock = NSLock()
         private var lease: PortForwarder.PortLease?
         private var finished = false
 
-        init(fd: Int32, containerID: String, forwarder: PortForwarder, log: MorbLog) {
+        init(
+            fd: Int32,
+            containerID: String,
+            forwarder: PortForwarder,
+            log: MorbLog,
+            remainsAvailableForRestartPolicy: Bool = false
+        ) {
             self.fd = fd
             self.containerID = containerID
             self.forwarder = forwarder
             self.log = log
+            self.remainsAvailableForRestartPolicy = remainsAvailableForRestartPolicy
         }
 
         deinit { Darwin.close(fd) }
@@ -57,9 +65,19 @@ final class PublishAllPortAllocator {
             }
         }
 
+        func invalidate() {
+            lock.lock()
+            finished = true
+            lock.unlock()
+            _ = Darwin.shutdown(fd, SHUT_RDWR)
+        }
+
         private func serve() {
-            do {
-                let header = try Self.readLine(fd, timeout: 20)
+            while !isFinished {
+                do {
+                let header = try Self.readLine(
+                    fd,
+                    timeout: remainsAvailableForRestartPolicy ? 86_400 : 20)
                 let fields = header.split(separator: " ", omittingEmptySubsequences: false)
                 guard fields.count == 3,
                       fields[0] == "ALLOC",
@@ -98,13 +116,22 @@ final class PublishAllPortAllocator {
                 guard POSIXSocketSupport.writeAll(fd, Data(reply.utf8)) else {
                     throw MorbError.io("could not return the publish-all allocation to the guest")
                 }
-            } catch {
-                let message = error.localizedDescription
-                    .replacingOccurrences(of: "\n", with: " ")
-                _ = POSIXSocketSupport.writeAll(fd, Data("ERR \(message)\n".utf8))
-                complete(succeeded: false)
-                log.warn("publish-all allocator for \(String(containerID.prefix(12))) failed: \(message)")
+                } catch {
+                    let message = error.localizedDescription
+                        .replacingOccurrences(of: "\n", with: " ")
+                    _ = POSIXSocketSupport.writeAll(fd, Data("ERR \(message)\n".utf8))
+                    complete(succeeded: false)
+                    log.warn("publish-all allocator for \(String(containerID.prefix(12))) failed: \(message)")
+                    return
+                }
+                if !remainsAvailableForRestartPolicy { return }
             }
+        }
+
+        private var isFinished: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return finished
         }
 
         private static func parseRequest(_ line: String) throws -> DockerPublishAllPortRequest {

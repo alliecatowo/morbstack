@@ -258,6 +258,24 @@ public enum DockerPortPublicationPreflight {
         return true
     }
 
+    /// A persisted Engine restart policy may start this container before a user
+    /// issues another Docker API request after a VM boot. Register a durable host
+    /// allocator session for those `-P` containers during forwarder recovery.
+    static func restartPolicyUsesPublishAllPorts(in body: Data, expectedContainerID: String) -> Bool {
+        guard
+            isFullContainerID(expectedContainerID),
+            let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+            (object["Id"] as? String) == expectedContainerID,
+            let hostConfig = object["HostConfig"] as? [String: Any],
+            (hostConfig["PublishAllPorts"] as? Bool) == true,
+            let restartPolicy = hostConfig["RestartPolicy"] as? [String: Any],
+            let policyName = restartPolicy["Name"] as? String
+        else {
+            return false
+        }
+        return ["always", "unless-stopped", "on-failure"].contains(policyName)
+    }
+
     public enum Verdict: Equatable, Sendable {
         case allowed
         case rejected(message: String)

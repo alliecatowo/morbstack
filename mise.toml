@@ -73,13 +73,17 @@ cd guest/morbinit && \
 	cargo build --release --target aarch64-unknown-linux-musl
 """
 
+[tasks.build-patched-dockerd]
+description = "Build the pinned Moby Docker Engine with Morbstack publish-all support"
+run = "scripts/build-morbstack-dockerd.sh"
+
 # Build the bootable initramfs: cross-compiled morbinit as /init, plus the
 # Alpine minirootfs and the static Docker engine binaries from dist/. Writes
 # $MORBSTACK_HOME/data/kernel/initrd.img (default ~/.morbstack, override via
 # the MORBSTACK_HOME env var, honoured by scripts/mkinitramfs.sh itself).
 [tasks.guest-image]
-description = "Build the bootable guest initramfs (cross-compiled morbinit + Alpine rootfs + Docker engine)"
-depends = ["cross-build-guest"]
+description = "Build the bootable guest initramfs (cross-compiled morbinit + pinned patched Docker Engine)"
+depends = ["cross-build-guest", "build-patched-dockerd"]
 run = "scripts/mkinitramfs.sh"
 
 # ---------------------------------------------------------------------------

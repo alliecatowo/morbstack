@@ -19,10 +19,11 @@ pub const PUBLISH_ALL_SOCKET: &str = "/run/morbstack/publish-all.sock";
 
 const MAX_LINE_BYTES: usize = 512;
 const MAX_BINDINGS: usize = 128;
+const HOST_REGISTRATION_WAIT: std::time::Duration = std::time::Duration::from_secs(45);
 
 #[cfg(target_os = "linux")]
 mod imp {
-    use super::{io, MAX_BINDINGS, MAX_LINE_BYTES, PUBLISH_ALL_SOCKET, VSOCK_PUBLISH_ALL_ALLOCATOR_PORT};
+    use super::{io, HOST_REGISTRATION_WAIT, MAX_BINDINGS, MAX_LINE_BYTES, PUBLISH_ALL_SOCKET, VSOCK_PUBLISH_ALL_ALLOCATOR_PORT};
     use crate::{log, sys};
     use std::collections::HashMap;
     use std::fs::{self, File};
@@ -152,10 +153,7 @@ mod imp {
                 return;
             }
         };
-        let session = match sessions.lock() {
-            Ok(sessions) => sessions.get(&request.container_id).cloned(),
-            Err(_) => None,
-        };
+        let session = wait_for_host_session(&sessions, &request.container_id);
         let Some(session) = session else {
             let _ = write_error(&mut local, "host allocator is not registered");
             return;
@@ -179,6 +177,19 @@ mod imp {
                 let _ = write_error(&mut local, "host allocator disconnected");
                 log::log(&format!("publish-all host allocation failed: {}", error));
             }
+        }
+    }
+
+    fn wait_for_host_session(sessions: &Sessions, container_id: &str) -> Option<Arc<Mutex<File>>> {
+        let deadline = std::time::Instant::now() + HOST_REGISTRATION_WAIT;
+        loop {
+            if let Ok(sessions) = sessions.lock() {
+                if let Some(session) = sessions.get(container_id) {
+                    return Some(Arc::clone(session));
+                }
+            }
+            if std::time::Instant::now() >= deadline { return None; }
+            thread::sleep(Duration::from_millis(100));
         }
     }
 
