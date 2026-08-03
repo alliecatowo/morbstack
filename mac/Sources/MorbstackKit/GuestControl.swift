@@ -137,6 +137,12 @@ public struct GuestReply: Codable, Equatable, Sendable {
     /// watchers; it is not a transient failure. `nil` means an older guest did not
     /// report the additive capability. Neither state claims hot reload.
     public var shareEventBridge: String?
+    /// Version of the future acknowledged share-event record schema.
+    ///
+    /// The current guest reports version `1` while its capability remains
+    /// `"unavailable"`; that reserves a record shape, not an event receiver. `nil`
+    /// is never treated as version `1` for an older or incomplete guest.
+    public var shareEventBridgeContractVersion: Int?
     /// Whether the guest can execute the complete stop-only VM disk-growth contract.
     ///
     /// `"unavailable"` means this guest has no explicit target request, filesystem
@@ -158,6 +164,7 @@ public struct GuestReply: Codable, Equatable, Sendable {
         case rosetta
         case binfmtAmd64 = "binfmt_amd64"
         case shareEventBridge = "share_event_bridge"
+        case shareEventBridgeContractVersion = "share_event_bridge_contract_version"
         case diskResize = "disk_resize"
         case message
     }

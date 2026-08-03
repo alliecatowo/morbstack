@@ -324,6 +324,10 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
     /// explicit statement that it cannot inject host file notifications into inotify.
     private var _guestShareEventBridge: String?
 
+    /// Reserved schema version observed with the guest's future share-event
+    /// capability. A matching number does not by itself create a receiver.
+    private var _guestShareEventBridgeContractVersion: Int?
+
     /// Last `disk_resize` capability reported by the guest. `nil` means an
     /// older/stopped guest has not said; `"unavailable"` is an explicit no-mutation
     /// boundary, not a transient resize failure.
@@ -358,6 +362,14 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
         stateLock.lock()
         defer { stateLock.unlock() }
         return _guestShareEventBridge
+    }
+
+    /// The current guest's reported share-event schema version. Absence does not
+    /// default to the host's version because an older guest is not an implicit match.
+    public var guestShareEventBridgeContractVersion: Int? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _guestShareEventBridgeContractVersion
     }
 
     /// The current guest's disk-resize capability, when it has reported one.
@@ -451,6 +463,7 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
             _guestRosetta = nil
             _guestBinfmtAmd64 = nil
             _guestShareEventBridge = nil
+            _guestShareEventBridgeContractVersion = nil
             _guestDiskResize = nil
         }
         stateLock.unlock()
@@ -484,10 +497,11 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
     /// Records the guest's additive event-delivery capability. Absence from an older
     /// guest intentionally leaves the prior observation untouched for this boot, just
     /// as the other additive `info` fields do.
-    private func noteGuestShareEventBridge(_ capability: String?) {
-        guard let capability else { return }
+    private func noteGuestShareEventBridge(capability: String?, contractVersion: Int?) {
+        guard capability != nil || contractVersion != nil else { return }
         stateLock.lock()
-        _guestShareEventBridge = capability
+        if let capability { _guestShareEventBridge = capability }
+        if let contractVersion { _guestShareEventBridgeContractVersion = contractVersion }
         stateLock.unlock()
     }
 
@@ -1424,7 +1438,9 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
                 // ~220ms, dockerd ready at ~730ms), so `morb rosetta` should be able
                 // to answer during that window instead of reporting "unknown".
                 noteGuestRosetta(rosetta: info.rosetta, binfmtAmd64: info.binfmtAmd64)
-                noteGuestShareEventBridge(info.shareEventBridge)
+                noteGuestShareEventBridge(
+                    capability: info.shareEventBridge,
+                    contractVersion: info.shareEventBridgeContractVersion)
                 noteGuestDiskResize(info.diskResize)
                 // A guest too old to report the field cannot tell us dockerd is up;
                 // treating "absent" as ready keeps this compatible rather than
