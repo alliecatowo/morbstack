@@ -63,9 +63,33 @@ silently written into a persistent profile.
 
 The graphical first-run sheet invokes this same plan/transaction only after
 showing the exact links, PATH effect, and Docker-context effect. Its native
-`Form` provides `Not Now`, explicit `Set Up Docker CLI`, error/retry, and
+`Form` provides `Not Now`, explicit `Set Up Morbstack`, error/retry, and
 completion states; it never enables `--make-default` behavior. The terminal
 commands remain available for inspection and for automation.
+
+## Optional background service
+
+The same first-run review sheet presents the background-service decision beside
+the Docker CLI, context, and socket plan. It is a standard macOS `Toggle` that
+starts **off** and explains the exact registration before the person confirms:
+selecting it registers Morbstack's per-user `LaunchAgent` in Login Items, which
+allows macOS to run the lightweight host service now and after that user signs
+in. It does not start the VM or containers and does not change Docker data,
+images, volumes, or credentials.
+
+`MorbBackgroundService.status()` is used only to render the current state; it
+does not register, launch, or connect to the service. Registration happens only
+after the person selects the toggle and presses the review sheet's confirmation
+button. They can later disable it in System Settings > Login Items or with:
+
+```sh
+morb service disable
+```
+
+The command-line equivalents (`morb service status`, `enable`, `disable`, and
+`settings`) remain available for inspection, automation, and direct management.
+See [`background-service.md`](background-service.md) for the signed-bundle,
+Service Management, and update-registration requirements.
 
 After opening a new terminal, the clean-machine smoke checks are:
 
