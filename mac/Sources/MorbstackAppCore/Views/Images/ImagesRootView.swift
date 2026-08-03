@@ -214,6 +214,9 @@ struct ImagesRootView: View {
 
     private var sheetScreen: some View {
         baseScreen
+            .sheet(isPresented: $showingPull) {
+                pullSheet
+            }
             .sheet(item: $imageArchiveExport) { operation in
                 ImageArchiveExportSheet(operation: operation, cancel: cancelImageArchiveExport)
                     .interactiveDismissDisabled()
@@ -290,7 +293,6 @@ struct ImagesRootView: View {
             }
             .accessibilityLabel("Pull an image")
             .help("Pull an image")
-            .popover(isPresented: $showingPull, arrowEdge: .bottom) { pullPopover }
         }
         ToolbarItem(id: "images.pruneDangling", placement: .secondaryAction) {
             pruneDanglingButton
@@ -337,9 +339,9 @@ struct ImagesRootView: View {
                     + "freeing about \(Formatters.bytesString(danglingBytes))")
     }
 
-    // MARK: Pull popover
+    // MARK: Pull sheet
 
-    private var pullPopover: some View {
+    private var pullSheet: some View {
         Form {
             Section("Image Reference") {
                 TextField("nginx:alpine", text: $pullReference)
@@ -371,7 +373,11 @@ struct ImagesRootView: View {
                 .disabled(isPulling || pullReference.trimmingCharacters(in: .whitespaces).isEmpty)
             }
         }
-        .frame(width: 360)
+        // Docker's pull stream has no cancellation contract in this screen. Keep
+        // the system sheet visible while it is active instead of offering a Cancel
+        // control that cannot cancel the engine request.
+        .interactiveDismissDisabled(isPulling)
+        .frame(minWidth: 420, idealWidth: 480, minHeight: 260)
         .onAppear { pullReferenceIsFocused = true }
     }
 
