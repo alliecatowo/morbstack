@@ -149,10 +149,10 @@ struct ValidatedRoot {
     read_only: bool,
 }
 
-/// Tracks the next sequence the future receiver expects in each direction.
-/// This has no persistence and must not be mistaken for the future durable
-/// cache journal; it only makes an eventual receiver reject replayed, skipped,
-/// and out-of-order records before looking at their payload.
+/// Tracks the next host-to-guest sequence the future receiver expects. This
+/// has no persistence and must not be mistaken for the future durable cache
+/// journal; it only makes an eventual receiver reject replayed, skipped, and
+/// out-of-order records before looking at their payload.
 #[derive(Clone, PartialEq, Eq)]
 pub struct SequenceCursor {
     next_host_to_guest: u64,
