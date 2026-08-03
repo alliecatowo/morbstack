@@ -162,6 +162,19 @@ final class GuestControlTests: XCTestCase {
         XCTAssertNil(legacy.shareEventBridge)
     }
 
+    /// Disk expansion is similarly fail-closed: a current guest can explicitly say
+    /// it has no verified resize contract, while an older guest remains unknown.
+    func testInfoDecodesTheDiskResizeCapability() throws {
+        let current = try JSONDecoder().decode(
+            GuestReply.self,
+            from: Data(#"{"type":"info","disk_resize":"unavailable"}"#.utf8))
+        XCTAssertEqual(current.diskResize, "unavailable")
+
+        let legacy = try JSONDecoder().decode(
+            GuestReply.self, from: Data(#"{"type":"info","kernel":"6.1"}"#.utf8))
+        XCTAssertNil(legacy.diskResize)
+    }
+
     /// A well-formed exchange leaves the channel usable, and closing is idempotent.
     func testASuccessfulExchangeKeepsTheChannelUsable() throws {
         let control = try makeChannel()

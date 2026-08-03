@@ -43,7 +43,7 @@ larger feature checklist.
 | Migration | `MigrationReadOnlyPlanner` derives a read-only image comparison; `ImageMigrationTransaction` and `morb migrate run` execute an explicitly selected images-only transfer with one confirmation, typed progress, post-load image-ID verification, and a durable report. The app route remains inspection-only. | Images-only transaction implemented pending real-engine acceptance. Volumes, bind mounts, containers, CLI configuration, credentials, registry/provenance policy, resumable cancellation, and automatic rollback remain deliberately out of scope. |
 | Filesystem sharing | VirtioFS same-path sharing and share inspection are implemented; [`sharing.md`](sharing.md) records that host edits do not emit guest inotify events. | Day-to-day hot reload remains broken. Silent unshared/misresolved source behavior is still too dangerous. |
 | Published ports | `PortForwarder.swift` forwards TCP loopback. For a normally encoded fixed supported TCP `docker run -p <port>:...`, `DockerProxy` binds and retains the listener before create, associates it from a bounded standard create response, and hands it off before an exact start `204` reaches the client. Explicit UDP and unsupported host-address publishes reject instead of pretending to publish. | Dynamic/ranged allocation, UDP, opaque/chunked create responses, start by name/nonstandard framing (eventual event-based promotion only), and survival through VM/daemon shutdown remain absent. |
-| Disk management | `DiskCapacity.swift` is a correct read-only preflight. | Grow-only resize is deliberately unavailable until the guest filesystem protocol exists; shrinking must remain unsupported. |
+| Disk management | `DiskCapacity.swift` supplies the RAW-image facts. `MorbDiskResize` combines those facts with VM state and the guest's explicit `disk_resize` capability; the current guest reports `unavailable`. | No host image mutation occurs. A grow transaction still needs an explicit target, stopped-VM ownership, retained prior-capacity journal, guest filesystem identity/resize, and post-resize proof. Shrinking remains unsupported. |
 | Debug toolbox | `MorbScan/DebugToolboxPlan.swift` and `morb debug check` expose static readiness; `morb debug [plan] <container>` makes only `GET /containers/{id}/json` and reports its non-actions. | Read-only foundation. A verified pinned asset, consented acquisition/update policy, isolated namespace/cleanup policy, and interactive PTY bridge are still required before an executor or app action exists. |
 | Local domains, HTTPS, Finder-native files, Linux machines | Explicitly absent from current runtime/app implementation; see [`product-audit.md`](product-audit.md). | Differentiators, not P0 compatibility gates. They need a security and macOS-capability design before UI work. |
 
@@ -146,9 +146,10 @@ Finish workflows rather than adding dashboard panels.
    cancellable port forward, and guarded exec; retain `k8s-diagnose` as the
    first recovery action. Do not create/delete workloads behind a decorative
    control.
-4. **Capacity recovery:** implement stop-only grow-only disk expansion plus
-   in-guest filesystem resize, post-resize verification, retained backup
-   metadata, and a hard no-shrink invariant.
+4. **Capacity recovery:** replace the current negative guest capability with a
+   stop-only grow-only disk expansion transaction: explicit target, retained
+   prior-capacity journal, in-guest filesystem resize, post-resize verification, and
+   a hard no-shrink invariant.
 
 **Acceptance:** each action has live progress, cancellation/failure state,
 exact effects, and a test against a real engine/cluster. No one-click action

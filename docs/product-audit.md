@@ -79,8 +79,10 @@ guarantee.
    preserving loopback-safe defaults.
 2. Turn unshared/misresolved bind sources into clear Docker errors, then
    ship FSEvents-to-inotify forwarding or an explicit synced-share tier.
-3. Add grow-only disk expansion, truthful idle-stop wording until genuine
-   suspend/restore is demonstrated, and a redacted `morb diagnose` bundle
+3. Add an end-to-end grow-only disk expansion transaction (the current guest exposes
+   an explicit `disk_resize: unavailable` capability and the daemon has a read-only
+   stop/preflight diagnostic, but no host image is resized), truthful idle-stop wording
+   until genuine suspend/restore is demonstrated, and a redacted `morb diagnose` bundle
    with structured VM/DNS/share/forwarder/Kubernetes health.
 4. Make the operations app real: durable build progress/cancel/cache,
    stack actions, container logs/stats/exec/debug, safe image/volume export

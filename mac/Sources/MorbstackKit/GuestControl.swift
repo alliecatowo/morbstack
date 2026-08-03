@@ -137,6 +137,13 @@ public struct GuestReply: Codable, Equatable, Sendable {
     /// watchers; it is not a transient failure. `nil` means an older guest did not
     /// report the additive capability. Neither state claims hot reload.
     public var shareEventBridge: String?
+    /// Whether the guest can execute the complete stop-only VM disk-growth contract.
+    ///
+    /// `"unavailable"` means this guest has no explicit target request, filesystem
+    /// identification, resize operation, and post-resize proof. `nil` means an older
+    /// guest did not report the additive capability. Neither permits the host to
+    /// truncate an existing data image.
+    public var diskResize: String?
     /// Failure detail — present on `error`.
     public var message: String?
 
@@ -151,6 +158,7 @@ public struct GuestReply: Codable, Equatable, Sendable {
         case rosetta
         case binfmtAmd64 = "binfmt_amd64"
         case shareEventBridge = "share_event_bridge"
+        case diskResize = "disk_resize"
         case message
     }
 }

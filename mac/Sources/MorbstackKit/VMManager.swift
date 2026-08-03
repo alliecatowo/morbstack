@@ -324,6 +324,11 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
     /// explicit statement that it cannot inject host file notifications into inotify.
     private var _guestShareEventBridge: String?
 
+    /// Last `disk_resize` capability reported by the guest. `nil` means an
+    /// older/stopped guest has not said; `"unavailable"` is an explicit no-mutation
+    /// boundary, not a transient resize failure.
+    private var _guestDiskResize: String?
+
     /// Whether the running guest has Rosetta working, or `nil` if no guest has
     /// said (not booted, or an initramfs older than the field).
     ///
@@ -353,6 +358,14 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
         stateLock.lock()
         defer { stateLock.unlock() }
         return _guestShareEventBridge
+    }
+
+    /// The current guest's disk-resize capability, when it has reported one.
+    /// This is read-only diagnostic state; it never changes the attached disk.
+    public var guestDiskResize: String? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _guestDiskResize
     }
 
     /// The VirtioFS shares handed to the current (or most recent) configuration.
@@ -438,6 +451,7 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
             _guestRosetta = nil
             _guestBinfmtAmd64 = nil
             _guestShareEventBridge = nil
+            _guestDiskResize = nil
         }
         stateLock.unlock()
     }
@@ -474,6 +488,15 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
         guard let capability else { return }
         stateLock.lock()
         _guestShareEventBridge = capability
+        stateLock.unlock()
+    }
+
+    /// Records the guest's additive disk-resize capability. Like other `info`
+    /// capabilities, an older guest's absence must not become a false `ready`.
+    private func noteGuestDiskResize(_ capability: String?) {
+        guard let capability else { return }
+        stateLock.lock()
+        _guestDiskResize = capability
         stateLock.unlock()
     }
 
@@ -1402,6 +1425,7 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
                 // to answer during that window instead of reporting "unknown".
                 noteGuestRosetta(rosetta: info.rosetta, binfmtAmd64: info.binfmtAmd64)
                 noteGuestShareEventBridge(info.shareEventBridge)
+                noteGuestDiskResize(info.diskResize)
                 // A guest too old to report the field cannot tell us dockerd is up;
                 // treating "absent" as ready keeps this compatible rather than
                 // hanging for the whole boot budget against an older initramfs.

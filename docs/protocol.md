@@ -62,7 +62,7 @@ guest; replies are guest -> host.
 | host->guest | `ping`     | *(none)*                                     | Liveness check |
 | guest->host | `pong`     | `uptime_ms: int`                             | Reply to `ping` |
 | host->guest | `info`     | *(none)*                                     | Request static guest facts |
-| guest->host | `info`     | `morbinit_version: string`, `kernel: string`, `docker_ready: bool`, `docker_data_on_disk: bool`, `userland_proxy: bool`, `shares: string` | Reply to `info` request |
+| guest->host | `info`     | `morbinit_version: string`, `kernel: string`, `docker_ready: bool`, `docker_data_on_disk: bool`, `userland_proxy: bool`, `shares: string`, `disk_resize: string` | Reply to `info` request; `disk_resize` is additive capability state |
 | host->guest | `clock_sync` | `unix_nanos: int`                          | Push host wall-clock time |
 | guest->host | `ok`       | *(none)*                                     | Generic success reply (used for `clock_sync`, `shutdown`) |
 | host->guest | `shutdown` | *(none)*                                     | Request orderly guest shutdown |
@@ -109,6 +109,17 @@ probes that must not wait forever on a field an older guest will never
 send. Both are exposed to CLI/daemon consumers: `morb doctor`'s
 disk-persistence check and the `docker_data_on_disk` field in `morb
 status`'s JSON output (see `mac/Sources/MorbstackKit/Daemon.swift`).
+
+`disk_resize` is an additive capability for the future **stop-only,
+grow-only** expansion transaction. The current guest reports `"unavailable"`.
+Although the initramfs stages btrfs/e2fs utilities, there is no current control
+request carrying an explicit target, no boot-scoped transaction authorization, no
+filesystem identity/size proof, and no host journal tying a prior RAW capacity to a
+verified guest resize. A host must therefore never truncate an existing `disk.img`
+based on the configured `disk_size_gib` value alone. An absent field means an older
+guest has made no statement and is equally insufficient. The daemon exposes this as a
+read-only `disk_resize` status diagnostic; it does not resize, boot, stop, or attach
+anything while answering the status request.
 
 ### Examples
 

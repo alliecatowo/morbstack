@@ -38,6 +38,15 @@ const MAX_PAYLOAD: u32 = 1 << 20;
 /// reload. See docs/protocol.md §5.4.
 pub const SHARE_EVENT_BRIDGE_CAPABILITY: &str = "unavailable";
 
+/// Guest capability for a future stop-only host disk-growth transaction.
+///
+/// The initramfs contains filesystem utilities, but that is not a resize protocol:
+/// the host has no explicit target/transaction request, and the guest has no way to
+/// identify the mounted filesystem, resize it safely, and prove the result back to
+/// the host. Advertise the absence so a larger `disk.img` is never mistaken for a
+/// larger Docker filesystem. See docs/protocol.md §2.2.
+pub const DISK_RESIZE_CAPABILITY: &str = "unavailable";
+
 /// Read one MRB0 frame from `r`, returning its JSON payload bytes.
 pub fn read_frame<R: Read>(r: &mut R) -> io::Result<Vec<u8>> {
     let mut magic = [0u8; 4];
@@ -403,6 +412,10 @@ pub fn handle_request(payload: &[u8], ctx: &ControlContext) -> (Vec<u8>, bool) {
                 (
                     "share_event_bridge",
                     Value::Str(SHARE_EVENT_BRIDGE_CAPABILITY.to_string()),
+                ),
+                (
+                    "disk_resize",
+                    Value::Str(DISK_RESIZE_CAPABILITY.to_string()),
                 ),
             ]);
             (body.into_bytes(), false)
@@ -782,6 +795,10 @@ mod tests {
             fields.get("share_event_bridge"),
             Some(&Value::Str("unavailable".to_string()))
         );
+        assert_eq!(
+            fields.get("disk_resize"),
+            Some(&Value::Str("unavailable".to_string()))
+        );
     }
 
     #[test]
@@ -801,6 +818,7 @@ mod tests {
         assert!(fields.contains_key("docker_data_on_disk"));
         assert!(fields.contains_key("morbinit_version"));
         assert!(fields.contains_key("kernel"));
+        assert!(fields.contains_key("disk_resize"));
     }
 
     #[test]

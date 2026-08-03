@@ -505,6 +505,11 @@ public final class Daemon {
             let forwards = forwarder.activeForwards
             let failedForwards = forwarder.failedForwards
             let liveShareBridge = liveShareBridgeDiagnostic()
+            let diskCapacity = MorbDiskCapacity.inspect(configuredGiB: config.diskSizeGiB)
+            let diskResize = MorbDiskResize.diagnose(
+                capacity: diskCapacity,
+                vmState: vm.state,
+                guestCapability: MorbDiskResize.GuestCapability(wireValue: vm.guestDiskResize))
             return .success([
                 "failed_port_forwards": .array(failedForwards.map { AnyCodableValue.string($0) }),
                 "state": .string(vm.state.token),
@@ -540,6 +545,9 @@ public final class Daemon {
                 // guest endpoint can receive the bounded contract. It never starts an
                 // FSEvents watcher merely because `status` was read.
                 "live_share_bridge": .object(liveShareBridge.ipcFields),
+                // A readiness report only. In particular it does not turn a larger
+                // configured value into a host file resize while `status` is read.
+                "disk_resize": .object(diskResize.ipcFields),
             ])
 
         case "shares":
