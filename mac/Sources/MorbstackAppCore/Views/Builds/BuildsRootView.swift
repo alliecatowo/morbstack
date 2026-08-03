@@ -68,8 +68,15 @@ enum BuildCacheList {
             || record.shortID.localizedCaseInsensitiveContains(needle)
     }
 
-    static func totalSize(_ records: [BuildCacheRecord]) -> Int64 {
-        records.reduce(Int64(0)) { $0 + max(0, $1.size) }
+    /// Cache bytes that Docker attributes to BuildKit rather than an image parent.
+    ///
+    /// `/system/df` repeats shared cache records for every parent that references
+    /// them. Counting those entries in the route subtitle would make it disagree
+    /// with Disk and overstate the storage owned by the build cache.
+    static func storageSize(_ records: [BuildCacheRecord]) -> Int64 {
+        records.reduce(Int64(0)) { total, record in
+            total + (record.shared ? 0 : max(0, record.size))
+        }
     }
 
     static func unused(_ records: [BuildCacheRecord]) -> [BuildCacheRecord] {
@@ -121,7 +128,7 @@ struct BuildsRootView: View {
                 : "No cache · No space reclaimed"
         }
         var parts = ["\(records.count) record\(records.count == 1 ? "" : "s")"]
-        parts.append(Formatters.bytesString(BuildCacheList.totalSize(records)))
+        parts.append(Formatters.bytesString(BuildCacheList.storageSize(records)))
         if unusedCount > 0 { parts.append("\(unusedCount) unused") }
         if let lastPrunedBytes {
             let outcome = lastPrunedBytes > 0
