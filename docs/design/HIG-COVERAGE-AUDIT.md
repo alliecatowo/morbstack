@@ -122,6 +122,34 @@ For each route, record a compact review card before calling it complete:
 
 ## Required evidence at handoff
 
+### Live evidence — 2026-08-03
+
+The signed `dist/Morbstack.app` was rebuilt serially and inspected in a real dark-mode
+window using Computer Use after the native-content migration.  This is deliberately
+separate from fixture/source evidence: it records only what was actually observed in
+the WindowServer-composited bundle.
+
+| Surface | Observed safe interaction | Result |
+| --- | --- | --- |
+| Shell/sidebar | Hide then show sidebar | System `NavigationSplitView` owned collapse/reveal; no custom toggle or overlay appeared. |
+| Engine-off content | Relaunched without accepting setup, then explicitly started Morbstack | Native `ContentUnavailableView` supplied the one appropriate Start action. The user-visible setup review was dismissed without changing shell/context settings. |
+| Images | Real local images, selection/inspector, Pull sheet opened then escaped | Direct sortable `Table`; no redundant first table section; Pull uses a system document-modal `Form` and no image was pulled. |
+| Volumes | Real local named volume selection | Inspector labels the Docker path as a **Guest Mount Point** and offers no impossible Finder reveal. |
+| Builds | Empty cache state; Build sheet opened then dismissed | `ContentUnavailableView` offers Build/Refresh; Build is a system document-modal review sheet and no build ran. |
+| Disk | Real `/system/df` data and selection | Native list sections separate non-additive aggregate categories from largest individual resources; the VM capacity indicator remains factual. |
+| Kubernetes | Rebuilt daemon diagnosis and Enable review | The stale-daemon compatibility error disappeared after a clean daemon restart. Kubernetes accurately reported Off, then showed a standard enable confirmation naming the first-download consequence; it was cancelled, so k3s was not enabled. |
+
+The app uses the current system dark appearance without a global tint/appearance
+override. The purple screen-capture pill visible in some Computer Use captures is an
+OS privacy indicator, not a Morbstack view. The running-app audit did **not** execute
+destructive actions, pull an image, build, enable k3s, export/remove data, or restart
+any container. A clean daemon restart stopped existing running containers; they were
+not restarted automatically or manually.
+
+Still required before calling the migration fully accepted: real-window light
+appearance, minimum-width/toolbar-overflow review, increased-contrast/reduced-
+transparency review, and the separately approved XCUITest evidence pass.
+
 - exact HIG/API pages consulted;
 - a list of semantics covered and any documented exceptions;
 - for an Engine-facing claim, the bounded protocol/daemon admission contract and its
