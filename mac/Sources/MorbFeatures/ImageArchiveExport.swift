@@ -123,7 +123,12 @@ public enum ImageArchiveExporter {
             throw ImageArchiveExportError.invalidImageReference
         }
         let destination = try validateDestination(output, replaceExisting: replaceExisting)
-        let staging = try AtomicArchiveStagingFile(destination: destination)
+        let staging: LocalArchiveStagingFile
+        do {
+            staging = try LocalArchiveStagingFile(destination: destination)
+        } catch {
+            throw translateOutputError(error)
+        }
         var responseHead: HTTPResponseHead?
         var errorBody = Data()
         var writeFailure: Error?
@@ -148,7 +153,7 @@ public enum ImageArchiveExporter {
                         }
                         return true
                     } catch {
-                        writeFailure = error
+                        writeFailure = translateOutputError(error)
                         return false
                     }
                 },
@@ -163,7 +168,11 @@ public enum ImageArchiveExporter {
                     message: engineMessage(from: errorBody, fallbackStatus: responseHead.statusCode))
             }
             guard staging.bytes > 0 else { throw ImageArchiveExportError.archiveWasEmpty }
-            try staging.commit(replaceExisting: replaceExisting)
+            do {
+                try staging.commit(replaceExisting: replaceExisting)
+            } catch {
+                throw translateOutputError(error)
+            }
             return ImageArchiveExportResult(
                 reference: imageReference,
                 destination: destination,
@@ -195,52 +204,28 @@ public enum ImageArchiveExporter {
     }
 
     private static func validateDestination(_ requested: URL, replaceExisting: Bool) throws -> URL {
-        guard requested.isFileURL else { throw ImageArchiveExportError.invalidOutputURL }
-        let manager = FileManager.default
-        let standardized: URL
-        if requested.path.hasPrefix("/") {
-            standardized = requested.standardizedFileURL
-        } else {
-            standardized = URL(fileURLWithPath: manager.currentDirectoryPath, isDirectory: true)
-                .appendingPathComponent(requested.path, isDirectory: false)
-                .standardizedFileURL
+        do {
+            return try LocalArchiveOutput.validateDestination(
+                requested,
+                replaceExisting: replaceExisting)
+        } catch {
+            throw translateOutputError(error)
         }
-        guard standardized.path != "/", !standardized.lastPathComponent.isEmpty else {
-            throw ImageArchiveExportError.invalidOutputURL
-        }
-
-        let outputDirectory = standardized.deletingLastPathComponent()
-        var isDirectory = ObjCBool(false)
-        guard manager.fileExists(atPath: outputDirectory.path, isDirectory: &isDirectory), isDirectory.boolValue else {
-            throw ImageArchiveExportError.outputDirectoryUnavailable
-        }
-
-        // Resolve both the parent (for a not-yet-created output) and the final path
-        // (for an existing output symlink) before checking Morbstack's private root.
-        let canonicalRoot = MorbPaths.root.standardizedFileURL.resolvingSymlinksInPath()
-        let canonicalParent = outputDirectory.standardizedFileURL.resolvingSymlinksInPath()
-        let canonicalNewOutput = canonicalParent.appendingPathComponent(standardized.lastPathComponent)
-        let canonicalExistingOutput = standardized.resolvingSymlinksInPath()
-        guard !isDescendant(standardized, of: canonicalRoot),
-              !isDescendant(canonicalNewOutput, of: canonicalRoot),
-              !isDescendant(canonicalExistingOutput, of: canonicalRoot)
-        else {
-            throw ImageArchiveExportError.outputIsMorbstackOwned
-        }
-
-        var outputIsDirectory = ObjCBool(false)
-        if manager.fileExists(atPath: standardized.path, isDirectory: &outputIsDirectory) {
-            if outputIsDirectory.boolValue { throw ImageArchiveExportError.outputIsDirectory }
-            if !replaceExisting { throw ImageArchiveExportError.outputAlreadyExists }
-        }
-        return standardized
     }
 
-    private static func isDescendant(_ candidate: URL, of root: URL) -> Bool {
-        let candidatePath = candidate.standardizedFileURL.path
-        let rootPath = root.standardizedFileURL.path
-        if rootPath == "/" { return true }
-        return candidatePath == rootPath || candidatePath.hasPrefix(rootPath + "/")
+    private static func translateOutputError(_ error: Error) -> ImageArchiveExportError {
+        guard let error = error as? LocalArchiveOutputError else {
+            return .commitFailed
+        }
+        switch error {
+        case .invalidOutputURL: return .invalidOutputURL
+        case .outputDirectoryUnavailable: return .outputDirectoryUnavailable
+        case .outputIsMorbstackOwned: return .outputIsMorbstackOwned
+        case .outputIsDirectory: return .outputIsDirectory
+        case .outputAlreadyExists: return .outputAlreadyExists
+        case .stagingFileUnavailable: return .stagingFileUnavailable
+        case .writeFailed: return .writeFailed
+        case .commitFailed: return .commitFailed
     }
 
     private static func appendErrorBody(_ chunk: Data, to destination: inout Data) {
@@ -257,11 +242,79 @@ public enum ImageArchiveExporter {
     }
 }
 
+/// Destination failures shared by explicit local archive writers. They deliberately
+/// contain no path text; a CLI or native sheet owns safe path presentation.
+enum LocalArchiveOutputError: Error {
+    case invalidOutputURL
+    case outputDirectoryUnavailable
+    case outputIsMorbstackOwned
+    case outputIsDirectory
+    case outputAlreadyExists
+    case stagingFileUnavailable
+    case writeFailed
+    case commitFailed
+}
+
+/// The output half of every local archive export. It rejects Morbstack-owned paths
+/// and applies one no-clobber/explicit-replace policy before a service starts an
+/// Engine stream or creates a temporary helper container.
+enum LocalArchiveOutput {
+
+    static func validateDestination(_ requested: URL, replaceExisting: Bool) throws -> URL {
+        guard requested.isFileURL else { throw LocalArchiveOutputError.invalidOutputURL }
+        let manager = FileManager.default
+        let standardized: URL
+        if requested.path.hasPrefix("/") {
+            standardized = requested.standardizedFileURL
+        } else {
+            standardized = URL(fileURLWithPath: manager.currentDirectoryPath, isDirectory: true)
+                .appendingPathComponent(requested.path, isDirectory: false)
+                .standardizedFileURL
+        }
+        guard standardized.path != "/", !standardized.lastPathComponent.isEmpty else {
+            throw LocalArchiveOutputError.invalidOutputURL
+        }
+
+        let outputDirectory = standardized.deletingLastPathComponent()
+        var isDirectory = ObjCBool(false)
+        guard manager.fileExists(atPath: outputDirectory.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            throw LocalArchiveOutputError.outputDirectoryUnavailable
+        }
+
+        // Resolve both the parent (for a not-yet-created output) and the final path
+        // (for an existing output symlink) before checking Morbstack's private root.
+        let canonicalRoot = MorbPaths.root.standardizedFileURL.resolvingSymlinksInPath()
+        let canonicalParent = outputDirectory.standardizedFileURL.resolvingSymlinksInPath()
+        let canonicalNewOutput = canonicalParent.appendingPathComponent(standardized.lastPathComponent)
+        let canonicalExistingOutput = standardized.resolvingSymlinksInPath()
+        guard !isDescendant(standardized, of: canonicalRoot),
+              !isDescendant(canonicalNewOutput, of: canonicalRoot),
+              !isDescendant(canonicalExistingOutput, of: canonicalRoot)
+        else {
+            throw LocalArchiveOutputError.outputIsMorbstackOwned
+        }
+
+        var outputIsDirectory = ObjCBool(false)
+        if manager.fileExists(atPath: standardized.path, isDirectory: &outputIsDirectory) {
+            if outputIsDirectory.boolValue { throw LocalArchiveOutputError.outputIsDirectory }
+            if !replaceExisting { throw LocalArchiveOutputError.outputAlreadyExists }
+        }
+        return standardized
+    }
+
+    private static func isDescendant(_ candidate: URL, of root: URL) -> Bool {
+        let candidatePath = candidate.standardizedFileURL.path
+        let rootPath = root.standardizedFileURL.path
+        if rootPath == "/" { return true }
+        return candidatePath == rootPath || candidatePath.hasPrefix(rootPath + "/")
+    }
+}
+
 /// A private sibling file with a single atomic commit path. The final destination is
 /// not opened or truncated during download. Without `--replace`, `link(2)` supplies
 /// an atomic no-clobber publish; with it, `rename(2)` atomically replaces the old file
 /// only after the new bytes have been fsynced and closed.
-private final class AtomicArchiveStagingFile {
+final class LocalArchiveStagingFile {
     private let destination: URL
     private let temporary: URL
     private var descriptor: Int32?
@@ -283,7 +336,7 @@ private final class AtomicArchiveStagingFile {
             }
             if errno != EEXIST { break }
         }
-        guard let selected else { throw ImageArchiveExportError.stagingFileUnavailable }
+        guard let selected else { throw LocalArchiveOutputError.stagingFileUnavailable }
         temporary = selected.0
         descriptor = selected.1
     }
@@ -291,7 +344,7 @@ private final class AtomicArchiveStagingFile {
     deinit { discard() }
 
     func write(_ data: Data) throws {
-        guard let descriptor else { throw ImageArchiveExportError.writeFailed }
+        guard let descriptor else { throw LocalArchiveOutputError.writeFailed }
         do {
             try data.withUnsafeBytes { raw in
                 guard let base = raw.baseAddress else { return }
@@ -303,33 +356,33 @@ private final class AtomicArchiveStagingFile {
                     } else if count < 0 && errno == EINTR {
                         continue
                     } else {
-                        throw ImageArchiveExportError.writeFailed
+                        throw LocalArchiveOutputError.writeFailed
                     }
                 }
             }
             bytes += Int64(data.count)
-        } catch let error as ImageArchiveExportError {
+        } catch let error as LocalArchiveOutputError {
             throw error
         } catch {
-            throw ImageArchiveExportError.writeFailed
+            throw LocalArchiveOutputError.writeFailed
         }
     }
 
     func commit(replaceExisting: Bool) throws {
-        guard let descriptor else { throw ImageArchiveExportError.commitFailed }
+        guard let descriptor else { throw LocalArchiveOutputError.commitFailed }
         let syncSucceeded = Darwin.fsync(descriptor) == 0
         let closeSucceeded = Darwin.close(descriptor) == 0
         self.descriptor = nil
-        guard syncSucceeded, closeSucceeded else { throw ImageArchiveExportError.commitFailed }
+        guard syncSucceeded, closeSucceeded else { throw LocalArchiveOutputError.commitFailed }
 
         if replaceExisting {
             guard Darwin.rename(temporary.path, destination.path) == 0 else {
-                throw ImageArchiveExportError.commitFailed
+                throw LocalArchiveOutputError.commitFailed
             }
         } else {
             guard Darwin.link(temporary.path, destination.path) == 0 else {
-                if errno == EEXIST { throw ImageArchiveExportError.outputAlreadyExists }
-                throw ImageArchiveExportError.commitFailed
+                if errno == EEXIST { throw LocalArchiveOutputError.outputAlreadyExists }
+                throw LocalArchiveOutputError.commitFailed
             }
             // `link` made the destination visible atomically. The old name is only a
             // private staging alias now, so cleanup cannot affect the published file.

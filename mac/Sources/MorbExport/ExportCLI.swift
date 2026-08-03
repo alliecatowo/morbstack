@@ -1,7 +1,7 @@
 // Copyright 2026 The Morbstack Authors.
 // Licensed under the Apache License, Version 2.0 (the "License").
 //
-// Command surface for a user-directed Docker image archive. This target has no
+// Command surface for user-directed local Docker archives. This target has no
 // AppKit/SwiftUI dependency: the CLI is the truthful public boundary until a standard
 // macOS save-panel flow is wired through the native app's existing selection context.
 
@@ -24,6 +24,8 @@ enum ExportCLI {
             return 0
         case "image":
             return exportImage(arguments: Array(arguments.dropFirst()), json: json)
+        case "volume":
+            return exportVolume(arguments: Array(arguments.dropFirst()), json: json)
         default:
             return usageError("unknown export subcommand `\(subcommand)`", json: json)
         }
@@ -87,6 +89,68 @@ enum ExportCLI {
         }
     }
 
+    private static func exportVolume(arguments: [String], json: Bool) -> Int32 {
+        let request: VolumeRequest
+        do {
+            request = try VolumeRequest(arguments)
+        } catch {
+            return usageError(describe(error), json: json)
+        }
+
+        if !json {
+            out("Exporting one local named-volume archive (no pull, registry, or credentials access)")
+            out("  volume       \(terminalSafe(request.name))")
+            out("  output       \(terminalSafe(request.output.path))")
+            out("  replace      \(request.replaceExisting ? "yes, after helper cleanup and a complete stream" : "no")")
+            out("  helper       one already-local image; stopped with /data mounted read-only")
+            out("  engine       inspect volume, inspect local images, create/read/remove owned helper")
+        }
+
+        do {
+            let result = try VolumeArchiveExporter.export(
+                volumeName: request.name,
+                to: request.output,
+                replaceExisting: request.replaceExisting)
+            if json {
+                emitJSON([
+                    "ok": true,
+                    "volume": result.volumeName,
+                    "driver": result.driver,
+                    "output": result.destination.path,
+                    "bytes": result.bytes,
+                    "helper_image": result.helperImage,
+                    "engine_requests": result.engineRequests,
+                    "selected_volume_mutated": false,
+                    "temporary_helper_created_and_removed": true,
+                    "network_access": "not used",
+                    "credentials_access": "not used",
+                ])
+            } else {
+                out("")
+                out("[ok] exported \(Format.bytes(result.bytes)) from \(terminalSafe(result.volumeName)) to \(terminalSafe(result.destination.path))")
+                out("The tar contains the selected volume filesystem data. It was not imported, mounted in Finder, or written back to Docker.")
+            }
+            return 0
+        } catch {
+            let message = describe(error)
+            if json {
+                emitJSON([
+                    "ok": false,
+                    "volume": request.name,
+                    "output": request.output.path,
+                    "error": message,
+                    "selected_volume_mutated": false,
+                    "network_access": "not used",
+                    "credentials_access": "not used",
+                ])
+            } else {
+                err("morb export volume: \(message)")
+                err("No completed archive was published; any private partial staging file was discarded and owned-helper cleanup was attempted.")
+            }
+            return 2
+        }
+    }
+
     private struct ImageRequest {
         let reference: String
         let output: URL
@@ -129,8 +193,51 @@ enum ExportCLI {
         }
     }
 
+    private struct VolumeRequest {
+        let name: String
+        let output: URL
+        let replaceExisting: Bool
+
+        init(_ arguments: [String]) throws {
+            var name: String?
+            var outputPath: String?
+            var replaceExisting = false
+            var index = 0
+            while index < arguments.count {
+                let argument = arguments[index]
+                switch argument {
+                case "--output":
+                    guard index + 1 < arguments.count,
+                          !arguments[index + 1].isEmpty,
+                          !arguments[index + 1].hasPrefix("--")
+                    else {
+                        throw ArgumentError.missingValue("--output")
+                    }
+                    guard outputPath == nil else { throw ArgumentError.repeatedOption("--output") }
+                    outputPath = arguments[index + 1]
+                    index += 2
+                case "--replace":
+                    guard !replaceExisting else { throw ArgumentError.repeatedOption("--replace") }
+                    replaceExisting = true
+                    index += 1
+                default:
+                    guard !argument.hasPrefix("-") else { throw ArgumentError.unknownOption(argument) }
+                    guard name == nil else { throw ArgumentError.unexpectedArgument(argument) }
+                    name = argument
+                    index += 1
+                }
+            }
+            guard let name else { throw ArgumentError.volumeRequired }
+            guard let outputPath else { throw ArgumentError.outputRequired }
+            self.name = name
+            output = resolvedOutputURL(outputPath)
+            self.replaceExisting = replaceExisting
+        }
+    }
+
     private enum ArgumentError: Error, CustomStringConvertible {
         case referenceRequired
+        case volumeRequired
         case outputRequired
         case missingValue(String)
         case repeatedOption(String)
@@ -141,8 +248,10 @@ enum ExportCLI {
             switch self {
             case .referenceRequired:
                 return "an image reference or image ID is required"
+            case .volumeRequired:
+                return "an explicit named volume is required"
             case .outputRequired:
-                return "--output <path> is required; image archives are never written to a default location"
+                return "--output <path> is required; archives are never written to a default location"
             case .missingValue(let option):
                 return "\(option) requires a path"
             case .repeatedOption(let option):
@@ -169,7 +278,7 @@ enum ExportCLI {
             emitJSON([
                 "ok": false,
                 "error": message,
-                "usage": "morb export image <reference> --output <path> [--replace]",
+                "usage": "morb export <image|volume> <name> --output <path> [--replace]",
             ])
         } else {
             err("morb export: \(message)")
@@ -181,11 +290,14 @@ enum ExportCLI {
 
     private static func printUsage(to output: FileHandle = .standardOutput) {
         let text = """
-        Usage: morb export image <reference> --output <path> [--replace]
+        Usage:
+          morb export image <reference> --output <path> [--replace]
+          morb export volume <name> --output <path> [--replace]
 
-        Save one already-local Morbstack image as a Docker archive. This uses exactly
-        one current-engine GET /images/get request; it does not pull, push, inspect,
-        load, tag, delete, start a container, access a registry, or read credentials.
+        `image` saves one already-local Morbstack image through one GET /images/get
+        request. `volume` archives one explicit existing Docker local-driver volume
+        through one owned stopped read-only helper container. Volume export requires
+        an already-local helper image and never pulls one.
 
         The parent directory must already exist. `--output` is required, may be an
         absolute, ~/ or relative path, and must not be inside Morbstack-owned data.
@@ -193,14 +305,17 @@ enum ExportCLI {
         archive is atomically published only after its private sibling staging file
         has fully downloaded and synced.
 
-        There is no native export screen in this CLI slice. A future app action must
-        use the standard macOS save panel and this same service contract.
+        Neither command imports, writes back, mounts files in Finder, accesses a
+        registry or credential helper, or creates a default output path. There is no
+        native volume export screen in this CLI slice; a future app action must use
+        the standard macOS save panel and this same service contract.
         """
         output.write(Data((text + "\n").utf8))
     }
 
     private static func describe(_ error: Error) -> String {
         if let exportError = error as? ImageArchiveExportError { return exportError.description }
+        if let exportError = error as? VolumeArchiveExportError { return exportError.description }
         if let engineError = error as? EngineError { return engineError.description }
         if let argumentError = error as? ArgumentError { return argumentError.description }
         return error.localizedDescription

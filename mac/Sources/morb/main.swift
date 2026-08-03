@@ -44,7 +44,7 @@ let usage = """
       migrate      Import images, volumes and config from another runtime
       bench        Run the open benchmark suite and report the numbers
       scan         SBOM and CVE scan an image, entirely on this machine
-      export       Write an already-local image archive to a user-selected file
+      export       Write an already-local image or named-volume archive to a user-selected file
       debug        Inspect safe toolbox availability; does not open a shell yet
       context      Inspect the `morbstack` Docker context and discovery socket
       service      Manage Morbstack's explicit per-user background service

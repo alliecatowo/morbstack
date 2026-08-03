@@ -1,4 +1,4 @@
-# Local image archive export
+# Local archive export
 
 `morb export image` is the explicit, current-engine equivalent of saving one
 already-local Docker image to a `docker save` archive:
@@ -42,6 +42,31 @@ An exported archive can contain image configuration and layer contents. Save it
 in a location appropriate for that data and choose sharing/upload handling
 separately; this feature does not upload or encrypt it.
 
+## Named-volume archive export
+
+`morb export volume` exports exactly one existing Morbstack named volume as a
+tar archive:
+
+```console
+morb export volume <name> --output <path> [--replace]
+```
+
+This is deliberately not a Finder mount or a volume migration/import path. The
+command first reads `GET /volumes/<name>` and accepts only Docker's `local`
+driver. It then finds one already-local image; v1 never pulls a helper image or
+contacts a registry. Morbstack creates an owned, **stopped** helper container
+with only that volume mounted at `/data:ro`, streams
+`GET /containers/<helper>/archive?path=/data` into the same private atomic
+staging writer, and force-removes the helper before it publishes the completed
+archive. Every error path attempts owned-helper cleanup and discards the staging
+file; a known cleanup failure prevents publication and is reported plainly.
+
+The export is read-only with respect to the selected volume: it does not start
+the helper, execute a command in it, import the archive, modify the volume,
+write back its data, inspect an existing destination volume, access credentials,
+or create a default output location. The archive is a filesystem tar for the
+selected volume, not an OCI image archive or a general bidirectional file API.
+
 ## Native-app boundary
 
 The Images route exposes **Export Selected Image…** through the standard macOS
@@ -57,6 +82,11 @@ content length; otherwise the indicator stays indeterminate rather than
 inventing a percentage. Cancel requests a stream stop and the service discards
 the private staging file. Success is shown only after the atomic commit; a
 failure or cancellation never claims that an archive was saved.
+
+There is no native volume-export action yet. A later volume route must begin
+from an explicit selected local volume, use `NSSavePanel`, disclose the temporary
+read-only helper and no-pull rule, and call `VolumeArchiveExporter` rather than
+implementing another archive or cleanup path.
 
 ## Sources
 
