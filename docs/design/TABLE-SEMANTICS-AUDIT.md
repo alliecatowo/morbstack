@@ -8,9 +8,12 @@ this audit.
 
 The user task comes first. Retain a `Table` only for a collection of peer records that
 need multiple stable attributes, native selection, sorting, or a contextual action.
-Use a `Table(children:)` outline for a real parent → child relationship; use a `Form`,
-document editor, log viewport, chart, or `ContentUnavailableView` when it better owns
-the task. Never replace an appropriate native table with cards or hand-built rows.
+Use `List(selection:)` plus `OutlineGroup` when the task is to traverse an actual
+parent → child relationship and selected-record facts belong in an inspector. Retain a
+`Table(children:)` outline only when that hierarchy also needs multi-column comparison.
+Use a `Form`, document editor, log viewport, chart, or `ContentUnavailableView` when it
+better owns the task. Never replace an appropriate native table with cards or hand-built
+rows.
 
 Consulted: Apple's [Lists and tables](https://developer.apple.com/design/human-interface-guidelines/lists-and-tables),
 [Outline views](https://developer.apple.com/design/human-interface-guidelines/outline-views),
@@ -32,7 +35,7 @@ The binding detail is in the [native macOS playbook](NATIVE-MACOS-PLAYBOOK.md#ch
 | `Views/Volumes/VolumesRootView.swift` | Compare named volumes by driver, size, and use; select for inspection/export/removal. | **Retain `Table`.** | Preserve context-menu and inspector behavior; empty/filter states remain direct unavailable views. |
 | `Views/Networks/NetworksRootView.swift` | Compare peer Docker networks by kind, driver, scope, and attachment count. | **Retain `Table`.** | Preserve context menu/inspector selection; no dashboard or network-map substitute is justified. |
 | `Views/Disk/DiskRootView.swift` | Review storage-category facts and the largest individual resources without implying aggregates are additive. | **Retain the sectioned `Table`, not an outline.** The rows share stable size/reclaimability columns; sections make the two non-peer sets explicit. | Keep aggregate and resource sections distinct, and verify the system table does not look like an empty-band dashboard at real data densities. |
-| `Views/Stacks/StacksRootView.swift` | Traverse Compose project → service structure and compare service facts. | **Retain `Table(children:)` as an outline.** | Preserve disclosure/keyboard selection and do not flatten projects into a plain service table or cards. |
+| `Views/Stacks/StacksRootView.swift` | Traverse actual Compose project → service relationships; inspect one selected record’s facts or run contextual actions. | **Use `List(selection:)` + `OutlineGroup`, not `Table(children:)`.** The real-window observation showed the table’s unoccupied rows as repeated horizontal bands, while the task does not require side-by-side service comparison. | Keep the native disclosure/keyboard selection, row context menu, inspector `Form`, search filtering, source-editor boundary, and destructive confirmation. Recheck the current bundle in light/dark and narrow widths. |
 | `Views/Kubernetes/KubernetesRootView.swift` — pods | Compare flat pod records by namespace, phase, readiness, restarts, node, and age. | **Retain sortable `Table`.** | Keep selection, context menu, and inspector description load separate from the list. |
 | `Views/Kubernetes/KubernetesRootView.swift` — nodes | Compare flat node records by readiness, role, version, and age. | **Retain sortable `Table`.** | Keep node inspection in the system inspector; no tree is present in this data. |
 | `Views/Kubernetes/KubernetesRootView.swift` — recent events | Scan recent event records by reason, message, type, count, and last observation. | **Retain compact `Table`.** It supports cross-event comparison; it is not a container-log stream. | Keep the existing loading/error/empty states in the inspector and constrain the retained-event limit truthfully. |
@@ -47,17 +50,16 @@ The binding detail is in the [native macOS playbook](NATIVE-MACOS-PLAYBOOK.md#ch
 
 ## Result
 
-All 21 current `Table` uses have a task-shaped native justification. The one hierarchy
-is already an outline (`Stacks`); the two chart sample tables are required exact-value
-alternatives; configuration, source editing, logs, empty states, and selected-record
-facts already use their respective system patterns outside these tables. No localized
-table replacement is both clearly more correct and behavior-preserving, so this audit
-makes no source change beyond the decision record.
+The remaining 20 `Table` uses have a task-shaped native justification. `Stacks` is the
+one hierarchy that now uses a system `List` + `OutlineGroup`: its primary task is
+traversal, while the inspector owns service facts. The two chart sample tables remain
+required exact-value alternatives; configuration, source editing, logs, empty states,
+and selected-record facts use their respective system patterns outside tables.
 
 The remaining risk is visual and behavioral acceptance, not a missing generic
 container: evaluate each route in a current full window at normal and narrow widths,
-in light/dark appearance, with keyboard selection, sorting, column resizing, context
-menus, inspector transitions, and VoiceOver. A system table that still produces an
-empty-band/skeleton appearance at the tested density must be corrected by choosing a
-different system presentation for that specific task—not by styling rows or reviving a
-custom design system.
+in light/dark appearance, with keyboard selection, context menus, inspector
+transitions, and VoiceOver. A system table that still produces an empty-band/skeleton
+appearance at the tested density must be corrected by choosing a different system
+presentation for that specific task—not by styling rows or reviving a custom design
+system.

@@ -133,6 +133,33 @@ replacement Theme, Design, Style, or Appearance rendering module.
 | `Design/**`, `Theme.swift` | Materials, color, controls, focus/selection, accessibility | Removal staged — source verification pending | Keep only nonvisual domain semantics temporarily; eliminate routine rendering policy |
 | `Shots/**`, `LiveCapture.swift`, `mise.toml`, `mac/UITests/**` | Windows, accessibility/UI testing, visual validation | Synthetic renderer retired; real-window evidence harness in place | Foundation-only fixture invariants plus a text-only real-window route probe; the standard XCUITest host launches the assembled shipping bundle for WindowServer screenshots and accessibility evidence, followed by Computer Use |
 
+### 2026-08-03 Stacks hierarchy correction
+
+This decision supersedes the earlier `Views/Stacks/**` table-row reference to
+`Table(children:)` and its `.bordered` style hypothesis. The current task is to traverse
+real Compose project → service membership, select one record, and then inspect its rich
+metadata or invoke a contextually safe action; it is not a multi-column comparison task.
+The actual macOS screenshot showed `Table(children:)` extending its unused body as
+repeated horizontal bands, so that native container was not communicating the hierarchy
+well enough at the observed density.
+
+Consulted: Apple’s [outline views](https://developer.apple.com/design/human-interface-guidelines/outline-views),
+[lists and tables](https://developer.apple.com/design/human-interface-guidelines/lists-and-tables),
+SwiftUI [`List`](https://developer.apple.com/documentation/swiftui/list),
+[`OutlineGroup`](https://developer.apple.com/documentation/swiftui/outlinegroup),
+[`View.inspector`](https://developer.apple.com/documentation/swiftui/view/inspector(ispresented:content:)),
+and [`Form`](https://developer.apple.com/documentation/swiftui/form).
+
+`StacksRootView` therefore uses direct `List(selection:)` + `OutlineGroup` with one
+system `Label` for each actual project or service. The list retains native disclosure,
+keyboard selection, the selection-aware context menu and primary service action,
+filter-driven selection reconciliation, the existing inspector `Form`, and the current
+action and destructive-confirmation safety boundaries. It adds no material, cards,
+custom row treatment, or substitute visual system. Current-bundle light/dark,
+narrow-width, keyboard/VoiceOver, context-menu, inspector, and source-editing
+acceptance remain required; no build, test, Docker/VM action, or live-app interaction
+was performed for this source change.
+
 ## Charts audit: current concrete rule
 
 `ContainerStatsTab` currently contains the only real time-series visualization. It is

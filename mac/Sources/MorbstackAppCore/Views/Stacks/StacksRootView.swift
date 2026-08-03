@@ -56,15 +56,13 @@ final class TrackDComposeMetadata {
     }
 }
 
-// MARK: - Table sorting
-
 private enum StackOutlineID: Hashable {
     case project(String)
     case service(ContainerSummary.ID)
 }
 
-/// A single value type lets `Table(children:)` express the Compose outline through
-/// AppKit's native disclosure, selection, accessibility, and keyboard behavior.
+/// A single value type lets `OutlineGroup` express the Compose relationship through
+/// the system list's native disclosure, selection, accessibility, and keyboard behavior.
 private struct StackOutlineRow: Identifiable, Hashable {
 
     enum Kind: Hashable {
@@ -82,14 +80,6 @@ private struct StackOutlineRow: Identifiable, Hashable {
         }
     }
 
-    var stack: ComposeGroup {
-        switch kind {
-        case .project(let stack): stack
-        case .service:
-            preconditionFailure("A service outline row has no project payload")
-        }
-    }
-
     var service: ContainerSummary? {
         guard case .service(let service) = kind else { return nil }
         return service
@@ -101,51 +91,6 @@ private struct StackOutlineRow: Identifiable, Hashable {
         case .service(let service): service.composeService ?? service.displayName
         }
     }
-
-    var image: String {
-        service?.image ?? "—"
-    }
-
-    var status: String {
-        guard let service else {
-            return "\(stack.runningCount) of \(stack.containers.count) running"
-        }
-        return service.status.isEmpty ? service.state.capitalized : service.status
-    }
-
-    var ports: String {
-        service.map { $0.ports.map(\.label).joined(separator: ", ") } ?? "—"
-    }
-}
-
-private enum StackOutlineSortKey: Hashable {
-    case name, image, status, ports
-}
-
-private struct StackOutlineComparator: SortComparator {
-    typealias Compared = StackOutlineRow
-
-    var key: StackOutlineSortKey
-    var order: SortOrder = .forward
-
-    func compare(_ lhs: StackOutlineRow, _ rhs: StackOutlineRow) -> ComparisonResult {
-        let result: ComparisonResult
-        switch key {
-        case .name:
-            result = compare(lhs.displayName, rhs.displayName)
-        case .image:
-            result = compare(lhs.image, rhs.image)
-        case .status:
-            result = compare(lhs.status, rhs.status)
-        case .ports:
-            result = compare(lhs.ports, rhs.ports)
-        }
-        return order == .forward ? result : result.reversed
-    }
-
-    private func compare(_ lhs: String, _ rhs: String) -> ComparisonResult {
-        lhs.localizedStandardCompare(rhs)
-    }
 }
 
 // MARK: - Root
@@ -156,9 +101,6 @@ struct StacksRootView: View {
 
     @State private var metadata = TrackDComposeMetadata()
     @State private var query = ""
-    @State private var sortOrder: [StackOutlineComparator] = [
-        StackOutlineComparator(key: .name)
-    ]
     @State private var selection: StackOutlineID?
     @State private var showsInspector = true
     @State private var busyProjects: Set<String> = []
@@ -194,14 +136,18 @@ struct StacksRootView: View {
                 kind: .project(stack),
                 children: matchingServices
                     .map { StackOutlineRow(kind: .service($0), children: nil) }
-                    .sorted(using: sortOrder))
+                    .sorted { outlineRowsAreAscending($0, $1) })
         }
-        // Table sort descriptors apply independently to the root projects and to the
-        // services below each project; they never flatten the Compose hierarchy.
-        .sorted(using: sortOrder)
+        // Alphabetizing each level aids discovery without flattening the Compose
+        // parent → service relationship into an unrelated operational-record table.
+        .sorted { outlineRowsAreAscending($0, $1) }
     }
 
-    /// A table selection must always describe a row that is presently in the outline.
+    private func outlineRowsAreAscending(_ lhs: StackOutlineRow, _ rhs: StackOutlineRow) -> Bool {
+        lhs.displayName.localizedStandardCompare(rhs.displayName) == .orderedAscending
+    }
+
+    /// A list selection must always describe a row that is presently in the outline.
     /// Keeping this separate from `stacks` is intentional: a search can hide a live
     /// service without removing it from Docker, and its inspector must not continue to
     /// describe that hidden result.
@@ -268,7 +214,7 @@ struct StacksRootView: View {
                 Button("Remove", role: .destructive) {
                     removalTarget = nil
                     // The record can change while the confirmation is visible. Re-read
-                    // it from the current table data so a completed confirmation never
+                    // it from the current list data so a completed confirmation never
                     // turns into a silently unavailable lifecycle request.
                     if let currentService = services.first(where: { $0.id == service.id }),
                         canRemove(currentService)
@@ -484,7 +430,7 @@ struct StacksRootView: View {
         } else if visibleRows.isEmpty {
             ContentUnavailableView.search(text: query)
         } else {
-            table
+            outline
                 .inspector(isPresented: $showsInspector) {
                     inspector
                         .inspectorColumnWidth(min: 300, ideal: 360, max: 520)
@@ -492,48 +438,16 @@ struct StacksRootView: View {
         }
     }
 
-    private var table: some View {
-        Table(visibleRows, children: \.children, selection: $selection, sortOrder: $sortOrder) {
-            TableColumn("Name", sortUsing: StackOutlineComparator(key: .name)) { row in
+    private var outline: some View {
+        List(selection: $selection) {
+            OutlineGroup(visibleRows, children: \.children) { row in
                 Label(
                     row.displayName,
                     systemImage: row.service.map { stateSymbol(for: $0) } ?? "square.stack.3d.up")
-                    .help(row.service.map { $0.status.isEmpty ? $0.state : $0.status } ?? row.status)
+                    .tag(row.id)
+                    .help(row.service.map { $0.status.isEmpty ? $0.state : $0.status } ?? "Compose project")
             }
-            .width(min: 180, ideal: 260)
-
-            TableColumn("Image", sortUsing: StackOutlineComparator(key: .image)) { row in
-                Text(row.image)
-                    .font(.system(.body, design: .monospaced))
-                    .foregroundStyle(row.service == nil ? .tertiary : .secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            .width(min: 170, ideal: 280)
-
-            TableColumn("Status", sortUsing: StackOutlineComparator(key: .status)) { row in
-                Text(row.status)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
-            .width(min: 140, ideal: 190)
-
-            TableColumn("Ports", sortUsing: StackOutlineComparator(key: .ports)) { row in
-                Text(row.ports.isEmpty ? "—" : row.ports)
-                    .font(.system(.body, design: .monospaced))
-                    .foregroundStyle(row.service?.ports.isEmpty == false ? .secondary : .tertiary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
-            .width(min: 90, ideal: 150)
         }
-        // The automatic Tahoe table style renders unused rows as rounded, inset bands
-        // in this dense outline. Bordered is the system's native non-inset table
-        // treatment; it retains disclosure, selection, sorting, resizing, and
-        // accessibility without adding a Morbstack row style. It still needs the next
-        // latest-bundle Computer Use pass before this visual hypothesis is accepted.
-        .tableStyle(.bordered)
         .contextMenu(forSelectionType: StackOutlineID.self) { ids in
             contextMenu(for: ids)
         } primaryAction: { ids in
