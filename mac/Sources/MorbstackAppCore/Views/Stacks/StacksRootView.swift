@@ -164,6 +164,10 @@ struct StacksRootView: View {
     @State private var busyProjects: Set<String> = []
     @State private var busyServices: Set<ContainerSummary.ID> = []
     @State private var removalTarget: ContainerSummary?
+    /// A user-selected source document is intentionally separate from Compose metadata
+    /// inferred from running containers. Labels can describe a project, but they never
+    /// authorize Morbstack to open or write a file from the person's source tree.
+    @State private var composeFileEditor = ComposeFileEditor()
 
     /// Compose projects only. Unmanaged containers belong to the Containers browser.
     private var stacks: [ComposeGroup] {
@@ -283,6 +287,28 @@ struct StacksRootView: View {
             .onChange(of: visibleRowIDs) { _, _ in
                 reconcileSelectionWithVisibleRows()
             }
+            .sheet(
+                isPresented: Binding(
+                    get: { composeFileEditor.isPresented },
+                    set: { isPresented in
+                        if !isPresented { composeFileEditor.requestClose() }
+                    })
+            ) {
+                ComposeFileEditorSheet(editor: composeFileEditor)
+            }
+            .alert(
+                "Couldn’t Open Compose File",
+                isPresented: Binding(
+                    get: { composeFileEditor.openError != nil },
+                    set: { if !$0 { composeFileEditor.openError = nil } })
+            ) {
+                Button("OK", role: .cancel) { composeFileEditor.openError = nil }
+            } message: {
+                Text(composeFileEditor.openError ?? "")
+            }
+            .focusedSceneValue(
+                \.composeFileEditorCommandActions,
+                composeFileEditor.commandActions)
     }
 
     // MARK: Toolbar
@@ -309,6 +335,17 @@ struct StacksRootView: View {
                 }
                 .accessibilityLabel(showsInspector ? "Hide inspector" : "Show inspector")
                 .help(showsInspector ? "Hide inspector" : "Show inspector")
+            }
+        }
+
+        if selectedStack != nil {
+            ToolbarItem(id: "stacks.editComposeFile", placement: .secondaryAction) {
+                Button { chooseComposeFile() } label: {
+                    Image(systemName: "doc.text")
+                }
+                .disabled(composeFileEditor.isPresented)
+                .accessibilityLabel("Edit Compose file")
+                .help("Choose and edit a Compose YAML file")
             }
         }
 
@@ -743,6 +780,9 @@ struct StacksRootView: View {
                 Divider()
                 Button("Copy Compose File Path") { MorbPasteboard.copy(file) }
             }
+            Divider()
+            Button("Edit Compose File…") { chooseComposeFile() }
+                .disabled(composeFileEditor.isPresented)
         }
     }
 
@@ -770,6 +810,10 @@ struct StacksRootView: View {
             Button("Refresh") {
                 Task { await model.refreshAll() }
             }
+            Button("Choose Compose File…") {
+                chooseComposeFile()
+            }
+            .disabled(composeFileEditor.isPresented)
             Button("Copy Docker Context Command") {
                 MorbPasteboard.copy(TrackDLinks.dockerContextCommand(socketPath: MorbPaths.dockerSocket.path))
             }
@@ -845,6 +889,25 @@ struct StacksRootView: View {
     private func reconcileSelectionWithVisibleRows() {
         guard let selection, !visibleRowIDs.contains(selection) else { return }
         self.selection = nil
+    }
+
+    /// The project label shown in the inspector is observational Docker metadata. A
+    /// native Open panel is the only way this app obtains a Compose source URL, and
+    /// choosing it never runs Compose, reloads a stack, deploys changes, or writes any
+    /// file. The editor revalidates this selection before opening it.
+    private func chooseComposeFile() {
+        guard !composeFileEditor.isPresented else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.canCreateDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = ComposeFileEditor.yamlContentTypes
+        panel.allowsOtherFileTypes = false
+        panel.message = "Choose one Compose YAML source file to edit. Morbstack will not deploy or run it."
+        panel.prompt = "Edit"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        composeFileEditor.open(url)
     }
 
     private func portDescription(for service: ContainerSummary) -> String {

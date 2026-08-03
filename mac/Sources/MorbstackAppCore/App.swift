@@ -162,6 +162,7 @@ struct MorbCommands: Commands {
     @Binding var isCLISetupPresented: Bool
     @FocusedValue(\.routeRefreshAction) private var routeRefreshAction
     @FocusedValue(\.imageArchiveExportAction) private var imageArchiveExportAction
+    @FocusedValue(\.composeFileEditorCommandActions) private var composeFileEditorCommandActions
 
     var body: some Commands {
         // A deferred setup remains available from the standard application menu. This
@@ -211,6 +212,19 @@ struct MorbCommands: Commands {
                 imageArchiveExportAction?()
             }
             .disabled(imageArchiveExportAction == nil)
+        }
+
+        CommandMenu("Compose") {
+            Button("Save Compose File") {
+                composeFileEditorCommandActions?.save()
+            }
+            .keyboardShortcut("s", modifiers: .command)
+            .disabled(composeFileEditorCommandActions?.canSave != true)
+
+            Button("Discard Compose Changes") {
+                composeFileEditorCommandActions?.discard()
+            }
+            .disabled(composeFileEditorCommandActions?.canDiscard != true)
         }
 
         CommandGroup(after: .newItem) {
