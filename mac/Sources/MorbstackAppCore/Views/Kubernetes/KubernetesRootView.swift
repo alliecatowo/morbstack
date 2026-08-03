@@ -38,6 +38,58 @@ private enum KubernetesLifecycleRequest: Hashable, Identifiable {
     }
 }
 
+/// A standard sheet for the daemon's read-only recovery diagnosis. This is a Form,
+/// not an alert: the user can inspect several persistent facts and choose a real next
+/// action without an interruption designed for an immediate confirmation.
+private struct KubernetesDiagnosisSheet: View {
+
+    let diagnosis: K8s.Diagnosis
+    let performAction: (K8s.Diagnosis.RecommendedAction) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        Form {
+            Section("Cluster") {
+                LabeledContent("Phase", value: diagnosis.status.phase.summary)
+                LabeledContent("Nodes", value: "\(diagnosis.status.nodesReady) of \(diagnosis.status.nodes) ready")
+                LabeledContent("Pods", value: "\(diagnosis.status.podsReady) of \(diagnosis.status.pods) ready")
+                LabeledContent("API Forward") {
+                    Text(diagnosis.hostAPIServerPort.map { "127.0.0.1:\($0)" } ?? "Not published")
+                        .font(.system(.body, design: .monospaced))
+                        .textSelection(.enabled)
+                }
+                LabeledContent("Kubeconfig", value: diagnosis.kubeconfigExists ? "Available" : "Not generated")
+            }
+
+            Section("Recovery") {
+                LabeledContent("Recommended Action", value: diagnosis.recommendedAction.displayName)
+                Text(diagnosis.summary)
+                Text(diagnosis.guidance)
+                    .foregroundStyle(.secondary)
+                if let warning = diagnosis.persistenceWarning {
+                    Label(warning, systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.secondary)
+                }
+                if let title = diagnosis.recommendedAction.buttonTitle {
+                    Button(title) {
+                        performAction(diagnosis.recommendedAction)
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .frame(minWidth: 460, idealWidth: 520, minHeight: 310, idealHeight: 360)
+        .navigationTitle("Kubernetes Recovery")
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Done") { dismiss() }
+            }
+        }
+    }
+}
+
 private enum KubernetesNodeSortKey {
     case name
     case ready
@@ -146,6 +198,9 @@ struct KubernetesRootView: View {
     @State private var kubeconfigCopied = false
     @State private var hasKubeconfig = false
     @State private var isGeneratingKubeconfig = false
+    @State private var diagnosis: K8s.Diagnosis?
+    @State private var showsRecoveryGuidance = false
+    @State private var isDiagnosing = false
     @State private var clusterError: String?
     @State private var resourceError: String?
     @State private var resourceNeedsKubeconfig = false
@@ -246,6 +301,11 @@ struct KubernetesRootView: View {
             } message: { request in
                 Text(request.message)
             }
+            .sheet(isPresented: $showsRecoveryGuidance) {
+                if let diagnosis {
+                    KubernetesDiagnosisSheet(diagnosis: diagnosis, performAction: performRecoveryAction)
+                }
+            }
             .task(id: model.engine.isRunning) {
                 await refreshCluster()
             }
@@ -304,6 +364,10 @@ struct KubernetesRootView: View {
                     }
                 }
                 Divider()
+                Button("Diagnose Kubernetes") {
+                    Task { await presentRecoveryGuidance() }
+                }
+                .disabled(isDiagnosing)
                 Button("Generate Kubeconfig") {
                     Task { await generateKubeconfig() }
                 }
@@ -341,9 +405,7 @@ struct KubernetesRootView: View {
             do {
                 status = try await provider.setEnabled(request == .enable)
                 clusterError = nil
-                if status.phase != .starting {
-                    await reloadResources()
-                }
+                await refreshCluster()
             } catch {
                 clusterError = MorbErrorMessage.text(for: error)
             }
@@ -369,16 +431,18 @@ struct KubernetesRootView: View {
             hasKubeconfig = FileManager.default.fileExists(atPath: path.path)
             resourceError = nil
             resourceNeedsKubeconfig = false
-            await reloadResources()
+            await refreshCluster()
         } catch {
             resourceError = MorbErrorMessage.text(for: error)
         }
     }
 
     private func refreshCluster() async {
-        hasKubeconfig = FileManager.default.fileExists(atPath: K8s.defaultKubeconfigURL.path)
         do {
-            status = try await provider.currentStatus()
+            let diagnosis = try await provider.diagnosis()
+            self.diagnosis = diagnosis
+            status = diagnosis.status
+            hasKubeconfig = diagnosis.kubeconfigExists
             clusterError = nil
             await reloadResources()
         } catch {
@@ -386,6 +450,7 @@ struct KubernetesRootView: View {
             pods = []
             selectedNodeID = nil
             selectedPodID = nil
+            diagnosis = nil
             clusterError = MorbErrorMessage.text(for: error)
         }
     }
@@ -401,15 +466,44 @@ struct KubernetesRootView: View {
             }
             guard !Task.isCancelled else { return }
             do {
-                status = try await provider.currentStatus()
+                let diagnosis = try await provider.diagnosis()
+                self.diagnosis = diagnosis
+                status = diagnosis.status
+                hasKubeconfig = diagnosis.kubeconfigExists
                 clusterError = nil
             } catch {
+                diagnosis = nil
                 clusterError = MorbErrorMessage.text(for: error)
                 return
             }
         }
         guard !Task.isCancelled else { return }
         await reloadResources()
+    }
+
+    /// Request a fresh, daemon-authored recovery report before presenting it. The app
+    /// never derives actions from stale table data or starts/stops Kubernetes merely
+    /// because the user asked to inspect its state.
+    private func presentRecoveryGuidance() async {
+        guard !isDiagnosing else { return }
+        isDiagnosing = true
+        defer { isDiagnosing = false }
+        await refreshCluster()
+        guard diagnosis != nil, clusterError == nil else { return }
+        showsRecoveryGuidance = true
+    }
+
+    private func performRecoveryAction(_ action: K8s.Diagnosis.RecommendedAction) {
+        switch action {
+        case .enableKubernetes:
+            lifecycleRequest = .enable
+        case .refreshStatus:
+            Task { await refreshCluster() }
+        case .generateKubeconfig:
+            Task { await generateKubeconfig() }
+        case .none:
+            break
+        }
     }
 
     private func reloadResources() async {
@@ -505,7 +599,7 @@ struct KubernetesRootView: View {
         } actions: {
             ProgressView()
                 .controlSize(.small)
-            Button("Refresh Status") { Task { await refreshCluster() } }
+            Button("View Recovery Guidance") { Task { await presentRecoveryGuidance() } }
         }
     }
 

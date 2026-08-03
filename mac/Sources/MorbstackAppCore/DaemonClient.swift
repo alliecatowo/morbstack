@@ -144,6 +144,29 @@ class DaemonClient: @unchecked Sendable {
         try await decodeKubernetesStatus(command: "k8s-status")
     }
 
+    /// Reads the daemon's read-only Kubernetes recovery diagnosis. The daemon derives
+    /// it from the same guest status used by ``kubernetesStatus()``, plus its actual
+    /// loopback API forward and Morbstack-owned kubeconfig; the app does not infer a
+    /// recovery action from fixture-style assumptions.
+    func diagnoseKubernetes() async throws -> K8s.Diagnosis {
+        let fields = try await kubernetesCommand("k8s-diagnose")
+        let status = try decodeKubernetesStatus(fields)
+        let port: Int?
+        if case .int(let value)? = fields["host_api_port"] {
+            port = value
+        } else {
+            port = nil
+        }
+        let kubeconfigExists: Bool
+        if case .bool(let value)? = fields["kubeconfig_exists"] {
+            kubeconfigExists = value
+        } else {
+            throw MorbError.protocolViolation("morbstackd returned no kubeconfig status")
+        }
+        return K8s.Diagnosis(
+            status: status, hostAPIServerPort: port, kubeconfigExists: kubeconfigExists)
+    }
+
     /// Explicitly enables the local cluster. The app only exposes this after the
     /// engine is running, so unlike the CLI it does not need to spawn a daemon here.
     func enableKubernetes() async throws -> K8s.Status {
@@ -175,6 +198,10 @@ class DaemonClient: @unchecked Sendable {
 
     private func decodeKubernetesStatus(command: String) async throws -> K8s.Status {
         let fields = try await kubernetesCommand(command)
+        return try decodeKubernetesStatus(fields)
+    }
+
+    private func decodeKubernetesStatus(_ fields: [String: AnyCodableValue]) throws -> K8s.Status {
         do {
             return try JSONDecoder().decode(K8s.Status.self, from: JSONEncoder().encode(fields))
         } catch {

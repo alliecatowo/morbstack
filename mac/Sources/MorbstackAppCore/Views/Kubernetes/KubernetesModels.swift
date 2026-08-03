@@ -117,6 +117,9 @@ enum K8sResourceAccessError: LocalizedError, Sendable {
 @MainActor
 protocol K8sClusterProviding: AnyObject {
     func currentStatus() async throws -> K8s.Status
+    /// Real recovery guidance reconciled by the daemon from the guest status and the
+    /// host API-forward/kubeconfig facts. It performs no Kubernetes mutations.
+    func diagnosis() async throws -> K8s.Diagnosis
     func setEnabled(_ enabled: Bool) async throws -> K8s.Status
     func resources() async throws -> K8sClusterResources
     /// Writes only Morbstack's private, app-owned kubeconfig. It never edits
@@ -142,6 +145,10 @@ final class K8sDaemonClient: K8sClusterProviding {
 
     func currentStatus() async throws -> K8s.Status {
         try await daemon.kubernetesStatus()
+    }
+
+    func diagnosis() async throws -> K8s.Diagnosis {
+        try await daemon.diagnoseKubernetes()
     }
 
     func setEnabled(_ enabled: Bool) async throws -> K8s.Status {
@@ -194,6 +201,13 @@ final class K8sFixtureClient: K8sClusterProviding {
     }
 
     func currentStatus() async throws -> K8s.Status { status }
+
+    func diagnosis() async throws -> K8s.Diagnosis {
+        K8s.Diagnosis(
+            status: status,
+            hostAPIServerPort: status.phase == .ready ? K8s.guestAPIServerPort : nil,
+            kubeconfigExists: false)
+    }
 
     func setEnabled(_ enabled: Bool) async throws -> K8s.Status {
         guard enabled != status.enabled else { return status }

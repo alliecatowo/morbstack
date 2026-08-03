@@ -394,7 +394,7 @@ public final class Daemon {
 
     /// One `k8s-*` command.
     ///
-    /// Split into four command names rather than one `k8s` with an argument so
+    /// Split into named commands rather than one `k8s` with an argument so
     /// ``MorbCommandPolicy`` can treat them differently: `k8s-enable` is allowed to
     /// bring a daemon up, because "give me a cluster" implies "give me an engine",
     /// while `k8s-status` must never create the thing it was asked to describe.
@@ -408,6 +408,18 @@ public final class Daemon {
             switch request.cmd {
             case "k8s-status":
                 return .success(try k8s.status().ipcFields)
+            case "k8s-diagnose":
+                // This is a read-only reconciliation of the guest's status with two
+                // host facts only the daemon can see: the readiness-gated loopback
+                // listener and Morbstack's own kubeconfig. It must not install,
+                // restart, or otherwise "repair" a workload while diagnosing it.
+                let status = try k8s.status()
+                let diagnosis = K8s.Diagnosis(
+                    status: status,
+                    hostAPIServerPort: k8s.forward.boundPort,
+                    kubeconfigExists: FileManager.default.fileExists(
+                        atPath: K8s.defaultKubeconfigURL.path))
+                return .success(diagnosis.ipcFields)
             case "k8s-enable":
                 markBusy()
                 let status = try k8s.enable()
@@ -533,7 +545,7 @@ public final class Daemon {
             // idle suspend.
             return .success(["shares": MorbShareSurface.encode(liveShares())])
 
-        case "k8s-status", "k8s-enable", "k8s-disable", "k8s-kubeconfig":
+        case "k8s-status", "k8s-diagnose", "k8s-enable", "k8s-disable", "k8s-kubeconfig":
             return handleK8s(request)
 
         case "start":

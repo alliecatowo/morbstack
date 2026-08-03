@@ -39,6 +39,7 @@ not a pull event, because there is nothing to pull.
 ```sh
 morb k8s enable      # installs the payload if needed, then starts the cluster
 morb k8s status      # installed / enabled / phase / node & pod readiness
+morb k8s diagnose    # read-only recovery guidance from guest and daemon facts
 morb k8s kubeconfig  # writes ~/.morbstack/kubeconfig
 morb k8s disable      # stops the cluster; the payload and its data are kept
 ```
@@ -50,6 +51,28 @@ an implementation detail escaping into the interface. The payload (`k3s`
 [`protocol.md`](protocol.md) §3.3) is sha256-verified on both ends and
 skipped if the guest already has a byte-identical copy, so the second and
 later `enable` calls do no transfer at all.
+
+### Diagnosing recovery
+
+`morb k8s diagnose` is a read-only reconciliation, not a repair command. It
+combines the guest's authoritative `k8s_status` reply (installation,
+enablement, ready-node and pod counts, plus its current message) with the
+daemon's actual loopback API-forward port and the presence of Morbstack's
+private kubeconfig. It then recommends exactly one existing safe action:
+
+- enable Kubernetes when the cluster is off or not installed;
+- refresh status while the guest is still bringing a node up or the API
+  forward is reconciling; or
+- generate Morbstack's private kubeconfig when the cluster is ready but the
+  host has none.
+
+The app exposes the same report in a native recovery sheet, with only that
+recommended action. Neither surface restarts k3s, deletes pods, changes
+workloads, or edits `~/.kube/config` while diagnosing. Run `morb start`
+first when the VM is stopped: a guest status is required to make a truthful
+recommendation. The current guest protocol has no structured service logs or
+per-workload recovery operations, so those remain intentionally outside this
+diagnosis rather than being guessed from pod counts.
 
 ### The kubeconfig rule
 

@@ -56,6 +56,7 @@ let usage = """
       rosetta install --print-plan
                              Print exactly what that would do, and stop.
       k8s status             Show whether the cluster is installed, on, and Ready
+      k8s diagnose           Show real cluster recovery guidance without changing it
       k8s enable             Install the payload if needed, then start the cluster
       k8s disable            Stop the cluster; the payload and its state are kept
       k8s kubeconfig         Write ~/.morbstack/kubeconfig and say how to use it
@@ -1540,7 +1541,7 @@ case "k8s":
     // that `MorbCommandPolicy` can let `enable` start a daemon while `status`
     // stays an observation that does not change what it observes.
     let action = extraArguments.first(where: { !$0.hasPrefix("-") }) ?? "status"
-    let known = ["status", "enable", "disable", "kubeconfig"]
+    let known = ["status", "diagnose", "enable", "disable", "kubeconfig"]
     guard known.contains(action) else {
         fail("unknown k8s subcommand `\(action)`; expected one of \(known.joined(separator: ", "))", code: 2)
     }
@@ -1583,10 +1584,39 @@ case "k8s":
         }
     }
 
+    /// Render the daemon's structured recovery plan. The command never performs the
+    /// suggested action; its value is identifying which existing, safe operation fits
+    /// the guest's current status and the host's actual API-forward/kubeconfig facts.
+    func renderK8sDiagnosis(_ data: [String: AnyCodableValue]) {
+        renderK8sStatus(data, verb: "diagnose")
+        out("")
+        printAligned([
+            ("API forward", data["host_api_port"].map { value in
+                value == .null ? "not published" : "127.0.0.1:\(value.displayString)"
+            } ?? "unknown"),
+            ("kubeconfig", data["kubeconfig_exists"]?.displayString ?? "unknown"),
+            ("next action", data["recovery_action"]?.displayString ?? "unknown"),
+        ])
+        if let summary = data["summary"]?.displayString, !summary.isEmpty, data["summary"] != .null {
+            out("\n  \(summary)")
+        }
+        if let guidance = data["guidance"]?.displayString, !guidance.isEmpty, data["guidance"] != .null {
+            out("  \(guidance)")
+        }
+        if let warning = data["persistence_warning"]?.displayString,
+           !warning.isEmpty, data["persistence_warning"] != .null {
+            out("  Warning: \(warning)")
+        }
+    }
+
     switch action {
     case "status", "enable", "disable":
         let response = callDaemon(DaemonRequest(cmd: "k8s-\(action)"), timeout: 300)
         finish(response) { data in renderK8sStatus(data, verb: action) }
+
+    case "diagnose":
+        let response = callDaemon(DaemonRequest(cmd: "k8s-diagnose"), timeout: 30)
+        finish(response) { data in renderK8sDiagnosis(data) }
 
     default:  // kubeconfig
         let merge = extraArguments.contains("--merge")

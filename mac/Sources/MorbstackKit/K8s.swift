@@ -179,6 +179,121 @@ public enum K8s {
         }
     }
 
+    /// The next safe recovery step derived from the guest's current cluster status
+    /// and two host facts the daemon owns: its loopback API forward and Morbstack's
+    /// private kubeconfig.
+    ///
+    /// This is intentionally guidance, not a second Kubernetes control plane. The
+    /// guest remains the authority for installation, enablement, readiness, and its
+    /// explanatory message. A recommendation can only name an operation Morbstack
+    /// already performs truthfully (`enable`, `status`, or writing its own
+    /// kubeconfig); it never invents workload repair, pod deletion, or restart
+    /// commands that the daemon cannot constrain safely.
+    public struct Diagnosis: Equatable, Sendable {
+
+        /// The one concrete, reversible next step that is safe for the reported state.
+        public enum RecommendedAction: String, Equatable, Sendable {
+            /// Install (when needed) and start the local cluster.
+            case enableKubernetes = "enable-kubernetes"
+            /// Ask the existing guest monitor for a newer readiness reading.
+            case refreshStatus = "refresh-status"
+            /// Write Morbstack's private kubeconfig from the ready guest.
+            case generateKubeconfig = "generate-kubeconfig"
+            /// The status already supplies all required recovery actions.
+            case none
+
+            /// A system-button label for the actual action, when one is needed.
+            public var buttonTitle: String? {
+                switch self {
+                case .enableKubernetes: "Enable Kubernetes"
+                case .refreshStatus: "Refresh Status"
+                case .generateKubeconfig: "Generate Kubeconfig"
+                case .none: nil
+                }
+            }
+
+            /// A factual, noun-free description for an inspector or Form row.
+            public var displayName: String {
+                buttonTitle ?? "No action required"
+            }
+        }
+
+        /// The guest's latest authoritative status reply.
+        public var status: Status
+        /// Host loopback port that currently forwards the ready API server, if any.
+        public var hostAPIServerPort: Int?
+        /// Whether Morbstack's app-owned kubeconfig currently exists on the host.
+        public var kubeconfigExists: Bool
+        /// A warning that must not be hidden behind a lifecycle recommendation.
+        public var persistenceWarning: String?
+        /// The one safe next action for this state.
+        public var recommendedAction: RecommendedAction
+        /// Short result suitable for a CLI row or a native Form section header.
+        public var summary: String
+        /// Specific recovery guidance, including the guest's own message when present.
+        public var guidance: String
+
+        public init(
+            status: Status,
+            hostAPIServerPort: Int?,
+            kubeconfigExists: Bool
+        ) {
+            self.status = status
+            self.hostAPIServerPort = hostAPIServerPort
+            self.kubeconfigExists = kubeconfigExists
+            persistenceWarning = status.persistent
+                ? nil
+                : "The guest reports RAM-backed Docker data, so Kubernetes state will be lost when the engine stops."
+
+            let guestMessage = status.message.trimmingCharacters(in: .whitespacesAndNewlines)
+            switch status.phase {
+            case .notInstalled, .stopped:
+                recommendedAction = .enableKubernetes
+                if status.installed {
+                    summary = "Kubernetes is installed but turned off."
+                    guidance = "Enable Kubernetes to start the local k3s control plane."
+                } else {
+                    summary = "Kubernetes is not installed in the guest."
+                    guidance = "Enable Kubernetes to transfer Morbstack’s pinned payload and start the local k3s control plane."
+                }
+
+            case .starting:
+                recommendedAction = .refreshStatus
+                summary = "Kubernetes has not reported a ready node yet."
+                guidance = guestMessage.isEmpty
+                    ? "Wait for the guest monitor to report a ready node, then refresh status."
+                    : guestMessage
+
+            case .ready:
+                if !kubeconfigExists {
+                    recommendedAction = .generateKubeconfig
+                    summary = "Kubernetes is ready, but Morbstack’s kubeconfig has not been generated."
+                    guidance = "Generate Morbstack’s private kubeconfig before connecting to the local API from this Mac."
+                } else if hostAPIServerPort == nil {
+                    recommendedAction = .refreshStatus
+                    summary = "Kubernetes is ready, and the API forward is still reconciling."
+                    guidance = "Refresh status. Morbstack only publishes the loopback API endpoint after the guest reports a ready node."
+                } else {
+                    recommendedAction = .none
+                    summary = "Kubernetes is ready and reachable through Morbstack’s local API forward."
+                    guidance = "No recovery action is required. Inspect cluster resources or use the generated kubeconfig."
+                }
+            }
+        }
+
+        /// The `data` bag for `morb k8s diagnose --json` and the native app client.
+        public var ipcFields: [String: AnyCodableValue] {
+            var fields = status.ipcFields
+            fields["host_api_port"] = hostAPIServerPort.map { .int($0) } ?? .null
+            fields["kubeconfig_exists"] = .bool(kubeconfigExists)
+            fields["persistence_warning"] = persistenceWarning.map { .string($0) } ?? .null
+            fields["recovery_action"] = .string(recommendedAction.rawValue)
+            fields["summary"] = .string(summary)
+            fields["guidance"] = .string(guidance)
+            return fields
+        }
+    }
+
     /// The guest's `k8s_kubeconfig` reply.
     public struct KubeconfigReply: Codable, Equatable, Sendable {
         public var type: String
