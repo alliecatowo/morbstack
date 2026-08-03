@@ -28,7 +28,8 @@ This plan keeps three kinds of evidence separate:
 - A product action is only available when its service boundary is real. For
   example, `morb debug` is an inspection plan, not a shell; current domains
   are inactive claim models, not hostname routing; and the share-event
-  contract reports `unavailable`, not hot reload.
+  contract reports `unavailable`, not hot reload. The guest's retained
+  version-1 record shape is compatibility metadata, not an event receiver.
 
 ## P0 — release blockers for a credible Docker Desktop replacement
 
@@ -39,6 +40,8 @@ This plan keeps three kinds of evidence separate:
 consent for, and reversibly installs user-owned links/plugins/context/direct
 socket integration. It intentionally preserves a conflicting Docker context,
 PATH selection, or socket. The native first-run sheet uses the same model.
+`morb context use` also refuses to treat the `morbstack` name as success when
+that registered context points at a different socket.
 
 **Remaining implementation decision:** make the durable, no-window runtime
 choice unmistakable in onboarding. A per-user background service is present
@@ -70,9 +73,12 @@ language toolchain.
 ### P0.3 Never acknowledge an unusable Docker resource as successful
 
 **Current foundation:** `DockerProxy`/`PortForwarder` holds a supported fixed
-loopback TCP listener through the recognized create/start exchange and can
-reclaim it for a canonical full-ID restart. The guest now has targeted
-`/tmp` sharing and `host.docker.internal`/`gateway.docker.internal` code.
+loopback TCP listener through the recognized create/start exchange, supports a
+narrow bounded explicit-empty TCP allocation transaction, and can reclaim a
+fixed lease for a canonical full-ID restart. Snapshot reconciliation withholds
+a TCP or UDP endpoint if Docker reports competing targets rather than choosing
+one by response order. The guest now has targeted `/tmp` sharing and
+`host.docker.internal`/`gateway.docker.internal` code.
 
 **Work:** run a new real-VM follow-up for historical checks #9, #18, and #19,
 then prove fixed TCP conflict and restart behavior. For every remaining
@@ -113,12 +119,13 @@ non-Morbstack configuration.
    acknowledgement, overflow/rescan behavior, stop/restart recovery, and
    real Node/Python/Go watcher evidence.
 2. **Finish escape-hatch workflows.** Run the existing reviewed native
-   image/volume migration workflows through a real two-engine matrix, then
-   harden volume transfer with a final reprepare/review at Transfer time. Add
-   grow-only disk expansion only with a stopped-VM journal, guest filesystem
-   resize, and postcondition check. Keep `morb debug` unavailable until a
-   verified toolbox asset, consented acquisition, isolation, cleanup, and
-   duplex TTY are all real.
+   image/volume migration workflows through a real two-engine matrix. The
+   volume flow now performs a final Transfer-click reprepare and returns a
+   changed plan to review before it can write; prove that boundary against real
+   engines. Add grow-only disk expansion only with a stopped-VM journal, guest
+   filesystem resize, and postcondition check. Keep `morb debug` unavailable
+   until a verified toolbox asset, consented acquisition, isolation, cleanup,
+   and duplex TTY are all real.
 3. **Turn local services into a Mac-native advantage.** After P0/P1.1,
    implement opt-in exact `*.morb.local` claim reconciliation, narrow
    loopback HTTP routing, and only then separately consented local HTTPS/CA
