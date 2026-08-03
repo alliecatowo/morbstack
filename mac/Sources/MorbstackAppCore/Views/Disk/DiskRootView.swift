@@ -3,20 +3,9 @@
 //
 // The Disk screen.
 //
-// One question, asked and answered above the fold: *where did my disk go, and how much
-// of it can I have back?* A stacked bar answers the first at a glance, a same-hue dimmed
-// tail answers the second in the same pixels, and four prune buttons act on it — each
-// behind a sheet that names what it is about to delete.
-//
-// A sunburst was the obvious first idea and the wrong one: four categories with a
-// three-orders-of-magnitude spread render as one circle and three invisible slivers, and
-// a ring cannot show "of this, that much is garbage" without a second ring nobody can
-// read. A single bar with a dimmed tail shows both facts in one shape, and — per
-// `docs/design/IDENTITY.md` §2.5 — without the diagonal hatching the previous build used,
-// which reads as a moiré artefact rather than as "reclaimable" at the sizes this bar
-// actually renders at.
-//
-// All the arithmetic lives in `TrackCDiskMath`; this file is only the drawing.
+// This is an operational screen, not a storage dashboard. The native rows below answer
+// the useful questions directly: how much is used, what is reclaimable, and which
+// resources are worth investigating or pruning.
 
 import SwiftUI
 
@@ -42,13 +31,35 @@ extension TrackCDiskCategory {
     }
 }
 
+// MARK: - Largest items
+
+/// A named resource in the disk screen's single, size-ordered list.
+///
+/// Keeping images and volumes in one table avoids the dashboard-like pair of miniature
+/// tables that used to compete for attention below the usage bar. The source stays
+/// visible, but the one question here is simply "what is largest?".
+private struct TrackCDiskLargestItem: Identifiable {
+
+    enum Kind: String {
+        case image
+        case volume
+
+        var title: String { self == .image ? "Image" : "Volume" }
+        var symbol: String { self == .image ? "square.on.square" : "externaldrive" }
+    }
+
+    let kind: Kind
+    let item: TrackCNamedSize
+
+    var id: String { "\(kind.rawValue):\(item.id)" }
+}
+
 // MARK: - Root
 
 struct DiskRootView: View {
 
     let model: AppModel
 
-    @State private var highlighted: TrackCDiskCategory?
     @State private var pruning: TrackCPruneTarget?
     @State private var footprint: TrackCDiskImageFootprint?
     @State private var busy = false
@@ -80,18 +91,32 @@ struct DiskRootView: View {
     }
 
     private var subtitle: String {
-        guard model.disk != nil else { return "Waiting for the engine" }
+        guard model.disk != nil else {
+            return model.engine.isRunning ? "Calculating usage…" : "Engine isn't running"
+        }
         return "\(Formatters.bytesString(usage.total)) in use · \(Formatters.bytesString(usage.reclaimable)) reclaimable"
     }
 
     var body: some View {
         Group {
-            if model.disk == nil {
+            if model.disk == nil, model.engine.isRunning {
                 MorbEmptyState(
-                    "No usage data yet",
-                    systemImage: "chart.pie",
-                    description: "Disk usage comes from the engine. Start it and this fills in — the first "
-                        + "calculation walks every layer, so give it a moment.")
+                    "Calculating disk usage",
+                    systemImage: "internaldrive",
+                    description: "Morbstack is reading the engine's storage records. This can take a little longer on a large image store.",
+                    actionTitle: "Try Again"
+                ) {
+                    Task { await model.refreshDisk() }
+                }
+            } else if model.disk == nil {
+                MorbEmptyState(
+                    "The engine isn't running",
+                    systemImage: "internaldrive",
+                    description: "Start the engine to see Docker images, containers, volumes and build cache on disk.",
+                    actionTitle: model.engine.state == "suspended" ? "Resume Engine" : "Start Engine"
+                ) {
+                    Task { await model.engineAction(.start) }
+                }
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: Theme.space6) {
@@ -146,8 +171,9 @@ struct DiskRootView: View {
             Button {
                 Task { await refresh() }
             } label: {
-                Label("Recalculate", systemImage: "arrow.triangle.2.circlepath")
+                Image(systemName: "arrow.triangle.2.circlepath")
             }
+            .accessibilityLabel("Recalculate disk usage")
             .disabled(busy)
             .help("Recalculate disk usage — the engine walks every layer, so this is not instant")
         }
@@ -155,38 +181,27 @@ struct DiskRootView: View {
 
     // MARK: Usage summary
     //
-    // The one thing on this screen that earns a custom drawing rather than a system
-    // container: a real chart, not a card. `TrackCStackedBar` is a `Canvas`, not a
-    // painted panel — it carries no fill, no hairline border and no card chrome of its
-    // own, so it is not what the "delete the cards" instruction is about. It sits
-    // directly on the window's content background, restrained to two numbers and one
-    // bar rather than the four-card spread this replaces.
+    // The previous full-width, multi-colour canvas read as a dashboard hero rather than
+    // an operational fact. The category table below already has the useful breakdown;
+    // a compact native key/value summary lets that table carry the visual hierarchy.
 
     private var usageSummary: some View {
         VStack(alignment: .leading, spacing: Theme.space4) {
-            HStack(alignment: .firstTextBaseline, spacing: Theme.space6) {
-                let total = splitBytes(usage.total)
-                MorbMetric(value: total.value, unit: total.unit, caption: "used by Docker", emphasis: .leading)
-                if usage.reclaimable > 0 {
-                    let reclaim = splitBytes(usage.reclaimable)
-                    MorbMetric(value: reclaim.value, unit: reclaim.unit, caption: "reclaimable", tone: Theme.statusBusy)
-                }
-                Spacer(minLength: Theme.space3)
-            }
-
-            TrackCStackedBar(segments: segments, highlighted: highlighted)
-                .frame(height: 30)
-                .morbAnimation(.fade, value: highlighted)
-
-            HStack(spacing: Theme.space2) {
-                Text("Layers on disk")
-                    .foregroundStyle(.tertiary)
+            MorbSectionHeader("Storage", symbol: "internaldrive")
+            LabeledContent("Shared image layers") {
                 MorbNumber(Formatters.bytesString(usage.layersSize))
-                Text("— shared base layers are counted once, so this is smaller than the sum of image sizes.")
-                    .foregroundStyle(.tertiary)
-                Spacer()
             }
-            .font(.caption2)
+            LabeledContent("Used by Docker") {
+                MorbNumber(Formatters.bytesString(usage.total), tone: .primary, font: .body)
+            }
+            if usage.reclaimable > 0 {
+                LabeledContent("Reclaimable") {
+                    MorbNumber(Formatters.bytesString(usage.reclaimable), tone: Theme.statusBusy, font: .body)
+                }
+            }
+            Text("Shared base layers are counted once, so their total can be smaller than the sum of image sizes.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -215,11 +230,14 @@ struct DiskRootView: View {
                 }
                 .width(min: 96, ideal: 130, max: 180)
                 TableColumn("") { segment in
-                    Button("Prune", role: .destructive) {
+                    Button(role: .destructive) {
                         pruning = segment.category.pruneTarget
+                    } label: {
+                        Image(systemName: "trash")
                     }
                     .buttonStyle(.borderless)
                     .controlSize(.small)
+                    .accessibilityLabel("Prune \(segment.category.title)")
                     .disabled(busy)
                     .help(segment.category.pruneSummary)
                     .frame(height: Theme.rowStandard, alignment: .trailing)
@@ -227,8 +245,7 @@ struct DiskRootView: View {
                 }
                 .width(min: 50, ideal: 60, max: 70)
             }
-            .tableStyle(.inset)
-            .alternatingRowBackgrounds()
+            .tableStyle(.automatic)
             .frame(height: Theme.rowGroupHeader + CGFloat(segments.count) * Theme.rowStandard)
         }
     }
@@ -243,10 +260,6 @@ struct DiskRootView: View {
                 .font(.caption2)
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
-        }
-        .contentShape(Rectangle())
-        .onHover { hovering in
-            highlighted = hovering ? segment.category : (highlighted == segment.category ? nil : highlighted)
         }
     }
 
@@ -267,57 +280,61 @@ struct DiskRootView: View {
         return Formatters.percent(segment.fraction(of: usage.total) * 100)
     }
 
-    // MARK: Biggest items
+    // MARK: Largest items
     //
-    // The named offenders behind two of the four categories. The categories answer
-    // *where* the disk went; they cannot answer *what to delete*. "Volumes, 13.26 GB" is
-    // a fact you can do nothing with. "shopfront_uploads, 3.22 GB" is a decision. Images
-    // and volumes only: containers and build cache are aggregates the engine reports as
-    // a lump. Real `Table`s, not hand-drawn progress bars — the size column, already
-    // sorted largest first, says everything a bar underneath it would have repeated.
+    // The category table answers where the bytes went; this one answers what is actually
+    // large enough to investigate. A single `Table` gives the content hierarchy of a Mac
+    // utility rather than a two-card dashboard.
 
-    /// How many rows each table shows before it would rather scroll than grow.
+    /// How many image and volume candidates to consider for the combined table.
     private static let biggestRows = 5
 
-    @ViewBuilder
-    private var biggestSection: some View {
-        let topImages = TrackCDiskMath.largestImages(model.images, limit: Self.biggestRows)
-        let topVolumes = TrackCDiskMath.largestVolumes(model.volumes, limit: Self.biggestRows)
-
-        if !topImages.isEmpty || !topVolumes.isEmpty {
-            HStack(alignment: .top, spacing: Theme.space5) {
-                if !topImages.isEmpty {
-                    biggestTable(title: "Largest Images", symbol: "shippingbox", items: topImages)
-                }
-                if !topVolumes.isEmpty {
-                    biggestTable(title: "Largest Volumes", symbol: "externaldrive", items: topVolumes)
-                }
-            }
+    private var largestItems: [TrackCDiskLargestItem] {
+        let images = TrackCDiskMath.largestImages(model.images, limit: Self.biggestRows)
+            .map { TrackCDiskLargestItem(kind: .image, item: $0) }
+        let volumes = TrackCDiskMath.largestVolumes(model.volumes, limit: Self.biggestRows)
+            .map { TrackCDiskLargestItem(kind: .volume, item: $0) }
+        return (images + volumes).sorted {
+            ($0.item.bytes, $0.item.id) > ($1.item.bytes, $1.item.id)
         }
     }
 
-    private func biggestTable(title: String, symbol: String, items: [TrackCNamedSize]) -> some View {
+    @ViewBuilder
+    private var biggestSection: some View {
+        let items = largestItems
+        if !items.isEmpty {
+            largestTable(items)
+        }
+    }
+
+    private func largestTable(_ items: [TrackCDiskLargestItem]) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            MorbSectionHeader(title, symbol: symbol)
+            MorbSectionHeader("Largest Items", symbol: "arrow.up.right")
                 .padding(.bottom, Theme.space2)
             Table(items) {
-                TableColumn("Name") { item in
-                    Text(item.label)
+                TableColumn("Name") { entry in
+                    Text(entry.item.label)
                         .lineLimit(1)
                         .truncationMode(.middle)
-                        .help(item.detail ?? item.label)
+                        .help(entry.item.detail ?? entry.item.label)
                         .frame(height: Theme.rowStandard, alignment: .leading)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                TableColumn("Size") { item in
-                    MorbNumber(Formatters.bytesString(item.bytes), tone: .primary, font: .callout)
+                TableColumn("Kind") { entry in
+                    Label(entry.kind.title, systemImage: entry.kind.symbol)
+                        .foregroundStyle(.secondary)
+                        .frame(height: Theme.rowStandard, alignment: .leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .width(min: 84, ideal: 102, max: 128)
+                TableColumn("Size") { entry in
+                    MorbNumber(Formatters.bytesString(entry.item.bytes), tone: .primary, font: .callout)
                         .frame(height: Theme.rowStandard, alignment: .trailing)
                         .frame(maxWidth: .infinity, alignment: .trailing)
                 }
                 .width(min: 76, ideal: 92, max: 120)
             }
-            .tableStyle(.inset)
-            .alternatingRowBackgrounds()
+            .tableStyle(.automatic)
             .frame(height: Theme.rowGroupHeader + CGFloat(items.count) * Theme.rowStandard)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -325,43 +342,37 @@ struct DiskRootView: View {
 
     // MARK: VM disk image
     //
-    // A `GroupBox` of `LabeledContent` rows rather than a nested `Form`: the rest of the
-    // screen already lives inside one `ScrollView`, and a `Form` — List-backed, like
-    // every SwiftUI form — fights an enclosing scroll view for the gesture unless it is
-    // given a hand-measured fixed height. Four static rows do not need List's machinery;
-    // `GroupBox` gives the same grouped, boxed look `Form` would without the conflict,
-    // which is what item 1 of the design brief means by "`GroupBox` only where a genuine
-    // box is warranted" — a self-contained footnote panel is exactly that case.
+    // `LabeledContent` keeps these facts legible without a second rounded, material-like
+    // panel inside the already-scrolling content area. The disk file is a detail, not a
+    // dashboard card.
 
     @ViewBuilder
     private var diskImageSection: some View {
         VStack(alignment: .leading, spacing: 0) {
             MorbSectionHeader("VM Disk Image", symbol: "internaldrive")
                 .padding(.bottom, Theme.space2)
-            GroupBox {
-                if let footprint {
-                    VStack(alignment: .leading, spacing: Theme.space3) {
-                        LabeledContent("Apparent", value: Formatters.bytesString(footprint.apparentBytes))
-                        LabeledContent("Actual on APFS", value: Formatters.bytesString(footprint.actualBytes))
-                        LabeledContent("Allocated", value: Formatters.percent(footprint.occupancy * 100))
-                        LabeledContent("Path") {
-                            Text(footprint.path)
-                                .font(.system(.callout, design: .monospaced))
-                                .textSelection(.enabled)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                        }
-                        Divider()
-                        footnoteExplanation(footprint)
-                            .fixedSize(horizontal: false, vertical: true)
+            if let footprint {
+                VStack(alignment: .leading, spacing: Theme.space3) {
+                    LabeledContent("Apparent", value: Formatters.bytesString(footprint.apparentBytes))
+                    LabeledContent("Actual on APFS", value: Formatters.bytesString(footprint.actualBytes))
+                    LabeledContent("Allocated", value: Formatters.percent(footprint.occupancy * 100))
+                    LabeledContent("Path") {
+                        Text(footprint.path)
+                            .font(.system(.callout, design: .monospaced))
+                            .textSelection(.enabled)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                     }
-                    .padding(Theme.space4)
-                } else {
-                    Text("No disk image yet — one is created the first time the engine starts.")
-                        .foregroundStyle(.secondary)
-                        .padding(Theme.space4)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Divider()
+                    footnoteExplanation(footprint)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
+                .padding(.vertical, Theme.space2)
+            } else {
+                Text("No VM disk image yet. Morbstack creates one when the engine starts.")
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, Theme.space2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
@@ -390,14 +401,6 @@ struct DiskRootView: View {
             + plain(" all report the apparent figure — the actual one is ")
             + code("st_blocks × 512")
             + plain(", and it is \(Formatters.bytesString(footprint.savedBytes)) smaller right now.")
-    }
-
-    /// Splits a formatted byte string (`"25.15 GB"`) at its last space so the value and
-    /// unit can be handed to `MorbMetric` at their two different type ranks.
-    private func splitBytes(_ bytes: Int64) -> (value: String, unit: String?) {
-        let full = Formatters.bytesString(bytes)
-        guard let space = full.lastIndex(of: " ") else { return (full, nil) }
-        return (String(full[full.startIndex..<space]), String(full[full.index(after: space)...]))
     }
 
     // MARK: Operations
@@ -444,94 +447,5 @@ struct DiskRootView: View {
         } catch {
             toast = .failure("Prune failed", detail: trackCErrorText(error))
         }
-    }
-}
-
-// MARK: - The stacked bar
-
-/// The stacked usage bar, drawn in one `Canvas` pass.
-///
-/// A `Canvas` rather than an `HStack` of rectangles: the reclaimable tail has to sit
-/// flush against its segment's trailing edge with a hairline between neighbours, which is
-/// fiddlier to get pixel-exact in SwiftUI layout primitives than in fifteen lines here.
-struct TrackCStackedBar: View {
-
-    let segments: [TrackCDiskSegment]
-    var highlighted: TrackCDiskCategory?
-
-    /// Corner radius of the whole bar. The bar is clipped to this, so segments never
-    /// need rounding of their own.
-    private let radius: CGFloat = Theme.radiusControl + 1
-
-    var body: some View {
-        Canvas { context, size in
-            let bounds = CGRect(origin: .zero, size: size)
-            let clip = Path(roundedRect: bounds, cornerRadius: radius, style: .continuous)
-
-            let widths = TrackCDiskMath.barWidths(
-                byteValues: segments.map(\.bytes),
-                totalWidth: Double(size.width),
-                minimumSegmentWidth: 6)
-
-            guard widths.contains(where: { $0 > 0 }) else {
-                context.stroke(clip, with: .color(.secondary.opacity(0.35)), style: .init(lineWidth: 1, dash: [4, 4]))
-                return
-            }
-
-            context.clip(to: clip)
-
-            var x: CGFloat = 0
-            for (index, segment) in segments.enumerated() {
-                let width = CGFloat(widths[index])
-                guard width > 0 else { continue }
-                let rect = CGRect(x: x, y: 0, width: width, height: size.height)
-                x += width
-
-                let dimmed = highlighted != nil && highlighted != segment.category
-
-                // The reclaimable share is drawn as its own disjoint rectangle at the
-                // tail, at `Theme.seriesDimAlpha`, rather than as an overlay on top of an
-                // already-opaque fill of the same hue — translucent colour composited
-                // over an opaque fill of the *same* colour is a no-op regardless of
-                // alpha, which is why the previous drawing used a hatch texture instead.
-                // Disjoint rects make the dimming actually visible against the card
-                // behind the bar.
-                let reclaimShare = segment.bytes > 0
-                    ? min(1, Double(segment.reclaimableBytes) / Double(segment.bytes)) : 0
-                let reclaimWidth = width * CGFloat(reclaimShare)
-                let solidWidth = width - reclaimWidth
-
-                let baseAlpha: CGFloat = dimmed ? 0.34 : 1
-                if solidWidth > 0 {
-                    let solidRect = CGRect(x: rect.minX, y: 0, width: solidWidth, height: size.height)
-                    context.fill(Path(solidRect), with: .color(segment.category.color.opacity(baseAlpha)))
-                }
-                if reclaimWidth > 0.5 {
-                    let reclaimRect = CGRect(x: rect.maxX - reclaimWidth, y: 0, width: reclaimWidth, height: size.height)
-                    context.fill(
-                        Path(reclaimRect),
-                        with: .color(segment.category.color.opacity(Theme.seriesDimAlpha * baseAlpha)))
-                }
-
-                // A hairline between neighbours, so two similar colours never merge.
-                if x < size.width {
-                    context.fill(
-                        Path(CGRect(x: x - 0.5, y: 0, width: 1, height: size.height)),
-                        with: .color(.black.opacity(0.16)))
-                }
-            }
-        }
-        .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: radius, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: radius, style: .continuous)
-                .strokeBorder(Theme.hairline, lineWidth: 0.5)
-        }
-        .accessibilityElement()
-        .accessibilityLabel("Disk usage by category")
-        .accessibilityValue(
-            segments
-                .filter { $0.bytes > 0 }
-                .map { "\($0.category.title) \(Formatters.bytesString($0.bytes))" }
-                .joined(separator: ", "))
     }
 }

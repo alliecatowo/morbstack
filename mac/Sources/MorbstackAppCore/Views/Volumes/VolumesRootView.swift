@@ -325,7 +325,9 @@ struct VolumesRootView: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
             if TrackCDiskMath.isAnonymousVolumeName(volume.name) {
-                MorbChip("anonymous", rank: .quiet)
+                Text("anonymous")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
             }
         }
     }
@@ -335,11 +337,14 @@ struct VolumesRootView: View {
         // `nil` is "the engine was not asked for usage data", which is a different fact
         // from "this volume is unused" and must not render as a confident zero.
         if let count = volume.refCount, count > 0 {
-            MorbCountBadge(count: count, tone: .running)
+            Text(count, format: .number)
+                .monospacedDigit()
         } else if volume.refCount == nil {
             Text("—").foregroundStyle(.tertiary)
         } else {
-            Text("unused").font(.caption2).foregroundStyle(.tertiary)
+            Text("unused")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
         }
     }
 
@@ -357,13 +362,11 @@ struct VolumesRootView: View {
 
     // MARK: Detail pane
 
-    /// The inspector's contents: a grouped `Form`, not a stack of hand-drawn cards.
+    /// The inspector's contents: a native `Form`, not a stack of hand-drawn cards.
     ///
-    /// `Form` + `.formStyle(.grouped)` + `LabeledContent` is the blessed macOS shape for
-    /// key/value detail, and on Tahoe it brings the larger row height, the wider section
-    /// corner radius and the title-cased section headers with it. The `MorbCard` this
-    /// replaces drew its own fill, its own hairline and its own radius — three things the
-    /// system already had an opinion about.
+    /// `Form` + `LabeledContent` gives the system ownership of labels, row spacing, and
+    /// the inspector surface. Status and size stay as separate values instead of a
+    /// custom badge, keeping this dense like a native macOS inspector.
     @ViewBuilder
     private var detailPane: some View {
         if let volume = selectedVolume {
@@ -375,13 +378,8 @@ struct VolumesRootView: View {
                             .lineLimit(2)
                             .truncationMode(.middle)
                     }
-                    LabeledContent("Status") {
-                        MorbStatusBadge(
-                            tone: volume.isUnused ? .idle : .running,
-                            title: volume.isUnused ? "Unused" : "In use",
-                            detail: volume.size.map(Formatters.bytesString),
-                            filled: false)
-                    }
+                    LabeledContent("Status", value: volume.isUnused ? "Unused" : "In use")
+                    LabeledContent("Size", value: volume.size.map(Formatters.bytesString) ?? "Unreported")
                     LabeledContent("Driver", value: volume.driver)
                     LabeledContent("Mount point") {
                         Text(volume.mountpoint.isEmpty ? "unknown" : volume.mountpoint)
@@ -395,10 +393,12 @@ struct VolumesRootView: View {
                 }
 
                 Section("Kind") {
-                    Text(TrackCDiskMath.isAnonymousVolumeName(volume.name)
-                         ? "Anonymous — created implicitly, and removed by prune."
-                         : "Named — prune leaves it alone.")
-                        .foregroundStyle(.secondary)
+                    LabeledContent(
+                        "Volume",
+                        value: TrackCDiskMath.isAnonymousVolumeName(volume.name) ? "Anonymous" : "Named")
+                    LabeledContent(
+                        "Prune",
+                        value: TrackCDiskMath.isAnonymousVolumeName(volume.name) ? "Eligible" : "Retained")
                 }
 
                 Section {
@@ -416,7 +416,6 @@ struct VolumesRootView: View {
                     }
                 }
             }
-            .formStyle(.grouped)
         } else {
             ContentUnavailableView(
                 "No Volume Selected",

@@ -205,6 +205,10 @@ struct ContainerOverviewTab: View {
                 MorbNoMatches(query: envQuery)
                     .frame(height: Theme.rowRich * 3)
             } else {
+                // Environment values are operational data, not a floating panel.
+                // Keeping the rows on the content surface makes this section share the
+                // same table rhythm as Ports, Mounts and Labels instead of creating a
+                // fourth rounded card inside an already-selected detail pane.
                 VStack(spacing: 0) {
                     ForEach(matches) { variable in
                         TrackBEnvRow(
@@ -219,11 +223,6 @@ struct ContainerOverviewTab: View {
                             })
                         if variable.id != matches.last?.id { MorbRowDivider(rowClass: .standard) }
                     }
-                }
-                .background(Theme.cardBackground, in: RoundedRectangle(cornerRadius: Theme.radiusCard, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: Theme.radiusCard, style: .continuous)
-                        .strokeBorder(Theme.hairline, lineWidth: 1)
                 }
             }
         }

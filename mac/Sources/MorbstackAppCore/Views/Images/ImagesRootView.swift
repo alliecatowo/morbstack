@@ -168,6 +168,7 @@ struct ImagesRootView: View {
             } label: {
                 Image(systemName: "plus")
             }
+            .accessibilityLabel("Pull an image")
             .help("Pull an image")
             .popover(isPresented: $showingPull, arrowEdge: .bottom) { pullPopover }
         }
@@ -192,8 +193,9 @@ struct ImagesRootView: View {
         Button {
             Task { await pruneDangling() }
         } label: {
-            Label("Prune Dangling Layers", systemImage: "trash")
+            Image(systemName: "trash")
         }
+        .accessibilityLabel("Prune dangling layers")
         .disabled(count == 0 || busy)
         .help(
             count == 0
@@ -204,30 +206,28 @@ struct ImagesRootView: View {
     // MARK: Pull popover
 
     private var pullPopover: some View {
-        VStack(alignment: .leading, spacing: Theme.space4) {
-            Text("Pull an image")
-                .font(.headline)
+        VStack(spacing: 0) {
+            Form {
+                Section("Image Reference") {
+                    HStack(spacing: Theme.space3) {
+                        TextField("nginx:alpine", text: $pullReference)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(.callout, design: .monospaced))
+                            .disabled(isPulling)
+                            .onSubmit { Task { await pull() } }
+                        if isPulling {
+                            ProgressView().controlSize(.small)
+                        }
+                    }
+                }
 
-            HStack(spacing: Theme.space3) {
-                Image(systemName: "arrow.down.circle")
-                    .foregroundStyle(.secondary)
-                TextField("nginx:alpine", text: $pullReference)
-                    .textFieldStyle(.plain)
-                    .font(.system(.callout, design: .monospaced))
-                    .disabled(isPulling)
-                    .onSubmit { Task { await pull() } }
-                if isPulling {
-                    ProgressView().controlSize(.small).scaleEffect(0.75)
+                if !pullLines.isEmpty {
+                    Section("Pull Progress") {
+                        pullLog
+                    }
                 }
             }
-            .padding(.horizontal, Theme.space3)
-            .padding(.vertical, Theme.space2 + 1)
-            .background(.quaternary.opacity(0.5),
-                        in: RoundedRectangle(cornerRadius: Theme.radiusControl, style: .continuous))
-
-            if !pullLines.isEmpty {
-                pullLog
-            }
+            .formStyle(.grouped)
 
             HStack {
                 Spacer()
@@ -238,9 +238,9 @@ struct ImagesRootView: View {
                 .morbButton(.primary)
                 .disabled(isPulling || pullReference.trimmingCharacters(in: .whitespaces).isEmpty)
             }
+            .padding(Theme.space4)
         }
-        .padding(Theme.space5)
-        .frame(width: 360)
+        .frame(width: 380)
     }
 
     private var pullLog: some View {
@@ -259,11 +259,6 @@ struct ImagesRootView: View {
                 .padding(Theme.space3)
             }
             .frame(height: 132)
-            .background(Theme.contentBackground, in: RoundedRectangle(cornerRadius: Theme.radiusControl, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: Theme.radiusControl, style: .continuous)
-                    .strokeBorder(Theme.hairline, lineWidth: 1)
-            }
             .onChange(of: pullLines.count) {
                 withAnimation(Theme.animation(.fade, reduceMotion: reduceMotion)) {
                     proxy.scrollTo(pullLines.count - 1, anchor: .bottom)
@@ -287,7 +282,13 @@ struct ImagesRootView: View {
                 showingPull = true
             }
         } else if split.tagged.isEmpty && split.dangling.isEmpty {
-            MorbNoMatches(query: query)
+            ContentUnavailableView(
+                "No Images Found",
+                systemImage: "magnifyingglass",
+                description: Text("No image matches \(query).")
+            ) {
+                Button("Clear Search") { query = "" }
+            }
         } else {
             table(split)
                 .inspector(isPresented: $showsInspector) {
@@ -355,8 +356,7 @@ struct ImagesRootView: View {
                 }
             }
         }
-        .tableStyle(.inset)
-        .alternatingRowBackgrounds()
+        .tableStyle(.automatic)
         .contextMenu(forSelectionType: ImageSummary.ID.self) { ids in
             contextMenu(for: ids)
         } primaryAction: { ids in
@@ -366,15 +366,22 @@ struct ImagesRootView: View {
 
     private func repositoryCell(_ image: ImageSummary) -> some View {
         HStack(spacing: Theme.space2) {
-            MorbStatusDot(tone: image.isDangling ? .idle : (image.containersUsing > 0 ? .running : .idle))
+            if image.isDangling {
+                Image(systemName: "tag.slash")
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("Dangling layer")
+            }
             Text(image.isDangling ? "<none>" : image.repository)
                 .foregroundStyle(image.isDangling ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
                 .lineLimit(1)
                 .truncationMode(.middle)
             if image.repoTags.count > 1 {
-                MorbChip("+\(image.repoTags.count - 1)", rank: .quiet, monospaced: true)
+                Text("+\(image.repoTags.count - 1)")
+                    .font(.caption)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
             }
-            architectureChip(image)
+            architectureLabel(image)
         }
     }
 
@@ -383,19 +390,12 @@ struct ImagesRootView: View {
     /// A native image gets no chip at all — a badge on every row is wallpaper by the
     /// second screenful — and only the mismatch that costs something is worth ink.
     @ViewBuilder
-    private func architectureChip(_ image: ImageSummary) -> some View {
+    private func architectureLabel(_ image: ImageSummary) -> some View {
         if let badge = TrackCImageArch.badge(for: image.architecture), badge.isNoteworthy {
-            MorbChip(badge.text, symbol: badge.symbol, rank: chipRank(for: badge.tone), monospaced: true)
-        }
-    }
-
-    private func chipRank(for tone: TrackCTone) -> MorbChipRank {
-        switch tone {
-        case .neutral: return .quiet
-        case .good: return .status(.running)
-        case .warn: return .status(.busy)
-        case .bad: return .status(.bad)
-        case .accent: return .actionable
+            Label(badge.text, systemImage: badge.symbol ?? "exclamationmark.triangle")
+                .font(.caption)
+                .foregroundStyle(badge.tone.color)
+                .help("This image is built for \(badge.text), not this Mac's native architecture")
         }
     }
 
@@ -408,7 +408,9 @@ struct ImagesRootView: View {
         } else if image.containersUsing == 0 {
             Text("—").foregroundStyle(.tertiary)
         } else {
-            MorbCountBadge(count: image.containersUsing, tone: .running)
+            Text("\(image.containersUsing)")
+                .monospacedDigit()
+                .help("Used by \(image.containersUsing) container\(image.containersUsing == 1 ? "" : "s")")
         }
     }
 
@@ -439,15 +441,14 @@ struct ImagesRootView: View {
                             .lineLimit(2)
                             .truncationMode(.middle)
                     }
-                    LabeledContent("Status") {
-                        MorbStatusBadge(
-                            tone: image.containersUsing > 0 ? .running : .idle,
-                            title: image.containersUsing > 0
-                                ? "In use by \(image.containersUsing) container\(image.containersUsing == 1 ? "" : "s")"
-                                : "Not in use",
-                            detail: Formatters.bytesString(image.size),
-                            filled: false)
-                    }
+                    LabeledContent("Size", value: Formatters.bytesString(image.size))
+                    LabeledContent(
+                        "Used by",
+                        value: image.containersUsing < 0
+                            ? "not reported"
+                            : image.containersUsing == 0
+                                ? "no containers"
+                                : "\(image.containersUsing) container\(image.containersUsing == 1 ? "" : "s")")
                     architectureField(image)
                     LabeledContent("Content digest") {
                         Text(image.id)
@@ -477,12 +478,16 @@ struct ImagesRootView: View {
                     }
                 }
             }
-            .formStyle(.grouped)
+            .formStyle(.columns)
         } else {
             ContentUnavailableView(
                 "No Image Selected",
                 systemImage: "square.on.square",
-                description: Text("Pick an image to see its platform, digest and tags."))
+                description: Text("Pick an image to see its platform, digest and tags.")) {
+                    Button("Select First Image") {
+                        selection = sections.tagged.first?.id ?? sections.dangling.first?.id
+                    }
+                }
         }
     }
 
@@ -498,21 +503,30 @@ struct ImagesRootView: View {
                             .font(.system(.callout, design: .monospaced))
                             .textSelection(.enabled)
                         if let consequence = badge.consequenceLabel {
-                            MorbChip(consequence, symbol: badge.symbol, rank: chipRank(for: badge.tone))
+                            Label(consequence, systemImage: badge.symbol ?? "exclamationmark.triangle")
+                                .font(.caption)
+                                .foregroundStyle(badge.tone.color)
                         }
                     }
                 } else {
                     // The lookup is one request and it is in flight; saying "unknown" for
                     // the half-second it takes would read as a defect rather than latency.
-                    Text("checking…").font(.callout).foregroundStyle(.tertiary)
+                    HStack(spacing: Theme.space2) {
+                        ProgressView().controlSize(.small)
+                        Text("Checking…").font(.callout).foregroundStyle(.tertiary)
+                    }
                 }
                 if let badge, let advice = TrackCImageArch.advice(
                     for: badge, rosettaAvailable: model.rosetta.availability == .active
                 ) {
-                    Text(advice)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    Label {
+                        Text(advice)
+                    } icon: {
+                        Image(systemName: badge.symbol ?? "info.circle")
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }

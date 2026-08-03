@@ -35,8 +35,6 @@ struct KubernetesRootView: View {
     @State private var selectedPodID: K8sPodInfo.ID?
     @State private var showsInspector = true
 
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
     private var filteredPods: [K8sPodInfo] {
         let needle = podQuery.trimmingCharacters(in: .whitespaces)
         guard !needle.isEmpty else { return pods }
@@ -73,20 +71,17 @@ struct KubernetesRootView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        // A plain text button rather than a `Toggle(.switch)`: the system switch at its
-        // default control size reads as an enormous, brightly-tinted control sitting
-        // alone in the toolbar — the exact complaint. "Enable"/"Disable" says the same
-        // thing a symbol cannot, at the size every other toolbar button is.
+        // This is an operation, not a settings control. A symbol-only toolbar button
+        // keeps it at the same visual weight as Refresh and Copy Kubeconfig instead of
+        // making the cluster's on/off state a giant standalone switch.
         ToolbarItem(id: "kubernetes.enable", placement: MorbToolbarGroup.actions) {
-            Button {
+            MorbIconButton(
+                "power",
+                help: status.enabled ? "Disable Kubernetes" : "Enable Kubernetes"
+            ) {
                 toggle(!status.enabled)
-            } label: {
-                Text(status.enabled ? "Disable" : "Enable")
             }
             .disabled(!model.engine.isRunning || status.phase == .starting)
-            .help(model.engine.isRunning
-                ? "Turn the local cluster on or off"
-                : "Start the Morbstack engine first")
         }
         ToolbarItem(id: "kubernetes.kubeconfig", placement: MorbToolbarGroup.secondary) {
             MorbIconButton(
@@ -105,10 +100,6 @@ struct KubernetesRootView: View {
         if status.phase == .ready {
             MorbInspectorToggle(id: "kubernetes.inspector", isPresented: $showsInspector)
         }
-    }
-
-    private var enabledBinding: Binding<Bool> {
-        Binding(get: { status.enabled }, set: { toggle($0) })
     }
 
     private func toggle(_ enabled: Bool) {
@@ -134,10 +125,14 @@ struct KubernetesRootView: View {
         guard status.phase == .ready else {
             nodes = []
             pods = []
+            selectedNodeID = nil
+            selectedPodID = nil
             return
         }
         nodes = await provider.nodes()
         pods = await provider.pods()
+        if !nodes.contains(where: { $0.id == selectedNodeID }) { selectedNodeID = nil }
+        if !pods.contains(where: { $0.id == selectedPodID }) { selectedPodID = nil }
     }
 
     // MARK: Content
@@ -163,10 +158,8 @@ struct KubernetesRootView: View {
         MorbEmptyState(
             "Kubernetes is off",
             systemImage: "cube.transparent",
-            description: "Turn it on to run a single-node k3s cluster on the same dockerd your "
-                + "containers already use. The first enable streams about 122\u{00A0}MB into the VM.",
-            footnote: "Pods are ordinary containers underneath — Logs and Stats work on them from "
-                + "the Containers screen too."
+            description: "Enable a single-node k3s cluster in Morbstack's VM. "
+                + "The first start downloads the k3s payload."
         ) {
             Button {
                 toggle(true)
@@ -181,8 +174,7 @@ struct KubernetesRootView: View {
         MorbEmptyState(
             "Starting the cluster",
             systemImage: "cube.transparent",
-            description: "Bringing up k3s and waiting for a node to report Ready. A first-ever "
-                + "start also streams the payload into the guest, which takes a minute."
+            description: "Setting up k3s and waiting for its node to report ready."
         ) {
             ProgressView()
                 .controlSize(.small)
@@ -231,6 +223,13 @@ struct KubernetesRootView: View {
                     LabeledContent("Memory", value: Formatters.bytesString(node.memoryBytes))
                     LabeledContent("Age", value: Formatters.absoluteDate(node.age))
                 }
+                Section("Actions") {
+                    Button {
+                        trackDCopy(node.name)
+                    } label: {
+                        Label("Copy Node Name", systemImage: "doc.on.doc")
+                    }
+                }
             }
             .formStyle(.grouped)
         } else if let pod = pods.first(where: { $0.id == selectedPodID }) {
@@ -248,9 +247,24 @@ struct KubernetesRootView: View {
                     LabeledContent("Node", value: pod.node)
                     LabeledContent("Age", value: Formatters.absoluteDate(pod.age))
                 }
-                Section {
-                    Text("Pods are ordinary containers underneath — Logs and Stats work on them from the Containers screen too.")
-                        .foregroundStyle(.secondary)
+                Section("Actions") {
+                    Button {
+                        trackDCopy(pod.name)
+                    } label: {
+                        Label("Copy Pod Name", systemImage: "doc.on.doc")
+                    }
+                    Button {
+                        trackDCopy(pod.namespace)
+                    } label: {
+                        Label("Copy Namespace", systemImage: "doc.on.doc")
+                    }
+                    if let container = matchingContainer(for: pod) {
+                        Button {
+                            TrackDAppBridge.reveal(containerID: container.id, in: model, showingLogs: true)
+                        } label: {
+                            Label("Open Container Logs", systemImage: "text.alignleft")
+                        }
+                    }
                 }
             }
             .formStyle(.grouped)
@@ -353,6 +367,7 @@ struct KubernetesRootView: View {
             .onChange(of: selectedNodeID) { _, newValue in
                 guard newValue != nil else { return }
                 selectedPodID = nil
+                showsInspector = true
             }
         }
     }
@@ -399,13 +414,15 @@ struct KubernetesRootView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             TableColumn("Namespace") { pod in
-                MorbChip(pod.namespace, rank: .quiet)
+                Text(pod.namespace)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
                     .frame(height: Theme.rowStandard, alignment: .leading)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .width(min: 92, ideal: 116, max: 160)
             TableColumn("Status") { pod in
-                MorbStatusBadge(tone: pod.tone, title: pod.phase.rawValue, filled: false)
+                podStatusCell(pod)
                     .frame(height: Theme.rowStandard, alignment: .leading)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -459,6 +476,7 @@ struct KubernetesRootView: View {
         .onChange(of: selectedPodID) { _, newValue in
             guard newValue != nil else { return }
             selectedNodeID = nil
+            showsInspector = true
         }
     }
 
@@ -478,7 +496,23 @@ struct KubernetesRootView: View {
             Text(pod.name)
                 .lineLimit(1)
                 .truncationMode(.middle)
-            MorbChip("\(pod.readyContainers)/\(pod.totalContainers)", rank: .quiet, monospaced: true)
+            Text("\(pod.readyContainers)/\(pod.totalContainers)")
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
         }
+    }
+
+    private func podStatusCell(_ pod: K8sPodInfo) -> some View {
+        HStack(spacing: Theme.space2) {
+            MorbStatusDot(tone: pod.tone)
+            Text(pod.phase.rawValue)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(pod.tone == .idle
+                    ? AnyShapeStyle(.secondary)
+                    : AnyShapeStyle(pod.tone.color))
+                .lineLimit(1)
+        }
+        .accessibilityElement(children: .combine)
     }
 }

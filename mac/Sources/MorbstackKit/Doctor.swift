@@ -323,6 +323,35 @@ public enum Doctor {
                 DoctorCheck(name: "docker-credentials", status: .pass, detail: "no credential helper configured"))
         }
 
+        // 10c. Context-blind Docker clients. A Docker CLI context only affects tools
+        // that actually use the Docker CLI context store. Testcontainers Node, for
+        // example, instead probes these conventional sockets directly. During a
+        // Docker Desktop -> Morbstack migration, leaving Desktop's rootless socket
+        // here means those tools can run successfully against the *wrong* engine.
+        //
+        // This is deliberately a warning only when Morbstack is also published: a
+        // stale Desktop socket on a machine where Morbstack is stopped is not a
+        // competing endpoint yet, and a current context cannot help a client that
+        // never consults contexts in the first place.
+        let morbstackSocketPath = MorbPaths.dockerSocket.path
+        let discoveryConflicts = dockerAutoDiscoveryConflicts(
+            morbstackSocketPath: morbstackSocketPath,
+            candidates: rootlessDockerSocketCandidates(homeDirectory: fm.homeDirectoryForCurrentUser),
+            fileExists: { fm.fileExists(atPath: $0) },
+            canonicalPath: Self.canonicalSocketPath)
+        if fm.fileExists(atPath: morbstackSocketPath), !discoveryConflicts.isEmpty {
+            let paths = discoveryConflicts.map { "`\($0)`" }.joined(separator: ", ")
+            let verb = discoveryConflicts.count == 1 ? "is" : "are"
+            checks.append(
+                DoctorCheck(
+                    name: "docker-discovery",
+                    status: .warn,
+                    detail: "\(paths) \(verb) not Morbstack but context-blind clients (including "
+                        + "Testcontainers Node) may select it before \(morbstackSocketPath). "
+                        + "Set DOCKER_HOST=unix://\(morbstackSocketPath) for those tools, "
+                        + "or stop/remove the competing Docker socket."))
+        }
+
         // 11. Daemon liveness.
         let controlPath = MorbPaths.controlSocket.path
         if UnixSocketClient.isAlive(path: controlPath) {
@@ -341,9 +370,9 @@ public enum Doctor {
         checks.append(
             DoctorCheck(
                 name: "docker-socket",
-                status: fm.fileExists(atPath: MorbPaths.dockerSocket.path) ? .pass : .info,
-                detail: fm.fileExists(atPath: MorbPaths.dockerSocket.path)
-                    ? MorbPaths.dockerSocket.path
+                status: fm.fileExists(atPath: morbstackSocketPath) ? .pass : .info,
+                detail: fm.fileExists(atPath: morbstackSocketPath)
+                    ? morbstackSocketPath
                     : "not published (daemon not running)"))
 
         return DoctorReport(version: MorbVersion.string, checks: checks)
@@ -481,6 +510,43 @@ public enum Doctor {
     }
 
     // MARK: - Helpers
+
+    /// The two user-level Docker socket locations context-blind clients commonly
+    /// probe after `/var/run/docker.sock`. The first is Docker Desktop's documented
+    /// rootless socket; the second is a legacy Desktop location still tried by
+    /// Testcontainers. Keep this intentionally narrow: `/var/run/docker.sock` is a
+    /// system-owned path that Morbstack already calls out separately from `morb
+    /// context status`, while these paths are the migration footgun sitting in the
+    /// user's own Docker directory.
+    static func rootlessDockerSocketCandidates(homeDirectory: URL) -> [String] {
+        [
+            homeDirectory.appendingPathComponent(".docker/run/docker.sock").path,
+            homeDirectory.appendingPathComponent(".docker/desktop/docker.sock").path,
+        ]
+    }
+
+    /// Existing conventional sockets that do not lead back to Morbstack.
+    ///
+    /// Kept pure so the important distinction between a competing socket and a
+    /// symlink intentionally pointing at Morbstack is covered without a test ever
+    /// looking at a developer's real `~/.docker`. `canonicalPath` is injected for
+    /// the same reason; production resolves symlinks, while the tests model a link
+    /// with a small mapping.
+    static func dockerAutoDiscoveryConflicts(
+        morbstackSocketPath: String,
+        candidates: [String],
+        fileExists: (String) -> Bool,
+        canonicalPath: (String) -> String
+    ) -> [String] {
+        let morbstackCanonicalPath = canonicalPath(morbstackSocketPath)
+        return candidates.filter { candidate in
+            fileExists(candidate) && canonicalPath(candidate) != morbstackCanonicalPath
+        }
+    }
+
+    private static func canonicalSocketPath(_ path: String) -> String {
+        URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+    }
 
     /// Locates an executable on `PATH` using `/usr/bin/which`.
     /// Whether Docker Desktop's backend is up, i.e. whether its credential

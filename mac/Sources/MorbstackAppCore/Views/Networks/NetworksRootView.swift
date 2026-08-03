@@ -325,9 +325,12 @@ struct NetworksRootView: View {
     @ViewBuilder
     private func containersCell(_ network: NetworkSummary) -> some View {
         if network.containers > 0 {
-            MorbCountBadge(count: network.containers, tone: .running)
+            Text(network.containers, format: .number)
+                .monospacedDigit()
         } else {
-            Text("none").font(.caption2).foregroundStyle(.tertiary)
+            Text("none")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
         }
     }
 
@@ -345,7 +348,7 @@ struct NetworksRootView: View {
 
     // MARK: Detail pane
 
-    /// A grouped `Form`, not a stack of hand-drawn cards — see the note on
+    /// A native `Form`, not a stack of hand-drawn cards — see the note on
     /// `VolumesRootView.detailPane`.
     @ViewBuilder
     private var detailPane: some View {
@@ -358,14 +361,10 @@ struct NetworksRootView: View {
                             .lineLimit(2)
                             .truncationMode(.middle)
                     }
-                    LabeledContent("Status") {
-                        MorbStatusBadge(
-                            tone: network.containers > 0 ? .running : .idle,
-                            title: network.containers > 0
-                                ? "\(network.containers) container\(network.containers == 1 ? "" : "s") attached"
-                                : "No containers attached",
-                            filled: false)
-                    }
+                    LabeledContent("Status", value: network.containers > 0 ? "In use" : "Unused")
+                    LabeledContent(
+                        "Containers",
+                        value: "\(network.containers) attached")
                     LabeledContent("Driver", value: network.driver)
                     LabeledContent("Scope", value: network.scope)
                     LabeledContent("Network ID") {
@@ -378,10 +377,12 @@ struct NetworksRootView: View {
                 }
 
                 Section("Kind") {
-                    Text(network.isBuiltIn
-                         ? "Built in — created by the engine, and cannot be removed."
-                         : "User-defined — created by compose, or by morb network create.")
-                        .foregroundStyle(.secondary)
+                    LabeledContent("Network", value: network.isBuiltIn ? "Built in" : "User-defined")
+                    LabeledContent(
+                        "Removal",
+                        value: network.isBuiltIn
+                            ? "Managed by Docker"
+                            : (network.containers > 0 ? "Detach containers first" : "Available"))
                 }
 
                 if !network.isBuiltIn {
@@ -399,7 +400,6 @@ struct NetworksRootView: View {
                     }
                 }
             }
-            .formStyle(.grouped)
         } else {
             ContentUnavailableView(
                 "No Network Selected",
