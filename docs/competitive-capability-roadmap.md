@@ -44,7 +44,7 @@ larger feature checklist.
 | Filesystem sharing | VirtioFS same-path sharing and share inspection are implemented; [`sharing.md`](sharing.md) records that host edits do not emit guest inotify events. | Day-to-day hot reload remains broken. Silent unshared/misresolved source behavior is still too dangerous. |
 | Published ports | `PortForwarder.swift` forwards TCP loopback. `DockerProxy` applies a bounded explicit-create preflight using `HostPortPreflight`, so a normally encoded `docker run -p <port>:...` rejects a currently held TCP loopback port before the guest receives the create; explicit UDP and unsupported host-address publishes also reject instead of pretending to publish. | The snapshot closes before Docker starts: it is not a TCP lease and does not cover dynamic/ranged ports, separately-created containers started later, or the race after the check. UDP forwarding remains absent. |
 | Disk management | `DiskCapacity.swift` is a correct read-only preflight. | Grow-only resize is deliberately unavailable until the guest filesystem protocol exists; shrinking must remain unsupported. |
-| Debug shell | `MorbScan/DebugCLI.swift` explicitly refuses to pretend `docker exec` is a distroless toolbox. | Correctly honest placeholder. A real pinned toolbox lifecycle and interactive PTY bridge are needed. |
+| Debug toolbox | `MorbScan/DebugToolboxPlan.swift` and `morb debug check` expose static readiness; `morb debug [plan] <container>` makes only `GET /containers/{id}/json` and reports its non-actions. | Read-only foundation. A verified pinned asset, consented acquisition/update policy, isolated namespace/cleanup policy, and interactive PTY bridge are still required before an executor or app action exists. |
 | Local domains, HTTPS, Finder-native files, Linux machines | Explicitly absent from current runtime/app implementation; see [`product-audit.md`](product-audit.md). | Differentiators, not P0 compatibility gates. They need a security and macOS-capability design before UI work. |
 
 ### Documentation reconciliation is a release prerequisite
@@ -138,9 +138,10 @@ Finish workflows rather than adding dashboard panels.
    progress, write a precise report, verify, and give rollback *guidance* that
    never destroys the source runtime. Keep the app read-only until those shared
    primitives exist.
-2. **Debug toolbox:** ship a pinned, signed toolbox image with provenance,
+2. **Debug toolbox:** the read-only readiness and target-plan boundary exists;
+   ship its executor only with a pinned, signed toolbox image, provenance,
    expiry/update policy, namespace/cleanup rules, and a real interactive PTY
-   bridge. Make `morb debug` unavailable when any safety primitive is missing.
+   bridge. Keep `morb debug` unavailable whenever any safety primitive is missing.
 3. **Kubernetes operations:** add selected-resource events/logs/describe,
    cancellable port forward, and guarded exec; retain `k8s-diagnose` as the
    first recovery action. Do not create/delete workloads behind a decorative

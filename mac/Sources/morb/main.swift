@@ -43,7 +43,7 @@ let usage = """
       migrate      Import images, volumes and config from another runtime
       bench        Run the open benchmark suite and report the numbers
       scan         SBOM and CVE scan an image, entirely on this machine
-      debug        Open a toolbox shell in a container, even a distroless one
+      debug        Inspect safe toolbox availability; does not open a shell yet
       context      Inspect the `morbstack` Docker context and discovery socket
       service      Manage Morbstack's explicit per-user background service
       install-cli  Install bundled docker, compose, and buildx for this user

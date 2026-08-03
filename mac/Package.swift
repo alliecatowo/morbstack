@@ -70,8 +70,9 @@ let package = Package(
             dependencies: ["MorbFeatures", "MorbstackKit"],
             swiftSettings: commonSwiftSettings
         ),
-        // `morb scan` and `morb debug` — local-only SBOM/CVE scanning, and a toolbox
-        // shell for containers that ship none. See docs/scanning.md, docs/debug.md.
+        // `morb scan` and `morb debug` — local-only SBOM/CVE scanning and the
+        // read-only foundation for a future container toolbox. See docs/scanning.md,
+        // docs/debug.md.
         .target(
             name: "MorbScan",
             dependencies: ["MorbFeatures", "MorbstackKit"],

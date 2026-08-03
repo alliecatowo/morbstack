@@ -133,11 +133,11 @@ Morbstack to make specific, checkable performance claims publicly.
   protocol (vsock port 2377).
 - `syft`/`grype` integration for image scanning.
 - `morb diagnose` — a bundle-the-diagnostics command for bug reports.
-  (Named `diagnose`, not `debug`: `morb debug <container>` is the toolbox
-  shell that attaches to a running container, including a distroless one
-  with no shell of its own. Two legitimate commands, one name, and the
-  one that takes a container argument has the better claim to it.
-  `diagnose` also sits naturally beside the existing `morb doctor`.)
+  (Named `diagnose`, not `debug`: `morb debug <container>` is reserved for
+  the container toolbox workflow. It currently provides only a read-only
+  availability and target plan; its shell remains gated on verified toolbox,
+  isolation, cleanup, and interactive-terminal primitives. `diagnose` also
+  sits naturally beside the existing `morb doctor`.)
 - MCP server ships (host integration domain).
 - Public compat-matrix CI stood up and green, plus `morb bench` as a
   user-runnable perf-target checker (see table below).

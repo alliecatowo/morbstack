@@ -13,7 +13,7 @@ public enum MorbScanCommand {
     }
 }
 
-/// The `morb debug` subcommand — a shell in a container that has none.
+/// The `morb debug` subcommand — read-only toolbox readiness and target planning.
 public enum MorbDebugCommand {
 
     /// Runs `morb debug <args>`.
