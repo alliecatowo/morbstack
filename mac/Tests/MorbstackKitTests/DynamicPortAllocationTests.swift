@@ -6,7 +6,7 @@ import XCTest
 
 @testable import MorbstackKit
 
-/// Offline coverage for the bounded Phase 1 create rewrite. These tests deliberately
+/// Offline coverage for the bounded Phase 1 TCP/UDP create rewrite. These tests deliberately
 /// contain no VM, Docker Engine, or real listener assertions; the live allocation
 /// contract remains a separately opted-in integration check.
 final class DynamicPortAllocationTests: XCTestCase {
@@ -15,15 +15,17 @@ final class DynamicPortAllocationTests: XCTestCase {
         let body = Data(
             #"{"HostConfig":{"PortBindings":{"80/tcp":[{"HostIp":"127.0.0.1","HostPort":""}]}}}"#.utf8)
 
-        guard case .supported(let plan) = DockerPortPublicationPreflight.dynamicTCPCreatePlan(in: body) else {
+        guard case .supported(let plan) = DockerPortPublicationPreflight.dynamicPortCreatePlan(in: body) else {
             return XCTFail("an explicit empty TCP HostPort must enter the bounded transaction")
         }
         XCTAssertEqual(
             plan.requestedPublications,
-            [DockerExplicitTCPPortBinding(hostIP: "127.0.0.1", hostPort: 0, containerPort: 80)])
+            [DockerDynamicPortPublication(
+                transport: .tcp, hostIP: "127.0.0.1", hostPort: 0, containerPort: 80)])
 
         let rewritten = try plan.rewrittenBody(with: [
-            DockerExplicitTCPPortBinding(hostIP: "127.0.0.1", hostPort: 49152, containerPort: 80)
+            DockerDynamicPortPublication(
+                transport: .tcp, hostIP: "127.0.0.1", hostPort: 49152, containerPort: 80)
         ])
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: rewritten) as? [String: Any])
         let hostConfig = try XCTUnwrap(object["HostConfig"] as? [String: Any])
@@ -32,32 +34,61 @@ final class DynamicPortAllocationTests: XCTestCase {
         XCTAssertEqual(tcp.first?["HostPort"] as? String, "49152")
     }
 
-    func testDynamicAllocatorRejectsPublishAllPortsAndNonTCP() {
+    func testDynamicAllocatorRejectsPublishAllPortsAndAdmitsDynamicUDP() throws {
         let publishAll = Data(#"{"HostConfig":{"PublishAllPorts":true}}"#.utf8)
         guard case .rejected(let publishAllMessage) =
-            DockerPortPublicationPreflight.dynamicTCPCreatePlan(in: publishAll)
+            DockerPortPublicationPreflight.dynamicPortCreatePlan(in: publishAll)
         else {
             return XCTFail("-P must not silently enter the empty-TCP transaction")
         }
         XCTAssertTrue(publishAllMessage.contains("PublishAllPorts"))
 
         let udp = Data(#"{"HostConfig":{"PortBindings":{"53/udp":[{"HostPort":""}]}}}"#.utf8)
-        guard case .rejected(let udpMessage) = DockerPortPublicationPreflight.dynamicTCPCreatePlan(in: udp) else {
-            return XCTFail("dynamic UDP needs its own held datagram lease")
+        guard case .supported(let udpPlan) = DockerPortPublicationPreflight.dynamicPortCreatePlan(in: udp) else {
+            return XCTFail("dynamic UDP must enter the held datagram lease transaction")
         }
-        XCTAssertTrue(udpMessage.contains("UDP"))
+        XCTAssertEqual(
+            udpPlan.requestedPublications,
+            [DockerDynamicPortPublication(
+                transport: .udp, hostIP: "", hostPort: 0, containerPort: 53)])
+        let rewritten = try udpPlan.rewrittenBody(with: [
+            DockerDynamicPortPublication(
+                transport: .udp, hostIP: "", hostPort: 49153, containerPort: 53)
+        ])
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: rewritten) as? [String: Any])
+        let hostConfig = try XCTUnwrap(object["HostConfig"] as? [String: Any])
+        let bindings = try XCTUnwrap(hostConfig["PortBindings"] as? [String: Any])
+        let dynamicUDP = try XCTUnwrap(bindings["53/udp"] as? [[String: Any]])
+        XCTAssertEqual(dynamicUDP.first?["HostPort"] as? String, "49153")
+    }
+
+    func testDynamicAllocatorKeepsFixedUDPSiblingsInTheSameLease() {
+        let body = Data(
+            #"{"HostConfig":{"PortBindings":{"80/tcp":[{"HostPort":"8080"}],"53/udp":[{"HostPort":""}]}}}"#.utf8)
+        guard case .supported(let plan) = DockerPortPublicationPreflight.dynamicPortCreatePlan(in: body) else {
+            return XCTFail("mixed fixed TCP plus dynamic UDP must remain one held lease")
+        }
+        XCTAssertEqual(
+            plan.fixedPlan,
+            DockerFixedPortLeasePlan(
+                tcp: [DockerExplicitTCPPortBinding(hostIP: "", hostPort: 8080, containerPort: 80)],
+                udp: []))
+        XCTAssertEqual(
+            plan.requestedPublications,
+            [DockerDynamicPortPublication(
+                transport: .udp, hostIP: "", hostPort: 0, containerPort: 53)])
     }
 
     func testDynamicAllocatorRejectsRangesAndLeavesOrdinaryFixedRequestsAlone() {
         let range = Data(
             #"{"HostConfig":{"PortBindings":{"80/tcp":[{"HostPort":""}],"81/tcp":[{"HostPort":"4000-4001"}]}}}"#.utf8)
-        guard case .rejected(let rangeMessage) = DockerPortPublicationPreflight.dynamicTCPCreatePlan(in: range) else {
+        guard case .rejected(let rangeMessage) = DockerPortPublicationPreflight.dynamicPortCreatePlan(in: range) else {
             return XCTFail("a dynamic request with a range sibling is not bounded")
         }
         XCTAssertTrue(rangeMessage.contains("not a single port"))
 
         let fixed = Data(#"{"HostConfig":{"PortBindings":{"80/tcp":[{"HostPort":"8080"}]}}}"#.utf8)
-        guard case .notDynamic = DockerPortPublicationPreflight.dynamicTCPCreatePlan(in: fixed) else {
+        guard case .notDynamic = DockerPortPublicationPreflight.dynamicPortCreatePlan(in: fixed) else {
             return XCTFail("fixed TCP must keep the existing passive lease path")
         }
     }

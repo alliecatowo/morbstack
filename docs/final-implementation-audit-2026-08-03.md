@@ -30,7 +30,7 @@ The canonical backlog remains [`drop-in-delivery-plan.md`](drop-in-delivery-plan
 | Area | Current source status | What may honestly be said | What may not be claimed yet |
 | --- | --- | --- | --- |
 | Normal Docker runtime | Upstream dockerd/containerd VM foundation, native daemon/app, consented context/direct socket/service path. | Implemented foundation pending clean-profile verification. | Release-ready Docker Desktop replacement. |
-| Fixed and ordinary dynamic TCP `-p` | Host-owned loopback lease/preflight exists for normal fixed TCP, Docker CLI-normalized equal-length fixed ranges, and bounded dynamic create forms. | The source supports fixed loopback TCP mappings, normal equal-length CLI ranges, and the documented empty/zero dynamic forms. | Full port-publication parity, `-P`, raw dynamic host-port ranges, dynamic UDP, paired-family IPv6 parity, or live acceptance. |
+| Fixed and ordinary dynamic TCP/UDP `-p` | Host-owned loopback lease/preflight exists for normal fixed TCP/IPv4-UDP, Docker CLI-normalized equal-length fixed ranges, and bounded dynamic create forms. | The source supports fixed loopback TCP/IPv4-UDP mappings, normal equal-length CLI ranges, and the documented omitted/empty/zero dynamic forms. | Full port-publication parity, `-P`, raw dynamic host-port ranges, paired-family IPv6 parity, or live acceptance. |
 | `-P` / `PublishAllPorts` | Audited and intentionally rejected before guest side effects. | The gap and required atomic Engine-level design are documented. | That `docker run -P` works. |
 | Docker context/CLI diagnostics | Context status now follows Docker precedence: `DOCKER_CONTEXT`, then `DOCKER_HOST`, then saved context. | The diagnostics no longer misstate the shell's effective selection. | That a clean account has been proven end-to-end. |
 | Builds | Native cache/history view with bounded selected detail/log reads. | Buildx history is an explicit read path, not inferred cache data. | Live build-history acceptance on a clean candidate. |
@@ -52,14 +52,15 @@ drop-in replacement. Current source behavior is recorded in
 
 - Fixed loopback TCP: normal `-p 8080:80`, `-p 8080:80/tcp`, explicit
   `127.0.0.1`, and compatible multiple mappings use the held-listener lifecycle.
-- Bounded dynamic TCP: `-p 80`, Docker API omitted `HostPort`, exact empty
-  `HostPort`, and exact `HostPort: "0"` are rewritten before create to a real
-  loopback reservation, then activated only after the Engine's successful start.
+- Bounded dynamic TCP/IPv4-UDP: `-p 80`, `-p 53/udp`, Docker API omitted
+  `HostPort`, exact empty `HostPort`, and exact `HostPort: "0"` are rewritten before
+  create to a real loopback reservation, then activated only after the Engine's
+  successful start.
 - Fixed UDP is event-confirmed forwarding, not a synchronous dynamic allocation
   guarantee.
 
 The remaining gaps are material: IPv6 literal forms currently do not have a
-matching IPv6 listener/reservation path; `-P`, raw dynamic host-port ranges, dynamic UDP, non-loopback
+matching IPv6 listener/reservation path; `-P`, raw dynamic host-port ranges, non-loopback
 and ambiguous forms, opaque/chunked framing, and live VM acceptance are not done.
 
 `-P` is **not** another spelling of dynamic `-p`. Docker resolves image `EXPOSE`
@@ -178,8 +179,8 @@ status from “source-backed implementation” to “not working”; it is not p
    Compose, and Buildx.
 2. **Close the highest-impact Docker gaps.** Add a correct dual-stack listener
    lifecycle for IPv6 `-p`; then design an atomic guest allocation protocol for
-   `-P` rather than a proxy rewrite. Treat raw dynamic host-port ranges and dynamic UDP as independent
-   protocols with their own conflict and recovery semantics.
+   `-P` rather than a proxy rewrite. Treat raw dynamic host-port ranges as an
+   independent protocol with its own conflict and recovery semantics.
 3. **Finish normal-Docker UX.** Wire public image discovery into the native Images
    route; build the safe Compose document editor; then add the project `.env`
    workflow and Compose trust/secret warnings. Each external effect remains an

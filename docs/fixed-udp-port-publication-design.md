@@ -3,8 +3,11 @@
 Status: source implementation complete; **live Docker/VM acceptance is still
 required and this is not a release claim**. This records the P0 transaction for
 ordinary fixed Docker CLI UDP publication such as
-`docker run -p 5353:53/udp image`. It deliberately excludes dynamic UDP, `-P`,
-raw dynamic host-port ranges, IPv6 UDP, and arbitrary Engine API shapes.
+`docker run -p 5353:53/udp image`. The later bounded dynamic transaction covers
+omitted, empty, and exact-zero UDP `HostPort` values; see
+[`dynamic-port-allocation.md`](dynamic-port-allocation.md). This fixed-path design
+still excludes `-P`, raw dynamic host-port ranges, IPv6 UDP, and arbitrary Engine API
+shapes.
 
 ## What Docker does
 
@@ -56,9 +59,10 @@ The source boundary is one transport-indexed `PortLease`, not a second UDP ledge
 It retains distinct listener objects and maps for TCP and UDP and never shares a
 socket, flow, or numeric-port dictionary across transports.
 
-1. **Admission.** The parser accepts only fixed UDP `HostPort` values `1...65535`, protocol
-   `udp`, and host addresses `""`, `"0.0.0.0"`, or `"127.0.0.1"`. Reject raw
-   dynamic host-port ranges, omitted/empty/zero UDP host ports, `-P`, IPv6 UDP,
+1. **Admission.** The fixed-path parser accepts only fixed UDP `HostPort` values
+   `1...65535`, protocol `udp`, and host addresses `""`, `"0.0.0.0"`, or
+   `"127.0.0.1"`. Its omitted/empty/zero UDP forms take the later bounded dynamic
+   transaction instead; it rejects raw dynamic host-port ranges, `-P`, IPv6 UDP,
    unsupported protocols/addresses, ambiguous same-UDP-port targets, and opaque
    documents. Normal equal-length UDP ranges are individual fixed bindings only if
    the Docker CLI supplied them; they use the same bounded concrete-binding ceiling

@@ -1,7 +1,7 @@
 // Copyright 2026 The Morbstack Authors.
 // Licensed under the Apache License, Version 2.0 (the "License").
 //
-// The bounded transaction for one explicit-empty-TCP Docker create.
+// The bounded transaction for one explicit-empty published-port Docker create.
 
 import Darwin
 import Dispatch
@@ -12,7 +12,7 @@ import Foundation
 /// Ordinary Engine traffic still belongs to ``FDRelay``. This transaction exists
 /// only because an empty `HostPort` cannot be made truthful by passively observing a
 /// later response: it sends a host-rewritten create document, waits for the complete
-/// bounded `201`, associates the already-held dynamic-TCP lease, and only then releases any
+/// bounded `201`, associates the already-held dynamic published-port lease, and only then releases any
 /// `201` byte to the Docker client. It consumes the create's exact known length and
 /// hands the client socket back to DockerProxy afterwards, so a following keep-alive
 /// or already-pipelined request is never forwarded before that association.
@@ -92,7 +92,7 @@ final class DockerDynamicCreateTransaction {
         // DockerProxy uses cancellation only for daemon/proxy teardown. Match the
         // ordinary relay's early-finish behavior: no create (even one whose worker
         // has not started yet) may keep a host listener alive after that teardown.
-        abandon("the dynamic TCP create transaction was cancelled")
+        abandon("the dynamic published-port create transaction was cancelled")
         if client >= 0 { _ = Darwin.shutdown(client, SHUT_RDWR) }
         if guest >= 0 { _ = Darwin.shutdown(guest, SHUT_RDWR) }
     }
@@ -104,7 +104,7 @@ final class DockerDynamicCreateTransaction {
         guard !isCancelled else { return }
 
         guard POSIXSocketSupport.writeAll(currentGuestFD, request) else {
-            abandon("the dynamic TCP create request could not reach the guest Engine")
+            abandon("the dynamic published-port create request could not reach the guest Engine")
             reportIfActive("morbstack could not send the dynamic port allocation to the Docker Engine")
             return
         }
@@ -113,19 +113,19 @@ final class DockerDynamicCreateTransaction {
         do {
             response = try readResponse(from: currentGuestFD)
         } catch {
-            abandon("the dynamic TCP create response was not a bounded HTTP response: \(error.localizedDescription)")
+            abandon("the dynamic published-port create response was not a bounded HTTP response: \(error.localizedDescription)")
             reportIfActive("morbstack could not verify the Docker Engine response for the dynamic port allocation")
             return
         }
         guard !isCancelled else {
-            abandon("the Docker client disconnected while its dynamic TCP create was in flight")
+            abandon("the Docker client disconnected while its dynamic published-port create was in flight")
             return
         }
 
         guard response.head.statusCode == 201 else {
             abandon("Docker create returned HTTP \(response.head.statusCode)")
             if (200..<300).contains(response.head.statusCode) {
-                reportIfActive("morbstack requires HTTP 201 before it can confirm a dynamic TCP port allocation")
+                reportIfActive("morbstack requires HTTP 201 before it can confirm a dynamic published-port allocation")
                 return
             }
             // A non-201 create cannot own a lease. Its bounded Engine response is
@@ -141,13 +141,13 @@ final class DockerDynamicCreateTransaction {
             !containerID.isEmpty
         else {
             abandon("Docker create returned 201 without a usable container identity")
-            reportIfActive("morbstack could not associate the dynamic TCP port allocation with Docker's create response")
+            reportIfActive("morbstack could not associate the dynamic published-port allocation with Docker's create response")
             return
         }
 
         guard associate(containerID) else {
             abandon("Docker create returned an already-leased or unusable container identity")
-            reportIfActive("morbstack could not retain the dynamic TCP port allocation for Docker's created container")
+            reportIfActive("morbstack could not retain the dynamic published-port allocation for Docker's created container")
             return
         }
 

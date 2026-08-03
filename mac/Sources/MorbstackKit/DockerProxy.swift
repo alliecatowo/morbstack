@@ -165,7 +165,7 @@ public final class DockerProxy {
                     message: message)
 
             case .allowed:
-                switch DockerPortPublicationPreflight.dynamicTCPCreatePlan(in: create.body) {
+                switch DockerPortPublicationPreflight.dynamicPortCreatePlan(in: create.body) {
                 case .rejected(let message):
                     rejectContainerCreate(
                         clientFD: clientFD,
@@ -175,7 +175,7 @@ public final class DockerProxy {
                     return
 
                 case .supported(let plan):
-                    beginDynamicTCPCreate(
+                    beginDynamicPortCreate(
                         clientFD: clientFD,
                         create: create,
                         plan: plan)
@@ -448,25 +448,25 @@ public final class DockerProxy {
         }
     }
 
-    // MARK: - Bounded dynamic TCP create transaction
+    // MARK: - Bounded dynamic published-port create transaction
 
-    /// Starts Phase 1's only request-transforming path: an explicit empty TCP
-    /// `HostPort` and a normal fixed-length create body.
+    /// Starts Phase 1's only request-transforming path: an explicit empty TCP or
+    /// IPv4/default UDP `HostPort` and a normal fixed-length create body.
     ///
     /// The original request remains in the Unix socket until this point. It is read
     /// with an exact byte count — never a generous buffer — so a following request
     /// remains available for a fresh preflight after the `201` is associated.
-    private func beginDynamicTCPCreate(
+    private func beginDynamicPortCreate(
         clientFD: Int32,
         create: ContainerCreateRequest,
-        plan: DockerDynamicTCPCreatePlan
+        plan: DockerDynamicPortCreatePlan
     ) {
         guard dynamicCreateDoesNotExpectContinue(create) else {
             rejectContainerCreate(
                 clientFD: clientFD,
                 statusCode: 500,
                 reason: "Internal Server Error",
-                message: "dynamic published TCP ports do not support Expect: 100-continue requests")
+                message: "dynamic published ports do not support Expect: 100-continue requests")
             return
         }
         guard consumeExactly(clientFD, expected: create.rawRequest) else {
@@ -477,12 +477,11 @@ public final class DockerProxy {
             return
         }
 
-        let fixedPublications = DockerPortPublicationPreflight.explicitTCPBindings(in: create.body)
-        let reservation: PortForwarder.DynamicTCPPortReservation
+        let reservation: PortForwarder.DynamicPortReservation
         do {
-            reservation = try forwarder.reserveDynamicTCPPorts(
+            reservation = try forwarder.reserveDynamicPorts(
                 plan.requestedPublications,
-                alongside: fixedPublications)
+                alongside: plan.fixedPlan)
         } catch {
             rejectContainerCreate(
                 clientFD: clientFD,
@@ -500,16 +499,16 @@ public final class DockerProxy {
                 in: create.headBytes,
                 bodyLength: rewrittenBody.count)
             else {
-                throw MorbError.protocolViolation("dynamic TCP create did not have one rewritable Content-Length header")
+                throw MorbError.protocolViolation("dynamic published-port create did not have one rewritable Content-Length header")
             }
             rewrittenHead = head
         } catch {
-            forwarder.abandon(reservation.lease, reason: "the dynamic TCP create request could not be rewritten")
+            forwarder.abandon(reservation.lease, reason: "the dynamic published-port create request could not be rewritten")
             rejectContainerCreate(
                 clientFD: clientFD,
                 statusCode: 500,
                 reason: "Internal Server Error",
-                message: "morbstack could not prepare the dynamic TCP port allocation")
+                message: "morbstack could not prepare the dynamic published-port allocation")
             return
         }
 
@@ -573,7 +572,7 @@ public final class DockerProxy {
                 }
                 self.writeGatewayError(to: clientFD, message: "\(error)")
                 Darwin.close(clientFD)
-                self.forwarder.abandon(lease, reason: "the VM was unavailable before dynamic Docker create could be relayed")
+                self.forwarder.abandon(lease, reason: "the VM was unavailable before dynamic published-port create could be relayed")
                 self.connectionFinished()
 
             case .success:
@@ -587,7 +586,7 @@ public final class DockerProxy {
                 case .allowed:
                     break
                 case .rejected(let message):
-                    self.forwarder.abandon(lease, reason: "bind source validation rejected the dynamic create")
+                    self.forwarder.abandon(lease, reason: "bind source validation rejected the dynamic published-port create")
                     self.rejectContainerCreate(
                         clientFD: clientFD,
                         statusCode: 400,
@@ -609,7 +608,7 @@ public final class DockerProxy {
                         }
                         self.writeGatewayError(to: clientFD, message: "\(error)")
                         Darwin.close(clientFD)
-                        self.forwarder.abandon(lease, reason: "the Docker API vsock connection failed for dynamic create")
+                        self.forwarder.abandon(lease, reason: "the Docker API vsock connection failed for dynamic published-port create")
                         self.connectionFinished()
                     case .success(let guestFD):
                         self.startDynamicCreateTransaction(

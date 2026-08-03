@@ -245,9 +245,9 @@ public final class PortForwarder {
     /// each kernel-reserved port into the exact `PortBindings` entry that caused it.
     /// The opaque lease contains both these entries and any fixed TCP entries from the
     /// same create, so all of them use one existing create/start lifecycle.
-    struct DynamicTCPPortReservation {
+    struct DynamicPortReservation {
         let lease: PortLease
-        let publications: [DockerExplicitTCPPortBinding]
+        let publications: [DockerDynamicPortPublication]
     }
 
     /// The only non-error way an inspect-derived reservation can decline. It means
@@ -255,7 +255,7 @@ public final class PortForwarder {
     /// the guest inspect and the atomic host bind; DockerProxy must retain its raw
     /// relay fallback rather than report a host-side publication error.
     private enum PortLeaseReservationAttempt {
-        case reserved(DynamicTCPPortReservation)
+        case reserved(DynamicPortReservation)
         case noLongerCurrent
     }
 
@@ -485,27 +485,30 @@ public final class PortForwarder {
         precondition(!plan.isEmpty, "a fixed port lease needs at least one publication")
         guard case .reserved(let reservation) = try reservePorts(
             fixedTCP: plan.tcp,
-            dynamicTCP: [],
-            fixedUDP: plan.udp)
+            fixedUDP: plan.udp,
+            dynamic: [])
         else {
             preconditionFailure("an unconditional fixed port reservation cannot become stale")
         }
         return reservation.lease
     }
 
-    /// Reserves fixed TCP ports and kernel-selected dynamic TCP ports as one lease.
-    /// Dynamic UDP is deliberately excluded: the parser rejects it before this point.
-    func reserveDynamicTCPPorts(
-        _ publications: [DockerExplicitTCPPortBinding],
-        alongside fixedPublications: [DockerExplicitTCPPortBinding]
-    ) throws -> DynamicTCPPortReservation {
-        precondition(!publications.isEmpty, "a dynamic TCP transaction needs at least one publication")
+    /// Reserves fixed and kernel-selected TCP/UDP ports as one lease.
+    ///
+    /// The input order is retained exactly so the proxy can replace each original
+    /// JSON binding with the corresponding held endpoint, including mixed transport
+    /// requests. A bind failure unwinds every listener before dockerd sees create.
+    func reserveDynamicPorts(
+        _ publications: [DockerDynamicPortPublication],
+        alongside fixedPlan: DockerFixedPortLeasePlan
+    ) throws -> DynamicPortReservation {
+        precondition(!publications.isEmpty, "a dynamic published-port transaction needs at least one publication")
         guard case .reserved(let reservation) = try reservePorts(
-            fixedTCP: fixedPublications,
-            dynamicTCP: publications,
-            fixedUDP: [])
+            fixedTCP: fixedPlan.tcp,
+            fixedUDP: fixedPlan.udp,
+            dynamic: publications)
         else {
-            preconditionFailure("an unconditional dynamic TCP reservation cannot become stale")
+            preconditionFailure("an unconditional dynamic published-port reservation cannot become stale")
         }
         return reservation
     }
@@ -551,8 +554,8 @@ public final class PortForwarder {
             generation: inspectedGeneration)
         switch try reservePorts(
             fixedTCP: plan.tcp,
-            dynamicTCP: [],
             fixedUDP: plan.udp,
+            dynamic: [],
             startLeaseAssociation: association)
         {
         case .reserved(let reservation):
@@ -565,20 +568,22 @@ public final class PortForwarder {
         }
     }
 
-    /// The one ledger lock covers all fixed TCP/UDP binds and the dynamic TCP
+    /// The one ledger lock covers all fixed TCP/UDP binds and dynamic TCP/UDP
     /// allocation. A failed bind rolls every listener from this request back before
     /// Docker sees a create/start success, so the host never reports a partial lease.
     private func reservePorts(
         fixedTCP: [DockerExplicitTCPPortBinding],
-        dynamicTCP: [DockerExplicitTCPPortBinding],
         fixedUDP: [DockerExplicitUDPPortBinding],
+        dynamic: [DockerDynamicPortPublication],
         startLeaseAssociation: StartLeaseAssociation? = nil
     ) throws -> PortLeaseReservationAttempt {
         let leaseID = UUID()
         var tcpListeners: [Int: TCPListener] = [:]
         var udpListeners: [Int: UDPListener] = [:]
-        var allocatedDynamic: [DockerExplicitTCPPortBinding] = []
-        let expectedPublicationCount = fixedTCP.count + dynamicTCP.count + fixedUDP.count
+        var allocatedDynamic: [DockerDynamicPortPublication] = []
+        var allocatedDynamicTCP: [DockerExplicitTCPPortBinding] = []
+        var allocatedDynamicUDP: [DockerExplicitUDPPortBinding] = []
+        let expectedPublicationCount = fixedTCP.count + fixedUDP.count + dynamic.count
 
         lock.lock()
         if let startLeaseAssociation {
@@ -614,32 +619,6 @@ public final class PortForwarder {
                 tcpListeners[publication.hostPort] = listener
             }
 
-            for publication in dynamicTCP {
-                let loopbackAddress = TCPListener.LoopbackAddress
-                    .forDockerHostAddress(publication.hostIP)
-                let listener = TCPListener(
-                    port: 0,
-                    queue: acceptQueue,
-                    loopbackAddress: loopbackAddress)
-                do {
-                    try listener.start()
-                } catch {
-                    throw PortLeaseError.unavailable(
-                        "could not allocate a dynamic published TCP port on \(loopbackAddress.rawValue): \(error.localizedDescription)")
-                }
-                let allocated = DockerExplicitTCPPortBinding(
-                    hostIP: publication.hostIP,
-                    hostPort: listener.port,
-                    containerPort: publication.containerPort)
-                guard tcpListeners[allocated.hostPort] == nil else {
-                    listener.stop()
-                    throw PortLeaseError.unavailable(
-                        "kernel returned an already-reserved dynamic TCP port \(allocated.hostPort)")
-                }
-                tcpListeners[allocated.hostPort] = listener
-                allocatedDynamic.append(allocated)
-            }
-
             for publication in fixedUDP {
                 guard conflictingUDPForwards[publication.hostPort] == nil else {
                     throw PortLeaseError.unavailable(
@@ -660,11 +639,73 @@ public final class PortForwarder {
                 udpListeners[publication.hostPort] = listener
             }
 
-            let allTCP = fixedTCP + allocatedDynamic
-            guard allTCP.count + fixedUDP.count == expectedPublicationCount else {
+            for publication in dynamic {
+                switch publication.transport {
+                case .tcp:
+                    let loopbackAddress = TCPListener.LoopbackAddress
+                        .forDockerHostAddress(publication.hostIP)
+                    let listener = TCPListener(
+                        port: 0,
+                        queue: acceptQueue,
+                        loopbackAddress: loopbackAddress)
+                    do {
+                        try listener.start()
+                    } catch {
+                        throw PortLeaseError.unavailable(
+                            "could not allocate a dynamic published TCP port on \(loopbackAddress.rawValue): \(error.localizedDescription)")
+                    }
+                    let allocated = DockerExplicitTCPPortBinding(
+                        hostIP: publication.hostIP,
+                        hostPort: listener.port,
+                        containerPort: publication.containerPort)
+                    guard tcpListeners[allocated.hostPort] == nil else {
+                        listener.stop()
+                        throw PortLeaseError.unavailable(
+                            "kernel returned an already-reserved dynamic TCP port \(allocated.hostPort)")
+                    }
+                    tcpListeners[allocated.hostPort] = listener
+                    allocatedDynamicTCP.append(allocated)
+                    allocatedDynamic.append(DockerDynamicPortPublication(
+                        transport: .tcp,
+                        hostIP: allocated.hostIP,
+                        hostPort: allocated.hostPort,
+                        containerPort: allocated.containerPort))
+
+                case .udp:
+                    let listener = UDPListener(port: 0, queue: acceptQueue)
+                    do {
+                        // Like fixed UDP leases, this bound socket drains until the
+                        // create-associated listener receives an exact start success.
+                        try listener.start()
+                    } catch {
+                        throw PortLeaseError.unavailable(
+                            "could not allocate a dynamic published UDP port on 127.0.0.1: \(error.localizedDescription)")
+                    }
+                    let allocated = DockerExplicitUDPPortBinding(
+                        hostIP: publication.hostIP,
+                        hostPort: listener.port,
+                        containerPort: publication.containerPort)
+                    guard udpListeners[allocated.hostPort] == nil else {
+                        listener.stop()
+                        throw PortLeaseError.unavailable(
+                            "kernel returned an already-reserved dynamic UDP port \(allocated.hostPort)")
+                    }
+                    udpListeners[allocated.hostPort] = listener
+                    allocatedDynamicUDP.append(allocated)
+                    allocatedDynamic.append(DockerDynamicPortPublication(
+                        transport: .udp,
+                        hostIP: allocated.hostIP,
+                        hostPort: allocated.hostPort,
+                        containerPort: allocated.containerPort))
+                }
+            }
+
+            let allTCP = fixedTCP + allocatedDynamicTCP
+            let allUDP = fixedUDP + allocatedDynamicUDP
+            guard allTCP.count + allUDP.count == expectedPublicationCount else {
                 throw PortLeaseError.unavailable("fixed port allocation did not retain every requested listener")
             }
-            let lease = PortLease(identifier: leaseID, tcp: allTCP, udp: fixedUDP)
+            let lease = PortLease(identifier: leaseID, tcp: allTCP, udp: allUDP)
             leases[lease.identifier] = LeaseRecord(
                 lease: lease,
                 tcpListeners: tcpListeners,
@@ -681,10 +722,13 @@ public final class PortForwarder {
             throw error
         }
 
-        let lease = PortLease(identifier: leaseID, tcp: fixedTCP + allocatedDynamic, udp: fixedUDP)
+        let lease = PortLease(
+            identifier: leaseID,
+            tcp: fixedTCP + allocatedDynamicTCP,
+            udp: fixedUDP + allocatedDynamicUDP)
         let purpose = startLeaseAssociation == nil ? "Docker create" : "Docker start"
         log.info("reserved fixed-port lease \(leasePortDescription(lease)) for \(purpose)")
-        return .reserved(DynamicTCPPortReservation(lease: lease, publications: allocatedDynamic))
+        return .reserved(DynamicPortReservation(lease: lease, publications: allocatedDynamic))
     }
 
     private func leasePortDescription(_ lease: PortLease) -> String {

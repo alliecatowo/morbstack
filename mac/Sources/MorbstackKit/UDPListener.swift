@@ -65,7 +65,10 @@ public final class UDPListener {
     }
 
     /// The loopback port this endpoint owns.
-    public let port: Int
+    ///
+    /// A dynamic listener is constructed with `0`; after the kernel binds it, this
+    /// contains the concrete endpoint selected for the held Docker lease.
+    public private(set) var port: Int
 
     /// Called on `queue` for every complete datagram. A received `Data()` is valid:
     /// UDP permits zero-length datagrams and the bridge preserves them. Access stays
@@ -134,6 +137,27 @@ public final class UDPListener {
             throw Error.failed(
                 "bind(127.0.0.1:\(port)/udp) failed: \(String(cString: strerror(code)))")
         }
+
+        var boundAddress = sockaddr_in()
+        var boundLength = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let named = withUnsafeMutablePointer(to: &boundAddress) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { generic in
+                POSIXSocketSupport.retryOnInterrupt { Darwin.getsockname(descriptor, generic, &boundLength) }
+            }
+        }
+        guard named == 0, boundAddress.sin_family == sa_family_t(AF_INET) else {
+            let detail = named == 0
+                ? "unexpected address family"
+                : String(cString: strerror(errno))
+            Darwin.close(descriptor)
+            throw Error.failed("getsockname(127.0.0.1/udp) failed: \(detail)")
+        }
+        let boundPort = Int(UInt16(bigEndian: boundAddress.sin_port))
+        guard (1...65_535).contains(boundPort) else {
+            Darwin.close(descriptor)
+            throw Error.failed("getsockname(127.0.0.1/udp) returned invalid port \(boundPort)")
+        }
+        port = boundPort
 
         POSIXSocketSupport.setNonBlocking(descriptor, true)
         fd = descriptor

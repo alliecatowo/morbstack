@@ -1,9 +1,9 @@
 # Dynamic published-port allocation
 
-Status: Phase 1 implementation complete; live Docker/VM acceptance evidence pending.
-This document distinguishes the implemented bounded TCP transaction from the broader
-dynamic-publication work that remains. It is not a release claim until the live matrix
-at the end passes.
+Status: Phase 1 TCP/UDP implementation complete; live Docker/VM acceptance evidence
+pending. This document distinguishes the implemented bounded request-visible `-p`
+transaction from the Engine-owned `-P` work that remains. It is not a release claim
+until the live matrix at the end passes.
 
 ## Decision
 
@@ -23,9 +23,9 @@ The [Docker CLI](https://github.com/docker/cli/blob/master/cli/command/container
 hands publish options to `nat.ParsePortSpecs`; its
 [upstream parser](https://github.com/docker/go-connections/blob/master/nat/nat.go#L159-L219)
 rejects unequal container/host spans and produces those individual concrete mappings.
-Fixed IPv4/default UDP is part of the same held lease; dynamic UDP remains
-unsupported. Neither mechanism can make an Engine-chosen dynamic port match a
-previously reserved Mac endpoint.
+Fixed and bounded dynamic IPv4/default UDP are part of the same held lease, alongside
+TCP. Neither mechanism can make an Engine-chosen dynamic port match a previously
+reserved Mac endpoint: the bounded proxy selects and holds the port before create.
 
 ## Why this cannot be added to the passive relay
 
@@ -58,9 +58,9 @@ explicit `-p` and `--expose` options; it does not copy an image's Dockerfile
 and merges the image configuration during container creation. Its networking code
 then clones `HostConfig.PortBindings`, adds every *merged* exposed port missing from
 that map, and turns each empty binding into an ephemeral publication. The relevant
-upstream paths are [Docker CLI option construction](https://github.com/docker/cli/blob/master/cli/command/container/opts.go#L2962-L3067),
-[Moby image resolution and config merge](https://github.com/moby/moby/blob/master/daemon/create.go#L1337-L1387),
-and [Moby's port-map expansion](https://github.com/moby/moby/blob/master/daemon/network.go#L912-L962).
+pinned upstream paths are [Docker CLI option construction](https://github.com/docker/cli/blob/v29.7.1/cli/command/container/opts.go#L408-L455),
+[Moby image resolution and config merge](https://github.com/moby/moby/blob/docker-v29.7.1/daemon/create.go#L163-L190),
+and [Moby's port-map expansion](https://github.com/moby/moby/blob/docker-v29.7.1/daemon/network.go#L961-L1026).
 
 Consequently, the ordinary `docker run -P image` body does not identify the complete
 set that dockerd will publish. Rewriting only request-visible `ExposedPorts` would
@@ -77,11 +77,14 @@ new ones on a later start. Materializing fixed `PortBindings` and clearing
 
 A future `-P` implementation therefore needs an atomic guest-Engine integration that
 uses the same immutable image/config resolution as the create operation, asks the host
-allocator to hold every selected loopback TCP endpoint before the Engine persists it,
-and defines the corresponding stop/start/restart reallocation protocol. It must reject
-the complete operation before guest side effects when the resolved set contains UDP,
-SCTP, raw dynamic host-port ranges, a non-loopback address, or any
-ambiguous/unsupported form. A proxy-only
+allocator to hold the whole supported resolved loopback TCP/UDP endpoint set before
+the Engine persists it, and defines the corresponding stop/start/restart reallocation
+protocol. In pinned Moby 29.7.1, the hook has to be **after**
+`mergeAndVerifyConfig` during create and **before** `initializeNetworking` makes the
+start-time mapping ([`start.go`](https://github.com/moby/moby/blob/docker-v29.7.1/daemon/start.go#L122-L125)).
+It must atomically reject the complete operation before guest side effects when the
+resolved set contains SCTP, a non-loopback address, or any ambiguous/unsupported form.
+A proxy-only
 request rewriter may support a clearly labeled direct-API subset whose complete
 `ExposedPorts` set is already in the body, but that is not compatible support for the
 standard Docker CLI `-P image` path and must not be advertised as such.
@@ -89,9 +92,10 @@ standard Docker CLI `-P image` path and must not be advertised as such.
 ## Implemented Phase 1 transaction
 
 For one recognized normal `POST .../containers/create`, Morbstack now supports an
-omitted `HostPort`, exact `HostPort: ""`, or exact `HostPort: "0"` on one or more TCP
-`PortBindings` entries. It holds a real `127.0.0.1` listener allocated by the macOS
-kernel, writes each concrete number into a re-encoded create body and matching
+omitted `HostPort`, exact `HostPort: ""`, or exact `HostPort: "0"` on one or more
+loopback TCP or IPv4/default UDP `PortBindings` entries. It holds a real `127.0.0.1`
+listener/socket allocated by the macOS kernel, writes each concrete number into a
+re-encoded create body and matching
 `Content-Length`, and sends that body to the guest Engine. The host associates the
 full ID from a bounded normal `201` response
 *before any `201` byte reaches the Docker client*. A later recognized bodyless start
@@ -164,7 +168,8 @@ body does not completely identify.
 | Repeated identical fixed TCP flags, for example `-p 8080:80 -p 8080:80` | The Docker CLI appends repeated bindings to the same `80/tcp` map entry | Morbstack deduplicates the identical host endpoint for its one listener/lease. | The guest Engine owns whether duplicate bindings are accepted; this is not a claim that every duplicate request succeeds. |
 | `-p 127.0.0.1:8080:80` | Concrete TCP `HostPort` with `HostIp: "127.0.0.1"` | Same fixed-port lease path. | Live Docker/VM evidence is still pending. |
 | `-p <container-port>`, `-p :<container-port>`, or `-p 0:<container-port>` | TCP `HostPort` omitted, exact `""`, or exact `"0"` | The create transaction holds a kernel-selected loopback listener and rewrites only that planned entry with its concrete port before the Engine sees it. | Fixed-length, bounded JSON/HTTP only; not a general HTTP transformer. |
-| Multiple compatible TCP `-p` flags | Multiple distinct concrete or recognized dynamic TCP entries | One atomic lease holds every requested listener; dynamic entries are rewritten with the reserved values. | A duplicate host port may only name one guest target. |
+| `-p <container-port>/udp`, `-p :<container-port>/udp`, or `-p 0:<container-port>/udp` | IPv4/default UDP `HostPort` omitted, exact `""`, or exact `"0"` | The same transaction holds a kernel-selected `127.0.0.1` datagram socket, rewrites that exact entry, and leaves it drain-only until the matching exact start success. | IPv6-literal UDP and general HTTP framing remain outside this path. |
+| Multiple compatible TCP/UDP `-p` flags | Multiple distinct concrete or recognized dynamic TCP/UDP entries | One atomic lease holds every requested listener/socket; dynamic entries are rewritten with the reserved values in request order. | TCP and UDP may share a numeric port, but a transport-local port may name only one guest target. |
 | `-p 8080:80/udp` | Concrete IPv4/default UDP publication | A real `127.0.0.1:8080/udp` socket is reserved before create, associated with the returned full ID, then moves from drain-only to forwarding on the exact successful start response. | IPv6-literal UDP publication is rejected; live Docker/VM acceptance is still pending. |
 | `-p 8080:80/sctp` | Docker CLI accepts and serializes an SCTP `PortBindings` key | Rejected during Morbstack's fixed-port preflight because its host forwarder implements TCP and IPv4/default UDP only. | This is an intentional truthful rejection, not SCTP forwarding support. |
 | `-p '[::1]:8080:80'` | Concrete TCP `HostPort` with `HostIp: "::1"` | The preflight, held create/start lease, and event reconciler bind the actual local IPv6 endpoint `[::1]:8080`. | Live Docker/VM evidence is still pending. |
@@ -177,7 +182,7 @@ body does not completely identify.
 
 The concrete implementation evidence is `DockerPortPublicationPreflight` for
 classification/rewrite, `DockerProxy` for the bounded request/response hand-off, and
-`PortForwarder`/`TCPListener` for the retained macOS listener. The remaining
+`PortForwarder`/`TCPListener`/`UDPListener` for the retained macOS endpoints. The remaining
 dual-family row is an explicit known gap in that chain, not a compatibility claim.
 The fixed UDP cross-transport transaction is documented separately in
 [`fixed-udp-port-publication-design.md`](fixed-udp-port-publication-design.md). It is
@@ -203,8 +208,8 @@ all other responses leave the lease inactive.
 
 This is not durable host-side lease persistence or general lifecycle interception. A
 name/unique-prefix start or restart, inspect or lifecycle failure, a running container
-with no existing full-ID lease, empty or zero host port, raw dynamic host-port range,
-dynamic UDP/non-TCP,
+with no existing full-ID lease, raw dynamic host-port range, unsupported dynamic
+protocol,
 unsupported address, malformed/ambiguous binding, or a non-bodyless request remains
 an unchanged relay with no synchronous recovery claim. If a fully proved endpoint
 cannot be bound on macOS, the start or restart is rejected before it reaches the
@@ -225,9 +230,8 @@ The following remain unsupported or explicitly outside this transaction:
   as one Engine-side allocation range rather than a fixed one-to-one mapping. The
   ordinary equal-length fixed range has already been normalized by the Docker CLI and
   is covered by the fixed-port row above.
-- Dynamic UDP, dynamic TCP combined with a non-TCP sibling, non-loopback addresses,
-  missing/ambiguous binding fields, and unsupported protocols. UDP's existing
-  post-start datagram forwarding remains unchanged; it is not a held dynamic lease.
+- Dynamic SCTP, IPv6-literal UDP, non-loopback addresses, missing/ambiguous binding
+  fields, and unsupported protocols.
 - Chunked, malformed, upgraded, or otherwise opaque dynamic HTTP framing, and
   nonstandard/oversized/chunked create responses.
 
@@ -239,7 +243,7 @@ When event reconciliation cannot bind an endpoint that Docker has already report
 `morb status` calls it an **unavailable host forward** and explicitly says that the
 Docker CLI may still display it as published. This is a post-create diagnostic, not a
 retroactive allocation guarantee: it does not make `-P`, raw dynamic host-port
-ranges, dynamic UDP,
+ranges,
 omitted-host-port, or opaque/chunked creates synchronously supported.
 
 ## Required work beyond Phase 1
@@ -299,17 +303,17 @@ either existing primitive into a partial generic HTTP proxy.
 Build the transaction in narrowly enabled stages, while retaining raw relay behavior
 for all non-dynamic calls:
 
-1. **Implemented, pending execution:** the bounded stateful TCP transaction preserves
-   unread keep-alive bytes for fresh preflight and includes offline parser/rewrite
+1. **Implemented, pending execution:** the bounded stateful TCP/IPv4-UDP transaction
+   preserves unread keep-alive bytes for fresh preflight and includes offline parser/rewrite
    coverage. Verify that a competing Mac bind fails before
    guest create, then verify the created container's reported port equals the still
    held Mac listener and is reachable immediately after a successful start response.
 2. Add `PublishAllPorts` only after its guest image-resolution, held-allocation, and
    stop/start/restart contract exists; cover image-tag replacement, image-provided
    TCP/UDP/SCTP exposure, explicit `-p` precedence, `--expose`, conflict, destroy, and
-   restart reallocation. Treat raw dynamic host-port ranges and UDP as separate
-   allocation protocols with dedicated collision, lifecycle, and recovery coverage;
-   do not infer either from string splitting. Ordinary equal-length fixed CLI ranges
+   restart reallocation. Treat raw dynamic host-port ranges as a separate allocation
+   protocol with dedicated collision, lifecycle, and recovery coverage; do not infer
+   it from string splitting. Ordinary equal-length fixed CLI ranges
    already use the fixed-port lease path.
 
 The integration matrix must cover direct Docker API clients as well as Docker CLI,

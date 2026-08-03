@@ -63,13 +63,38 @@ public struct DockerFixedPortLeasePlan: Hashable, Sendable {
     public var isEmpty: Bool { tcp.isEmpty && udp.isEmpty }
 }
 
-/// A bounded dynamic-host-port TCP create document that can be transformed before it
+/// The transport of one bounded dynamic host-port publication.
+///
+/// This remains intentionally narrower than Docker's complete port grammar. The
+/// held host forwarder supports loopback TCP and IPv4/default UDP only.
+enum DockerDynamicPortTransport: Hashable, Sendable {
+    case tcp
+    case udp
+
+    var name: String {
+        switch self {
+        case .tcp: return "TCP"
+        case .udp: return "UDP"
+        }
+    }
+}
+
+/// One dynamic publication that the proxy may rewrite with a held kernel-selected
+/// host port before the request reaches the guest Engine.
+struct DockerDynamicPortPublication: Hashable, Sendable {
+    let transport: DockerDynamicPortTransport
+    let hostIP: String
+    let hostPort: Int
+    let containerPort: Int
+}
+
+/// A bounded dynamic-host-port create document that can be transformed before it
 /// reaches the guest Engine.
 ///
 /// This is intentionally not a general Docker create model. It remembers only the
 /// exact JSON entries the Phase 1 transaction is allowed to replace, and reparses the
 /// original body before rewriting so a plan can never be applied to different bytes.
-struct DockerDynamicTCPCreatePlan {
+struct DockerDynamicPortCreatePlan {
 
     /// The exact dynamic spelling admitted from the original JSON document.
     ///
@@ -85,6 +110,7 @@ struct DockerDynamicTCPCreatePlan {
     private struct Entry: Hashable {
         let containerPortKey: String
         let index: Int
+        let transport: DockerDynamicPortTransport
         let hostIP: String
         let containerPort: Int
         /// Keep the request's exact dynamic spelling so a stale plan cannot
@@ -92,7 +118,8 @@ struct DockerDynamicTCPCreatePlan {
         let hostPortOrigin: DynamicHostPortOrigin
     }
 
-    let requestedPublications: [DockerExplicitTCPPortBinding]
+    let requestedPublications: [DockerDynamicPortPublication]
+    let fixedPlan: DockerFixedPortLeasePlan
     private let body: Data
     private let entries: [Entry]
 
@@ -101,23 +128,31 @@ struct DockerDynamicTCPCreatePlan {
         entries: [(
             containerPortKey: String,
             index: Int,
+            transport: DockerDynamicPortTransport,
             hostIP: String,
             containerPort: Int,
             hostPortOrigin: DynamicHostPortOrigin
-        )]
+        )],
+        fixedPlan: DockerFixedPortLeasePlan
     ) {
         self.body = body
         self.entries = entries.map {
             Entry(
                 containerPortKey: $0.containerPortKey,
                 index: $0.index,
+                transport: $0.transport,
                 hostIP: $0.hostIP,
                 containerPort: $0.containerPort,
                 hostPortOrigin: $0.hostPortOrigin)
         }
         self.requestedPublications = entries.map {
-            DockerExplicitTCPPortBinding(hostIP: $0.hostIP, hostPort: 0, containerPort: $0.containerPort)
+            DockerDynamicPortPublication(
+                transport: $0.transport,
+                hostIP: $0.hostIP,
+                hostPort: 0,
+                containerPort: $0.containerPort)
         }
+        self.fixedPlan = fixedPlan
     }
 
     /// Replaces only planned empty, omitted, or literal `"0"` `HostPort` entries
@@ -126,27 +161,28 @@ struct DockerDynamicTCPCreatePlan {
     /// Rechecking every entry is defensive but significant: JSON object graphs are
     /// mutable Foundation values, and a transaction must never turn a stale plan into
     /// a different container's port mapping.
-    func rewrittenBody(with publications: [DockerExplicitTCPPortBinding]) throws -> Data {
+    func rewrittenBody(with publications: [DockerDynamicPortPublication]) throws -> Data {
         guard publications.count == entries.count else {
-            throw MorbError.protocolViolation("dynamic TCP allocator returned the wrong number of ports")
+            throw MorbError.protocolViolation("dynamic published-port allocator returned the wrong number of ports")
         }
         guard
             var object = try JSONSerialization.jsonObject(with: body) as? [String: Any],
             var hostConfig = object["HostConfig"] as? [String: Any],
             var portBindings = hostConfig["PortBindings"] as? [String: Any]
         else {
-            throw MorbError.protocolViolation("dynamic TCP create body changed before it could be rewritten")
+            throw MorbError.protocolViolation("dynamic published-port create body changed before it could be rewritten")
         }
 
         for (entry, publication) in zip(entries, publications) {
-            guard publication.hostIP == entry.hostIP,
+            guard publication.transport == entry.transport,
+                  publication.hostIP == entry.hostIP,
                   publication.containerPort == entry.containerPort,
                   (1...65535).contains(publication.hostPort),
                   var bindings = portBindings[entry.containerPortKey] as? [Any],
                   bindings.indices.contains(entry.index),
                   var binding = bindings[entry.index] as? [String: Any]
             else {
-                throw MorbError.protocolViolation("dynamic TCP create plan no longer matches its request body")
+                throw MorbError.protocolViolation("dynamic published-port create plan no longer matches its request body")
             }
             let originalFormStillMatches: Bool
             switch entry.hostPortOrigin {
@@ -158,7 +194,7 @@ struct DockerDynamicTCPCreatePlan {
                 originalFormStillMatches = (binding["HostPort"] as? String) == "0"
             }
             guard originalFormStillMatches else {
-                throw MorbError.protocolViolation("dynamic TCP create plan no longer matches its request body")
+                throw MorbError.protocolViolation("dynamic published-port create plan no longer matches its request body")
             }
             binding["HostPort"] = String(publication.hostPort)
             bindings[entry.index] = binding
@@ -168,7 +204,7 @@ struct DockerDynamicTCPCreatePlan {
         hostConfig["PortBindings"] = portBindings
         object["HostConfig"] = hostConfig
         guard JSONSerialization.isValidJSONObject(object) else {
-            throw MorbError.protocolViolation("rewritten dynamic TCP create is not valid JSON")
+            throw MorbError.protocolViolation("rewritten dynamic published-port create is not valid JSON")
         }
         return try JSONSerialization.data(withJSONObject: object, options: [])
     }
@@ -198,13 +234,13 @@ public enum DockerPortPublicationPreflight {
         case rejected(message: String)
     }
 
-    /// The Phase 1 dynamic allocator either receives a fully understood TCP-only
+    /// The Phase 1 dynamic allocator either receives a fully understood TCP/UDP
     /// request or does not run at all. `rejected` is deliberately precise: forwarding
     /// one of these shapes dynamically would let guest dockerd choose a port after
     /// the host had already committed to a different endpoint.
-    enum DynamicTCPVerdict {
+    enum DynamicPortVerdict {
         case notDynamic
-        case supported(DockerDynamicTCPCreatePlan)
+        case supported(DockerDynamicPortCreatePlan)
         case rejected(message: String)
     }
 
@@ -740,11 +776,11 @@ public enum DockerPortPublicationPreflight {
         return byHostPort.values.sorted { $0.hostPort < $1.hostPort }
     }
 
-    /// Recognizes Docker's empty, omitted, or literal `"0"` `HostPort` TCP bindings
-    /// for the stateful Phase 1 allocator. `PublishAllPorts`, raw dynamic host-port
-    /// ranges, UDP, invalid address/protocol values, and opaque sibling entries are
-    /// rejected rather than silently falling back to an Engine-owned allocation.
-    static func dynamicTCPCreatePlan(in body: Data) -> DynamicTCPVerdict {
+    /// Recognizes Docker's empty, omitted, or literal `"0"` `HostPort` TCP and UDP
+    /// bindings for the stateful Phase 1 allocator. `PublishAllPorts`, raw dynamic
+    /// host-port ranges, invalid address/protocol values, and opaque sibling entries
+    /// are rejected rather than silently falling back to an Engine-owned allocation.
+    static func dynamicPortCreatePlan(in body: Data) -> DynamicPortVerdict {
         guard
             let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
             let hostConfig = object["HostConfig"] as? [String: Any]
@@ -764,13 +800,17 @@ public enum DockerPortPublicationPreflight {
         var dynamicEntries: [(
             containerPortKey: String,
             index: Int,
+            transport: DockerDynamicPortTransport,
             hostIP: String,
             containerPort: Int,
-            hostPortOrigin: DockerDynamicTCPCreatePlan.DynamicHostPortOrigin
+            hostPortOrigin: DockerDynamicPortCreatePlan.DynamicHostPortOrigin
         )] = []
         var sawOpaqueEntry = false
-        var sawNonTCPPublication = false
         var unsupportedSiblingMessage: String?
+        var fixedTCPByHostPort: [Int: DockerExplicitTCPPortBinding] = [:]
+        var fixedUDPByHostPort: [Int: DockerExplicitUDPPortBinding] = [:]
+        var ambiguousTCPHostPorts: Set<Int> = []
+        var ambiguousUDPHostPorts: Set<Int> = []
 
         for containerPortKey in portBindings.keys.sorted() {
             let protocolName = networkProtocol(in: containerPortKey)
@@ -796,7 +836,7 @@ public enum DockerPortPublicationPreflight {
                     continue
                 }
 
-                let dynamicHostPortOrigin: DockerDynamicTCPCreatePlan.DynamicHostPortOrigin?
+                let dynamicHostPortOrigin: DockerDynamicPortCreatePlan.DynamicHostPortOrigin?
                 if hostPortWasOmitted {
                     dynamicHostPortOrigin = .omitted
                 } else if rawHostPort == "" {
@@ -808,7 +848,11 @@ public enum DockerPortPublicationPreflight {
                 }
 
                 if let dynamicHostPortOrigin {
-                    guard protocolName == "tcp" else {
+                    let transport: DockerDynamicPortTransport
+                    switch protocolName {
+                    case "tcp": transport = .tcp
+                    case "udp": transport = .udp
+                    default:
                         return .rejected(
                             message: "dynamic published \(protocolName.uppercased()) ports are not supported yet")
                     }
@@ -816,32 +860,33 @@ public enum DockerPortPublicationPreflight {
                           (1...65535).contains(containerPort)
                     else {
                         return .rejected(
-                            message: "dynamic published TCP port \(containerPortKey) is not a single valid container port")
+                            message: "dynamic published \(transport.name) port \(containerPortKey) is not a single valid container port")
                     }
                     let hostIP: String
                     if let value = binding["HostIp"] {
                         guard let string = value as? String else {
                             return .rejected(
-                                message: "dynamic published TCP HostIp must be a string")
+                                message: "dynamic published \(transport.name) HostIp must be a string")
                         }
                         hostIP = string.trimmingCharacters(in: .whitespaces)
                     } else {
                         hostIP = ""
                     }
-                    guard PortForwardPlan.forwardableHostAddresses.contains(hostIP) else {
+                    let forwardableAddresses = transport == .tcp
+                        ? PortForwardPlan.forwardableHostAddresses
+                        : PortForwardPlan.forwardableUDPHostAddresses
+                    guard forwardableAddresses.contains(hostIP) else {
                         return .rejected(
-                            message: "published host address \(hostIP) is not supported; Morbstack forwards TCP only on loopback")
+                            message: "published host address \(hostIP) is not supported; Morbstack forwards \(transport.name) only on loopback")
                     }
                     dynamicEntries.append((
                         containerPortKey,
                         index,
+                        transport,
                         hostIP,
                         containerPort,
                         dynamicHostPortOrigin))
                 } else {
-                    // A transaction that rewrites one entry must understand every
-                    // sibling. Fixed TCP bindings remain supported, but fixed UDP or
-                    // an opaque/invalid sibling would need a second lease contract.
                     guard let rawHostPort,
                           let hostPort = Int(rawHostPort),
                           (1...65535).contains(hostPort)
@@ -850,7 +895,71 @@ public enum DockerPortPublicationPreflight {
                             ?? "published \(protocolName.uppercased()) host port \(rawHostPort ?? "missing") is not a concrete port; dynamic host-port ranges are not supported yet"
                         continue
                     }
-                    if protocolName != "tcp" { sawNonTCPPublication = true }
+                    let hostIP: String
+                    if let value = binding["HostIp"] {
+                        guard let string = value as? String else {
+                            unsupportedSiblingMessage = unsupportedSiblingMessage
+                                ?? "published \(protocolName.uppercased()) HostIp must be a string"
+                            continue
+                        }
+                        hostIP = string.trimmingCharacters(in: .whitespaces)
+                    } else {
+                        hostIP = ""
+                    }
+                    guard let containerPort = parsedContainerPort,
+                          (1...65535).contains(containerPort)
+                    else {
+                        unsupportedSiblingMessage = unsupportedSiblingMessage
+                            ?? "published \(protocolName.uppercased()) port \(containerPortKey) is not a single valid container port"
+                        continue
+                    }
+
+                    switch protocolName {
+                    case "tcp":
+                        guard PortForwardPlan.forwardableHostAddresses.contains(hostIP) else {
+                            unsupportedSiblingMessage = unsupportedSiblingMessage
+                                ?? "published host address \(hostIP) is not supported; Morbstack forwards TCP only on loopback"
+                            continue
+                        }
+                        let candidate = DockerExplicitTCPPortBinding(
+                            hostIP: hostIP, hostPort: hostPort, containerPort: containerPort)
+                        guard !ambiguousTCPHostPorts.contains(hostPort) else { continue }
+                        if let existing = fixedTCPByHostPort[hostPort] {
+                            guard existing.containerPort == candidate.containerPort else {
+                                fixedTCPByHostPort.removeValue(forKey: hostPort)
+                                ambiguousTCPHostPorts.insert(hostPort)
+                                continue
+                            }
+                            if existing.hostIP.contains(":"), !candidate.hostIP.contains(":") {
+                                fixedTCPByHostPort[hostPort] = candidate
+                            }
+                        } else {
+                            fixedTCPByHostPort[hostPort] = candidate
+                        }
+
+                    case "udp":
+                        guard PortForwardPlan.forwardableUDPHostAddresses.contains(hostIP) else {
+                            unsupportedSiblingMessage = unsupportedSiblingMessage
+                                ?? "published host address \(hostIP) is not supported; Morbstack forwards UDP only on loopback"
+                            continue
+                        }
+                        let candidate = DockerExplicitUDPPortBinding(
+                            hostIP: hostIP, hostPort: hostPort, containerPort: containerPort)
+                        guard !ambiguousUDPHostPorts.contains(hostPort) else { continue }
+                        if let existing = fixedUDPByHostPort[hostPort] {
+                            guard existing.containerPort == candidate.containerPort else {
+                                fixedUDPByHostPort.removeValue(forKey: hostPort)
+                                ambiguousUDPHostPorts.insert(hostPort)
+                                continue
+                            }
+                        } else {
+                            fixedUDPByHostPort[hostPort] = candidate
+                        }
+
+                    default:
+                        unsupportedSiblingMessage = unsupportedSiblingMessage
+                            ?? "published \(protocolName.uppercased()) ports are not supported by Morbstack's host forwarder"
+                    }
                 }
             }
         }
@@ -861,13 +970,26 @@ public enum DockerPortPublicationPreflight {
         }
         guard !sawOpaqueEntry else {
             return .rejected(
-                message: "dynamic published TCP ports require a fully understood PortBindings document")
+                message: "dynamic published ports require a fully understood PortBindings document")
         }
-        guard !sawNonTCPPublication else {
+        guard ambiguousTCPHostPorts.isEmpty, ambiguousUDPHostPorts.isEmpty else {
             return .rejected(
-                message: "dynamic published TCP ports cannot be combined with UDP or another non-TCP publication yet")
+                message: "dynamic published ports cannot map one loopback endpoint to multiple container targets")
         }
-        return .supported(DockerDynamicTCPCreatePlan(body: body, entries: dynamicEntries))
+        let fixedPlan = DockerFixedPortLeasePlan(
+            tcp: fixedTCPByHostPort.values.sorted { $0.hostPort < $1.hostPort },
+            udp: fixedUDPByHostPort.values.sorted { $0.hostPort < $1.hostPort })
+        guard dynamicEntries.count + fixedPlan.tcp.count + fixedPlan.udp.count
+            <= maximumSynchronousFixedPortBindings
+        else {
+            return .rejected(
+                message: "published mapping has more than \(maximumSynchronousFixedPortBindings) host endpoints; Morbstack refuses a partial port lease")
+        }
+        return .supported(
+            DockerDynamicPortCreatePlan(
+                body: body,
+                entries: dynamicEntries,
+                fixedPlan: fixedPlan))
     }
 
     private static func networkProtocol(in containerPort: String) -> String {
