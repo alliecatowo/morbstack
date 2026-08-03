@@ -15,6 +15,9 @@ import SwiftUI
 enum TrackDPreferences {
     static let showMenuBarIcon = "morb.showMenuBarIcon"
     static let selectedSettingsPane = "morb.selectedSettingsPane"
+    /// Suppresses only automatic first-run CLI presentation. The Morbstack app menu
+    /// always offers a deliberate way to return to the same review sheet.
+    static let firstRunCLISetupDeferred = "morb.firstRunCLISetupDeferred"
 }
 
 // MARK: - Root
@@ -114,6 +117,10 @@ struct MorbSettingsView: View {
 private struct TrackDGeneralSettings: View {
 
     @AppStorage(TrackDPreferences.showMenuBarIcon) private var showMenuBarIcon = true
+    @State private var backgroundServiceStatus: MorbBackgroundService.Status?
+    @State private var isBackgroundServiceEnabled = false
+    @State private var isUpdatingBackgroundService = false
+    @State private var backgroundServiceError: String?
 
     var body: some View {
         Form {
@@ -126,8 +133,115 @@ private struct TrackDGeneralSettings: View {
                 .font(.footnote)
                 .foregroundStyle(.secondary)
             }
+
+            backgroundServiceSection
         }
         .formStyle(.grouped)
+        .task {
+            await refreshBackgroundServiceStatus()
+        }
+    }
+
+    @ViewBuilder
+    private var backgroundServiceSection: some View {
+        if let backgroundServiceStatus {
+            Section("Background Service") {
+                if backgroundServiceStatus.registration == .unavailable {
+                    LabeledContent("Status") {
+                        Text("Available from an installed app")
+                    }
+                } else {
+                    Toggle(
+                        "Run Morbstack’s host service at login",
+                        isOn: Binding(
+                            get: { isBackgroundServiceEnabled },
+                            set: { requested in
+                                Task { await updateBackgroundService(enabled: requested) }
+                            }))
+                    .toggleStyle(.checkbox)
+                    .disabled(isUpdatingBackgroundService)
+
+                    Text(
+                        "Registers a per-user service in Login Items. macOS may run it now and after sign-in; it doesn’t start Morbstack’s VM or containers."
+                    )
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                }
+
+                LabeledContent("Status") {
+                    Text(backgroundServiceStatus.registration.settingsTitle)
+                }
+                Text(backgroundServiceStatus.diagnostic)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if backgroundServiceStatus.registration == .requiresApproval {
+                    Button("Open Login Items…") {
+                        MorbBackgroundService.openLoginItemsSettings()
+                    }
+                }
+
+                if isUpdatingBackgroundService {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Updating Login Item…")
+                    }
+                    .accessibilityElement(children: .combine)
+                }
+
+                if let backgroundServiceError {
+                    Label(backgroundServiceError, systemImage: "exclamationmark.triangle")
+                        .font(.footnote)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    private func refreshBackgroundServiceStatus() async {
+        let status = await Task.detached(priority: .userInitiated) {
+            MorbBackgroundService.status()
+        }.value
+        backgroundServiceStatus = status
+        isBackgroundServiceEnabled = status.registration.isRegistered
+    }
+
+    private func updateBackgroundService(enabled: Bool) async {
+        guard !isUpdatingBackgroundService else { return }
+        isUpdatingBackgroundService = true
+        backgroundServiceError = nil
+        defer { isUpdatingBackgroundService = false }
+
+        do {
+            let status = try await Task.detached(priority: .userInitiated) {
+                try (enabled ? MorbBackgroundService.enable() : MorbBackgroundService.disable())
+            }.value
+            backgroundServiceStatus = status
+            isBackgroundServiceEnabled = status.registration.isRegistered
+        } catch {
+            backgroundServiceError = (error as? MorbError)?.description ?? error.localizedDescription
+            await refreshBackgroundServiceStatus()
+        }
+    }
+}
+
+private extension MorbBackgroundService.Registration {
+
+    var isRegistered: Bool {
+        self == .enabled || self == .requiresApproval
+    }
+
+    var settingsTitle: String {
+        switch self {
+        case .unavailable: return "Unavailable"
+        case .notRegistered, .notFound: return "Off"
+        case .enabled: return "On"
+        case .requiresApproval: return "Needs Approval"
+        case .unknown: return "Unknown"
+        }
     }
 }
 

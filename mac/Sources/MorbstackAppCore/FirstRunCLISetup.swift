@@ -77,10 +77,12 @@ final class FirstRunCLISetupModel {
     /// durable per-user service is an affirmative choice made from the review sheet.
     var enableBackgroundService = false
 
-    /// This explicit one-time choice is separate from the durable Login Item Toggle.
-    /// Starting is the default completion path for a new Docker runtime, but the sheet
-    /// names the operation in both the Picker and confirmation button before it runs.
-    var engineVerificationChoice: FirstRunEngineVerificationChoice = .startAndVerify
+    /// This explicit one-time choice is separate from the durable Background Service
+    /// preference in Settings.
+    /// Host setup is the safe default: someone must choose the one-time engine start
+    /// separately. The sheet names either operation in both the Picker and its
+    /// confirmation button before it runs.
+    var engineVerificationChoice: FirstRunEngineVerificationChoice = .configureOnly
 
     private let daemon: DaemonClient
     private var hasPrepared = false
@@ -94,11 +96,11 @@ final class FirstRunCLISetupModel {
     ///
     /// An incomplete development bundle is not a CLI consent opportunity: the model
     /// leaves that plan alone rather than presenting a button that can never succeed.
-    /// A separately available background-service choice remains visible and is still
-    /// never registered until confirmed.
+    /// The separately available background-service preference belongs in Settings.
+    /// It must not turn an otherwise configured installation into a first-run block.
     var requiresConsent: Bool {
         guard plan != nil, !hasCompletedSetup else { return false }
-        return needsCLISetup || offersBackgroundService
+        return needsCLISetup
     }
 
     /// There is a concrete CLI transaction to review and apply.
@@ -143,6 +145,12 @@ final class FirstRunCLISetupModel {
     /// command-line setup is already complete and the optional service is unchecked.
     var canApplyReviewedSetup: Bool {
         needsCLISetup || (offersBackgroundService && enableBackgroundService)
+    }
+
+    /// Whether dismissing the sheet should suppress only its automatic first-run
+    /// presentation. Manual presentation from the app menu remains available.
+    var shouldPersistFirstRunDeferral: Bool {
+        !hasCompletedSetup && needsCLISetup
     }
 
     var confirmationTitle: String { engineVerificationChoice.confirmationTitle }
@@ -330,6 +338,7 @@ struct FirstRunCLISetupSheet: View {
 
     @Bindable var model: FirstRunCLISetupModel
     @Binding var isPresented: Bool
+    let deferFirstRunSetup: () -> Void
 
     var body: some View {
         NavigationStack {
@@ -358,6 +367,9 @@ struct FirstRunCLISetupSheet: View {
     private var toolbar: some ToolbarContent {
         ToolbarItem(placement: .cancellationAction) {
             Button(model.hasCompletedSetup ? "Done" : "Not Now") {
+                if !model.hasCompletedSetup {
+                    deferFirstRunSetup()
+                }
                 isPresented = false
             }
             .disabled(model.isInstalling)
@@ -556,7 +568,9 @@ struct FirstRunCLISetupSheet: View {
             Section {
                 if let result = model.result {
                     Label(
-                        result.contextError == nil ? "Docker CLI Is Ready" : "Docker CLI Installed",
+                        result.contextError == nil
+                            ? "Command-Line Setup Complete"
+                            : "Command-Line Tools Installed",
                         systemImage: "checkmark.circle"
                     )
                     Text(result.completionDescription)
@@ -572,7 +586,7 @@ struct FirstRunCLISetupSheet: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 } else {
-                    Label("Morbstack Is Ready", systemImage: "checkmark.circle")
+                    Label("Command-Line Setup Complete", systemImage: "checkmark.circle")
                     Text("The command-line configuration was already ready.")
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -605,7 +619,7 @@ struct FirstRunCLISetupSheet: View {
             }
             if let engineRepairMessage = model.engineRepairMessage {
                 Section("Engine Verification Needs Attention") {
-                    Label("Docker Isn’t Ready Yet", systemImage: "exclamationmark.triangle")
+                    Label("Docker Health Check Didn’t Pass", systemImage: "exclamationmark.triangle")
                         .foregroundStyle(.orange)
                     Text(engineRepairMessage)
                         .foregroundStyle(.secondary)

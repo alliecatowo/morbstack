@@ -44,6 +44,7 @@ public struct MorbstackMainApp: App {
 
     @State private var model: AppModel
     @State private var isPalettePresented = false
+    @State private var isCLISetupPresented = false
 
     /// Track D's General settings toggle. Bound to `MenuBarExtra(isInserted:)` so the
     /// switch actually removes the status item rather than just recording a preference.
@@ -86,7 +87,11 @@ public struct MorbstackMainApp: App {
         let _ = MorbWindowOpener.installOpenWindow { openWindow(id: MorbWindowID.main) }
 
         WindowGroup(id: MorbWindowID.main) {
-            RootWindow(model: model, options: options, isPalettePresented: $isPalettePresented)
+            RootWindow(
+                model: model,
+                options: options,
+                isPalettePresented: $isPalettePresented,
+                isCLISetupPresented: $isCLISetupPresented)
                 // A forced appearance is a tour switch, so `nil` — the ordinary case —
                 // must leave the system's own choice completely alone.
                 .preferredColorScheme(options.appearance)
@@ -95,7 +100,10 @@ public struct MorbstackMainApp: App {
             width: options.windowSize?.width ?? 1180,
             height: options.windowSize?.height ?? 760)
         .commands {
-            MorbCommands(model: model, isPalettePresented: $isPalettePresented)
+            MorbCommands(
+                model: model,
+                isPalettePresented: $isPalettePresented,
+                isCLISetupPresented: $isCLISetupPresented)
         }
         // `.unified`, and emphatically **not** `.unifiedCompact(showsTitle: false)`,
         // which is what shipped before this pass.
@@ -151,10 +159,20 @@ struct MorbCommands: Commands {
 
     let model: AppModel
     @Binding var isPalettePresented: Bool
+    @Binding var isCLISetupPresented: Bool
     @FocusedValue(\.routeRefreshAction) private var routeRefreshAction
     @FocusedValue(\.imageArchiveExportAction) private var imageArchiveExportAction
 
     var body: some Commands {
+        // A deferred setup remains available from the standard application menu. This
+        // is a command, not an onboarding overlay, and it presents the same scoped
+        // document-modal review sheet when someone asks to return to it.
+        CommandGroup(after: .appInfo) {
+            Button("Set Up Command-Line Tools…") {
+                isCLISetupPresented = true
+            }
+        }
+
         // Keep the system's View > Show Sidebar command and add document navigation
         // immediately after it.  That gives every toolbar/sidebar command a standard
         // menu and keyboard equivalent without replacing a system command group.
@@ -209,10 +227,12 @@ struct RootWindow: View {
     @Bindable var model: AppModel
     let options: LaunchOptions
     @Binding var isPalettePresented: Bool
+    @Binding var isCLISetupPresented: Bool
 
     @Environment(\.openWindow) private var openWindow
     @State private var cliSetup = FirstRunCLISetupModel()
-    @State private var isCLISetupPresented = false
+    @AppStorage(TrackDPreferences.firstRunCLISetupDeferred)
+    private var isCLISetupDeferred = false
 
     var body: some View {
         NavigationSplitView {
@@ -251,7 +271,7 @@ struct RootWindow: View {
         // shell profile.  Ordinary launches calculate the plan before presenting this
         // sheet; calculating it makes no changes to the machine.
         .task {
-            guard !suppressesFirstRunSetup else { return }
+            guard !suppressesFirstRunSetup, !isCLISetupDeferred else { return }
             await cliSetup.prepare()
             if cliSetup.requiresConsent {
                 isCLISetupPresented = true
@@ -265,8 +285,11 @@ struct RootWindow: View {
             CommandPalette(model: model, isPresented: $isPalettePresented)
                 .frame(minWidth: 480, idealWidth: 560, minHeight: 360, idealHeight: 520)
         }
-        .sheet(isPresented: $isCLISetupPresented) {
-            FirstRunCLISetupSheet(model: cliSetup, isPresented: $isCLISetupPresented)
+        .sheet(isPresented: $isCLISetupPresented, onDismiss: persistFirstRunDeferralIfNeeded) {
+            FirstRunCLISetupSheet(
+                model: cliSetup,
+                isPresented: $isCLISetupPresented,
+                deferFirstRunSetup: { isCLISetupDeferred = true })
         }
         // The two cross-track hooks Track D asked for. Installed from the window rather
         // than from `init` because `openWindow` is an environment action and only exists
@@ -285,6 +308,12 @@ struct RootWindow: View {
     private var suppressesFirstRunSetup: Bool {
         options.isTour || options.tourCapture != nil || options.tourFixtures
             || options.dumpWindow || options.dumpFile != nil
+    }
+
+    private func persistFirstRunDeferralIfNeeded() {
+        if cliSetup.shouldPersistFirstRunDeferral {
+            isCLISetupDeferred = true
+        }
     }
 }
 
