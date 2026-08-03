@@ -13,7 +13,7 @@ enum DebugCLI {
     static func run(_ arguments: [String], json: Bool) -> Int32 {
         switch parse(arguments) {
         case .failure(let error):
-            return usageError(error, json: json)
+            return usageError(error.message, json: json)
         case .success(.help):
             printUsage()
             return 0
@@ -65,7 +65,11 @@ enum DebugCLI {
         case plan(String)
     }
 
-    private static func parse(_ arguments: [String]) -> Result<Command, String> {
+    private struct ArgumentError: Error {
+        var message: String
+    }
+
+    private static func parse(_ arguments: [String]) -> Result<Command, ArgumentError> {
         if arguments == ["help"] || arguments == ["--help"] || arguments == ["-h"] {
             return .success(.help)
         }
@@ -86,9 +90,9 @@ enum DebugCLI {
             return .success(.plan(container))
         }
         if arguments.isEmpty {
-            return .failure("a container name or ID is required (or pass check)")
+            return .failure(ArgumentError(message: "a container name or ID is required (or pass check)"))
         }
-        return .failure("expected `check` or one container name/ID")
+        return .failure(ArgumentError(message: "expected `check` or one container name/ID"))
     }
 
     // MARK: - Presentation
@@ -172,11 +176,11 @@ enum DebugCLI {
         output["target"] = [
             "requested_reference": plan.target.requestedReference,
             "id": plan.target.id,
-            "name": plan.target.name ?? NSNull(),
-            "image_reference": plan.target.imageReference ?? NSNull(),
-            "image_id": plan.target.imageID ?? NSNull(),
-            "state": plan.target.state ?? NSNull(),
-            "running": plan.target.isRunning.map { $0 as Any } ?? NSNull(),
+            "name": jsonValue(plan.target.name),
+            "image_reference": jsonValue(plan.target.imageReference),
+            "image_id": jsonValue(plan.target.imageID),
+            "state": jsonValue(plan.target.state),
+            "running": jsonValue(plan.target.isRunning),
         ]
         return output
     }
@@ -210,6 +214,8 @@ enum DebugCLI {
     }
 
     private static func out(_ message: String = "") { print(message) }
+
+    private static func jsonValue(_ value: Any?) -> Any { value ?? NSNull() }
 
     private static func emitJSON(_ value: Any) {
         guard JSONSerialization.isValidJSONObject(value),
