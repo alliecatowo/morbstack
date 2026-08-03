@@ -453,6 +453,7 @@ struct EngineFooter: View {
 struct DetailHost: View {
 
     @Bindable var model: AppModel
+    @State private var diagnosticsWorkflow = DiagnosticsBundleWorkflow()
 
     var body: some View {
         // No painted background. The detail column of a `NavigationSplitView` already
@@ -466,7 +467,7 @@ struct DetailHost: View {
                     .navigationTitle(model.selection.title)
                     .navigationSubtitle("Connecting…")
             } else if !model.engine.isRunning && model.selection != .migration {
-                EngineStoppedView(model: model)
+                EngineStoppedView(model: model, diagnostics: diagnosticsWorkflow)
                     .navigationTitle(model.selection.title)
                     .navigationSubtitle(model.engine.headline)
             } else {
@@ -482,6 +483,22 @@ struct DetailHost: View {
             Button("OK", role: .cancel) { model.dismissError() }
         } message: {
             Text(model.lastError ?? "An unknown error occurred.")
+        }
+        .alert(
+            diagnosticsWorkflow.notice?.title ?? "",
+            isPresented: Binding(
+                get: { diagnosticsWorkflow.notice != nil },
+                set: { if !$0 { diagnosticsWorkflow.notice = nil } }),
+            presenting: diagnosticsWorkflow.notice
+        ) { notice in
+            if let directory = notice.directory {
+                Button("Show in Finder") {
+                    NSWorkspace.shared.activateFileViewerSelecting([directory])
+                }
+            }
+            Button("Done", role: .cancel) {}
+        } message: { notice in
+            Text(notice.message)
         }
         // `refreshAll` deliberately skips `/system/df` — it can take tens of seconds on
         // a large store — so the Disk screen has to ask for its own data when it is
@@ -563,6 +580,7 @@ private struct LoadingView: View {
 struct EngineStoppedView: View {
 
     @Bindable var model: AppModel
+    let diagnostics: DiagnosticsBundleWorkflow
 
     private var isStarting: Bool { model.isEngineBusy || model.engine.isTransitional }
 
@@ -589,6 +607,18 @@ struct EngineStoppedView: View {
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.return, modifiers: [])
                 }
+
+                if model.engine.state == "error" {
+                    if diagnostics.isCollecting {
+                        ProgressView("Creating Diagnostics Bundle…")
+                            .controlSize(.small)
+                    } else {
+                        Button("Create Diagnostics Bundle…") {
+                            diagnostics.chooseParentFolderAndCollect()
+                        }
+                        .help("Create a local redacted diagnostics bundle without contacting the engine")
+                    }
+                }
             })
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -610,7 +640,7 @@ struct EngineStoppedView: View {
         case "suspended":
             return "The engine is not running. Start it from persisted Docker data; images, containers and volumes remain, but don’t rely on running containers surviving."
         case "error":
-            return "Morbstack could not bring the virtual machine up. Run morb doctor in a terminal for a full diagnosis."
+            return "Morbstack could not bring the virtual machine up. Create a redacted diagnostics bundle to review before sharing; it doesn’t start or contact the engine."
         default:
             return "Start it to see your containers, images and volumes. Nothing runs on your Mac until you do."
         }
