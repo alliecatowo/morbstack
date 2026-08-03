@@ -95,6 +95,31 @@ struct MorbToolbarStatus<Content: View>: ToolbarContent {
     }
 }
 
+// MARK: - Inspector toggle
+
+/// The trailing-edge control that shows and hides a screen's inspector column.
+///
+/// One implementation, so that Images, Volumes and Networks all put the same glyph in
+/// the same place. `sidebar.right` is the symbol macOS itself uses for this — Finder's
+/// preview pane, Xcode's inspector, Notes' attachment browser — and the HIG puts the
+/// control on the toolbar's trailing edge, next to search.
+struct MorbInspectorToggle: ToolbarContent {
+
+    var id: String
+    @Binding var isPresented: Bool
+
+    var body: some ToolbarContent {
+        ToolbarItem(id: id, placement: .primaryAction) {
+            Button {
+                isPresented.toggle()
+            } label: {
+                Label("Inspector", systemImage: "sidebar.right")
+            }
+            .help(isPresented ? "Hide the inspector" : "Show the inspector")
+        }
+    }
+}
+
 // MARK: - Icon buttons
 
 /// A toolbar-sized icon button with a real hit target.

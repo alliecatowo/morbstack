@@ -54,7 +54,10 @@ public struct MorbstackMainApp: App {
     public init() {
         let options = LaunchOptions()
         self.options = options
-        _model = State(initialValue: AppModel(launchOptions: options))
+        // `.forLaunch` picks fixture-backed clients under `--tour-fixtures` — see
+        // `AppModel.forLaunch(_:)` — so this stays a one-line call regardless of what
+        // that flag ends up wiring in.
+        _model = State(initialValue: AppModel.forLaunch(options))
     }
 
     /// The binding behind `MenuBarExtra(isInserted:)`.
@@ -94,13 +97,16 @@ public struct MorbstackMainApp: App {
         .commands {
             MorbCommands(model: model, isPalettePresented: $isPalettePresented)
         }
-        // A short titlebar that merges with the toolbar rather than a separate strip
-        // above it — the single scene-level change that makes every screen's
-        // `.morbScreen` toolbar look like it belongs to the window instead of floating
-        // under a second header. `showsTitle: false` because the sidebar already names
-        // the app and the detail pane's `.navigationTitle` already names the screen;
-        // a third "Morbstack" in the titlebar would be the same word twice.
-        .windowToolbarStyle(.unifiedCompact(showsTitle: false))
+        // `.unified`, and emphatically **not** `.unifiedCompact(showsTitle: false)`,
+        // which is what shipped before this pass.
+        //
+        // Measured on the real window rather than inferred: `showsTitle: false` sets
+        // `NSWindow.titleVisibility = .hidden`, and that suppresses the *subtitle* as
+        // well as the title. Every screen was dutifully setting `.navigationTitle` and
+        // `.navigationSubtitle` and the window was throwing both away, which is the
+        // whole reason the titlebar read as empty. `.unified` is what Finder, Mail and
+        // System Settings use: one bar carrying title, subtitle and toolbar items.
+        .windowToolbarStyle(.unified)
 
         // `.window` rather than the default `.menu`: the popover is a laid-out SwiftUI
         // view with its own header, rows and footer, and `.menu` would try to render it
@@ -197,14 +203,29 @@ struct RootWindow: View {
             DetailHost(model: model)
                 .frame(minWidth: 620, minHeight: 420)
         }
-        .navigationTitle(model.selection.title)
-        // The sidebar's own material comes from the split view; asking for it again on
-        // the List would double the blur and make the sidebar noticeably murkier than
-        // every other macOS app on screen.
-        .navigationSplitViewStyle(.balanced)
+        // No `.navigationTitle` here. The window's title belongs to whatever is in the
+        // detail column, and setting it at the split view as well produced a window
+        // whose title never changed with the content and whose subtitle was always
+        // empty — see `DetailHost`, which now owns both for every state it can be in.
+        //
+        // No `.navigationSplitViewStyle` either: the default is the two-column macOS
+        // behaviour every first-party app uses, and `.balanced` was buying nothing.
+        //
+        // The sidebar's material comes from the split view itself. Asking for it again
+        // on the `List` would double the blur and make the sidebar visibly murkier than
+        // every other app on screen.
         .frame(minWidth: 880, minHeight: 540)
         .background(WindowConfigurator(size: options.windowSize))
-        .task { await model.bootstrap() }
+        .task {
+            await model.bootstrap()
+            // `--tour-capture <dir>`: self-capture the real window instead of running
+            // the app for a person. Chained after `bootstrap()` so a `--tour-fixtures`
+            // run has already populated the model before the first screen is
+            // photographed. See `Shots/LiveCapture.swift`.
+            if options.tourCapture != nil {
+                await LiveCaptureRunner.run(model: model, options: options)
+            }
+        }
         .sheet(isPresented: $isPalettePresented) {
             // `CommandPalette`'s own root is just the sized panel — the merge-owned
             // screenshot harness composes it the same way for `paletteScene()`, so the
@@ -227,6 +248,9 @@ struct RootWindow: View {
         .onAppear {
             TrackDAppBridge.openMainWindow = { openWindow(id: MorbWindowID.main) }
             TrackDAppBridge.showLogs = { id in model.requestLogsTab(for: id) }
+            // `--tour-capture`'s palette screen: see `Shots/LiveCapture.swift`. `nil` —
+            // a no-op — on every launch that never asks `LiveCaptureBridge` to fire it.
+            LiveCaptureBridge.setPalettePresented = { isPalettePresented = $0 }
         }
     }
 }
@@ -249,90 +273,64 @@ private enum SidebarSection: String, CaseIterable, Identifiable {
     }
 }
 
+/// The sidebar, drawn entirely by the system.
+///
+/// Everything this used to do by hand is gone, and the deletions are the feature:
+///
+/// - **No branded header.** A "Morbstack v0.4.2" card at the top is chrome no first-party
+///   app has; the app's name lives in the menu bar and the Dock. It also broke the window:
+///   wrapping the `List` in a `VStack` meant the sidebar's material stopped at the top of
+///   the header instead of running up behind the traffic lights, which is what put a dead
+///   opaque strip across the top of the window.
+/// - **No `NavRow`.** Selection is `List(selection:)` + `.listStyle(.sidebar)`, so macOS
+///   draws its own capsule in the user's accent colour — the same selection Finder, Mail
+///   and Xcode draw. We do not tint it to brand indigo: sidebar selection is system
+///   chrome, and following the user's accent is the native behaviour.
+/// - **No hand-drawn count pills.** `.badge()` is the sidebar count macOS already has.
 struct Sidebar: View {
 
     @Bindable var model: AppModel
 
     var body: some View {
-        VStack(spacing: 0) {
-            MorbSidebarHeader(version: model.engine.version.map { "v\($0)" })
-            List(selection: $model.selection) {
-                ForEach(SidebarSection.allCases) { section in
-                    Section(section.rawValue) {
-                        ForEach(section.items) { nav in
-                            NavRow(
-                                nav: nav,
-                                badge: badge(for: nav),
-                                isSelected: model.selection == nav,
-                                isEnabled: model.engine.isRunning)
-                                .tag(nav)
-                                .listRowInsets(EdgeInsets())
-                                .listRowBackground(Color.clear)
-                        }
+        List(selection: $model.selection) {
+            ForEach(SidebarSection.allCases) { section in
+                Section(section.rawValue) {
+                    ForEach(section.items) { nav in
+                        Label(nav.title, systemImage: nav.symbol)
+                            .badge(badge(for: nav))
+                            .tag(nav)
+                            .help("\(nav.title) (⌘\(nav.shortcutIndex))")
                     }
                 }
             }
-            .listStyle(.sidebar)
         }
-        // `.morbBottomBar`, not `.safeAreaInset`: on macOS 26 this is what gets the pill
-        // the system's own bar treatment (glass plus the scroll-edge effect) for free,
-        // and it degrades to `safeAreaInset` below that — see `Design/MorbGlass.swift`.
-        .safeAreaInset(edge: .bottom, spacing: 0) { EnginePill(model: model) }
+        .listStyle(.sidebar)
+        // `.morbBottomBar`, not `.safeAreaInset`: on macOS 26 this is what gets the
+        // footer the system's own bar treatment (glass plus the scroll-edge effect) for
+        // free, and it degrades to `safeAreaInset` below that — see `Design/MorbGlass.swift`.
+        .morbBottomBar { EngineFooter(model: model) }
     }
 
-    /// The count shown on the right of a row, when there is a number worth knowing.
+    /// The trailing count on a row, when there is a number worth knowing.
     ///
     /// Only sections whose count changes on its own get one. A badge on Networks that
-    /// permanently reads "3" is furniture, not information.
-    private func badge(for nav: Nav) -> Int? {
+    /// permanently reads "3" is furniture, not information. `Builds` carries a word
+    /// rather than a number because it does not exist yet.
+    private func badge(for nav: Nav) -> Text? {
+        if nav == .builds { return Text("Soon") }
         guard model.engine.isRunning else { return nil }
         switch nav {
-        case .containers: return model.runningCount > 0 ? model.runningCount : nil
+        case .containers:
+            return model.runningCount > 0 ? Text(model.runningCount, format: .number) : nil
         case .stacks:
             let count = model.composeGroups.filter { $0.project != nil }.count
-            return count > 0 ? count : nil
+            return count > 0 ? Text(count, format: .number) : nil
         default: return nil
         }
     }
 }
 
-/// One sidebar row.
-///
-/// Selection is drawn by ``MorbRow`` — `Theme.selectionFill` plus the 3pt brand rail —
-/// rather than by `List`'s own neutral-grey highlight, which is the single biggest
-/// reason a screenshot of the old sidebar had no colour identity at all. The `List`'s
-/// `selection:` binding still does the real work (click, arrow-key navigation,
-/// accessibility); this only replaces what it paints.
-private struct NavRow: View {
-
-    let nav: Nav
-    let badge: Int?
-    let isSelected: Bool
-    let isEnabled: Bool
-
-    var body: some View {
-        HStack(spacing: Theme.space3) {
-            Image(systemName: nav.symbol)
-                .frame(width: 18)
-            Text(nav.title)
-            Spacer(minLength: Theme.space2)
-            if nav == .builds {
-                MorbChip("Soon", rank: .quiet)
-            } else if let badge {
-                MorbCountBadge(count: badge)
-                    .transition(.opacity.combined(with: .scale(scale: 0.7)))
-            }
-        }
-        .morbRow(.standard, isSelected: isSelected)
-        .opacity(isEnabled ? 1 : 0.5)
-        .morbAnimation(.subtle, value: badge)
-        .help(isEnabled
-            ? "\(nav.title) (⌘\(nav.shortcutIndex))"
-            : "\(nav.title) — start the engine to see this")
-    }
-}
-
-// MARK: - Engine pill
+// MARK: - Engine footer
 
 /// The status footer under the sidebar.
 ///
@@ -340,7 +338,14 @@ private struct NavRow: View {
 /// question the app exists to answer: is the engine up? Colour, symbol and words all
 /// say the same thing, which is what makes it readable at a glance and still readable
 /// in a greyscale screenshot.
-struct EnginePill: View {
+///
+/// Note what is deliberately absent: **no material and no divider of its own.** It is
+/// hosted by `safeAreaBar`, which on macOS 26 already gives it the system's bar
+/// treatment. Painting `.thinMaterial` underneath as well put glass on glass — the one
+/// thing Apple's Liquid Glass guidance names as an outright mistake rather than a matter
+/// of taste — and it is why the footer used to read as a paler rectangle glued to the
+/// bottom of the sidebar instead of part of it.
+struct EngineFooter: View {
 
     @Bindable var model: AppModel
     @State private var isHovering = false
@@ -348,54 +353,48 @@ struct EnginePill: View {
     private var tone: StatusTone { .forEngine(model.engine) }
 
     var body: some View {
-        VStack(spacing: 0) {
-            Divider()
-            HStack(spacing: Theme.space3) {
-                MorbStatusDot(
-                    tone: tone, size: 9,
-                    pulsing: model.engine.isTransitional || model.isEngineBusy)
+        HStack(spacing: Theme.space3) {
+            MorbStatusDot(
+                tone: tone, size: 9,
+                pulsing: model.engine.isTransitional || model.isEngineBusy)
 
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(model.engine.headline)
-                        .font(.callout.weight(.medium))
-                        .foregroundStyle(.primary)
-                    Text(model.summaryLine == model.engine.headline ? subtitle : model.summaryLine)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                        .contentTransition(.numericText())
-                }
-
-                Spacer(minLength: 0)
-
-                sharingWarning
-
-                if model.isEngineBusy {
-                    ProgressView()
-                        .controlSize(.small)
-                        .scaleEffect(0.75)
-                } else if model.engine.isRunning {
-                    Button {
-                        Task { await model.engineAction(.suspend) }
-                    } label: {
-                        Image(systemName: "pause.circle")
-                    }
-                    .buttonStyle(.borderless)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(model.engine.headline)
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(.primary)
+                Text(model.summaryLine == model.engine.headline ? subtitle : model.summaryLine)
+                    .font(.caption2)
                     .foregroundStyle(.secondary)
-                    .help("Suspend the engine")
-                    .opacity(isHovering ? 1 : 0)
-                }
+                    .monospacedDigit()
+                    .contentTransition(.numericText())
             }
-            .padding(.horizontal, Theme.space4)
-            .padding(.vertical, Theme.space3 + 1)
-            .contentShape(Rectangle())
-            .onHover { isHovering = $0 }
-            .morbAnimation(.fade, value: isHovering)
-            .morbAnimation(.subtle, value: model.engine)
+
+            Spacer(minLength: 0)
+
+            sharingWarning
+
+            if model.isEngineBusy {
+                ProgressView()
+                    .controlSize(.small)
+                    .scaleEffect(0.75)
+            } else if model.engine.isRunning {
+                Button {
+                    Task { await model.engineAction(.suspend) }
+                } label: {
+                    Image(systemName: "pause.circle")
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .help("Suspend the engine")
+                .opacity(isHovering ? 1 : 0)
+            }
         }
-        // Floating chrome over the scrolling sidebar list, per `docs/design/IDENTITY.md`
-        // §5.1 — `.bar` role, flush with the sidebar's edges so `radius: 0`.
-        .background(.thinMaterial)
+        .padding(.horizontal, Theme.space3)
+        .padding(.vertical, Theme.space3)
+        .contentShape(Rectangle())
+        .onHover { isHovering = $0 }
+        .morbAnimation(.fade, value: isHovering)
+        .morbAnimation(.subtle, value: model.engine)
         .help(tooltip)
     }
 
@@ -413,10 +412,12 @@ struct EnginePill: View {
     private var sharingWarning: some View {
         if let chip = model.fileSharingChip {
             SettingsLink {
-                MorbChip(chip.text, symbol: chip.symbol, tone: chip.tone.color)
+                Image(systemName: chip.symbol)
+                    .foregroundStyle(chip.tone.color)
             }
-            .buttonStyle(.plain)
-            .help(chip.detail)
+            .buttonStyle(.borderless)
+            .help("\(chip.text). \(chip.detail)")
+            .accessibilityLabel(chip.text)
             .transition(.opacity.combined(with: .scale(scale: 0.8)))
             .morbAnimation(.subtle, value: chip)
         }
@@ -446,18 +447,30 @@ struct DetailHost: View {
     @Bindable var model: AppModel
 
     var body: some View {
-        ZStack {
-            Theme.contentBackground.ignoresSafeArea()
-
+        // No painted background. The detail column of a `NavigationSplitView` already
+        // has the system's own content background, and `Theme.contentBackground` on top
+        // of it was a second opaque surface doing the same job slightly differently.
+        Group {
             if !model.hasLoaded {
+                // Titled even here, so the window is never chrome-less for the few
+                // milliseconds before the daemon answers.
                 LoadingView()
+                    .navigationTitle(model.selection.title)
+                    .navigationSubtitle("Connecting…")
             } else if !model.engine.isRunning {
                 EngineStoppedView(model: model)
+                    .navigationTitle(model.selection.title)
+                    .navigationSubtitle(model.engine.headline)
             } else {
+                // Each screen sets its own title, subtitle, search field and actions.
                 content
                     .transition(.opacity)
             }
         }
+        // The one toolbar item that is true on every screen in every state. It also
+        // guarantees the window always has something in its toolbar: an `NSToolbar`
+        // with nothing but the sidebar toggle in it is what "unfinished" looks like.
+        .toolbar { refreshItem }
         .animation(Theme.springSubtle, value: model.engine.isRunning)
         .animation(Theme.fade, value: model.hasLoaded)
         .overlay(alignment: .top) { errorBanner }
@@ -469,6 +482,24 @@ struct DetailHost: View {
         .task(id: model.selection) {
             guard model.selection == .disk else { return }
             await model.refreshDisk()
+        }
+    }
+
+    /// Refresh, in the toolbar, on every screen.
+    ///
+    /// `.primaryAction` rather than `.automatic` so it lands with the screens' own
+    /// actions rather than beside the sidebar toggle, and a `Label` rather than a bare
+    /// `Image` so it has an accessibility name and a Customize Toolbar title.
+    @ToolbarContentBuilder
+    private var refreshItem: some ToolbarContent {
+        ToolbarItem(id: "app.refresh", placement: .primaryAction) {
+            Button {
+                Task { await model.refreshAll() }
+            } label: {
+                Label("Refresh", systemImage: "arrow.clockwise")
+            }
+            .disabled(!model.engine.isRunning)
+            .help("Refresh everything (⌘R)")
         }
     }
 
@@ -545,9 +576,11 @@ struct EngineStoppedView: View {
     private var isStarting: Bool { model.isEngineBusy || model.engine.isTransitional }
 
     var body: some View {
-        MorbEmptyState(
+        // The one screen in the app that carries the mark — see the note at the bottom
+        // of `Design/MorbBrand.swift`. Everywhere else the identity is carried by symbol
+        // choice, accent discipline and copy, not by the logo.
+        MorbBrandedEmptyState(
             title,
-            systemImage: isStarting ? "gearshape.2" : "shippingbox",
             description: explanation,
             footnote: "Morbstack runs Docker in a lightweight virtual machine."
         ) {

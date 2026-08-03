@@ -116,6 +116,10 @@ struct LaunchOptions: Sendable, Equatable {
                 dumpWindow = true
             case "--tour-dump-file":
                 if let path = nextValue() { dumpFile = path }
+            case "--tour-capture":
+                if let path = nextValue() { tourCapture = path }
+            case "--tour-fixtures":
+                tourFixtures = true
             default:
                 break
             }
@@ -219,6 +223,23 @@ final class AppModel {
         eventsTask?.cancel()
         engineWatchTask?.cancel()
         refreshDebounce?.cancel()
+    }
+
+    /// Builds the model for a real launch, choosing fixture-backed clients when
+    /// `--tour-fixtures` was passed.
+    ///
+    /// Kept here rather than inline in `App.swift`'s `init()` so that file only ever
+    /// needs this one call, regardless of which fixture types `--tour-fixtures` ends up
+    /// wiring in. `ShotDockerClient`/`ShotDaemonClient`/`ShotFixtures`/`ShotLogs` are the
+    /// same fixture stack `MorbShots` renders offscreen — see `Shots/ShotClients.swift`
+    /// and `Shots/ShotFixtures.swift` — so a `--tour-capture` run and an offscreen
+    /// `MorbShots` run are pictures of the same data.
+    static func forLaunch(_ options: LaunchOptions) -> AppModel {
+        guard options.tourFixtures else { return AppModel(launchOptions: options) }
+        return AppModel(
+            client: ShotDockerClient(logLines: ShotLogs.apiLog()),
+            daemon: ShotDaemonClient(reporting: ShotFixtures.engineRunning),
+            launchOptions: options)
     }
 
     // MARK: - Lifecycle

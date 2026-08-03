@@ -138,11 +138,15 @@ struct DiskRootView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        ToolbarItem(id: "refresh", placement: MorbToolbarGroup.actions) {
+        // Deliberately *not* called "Refresh" and deliberately not `arrow.clockwise`:
+        // the window already carries a shared Refresh, and two identical circular arrows
+        // sitting next to each other would be two buttons that look like one mistake.
+        // This one is a different, much more expensive operation and says so.
+        ToolbarItem(id: "disk.recalculate", placement: MorbToolbarGroup.actions) {
             Button {
                 Task { await refresh() }
             } label: {
-                Label("Refresh", systemImage: "arrow.clockwise")
+                Label("Recalculate", systemImage: "arrow.triangle.2.circlepath")
             }
             .disabled(busy)
             .help("Recalculate disk usage — the engine walks every layer, so this is not instant")

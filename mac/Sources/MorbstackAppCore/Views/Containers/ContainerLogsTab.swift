@@ -81,7 +81,7 @@ struct ContainerLogsTab: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        ToolbarItem(id: "follow", placement: MorbToolbarGroup.navigation) {
+        ToolbarItem(id: "logs.follow", placement: MorbToolbarGroup.navigation) {
             Toggle(isOn: Binding(
                 get: { store.tail.followEnabled },
                 set: { store.tail.setFollow($0) })
@@ -92,7 +92,7 @@ struct ContainerLogsTab: View {
             .tint(Theme.brand)
             .help("Keep scrolling as new output arrives")
         }
-        ToolbarItem(id: "times", placement: MorbToolbarGroup.navigation) {
+        ToolbarItem(id: "logs.times", placement: MorbToolbarGroup.navigation) {
             Toggle(isOn: $store.showsTimestamps) {
                 Label("Times", systemImage: "clock")
             }
@@ -101,14 +101,14 @@ struct ContainerLogsTab: View {
             .help("Show the engine's timestamp for each line")
         }
         MorbToolbarStatus(id: "status") { statusPill }
-        ToolbarItem(id: "next-error", placement: MorbToolbarGroup.actions) {
+        ToolbarItem(id: "logs.nextError", placement: MorbToolbarGroup.actions) {
             MorbIconButton("exclamationmark.triangle", help: "Jump to next error", action: jumpToNextError)
                 .disabled(!hasErrors)
         }
-        ToolbarItem(id: "clear", placement: MorbToolbarGroup.overflow) {
+        ToolbarItem(id: "logs.clear", placement: MorbToolbarGroup.overflow) {
             MorbIconButton("trash", help: "Clear the scrollback") { store.clear() }
         }
-        ToolbarItem(id: "copy", placement: MorbToolbarGroup.overflow) {
+        ToolbarItem(id: "logs.copy", placement: MorbToolbarGroup.overflow) {
             MorbIconButton(copied ? "checkmark" : "doc.on.doc", help: "Copy visible lines") {
                 TrackBClipboard.copy(store.exportText())
                 copied = true
@@ -118,7 +118,7 @@ struct ContainerLogsTab: View {
                 }
             }
         }
-        ToolbarItem(id: "export", placement: MorbToolbarGroup.overflow) {
+        ToolbarItem(id: "logs.export", placement: MorbToolbarGroup.overflow) {
             MorbIconButton("square.and.arrow.down", help: "Export as .log", action: export)
         }
     }

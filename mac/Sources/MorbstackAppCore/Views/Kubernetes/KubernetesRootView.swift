@@ -65,7 +65,7 @@ struct KubernetesRootView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        ToolbarItem(id: "enable", placement: MorbToolbarGroup.actions) {
+        ToolbarItem(id: "kubernetes.enable", placement: MorbToolbarGroup.actions) {
             Toggle("Kubernetes", isOn: enabledBinding)
                 .toggleStyle(.switch)
                 .disabled(!model.engine.isRunning || status.phase == .starting)
@@ -74,7 +74,7 @@ struct KubernetesRootView: View {
                     : "Start the Morbstack engine first")
         }
         MorbToolbarGap(placement: MorbToolbarGroup.actions)
-        ToolbarItem(id: "kubeconfig", placement: MorbToolbarGroup.actions) {
+        ToolbarItem(id: "kubernetes.kubeconfig", placement: MorbToolbarGroup.actions) {
             MorbIconButton(
                 kubeconfigCopied ? "checkmark" : "doc.on.doc",
                 help: "Copy the kubeconfig path (\(K8s.defaultKubeconfigURL.path))"

@@ -12,8 +12,8 @@
 // A real `Table` replaces the hand-rolled grid, grouped into the two sections `Table`
 // itself supports, and a detail pane gives the screen something to show besides a thin
 // row of five short strings — see `docs/design/CRITIQUE.md` on the empty Networks window.
-// The pane is a plain `HSplitView`, not `.inspector(isPresented:)` — see the identical
-// note in `VolumesRootView`.
+// The pane is a real `.inspector(isPresented:)` trailing column — see the note in
+// `VolumesRootView` about why the old `HSplitView` was the screenshot harness talking.
 
 import AppKit
 import SwiftUI
@@ -127,6 +127,9 @@ struct NetworksRootView: View {
     @State private var showingPruneSheet = false
     @State private var busy = false
     @State private var toast: TrackCToast?
+    /// Whether the trailing inspector column is open. SwiftUI restores this across
+    /// launches for a trailing-column inspector, so it is not persisted here.
+    @State private var showsInspector = true
 
     private var sections: (custom: [NetworkSummary], builtIn: [NetworkSummary]) {
         let key = sortOrder.first?.key ?? .name
@@ -206,15 +209,11 @@ struct NetworksRootView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        ToolbarItem(id: "removeUnused", placement: MorbToolbarGroup.actions) {
+        ToolbarItem(id: "networks.removeUnused", placement: MorbToolbarGroup.actions) {
             Button {
                 showingPruneSheet = true
             } label: {
-                HStack(spacing: Theme.space2) {
-                    Image(systemName: "trash")
-                    Text("Remove Unused")
-                    if unusedCount > 0 { MorbCountBadge(count: unusedCount) }
-                }
+                Label("Remove Unused", systemImage: "trash")
             }
             .disabled(unusedCount == 0 || busy)
             .help(
@@ -222,6 +221,7 @@ struct NetworksRootView: View {
                     ? "Every user-defined network has containers attached"
                     : "Review and remove \(unusedCount) unused network\(unusedCount == 1 ? "" : "s")")
         }
+        MorbInspectorToggle(id: "networks.inspector", isPresented: $showsInspector)
     }
 
     // MARK: Content
@@ -237,16 +237,14 @@ struct NetworksRootView: View {
         } else if split.custom.isEmpty && split.builtIn.isEmpty {
             MorbNoMatches(query: query)
         } else {
-            // A manual split rather than `.inspector(isPresented:)` — see the identical
-            // note in `VolumesRootView`: the offscreen screenshot harness does not
-            // composite `.inspector` content, only real view hierarchy.
-            HSplitView {
-                table(split)
-                    .frame(minWidth: 480, maxWidth: .infinity)
-                detailPane
-                    .frame(minWidth: Theme.inspectorMinWidth, idealWidth: Theme.inspectorWidth,
-                           maxWidth: Theme.inspectorWidth)
-            }
+            table(split)
+                .inspector(isPresented: $showsInspector) {
+                    detailPane
+                        .inspectorColumnWidth(
+                            min: Theme.inspectorMinWidth,
+                            ideal: Theme.inspectorWidth,
+                            max: 460)
+                }
         }
     }
 
@@ -339,21 +337,20 @@ struct NetworksRootView: View {
 
     // MARK: Detail pane
 
+    /// A grouped `Form`, not a stack of hand-drawn cards — see the note on
+    /// `VolumesRootView.detailPane`.
     @ViewBuilder
     private var detailPane: some View {
         if let network = selectedNetwork {
-            ScrollView {
-                VStack(alignment: .leading, spacing: Theme.space5) {
-                    VStack(alignment: .leading, spacing: Theme.space2) {
-                        HStack(spacing: Theme.space2) {
-                            Text(network.name)
-                                .font(.title3.weight(.semibold))
-                                .lineLimit(2)
-                                .truncationMode(.middle)
-                            if network.isBuiltIn {
-                                MorbChip("built in", symbol: "lock.fill", rank: .quiet)
-                            }
-                        }
+            Form {
+                Section("Network") {
+                    LabeledContent("Name") {
+                        Text(network.name)
+                            .textSelection(.enabled)
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                    }
+                    LabeledContent("Status") {
                         MorbStatusBadge(
                             tone: network.containers > 0 ? .running : .idle,
                             title: network.containers > 0
@@ -361,28 +358,31 @@ struct NetworksRootView: View {
                                 : "No containers attached",
                             filled: false)
                     }
-
-                    MorbCard {
-                        VStack(alignment: .leading, spacing: Theme.space4) {
-                            MorbKeyValue("Driver", network.driver)
-                            MorbKeyValue("Scope", network.scope)
-                            MorbKeyValue("Network ID", network.id, monospaced: true)
-                            MorbKeyValue(
-                                "Kind",
-                                network.isBuiltIn
-                                    ? "Built in — created by the engine, cannot be removed"
-                                    : "User-defined — created by compose or morb network create")
-                        }
+                    LabeledContent("Driver", value: network.driver)
+                    LabeledContent("Scope", value: network.scope)
+                    LabeledContent("Network ID") {
+                        Text(network.id)
+                            .font(.system(.callout, design: .monospaced))
+                            .textSelection(.enabled)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                     }
+                }
 
-                    if !network.isBuiltIn {
+                Section("Kind") {
+                    Text(network.isBuiltIn
+                         ? "Built in — created by the engine, and cannot be removed."
+                         : "User-defined — created by compose, or by morb network create.")
+                        .foregroundStyle(.secondary)
+                }
+
+                if !network.isBuiltIn {
+                    Section {
                         Button(role: .destructive) {
                             removal = network
                         } label: {
                             Label("Remove Network", systemImage: "trash")
-                                .frame(maxWidth: .infinity)
                         }
-                        .morbButton(.standard)
                         .disabled(network.containers > 0)
                         .help(
                             network.containers > 0
@@ -390,13 +390,13 @@ struct NetworksRootView: View {
                                 : "Remove this network")
                     }
                 }
-                .padding(Theme.pagePadding)
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .background(Theme.contentBackground)
+            .formStyle(.grouped)
         } else {
-            MorbEmptyState("No network selected", systemImage: "network")
-                .background(Theme.contentBackground)
+            ContentUnavailableView(
+                "No Network Selected",
+                systemImage: "network",
+                description: Text("Pick a network to see its driver, scope and what is attached to it."))
         }
     }
 

@@ -51,10 +51,12 @@ enum MorbRowClass: Sendable, Hashable {
 private struct MorbRowModifier: ViewModifier {
 
     let rowClass: MorbRowClass
+    /// `true` only for rows in a container that has **no** system selection of its own —
+    /// today that is the command palette, and nothing else.
+    let drawsSelection: Bool
     let isSelected: Bool
     let showsHover: Bool
 
-    @Environment(\.colorSchemeContrast) private var contrast
     @State private var isHovering = false
 
     func body(content: Content) -> some View {
@@ -63,7 +65,6 @@ private struct MorbRowModifier: ViewModifier {
             .padding(.horizontal, rowClass.horizontalInset)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(fill)
-            .overlay(alignment: .leading) { rail }
             .contentShape(Rectangle())
             .onHover { if showsHover { isHovering = $0 } }
             .morbAnimation(.fade, value: isHovering)
@@ -71,38 +72,39 @@ private struct MorbRowModifier: ViewModifier {
     }
 
     private var fill: Color {
-        if isSelected { return Theme.selectionFill }
+        if drawsSelection && isSelected { return Theme.selectionFill }
         return isHovering ? Theme.rowHover : .clear
-    }
-
-    /// The half of the selection that survives greyscale and Increase Contrast.
-    ///
-    /// The current sidebar selection is the system's neutral grey rounded rect: correct,
-    /// invisible, and the reason a screenshot of Morbstack has no colour identity at all.
-    @ViewBuilder
-    private var rail: some View {
-        if isSelected {
-            Capsule(style: .continuous)
-                .fill(Theme.selectionRail)
-                .frame(width: contrast == .increased ? 4 : 3)
-                .padding(.vertical, Theme.space2)
-        }
     }
 }
 
 extension View {
 
-    /// Gives this row the design system's fixed height, inset, hover wash and selection
-    /// treatment.
+    /// Gives this row the design system's fixed height, inset and hover wash.
     ///
-    /// Replaces the per-screen `.padding(.vertical, Theme.rowPadding)` that lets a row
-    /// size itself to its content.
-    func morbRow(_ rowClass: MorbRowClass,
-                 isSelected: Bool = false,
-                 showsHover: Bool = true) -> some View {
-        modifier(MorbRowModifier(rowClass: rowClass,
-                                 isSelected: isSelected,
-                                 showsHover: showsHover))
+    /// It deliberately does **not** draw selection. Every list in the app that has a
+    /// selection is a `List(selection:)` or a `Table(selection:)`, and macOS already
+    /// draws the selected row: a filled capsule in the user's accent colour, the same one
+    /// Finder, Mail and Xcode draw, complete with the focused/unfocused distinction and
+    /// the vibrancy that flips the row's label to white. Painting a translucent indigo
+    /// wash and a 3pt brand rail *underneath* that did not replace the system's
+    /// treatment, it stacked on top of it — which is what "vibecoded" looks like from
+    /// across the desk, and the single most-cited thing in the product review.
+    ///
+    /// Identity does not come from repainting the platform's selection. It comes from
+    /// what is *in* the row.
+    func morbRow(_ rowClass: MorbRowClass, showsHover: Bool = true) -> some View {
+        modifier(MorbRowModifier(rowClass: rowClass, drawsSelection: false,
+                                 isSelected: false, showsHover: showsHover))
+    }
+
+    /// The one exception: a row in a container the system does not know is a list.
+    ///
+    /// The command palette is a hand-built results list inside a sheet — there is no
+    /// `List(selection:)` for macOS to draw a highlight into, so the highlight has to be
+    /// ours. Do not reach for this anywhere a real `List` or `Table` would do.
+    func morbUnmanagedRow(_ rowClass: MorbRowClass, isSelected: Bool) -> some View {
+        modifier(MorbRowModifier(rowClass: rowClass, drawsSelection: true,
+                                 isSelected: isSelected, showsHover: false))
     }
 }
 
@@ -156,7 +158,7 @@ struct MorbRichRow<Leading: View, Trailing: View>: View {
             Spacer(minLength: Theme.space3)
             trailing
         }
-        .morbRow(.rich, isSelected: isSelected)
+        .morbRow(.rich)
         .accessibilityElement(children: .combine)
     }
 }

@@ -12,9 +12,8 @@
 // popover: selecting a volume opens its driver, mountpoint and reference count beside the
 // list rather than in a transient bubble, which is also what gives this screen something
 // to show besides a thin thirty-two-point row — the emptiness `CRITIQUE.md` calls out by
-// name. The pane is a plain `HSplitView`, not `.inspector(isPresented:)` — the offscreen
-// screenshot harness's `NSHostingView` does not composite `.inspector` content, only real
-// view hierarchy (see the note on `content` below).
+// name. The pane is a real `.inspector(isPresented:)` trailing column (see the note on
+// `content` below for why it used not to be).
 
 import AppKit
 import SwiftUI
@@ -142,6 +141,9 @@ struct VolumesRootView: View {
     @State private var removal: VolumeSummary?
     @State private var busy = false
     @State private var toast: TrackCToast?
+    /// Whether the trailing inspector column is open. SwiftUI restores this across
+    /// launches for a trailing-column inspector, so it is not persisted here.
+    @State private var showsInspector = true
 
     private var visible: [VolumeSummary] {
         model.volumes
@@ -217,15 +219,16 @@ struct VolumesRootView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        ToolbarItem(id: "removeUnused", placement: MorbToolbarGroup.actions) {
+        // A plain `Label`, not an `HStack` of glyph + text + hand-drawn count pill. The
+        // count already appears in the window subtitle and in the confirmation sheet;
+        // a third copy of it welded into a toolbar button is what makes a toolbar look
+        // hand-assembled. The HIG is explicit that toolbar items sharing a background
+        // should not mix text and icons ad hoc.
+        ToolbarItem(id: "volumes.removeUnused", placement: MorbToolbarGroup.actions) {
             Button {
                 showingUnusedSheet = true
             } label: {
-                HStack(spacing: Theme.space2) {
-                    Image(systemName: "trash")
-                    Text("Remove Unused")
-                    if unusedCount > 0 { MorbCountBadge(count: unusedCount) }
-                }
+                Label("Remove Unused", systemImage: "trash")
             }
             .disabled(unusedCount == 0 || busy)
             .help(
@@ -233,6 +236,7 @@ struct VolumesRootView: View {
                     ? "Every volume is attached to a container"
                     : "Review and remove \(unusedCount) unused volume\(unusedCount == 1 ? "" : "s")")
         }
+        MorbInspectorToggle(id: "volumes.inspector", isPresented: $showsInspector)
     }
 
     // MARK: Content
@@ -248,19 +252,23 @@ struct VolumesRootView: View {
         } else if visible.isEmpty {
             MorbNoMatches(query: query)
         } else {
-            // A manual split rather than `.inspector(isPresented:)`: the offscreen
-            // screenshot harness's `NSHostingView` does not composite `.inspector`
-            // content at all (verified empirically, same as `.toolbar` — see
-            // `ContainersRootView`'s note), so an `.inspector` here would render as a
-            // blank pane in every `dist/shots` capture. An `HSplitView` is real content,
-            // draggable, and photographs.
-            HSplitView {
-                table
-                    .frame(minWidth: 480, maxWidth: .infinity)
-                detailPane
-                    .frame(minWidth: Theme.inspectorMinWidth, idealWidth: Theme.inspectorWidth,
-                           maxWidth: Theme.inspectorWidth)
-            }
+            // A real `.inspector`, not the `HSplitView` that used to be here.
+            //
+            // The comment this replaces said the split existed because the offscreen
+            // screenshot harness could not composite `.inspector` content. That was
+            // true, and it was the wrong reason: it optimised the product for the test
+            // rig. An `.inspector` is a trailing column with the system's edge-to-edge
+            // glass, a resize behaviour the user already knows, and presentation state
+            // that the framework restores between launches — none of which an
+            // `HSplitView` of two `.frame`d views gets.
+            table
+                .inspector(isPresented: $showsInspector) {
+                    detailPane
+                        .inspectorColumnWidth(
+                            min: Theme.inspectorMinWidth,
+                            ideal: Theme.inspectorWidth,
+                            max: 460)
+                }
         }
     }
 
@@ -339,67 +347,71 @@ struct VolumesRootView: View {
 
     // MARK: Detail pane
 
+    /// The inspector's contents: a grouped `Form`, not a stack of hand-drawn cards.
+    ///
+    /// `Form` + `.formStyle(.grouped)` + `LabeledContent` is the blessed macOS shape for
+    /// key/value detail, and on Tahoe it brings the larger row height, the wider section
+    /// corner radius and the title-cased section headers with it. The `MorbCard` this
+    /// replaces drew its own fill, its own hairline and its own radius — three things the
+    /// system already had an opinion about.
     @ViewBuilder
     private var detailPane: some View {
         if let volume = selectedVolume {
-            ScrollView {
-                VStack(alignment: .leading, spacing: Theme.space5) {
-                    VStack(alignment: .leading, spacing: Theme.space2) {
+            Form {
+                Section("Volume") {
+                    LabeledContent("Name") {
                         Text(TrackCDiskMath.volumeDisplayName(volume.name))
-                            .font(.title3.weight(.semibold))
+                            .textSelection(.enabled)
                             .lineLimit(2)
                             .truncationMode(.middle)
+                    }
+                    LabeledContent("Status") {
                         MorbStatusBadge(
                             tone: volume.isUnused ? .idle : .running,
                             title: volume.isUnused ? "Unused" : "In use",
                             detail: volume.size.map(Formatters.bytesString),
                             filled: false)
                     }
-
-                    MorbCard {
-                        VStack(alignment: .leading, spacing: Theme.space4) {
-                            MorbKeyValue("Driver", volume.driver)
-                            MorbKeyValue(
-                                "Mount point",
-                                volume.mountpoint.isEmpty ? "unknown" : volume.mountpoint,
-                                monospaced: true)
-                            MorbKeyValue(
-                                "In use by",
-                                volume.refCount.map { "\($0) container\($0 == 1 ? "" : "s")" } ?? "unreported")
-                            MorbKeyValue(
-                                "Kind",
-                                TrackCDiskMath.isAnonymousVolumeName(volume.name)
-                                    ? "Anonymous — created implicitly, removed by prune"
-                                    : "Named — prune leaves it alone")
-                        }
+                    LabeledContent("Driver", value: volume.driver)
+                    LabeledContent("Mount point") {
+                        Text(volume.mountpoint.isEmpty ? "unknown" : volume.mountpoint)
+                            .font(.system(.callout, design: .monospaced))
+                            .textSelection(.enabled)
                     }
+                    LabeledContent(
+                        "In use by",
+                        value: volume.refCount.map { "\($0) container\($0 == 1 ? "" : "s")" }
+                            ?? "unreported")
+                }
 
-                    VStack(spacing: Theme.space3) {
-                        Button {
-                            revealInFinder(volume)
-                        } label: {
-                            Label("Reveal in Finder", systemImage: "folder")
-                                .frame(maxWidth: .infinity)
-                        }
-                        .morbButton(.standard)
-                        .disabled(volume.mountpoint.isEmpty)
+                Section("Kind") {
+                    Text(TrackCDiskMath.isAnonymousVolumeName(volume.name)
+                         ? "Anonymous — created implicitly, and removed by prune."
+                         : "Named — prune leaves it alone.")
+                        .foregroundStyle(.secondary)
+                }
 
-                        Button(role: .destructive) {
-                            removal = volume
-                        } label: {
-                            Label("Remove Volume", systemImage: "trash")
-                                .frame(maxWidth: .infinity)
-                        }
-                        .morbButton(.standard)
+                Section {
+                    Button {
+                        revealInFinder(volume)
+                    } label: {
+                        Label("Reveal in Finder", systemImage: "folder")
+                    }
+                    .disabled(volume.mountpoint.isEmpty)
+
+                    Button(role: .destructive) {
+                        removal = volume
+                    } label: {
+                        Label("Remove Volume", systemImage: "trash")
                     }
                 }
-                .padding(Theme.pagePadding)
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .background(Theme.contentBackground)
+            .formStyle(.grouped)
         } else {
-            MorbEmptyState("No volume selected", systemImage: "externaldrive")
-                .background(Theme.contentBackground)
+            ContentUnavailableView(
+                "No Volume Selected",
+                systemImage: "externaldrive",
+                description: Text("Pick a volume to see where it lives on disk and what is using it."))
         }
     }
 

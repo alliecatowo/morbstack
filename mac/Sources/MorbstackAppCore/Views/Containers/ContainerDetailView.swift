@@ -168,61 +168,69 @@ struct ContainerDetailView: View {
 
     // MARK: Toolbar
 
+    /// The lifecycle actions, as real toolbar items.
+    ///
+    /// What used to be here: one `ToolbarItem` containing a `MorbGlassCluster` wrapping
+    /// an `HStack` of `.buttonStyle(.glass)` buttons. That is glass on glass — a macOS 26
+    /// toolbar already puts its items on a shared Liquid Glass background, so the cluster
+    /// was a second sheet of glass sampling the first, which Apple's guidance calls out
+    /// as a mistake rather than a preference. It also defeated the toolbar's own
+    /// grouping: four buttons welded into one opaque item cannot be regrouped, spaced or
+    /// moved to the overflow menu when the window narrows.
+    ///
+    /// Now it is a `ToolbarItemGroup` of plain buttons. The system supplies the
+    /// background, groups them into one capsule because they are all push buttons, and
+    /// the `ToolbarSpacer` below breaks the destructive action out into its own capsule
+    /// so Remove can never be mistaken for part of the run/stop cluster.
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        ToolbarItem(id: "lifecycle", placement: MorbToolbarGroup.actions) {
-            lifecycleActions
-        }
-        MorbToolbarGap(placement: MorbToolbarGroup.actions)
-        ToolbarItem(id: "remove", placement: MorbToolbarGroup.actions) {
-            MorbIconButton("trash", help: "Remove container…", role: .destructive) {
-                onRequestRemove()
-            }
-        }
-        ToolbarItem(id: "more", placement: MorbToolbarGroup.overflow) {
-            Menu {
-                Button("Copy container ID") { TrackBClipboard.copy(container.id) }
-                Button("Copy image") { TrackBClipboard.copy(container.image) }
-                if !inspectJSON.isEmpty {
-                    Button("Copy inspect JSON") { TrackBClipboard.copy(inspectJSON) }
-                }
-            } label: {
-                Image(systemName: "ellipsis.circle")
-            }
-            .help("More actions")
-        }
-    }
-
-    @ViewBuilder
-    private var lifecycleActions: some View {
         if isBusy {
-            ProgressView().controlSize(.small).scaleEffect(0.7).frame(width: 26)
+            MorbToolbarStatus(id: "container.busy") {
+                ProgressView().controlSize(.small)
+            }
         } else {
-            MorbGlassCluster(spacing: Theme.space2) {
-                HStack(spacing: Theme.space2) {
-                    if container.isRunning {
-                        Button { onAction(.stop) } label: {
-                            Label("Stop", systemImage: "stop.fill")
-                        }
-                        .morbButton(.floating)
-                        Button { onAction(.restart) } label: {
-                            Label("Restart", systemImage: "arrow.clockwise")
-                        }
-                        .morbButton(.floating)
-                        MorbIconButton("pause.fill", help: "Pause") { onAction(.pause) }
-                    } else if container.state == "paused" {
-                        Button { onAction(.unpause) } label: {
-                            Label("Resume", systemImage: "play.fill")
-                        }
-                        .morbButton(.floating)
-                    } else {
-                        Button { onAction(.start) } label: {
-                            Label("Start", systemImage: "play.fill")
-                        }
-                        .morbButton(.floating)
+            ToolbarItemGroup(placement: MorbToolbarGroup.actions) {
+                if container.isRunning {
+                    Button { onAction(.stop) } label: {
+                        Label("Stop", systemImage: "stop.fill")
+                    }
+                    Button { onAction(.restart) } label: {
+                        Label("Restart", systemImage: "arrow.clockwise")
+                    }
+                    Button { onAction(.pause) } label: {
+                        Label("Pause", systemImage: "pause.fill")
+                    }
+                } else if container.state == "paused" {
+                    Button { onAction(.unpause) } label: {
+                        Label("Resume", systemImage: "play.fill")
+                    }
+                } else {
+                    Button { onAction(.start) } label: {
+                        Label("Start", systemImage: "play.fill")
                     }
                 }
             }
+        }
+        MorbToolbarGap(placement: MorbToolbarGroup.actions)
+        ToolbarItem(id: "container.remove", placement: MorbToolbarGroup.actions) {
+            Button(role: .destructive) {
+                onRequestRemove()
+            } label: {
+                Label("Remove", systemImage: "trash")
+            }
+            .help("Remove this container…")
+        }
+        ToolbarItem(id: "container.more", placement: MorbToolbarGroup.actions) {
+            Menu {
+                Button("Copy Container ID") { TrackBClipboard.copy(container.id) }
+                Button("Copy Image") { TrackBClipboard.copy(container.image) }
+                if !inspectJSON.isEmpty {
+                    Button("Copy Inspect JSON") { TrackBClipboard.copy(inspectJSON) }
+                }
+            } label: {
+                Label("More", systemImage: "ellipsis")
+            }
+            .help("More actions")
         }
     }
 

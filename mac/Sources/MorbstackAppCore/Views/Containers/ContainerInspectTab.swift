@@ -156,10 +156,10 @@ struct ContainerInspectTab: View {
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         if !matches.isEmpty {
-            ToolbarItem(id: "prev", placement: MorbToolbarGroup.navigation) {
+            ToolbarItem(id: "inspect.prev", placement: MorbToolbarGroup.navigation) {
                 MorbIconButton("chevron.up", help: "Previous match") { step(-1) }
             }
-            ToolbarItem(id: "next", placement: MorbToolbarGroup.navigation) {
+            ToolbarItem(id: "inspect.next", placement: MorbToolbarGroup.navigation) {
                 MorbIconButton("chevron.down", help: "Next match") { step(1) }
             }
             MorbToolbarStatus(id: "match-count") {
@@ -169,7 +169,7 @@ struct ContainerInspectTab: View {
         MorbToolbarStatus(id: "line-count") {
             MorbNumber("\(lines.count) lines")
         }
-        ToolbarItem(id: "copy", placement: MorbToolbarGroup.actions) {
+        ToolbarItem(id: "inspect.copy", placement: MorbToolbarGroup.actions) {
             MorbIconButton(didCopy ? "checkmark" : "doc.on.doc", help: "Copy the whole document") {
                 TrackBClipboard.copy(json)
                 didCopy = true

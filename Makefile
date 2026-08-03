@@ -7,7 +7,7 @@
 # Kept POSIX-make friendly: no GNU-only functions, explicit .PHONY list,
 # no order-only prerequisites.
 
-.PHONY: setup build build-mac build-guest cross-build-guest guest-image sign run-daemon test clean app app-icon run-app clean-app
+.PHONY: setup build build-mac build-guest cross-build-guest guest-image sign run-daemon test clean app app-icon run-app clean-app shots-live
 
 # How to invoke cargo. Resolved by the recipe's shell (command substitution,
 # not a GNU-make function) so this stays POSIX-make friendly: use the
@@ -105,6 +105,30 @@ run-daemon: sign
 test:
 	if [ -d mac/Tests ]; then cd mac && swift test; fi
 	cd guest/morbinit && $(CARGO) test
+
+# Self-capture the *real* MorbstackApp window — titlebar, toolbar, sidebar material and
+# Liquid Glass and all — instead of MorbShots' offscreen approximation (dist/shots),
+# which cannot render any of those. See Sources/MorbstackAppCore/Shots/LiveCapture.swift
+# for why an offscreen bitmap structurally can't and this can.
+#
+# `--tour-fixtures` serves the same canned Docker world MorbShots renders offscreen, so
+# no morbstackd and no VM are needed — this never starts the engine. Only `build-mac`,
+# not `sign`: nothing here touches the daemon, so morbstackd's virtualization
+# entitlement is irrelevant to this target.
+#
+# Two full launches, not one: SwiftUI's `.preferredColorScheme` is applied when the
+# window is created, so light and dark each need their own process. The app briefly
+# takes focus and shows real windows on screen while each run captures — that is the
+# whole mechanism, not a side effect to suppress.
+SHOTS_LIVE_DIR = dist/shots-live
+
+shots-live: build-mac
+	rm -rf $(SHOTS_LIVE_DIR)
+	mkdir -p $(SHOTS_LIVE_DIR)
+	$(MAC_BUILD_DIR)/MorbstackApp --tour-fixtures --tour-capture $(SHOTS_LIVE_DIR) \
+		--window-size 1440x900 --appearance light
+	$(MAC_BUILD_DIR)/MorbstackApp --tour-fixtures --tour-capture $(SHOTS_LIVE_DIR) \
+		--window-size 1440x900 --appearance dark
 
 # ---------------------------------------------------------------------------
 # The SwiftUI app bundle.

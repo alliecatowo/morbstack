@@ -19,11 +19,14 @@ struct PlaceholderView: View {
 
     var body: some View {
         MorbEmptyState(nav.title, systemImage: nav.symbol, description: copy) {
-            VStack(spacing: Theme.space4) {
-                MorbChip(milestone, symbol: "signpost.right", rank: .actionable)
-                roadmapAffordance
-            }
+            roadmapAffordance
         }
+        // A placeholder is still a screen: it gets the window's title and subtitle like
+        // every other one, so the titlebar never goes blank just because the feature
+        // has not shipped. The milestone used to be a hand-drawn pill in the middle of
+        // the empty state; it is the subtitle now, which is where a screen's one-line
+        // status belongs.
+        .morbScreen(title: nav.title, subtitle: milestone, edge: .soft)
     }
 
     // MARK: Copy

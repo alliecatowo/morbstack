@@ -7,8 +7,8 @@
 // footer band — replaces the hand-rolled grid, the pull field moves off a second bar of
 // its own and into the toolbar's `+` control, and a detail pane carries the digest, the
 // full tag list and the architecture advice that used to live in a popover. The pane is a
-// plain `HSplitView`, not `.inspector(isPresented:)` — see the identical note in
-// `VolumesRootView`.
+// real `.inspector(isPresented:)` trailing column — see the note in `VolumesRootView`
+// about why the old `HSplitView` was the screenshot harness talking, not the design.
 
 import AppKit
 import SwiftUI
@@ -77,6 +77,9 @@ struct ImagesRootView: View {
     @State private var pullLines: [String] = []
     @State private var isPulling = false
     @State private var showingPull = false
+    /// Whether the trailing inspector column is open. SwiftUI restores this across
+    /// launches for a trailing-column inspector, so it is not persisted here.
+    @State private var showsInspector = true
 
     @State private var removal: TrackCImageRemoval?
     @State private var busy = false
@@ -159,7 +162,7 @@ struct ImagesRootView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        ToolbarItem(id: "pull", placement: MorbToolbarGroup.actions) {
+        ToolbarItem(id: "images.pull", placement: MorbToolbarGroup.actions) {
             Button {
                 showingPull = true
             } label: {
@@ -168,9 +171,10 @@ struct ImagesRootView: View {
             .help("Pull an image")
             .popover(isPresented: $showingPull, arrowEdge: .bottom) { pullPopover }
         }
-        ToolbarItem(id: "pruneDangling", placement: MorbToolbarGroup.actions) {
+        ToolbarItem(id: "images.pruneDangling", placement: MorbToolbarGroup.actions) {
             pruneDanglingButton
         }
+        MorbInspectorToggle(id: "images.inspector", isPresented: $showsInspector)
     }
 
     @ViewBuilder
@@ -276,16 +280,14 @@ struct ImagesRootView: View {
         } else if split.tagged.isEmpty && split.dangling.isEmpty {
             MorbNoMatches(query: query)
         } else {
-            // A manual split rather than `.inspector(isPresented:)` — see the identical
-            // note in `VolumesRootView`: the offscreen screenshot harness does not
-            // composite `.inspector` content, only real view hierarchy.
-            HSplitView {
-                table(split)
-                    .frame(minWidth: 520, maxWidth: .infinity)
-                detailPane
-                    .frame(minWidth: Theme.inspectorMinWidth, idealWidth: Theme.inspectorWidth,
-                           maxWidth: Theme.inspectorWidth)
-            }
+            table(split)
+                .inspector(isPresented: $showsInspector) {
+                    detailPane
+                        .inspectorColumnWidth(
+                            min: Theme.inspectorMinWidth,
+                            ideal: Theme.inspectorWidth,
+                            max: 460)
+                }
         }
     }
 
@@ -415,16 +417,20 @@ struct ImagesRootView: View {
 
     // MARK: Detail pane
 
+    /// A grouped `Form`, not a stack of hand-drawn cards — see the note on
+    /// `VolumesRootView.detailPane`.
     @ViewBuilder
     private var detailPane: some View {
         if let image = selectedImage {
-            ScrollView {
-                VStack(alignment: .leading, spacing: Theme.space5) {
-                    VStack(alignment: .leading, spacing: Theme.space2) {
+            Form {
+                Section("Image") {
+                    LabeledContent("Repository") {
                         Text(image.repoTags.first ?? "Untagged layer")
-                            .font(.title3.weight(.semibold))
+                            .textSelection(.enabled)
                             .lineLimit(2)
                             .truncationMode(.middle)
+                    }
+                    LabeledContent("Status") {
                         MorbStatusBadge(
                             tone: image.containersUsing > 0 ? .running : .idle,
                             title: image.containersUsing > 0
@@ -433,42 +439,41 @@ struct ImagesRootView: View {
                             detail: Formatters.bytesString(image.size),
                             filled: false)
                     }
+                    architectureField(image)
+                    LabeledContent("Content digest") {
+                        Text(image.id)
+                            .font(.system(.callout, design: .monospaced))
+                            .textSelection(.enabled)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    LabeledContent("Created", value: Formatters.absoluteDate(image.createdAt))
+                }
 
-                    MorbCard {
-                        VStack(alignment: .leading, spacing: Theme.space4) {
-                            architectureField(image)
-                            MorbKeyValue("Content digest", image.id, monospaced: true)
-                            MorbKeyValue("Created", Formatters.absoluteDate(image.createdAt))
+                if !image.repoTags.isEmpty {
+                    Section("Repo Tags") {
+                        ForEach(image.repoTags, id: \.self) { tag in
+                            Text(tag)
+                                .font(.system(.callout, design: .monospaced))
+                                .textSelection(.enabled)
                         }
                     }
+                }
 
-                    if !image.repoTags.isEmpty {
-                        MorbCard("Repo tags", symbol: "tag", count: image.repoTags.count) {
-                            VStack(alignment: .leading, spacing: Theme.space2) {
-                                ForEach(image.repoTags, id: \.self) { tag in
-                                    Text(tag)
-                                        .font(.system(.callout, design: .monospaced))
-                                        .textSelection(.enabled)
-                                }
-                            }
-                        }
-                    }
-
+                Section {
                     Button(role: .destructive) {
                         removal = TrackCImageRemoval(image: image)
                     } label: {
                         Label("Remove Image", systemImage: "trash")
-                            .frame(maxWidth: .infinity)
                     }
-                    .morbButton(.standard)
                 }
-                .padding(Theme.pagePadding)
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .background(Theme.contentBackground)
+            .formStyle(.grouped)
         } else {
-            MorbEmptyState("No image selected", systemImage: "square.on.square")
-                .background(Theme.contentBackground)
+            ContentUnavailableView(
+                "No Image Selected",
+                systemImage: "square.on.square",
+                description: Text("Pick an image to see its platform, digest and tags."))
         }
     }
 
@@ -476,30 +481,30 @@ struct ImagesRootView: View {
     @ViewBuilder
     private func architectureField(_ image: ImageSummary) -> some View {
         let badge = TrackCImageArch.badge(for: image.architecture)
-        VStack(alignment: .leading, spacing: Theme.space2) {
-            HStack(spacing: Theme.space1) {
-                Text("Architecture").font(.callout).foregroundStyle(.secondary)
-                Spacer(minLength: Theme.space2)
+        LabeledContent("Architecture") {
+            VStack(alignment: .leading, spacing: Theme.space1) {
                 if let badge, let architecture = image.architecture {
-                    Text(architecture.platformString)
-                        .font(.system(.callout, design: .monospaced))
-                        .textSelection(.enabled)
-                    if let consequence = badge.consequenceLabel {
-                        MorbChip(consequence, symbol: badge.symbol, rank: chipRank(for: badge.tone))
+                    HStack(spacing: Theme.space2) {
+                        Text(architecture.platformString)
+                            .font(.system(.callout, design: .monospaced))
+                            .textSelection(.enabled)
+                        if let consequence = badge.consequenceLabel {
+                            MorbChip(consequence, symbol: badge.symbol, rank: chipRank(for: badge.tone))
+                        }
                     }
                 } else {
                     // The lookup is one request and it is in flight; saying "unknown" for
                     // the half-second it takes would read as a defect rather than latency.
                     Text("checking…").font(.callout).foregroundStyle(.tertiary)
                 }
-            }
-            if let badge, let advice = TrackCImageArch.advice(
-                for: badge, rosettaAvailable: model.rosetta.availability == .active
-            ) {
-                Text(advice)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                if let badge, let advice = TrackCImageArch.advice(
+                    for: badge, rosettaAvailable: model.rosetta.availability == .active
+                ) {
+                    Text(advice)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
     }

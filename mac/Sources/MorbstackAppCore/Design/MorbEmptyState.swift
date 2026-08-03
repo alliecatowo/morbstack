@@ -103,6 +103,58 @@ struct MorbBrandSymbol: View {
     }
 }
 
+// MARK: - Branded empty state
+
+/// The one empty state that carries the mark instead of an SF Symbol.
+///
+/// Reserved for the engine-stopped screen: the first thing a new user sees, the only
+/// screen whose subject *is* Morbstack, and the only place in the running app the logo
+/// appears. Using it anywhere else turns the mark into decoration, which is how a
+/// product loses a mark.
+///
+/// Still a `ContentUnavailableView` underneath, so the icon size, type ranks, vertical
+/// rhythm and Dynamic Type behaviour are the system's.
+struct MorbBrandedEmptyState<Actions: View>: View {
+
+    var title: String
+    var description: String?
+    var footnote: String?
+    @ViewBuilder var actions: Actions
+
+    init(_ title: String,
+         description: String? = nil,
+         footnote: String? = nil,
+         @ViewBuilder actions: () -> Actions) {
+        self.title = title
+        self.description = description
+        self.footnote = footnote
+        self.actions = actions()
+    }
+
+    var body: some View {
+        ContentUnavailableView {
+            Label {
+                Text(title)
+            } icon: {
+                MorbMark(size: 52, plated: true)
+            }
+        } description: {
+            if let description { Text(description) }
+        } actions: {
+            VStack(spacing: Theme.space4) {
+                actions
+                if let footnote {
+                    Text(footnote)
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .multilineTextAlignment(.center)
+                }
+            }
+            .padding(.top, Theme.space2)
+        }
+    }
+}
+
 extension MorbEmptyState where Actions == EmptyView {
 
     /// No action — for a screen that is empty because nothing has happened yet.

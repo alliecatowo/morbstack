@@ -392,7 +392,7 @@ private struct PaletteRow: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            .morbRow(.compact, isSelected: selected, showsHover: false)
+            .morbUnmanagedRow(.compact, isSelected: selected)
         }
         .buttonStyle(.plain)
     }

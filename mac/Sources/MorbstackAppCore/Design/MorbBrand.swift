@@ -182,36 +182,22 @@ struct MorbMark: View {
     }
 }
 
-// MARK: - Sidebar header
-
-/// The mark plus the wordmark, for the top of the sidebar.
-///
-/// The sidebar currently opens straight into a list of eight peers with no header, no
-/// mark and no grouping — the Xcode template. This is the fix, and it is the only place
-/// the product name is drawn in the UI.
-struct MorbSidebarHeader: View {
-
-    /// The daemon version, when we know it: `v0.4.2`.
-    var version: String?
-
-    var body: some View {
-        HStack(spacing: Theme.space3) {
-            MorbMark(size: 20)
-            VStack(alignment: .leading, spacing: 0) {
-                Text("Morbstack")
-                    .font(.headline)
-                if let version {
-                    Text(version)
-                        .font(.caption2)
-                        .monospacedDigit()
-                        .foregroundStyle(.tertiary)
-                }
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, Theme.space3)
-        .padding(.top, Theme.space3)
-        .padding(.bottom, Theme.space4)
-        .accessibilityElement(children: .combine)
-    }
-}
+// MARK: - Where the mark is allowed to appear
+//
+// `MorbSidebarHeader` used to live here: the mark plus a "Morbstack v0.4.2" wordmark,
+// pinned above the sidebar list. It is deleted, not restyled, for two reasons.
+//
+// The structural one: it forced the sidebar column to be a `VStack { header; List }`
+// rather than a bare `List`, so the sidebar's material stopped at the top of the header
+// instead of running up behind the traffic lights. That is what put a dead opaque strip
+// across the top of the window and made the whole app read as unfinished.
+//
+// The design one: no first-party Mac app writes its own name inside its own window. The
+// name is in the menu bar, the Dock, the About box and the window's title. A branded
+// card in the sidebar is the single clearest tell that a Mac app was designed by someone
+// thinking in web pages.
+//
+// The mark still has exactly one place in the running app — the engine-stopped state,
+// which is the first screen a new user sees and the one screen whose entire job is to
+// be about Morbstack. See `EngineStoppedView` in `App.swift`. Everywhere else, identity
+// comes from symbol choice, accent discipline and copy.

@@ -101,8 +101,19 @@ struct StacksRootView: View {
     private var totalServices: Int { stacks.reduce(0) { $0 + $1.containers.count } }
     private var runningServices: Int { stacks.reduce(0) { $0 + $1.runningCount } }
 
+    private var degradedCount: Int {
+        stacks.filter { $0.runningCount > 0 && $0.runningCount < $0.containers.count }.count
+    }
+
+    /// Everything the deleted summary band used to say, in the one line macOS already
+    /// reserves for it. See `content` for why the band is gone.
     private var subtitle: String {
-        "\(stacks.count) project\(stacks.count == 1 ? "" : "s") · \(runningServices) of \(totalServices) services running"
+        var parts = ["\(stacks.count) project\(stacks.count == 1 ? "" : "s")",
+                     "\(runningServices) of \(totalServices) services running"]
+        if degradedCount > 0 {
+            parts.append("\(degradedCount) degraded")
+        }
+        return parts.joined(separator: " · ")
     }
 
     var body: some View {
@@ -121,37 +132,13 @@ struct StacksRootView: View {
         } else if visibleStacks.isEmpty {
             MorbNoMatches(query: query)
         } else {
-            VStack(spacing: 0) {
-                summary
-                MorbRowDivider(rowClass: .rich)
-                list
-            }
+            // Just the list. The three-metric summary band that used to sit above it is
+            // gone: every number it showed — projects, services running, stacks degraded
+            // — is now in the window subtitle, which is where macOS puts a screen's
+            // aggregate line. A painted dashboard strip inside the content area was the
+            // same information in a second, non-native place.
+            list
         }
-    }
-
-    // MARK: Summary
-
-    /// Three aggregate numbers above the list, so the screen reads as a dashboard rather
-    /// than as two cards floating in the top-left corner of the window.
-    private var summary: some View {
-        HStack(spacing: Theme.space6) {
-            MorbMetric(
-                value: "\(stacks.count)",
-                caption: stacks.count == 1 ? "project" : "projects",
-                emphasis: .leading)
-            MorbMetric(
-                value: "\(runningServices)",
-                unit: "of \(totalServices)",
-                caption: "services running",
-                tone: runningServices == totalServices && totalServices > 0 ? Theme.statusRunning : nil)
-            let degraded = stacks.filter { $0.runningCount > 0 && $0.runningCount < $0.containers.count }.count
-            if degraded > 0 {
-                MorbMetric(value: "\(degraded)", caption: degraded == 1 ? "stack degraded" : "stacks degraded", tone: Theme.statusDegraded)
-            }
-            Spacer(minLength: Theme.space4)
-        }
-        .padding(.horizontal, Theme.pagePadding)
-        .padding(.vertical, Theme.space4)
     }
 
     // MARK: List

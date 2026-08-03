@@ -21,6 +21,12 @@ import SwiftUI
 /// The symbol is optional and deliberately drawn at a fixed 10pt semibold regardless of
 /// which glyph it is, because SF Symbols do not share an optical weight across families
 /// and a clock next to a gear next to a tag at "the same size" is three different sizes.
+///
+/// **Title case, not `.uppercased()`.** macOS Tahoe moved lists, tables and forms to
+/// title-style capitalisation for section headers and no longer shouts them for you —
+/// so a header that upper-cases its own string is now the odd one out on screen rather
+/// than the one that matches. The tracking went with it: kerning was compensating for
+/// the all-caps setting, and without the caps it just looks loose.
 struct MorbSectionHeader: View {
 
     var title: String
@@ -55,15 +61,14 @@ struct MorbSectionHeader: View {
                     .foregroundStyle(.tertiary)
                     .frame(width: 13, alignment: .center)
             }
-            Text(title.uppercased())
-                .font(.caption2.weight(.semibold))
-                .kerning(0.6)
-                .foregroundStyle(.tertiary)
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
             if let count {
                 Text("\(count)")
-                    .font(.caption2.weight(.semibold))
+                    .font(.subheadline)
                     .monospacedDigit()
-                    .foregroundStyle(.quaternary)
+                    .foregroundStyle(.tertiary)
             }
             Spacer(minLength: Theme.space3)
             if let accessory { accessory }
@@ -75,14 +80,17 @@ struct MorbSectionHeader: View {
 
 // MARK: - Card
 
-/// An opaque panel holding a group of related content.
+/// A panel holding a group of related content — drawn by `GroupBox`.
 ///
-/// Replaces the ad-hoc `RoundedRectangle` backgrounds in `DiskRootView`,
-/// `StacksRootView` and `MorbSettingsView`, which use three different radii and two
-/// different fills.
+/// This used to paint its own `RoundedRectangle` fill and its own hairline stroke at its
+/// own radius. `GroupBox` is the system component for exactly this, it already tracks
+/// the platform's card fill, border and corner radius (all of which changed in Tahoe, so
+/// a hand-drawn card is now visibly a different shape from a real one), and it responds
+/// to Increase Contrast without being asked. The wrapper stays because the *layout*
+/// decisions — the section header, the internal padding scale — are still ours.
 ///
 /// A card is **never** glass and **never** carries a shadow. On macOS a shadow under a
-/// non-floating panel reads as a web component; the hairline is what says "grouped".
+/// non-floating panel reads as a web component.
 struct MorbCard<Content: View>: View {
 
     /// Optional heading, rendered as a ``MorbSectionHeader`` above the divider.
@@ -94,8 +102,6 @@ struct MorbCard<Content: View>: View {
     var padding: CGFloat = Theme.space4
 
     @ViewBuilder var content: Content
-
-    @Environment(\.colorSchemeContrast) private var contrast
 
     init(_ title: String? = nil,
          symbol: String? = nil,
@@ -110,24 +116,17 @@ struct MorbCard<Content: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        GroupBox {
+            content
+                .padding(.top, title == nil ? 0 : Theme.space2)
+                .padding(padding)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } label: {
             if let title {
                 MorbSectionHeader(title, symbol: symbol, count: count)
-                    .padding(.horizontal, Theme.space4)
-                    .padding(.top, Theme.space4)
-                    .padding(.bottom, Theme.space3)
-                Divider()
             }
-            content
-                .padding(padding)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.cardBackground,
-                    in: RoundedRectangle(cornerRadius: Theme.radiusCard, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: Theme.radiusCard, style: .continuous)
-                .strokeBorder(Theme.hairline(contrast: contrast), lineWidth: 1)
-        }
     }
 }
 

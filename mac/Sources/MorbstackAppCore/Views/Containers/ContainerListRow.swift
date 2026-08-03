@@ -58,7 +58,7 @@ struct ContainerListRow: View {
 
             trailing
         }
-        .morbRow(.rich, isSelected: isSelected, showsHover: true)
+        .morbRow(.rich, showsHover: true)
         .onHover { hovering = $0 }
         .help(tooltip)
         .onAppear(perform: subscribe)

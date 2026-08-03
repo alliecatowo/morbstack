@@ -138,7 +138,7 @@ struct ContainersRootView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        ToolbarItem(id: "scope", placement: MorbToolbarGroup.navigation) {
+        ToolbarItem(id: "containers.scope", placement: MorbToolbarGroup.navigation) {
             Picker("Scope", selection: $scope) {
                 ForEach(TrackBScope.allCases) { item in
                     Text(item.title).tag(item)
@@ -149,7 +149,7 @@ struct ContainersRootView: View {
             .fixedSize()
             .help("Show all containers or only running ones")
         }
-        ToolbarItem(id: "prune", placement: MorbToolbarGroup.actions) {
+        ToolbarItem(id: "containers.prune", placement: MorbToolbarGroup.actions) {
             pruneButton
         }
     }
