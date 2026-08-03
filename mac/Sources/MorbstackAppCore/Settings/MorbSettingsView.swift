@@ -516,7 +516,7 @@ private struct TrackDAdvancedSettings: View {
     }
 
     private var commandLineToolsSection: some View {
-        Section("Command-Line Tools") {
+        Section {
             LabeledContent("Morbstack context") {
                 Text(commandLineTools.contextSummary)
             }
@@ -562,6 +562,8 @@ private struct TrackDAdvancedSettings: View {
                 commandLineTools = .inspect()
             }
             .help("Re-read Docker context and bundled command-line tool status")
+        } header: {
+            Text("Command-Line Tools")
         } footer: {
             Text(
                 "Settings only reads this status. Choose Morbstack > Set Up Command-Line Tools… "
