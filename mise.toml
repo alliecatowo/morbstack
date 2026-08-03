@@ -203,11 +203,17 @@ run = """
 # compiling if the staged files, their manifest, or their bytes are incomplete or
 # mismatched. An executable bit alone is not provenance: without this gate a signed
 # app could truthfully look complete while installing a stale/altered plugin.
-# mise may run this recipe with a sealed toolchain PATH.  Keep that path intact, but
-# append the macOS system locations this recipe itself needs for checksum parsing.
-# The bundled Docker helpers are data under verification, never PATH-provided build
-# tools, so this cannot cause the app assembly to pick up a staged `docker` binary.
-PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
+# mise may run this recipe with a sealed toolchain PATH. Resolve the active Xcode
+# toolchain through the stable system `xcrun`, then put that and macOS system tools
+# before the inherited path. The bundled Docker helpers are data under verification,
+# never PATH-provided build tools, so this cannot cause app assembly to pick up a
+# staged `docker` binary.
+XCODE_SWIFT="$(/usr/bin/xcrun --find swift)"
+case "$XCODE_SWIFT" in
+	/*/swift) XCODE_TOOLCHAIN_BIN="${XCODE_SWIFT%/*}" ;;
+	*) echo "error: xcrun could not locate the selected Xcode Swift toolchain" >&2; exit 1 ;;
+esac
+PATH="$XCODE_TOOLCHAIN_BIN:/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"
 export PATH
 verify_host_toolchain() {
 	TOOLCHAIN_ROOT="$1"
