@@ -166,9 +166,7 @@ struct ImagesRootView: View {
             }
             .alert(
                 imageArchiveExportNotice?.title ?? "",
-                isPresented: Binding(
-                    get: { imageArchiveExportNotice != nil },
-                    set: { if !$0 { imageArchiveExportNotice = nil } }),
+                isPresented: imageArchiveExportNoticePresented,
                 presenting: imageArchiveExportNotice
             ) { _ in
                 Button("OK", role: .cancel) {}
@@ -206,6 +204,20 @@ struct ImagesRootView: View {
     }
 
     // MARK: Toolbar
+
+    /// Keep the alert binding out of `body`: Swift's type checker otherwise has to
+    /// infer a nested optional-state mutation while it is building the long modifier
+    /// chain above.
+    private var imageArchiveExportNoticePresented: Binding<Bool> {
+        Binding(
+            get: { imageArchiveExportNotice != nil },
+            set: dismissImageArchiveExportNotice)
+    }
+
+    private func dismissImageArchiveExportNotice(_ isPresented: Bool) {
+        guard !isPresented else { return }
+        imageArchiveExportNotice = nil
+    }
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
