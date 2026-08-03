@@ -136,7 +136,10 @@ private struct TrackDGeneralSettings: View {
 
             backgroundServiceSection
         }
-        .formStyle(.grouped)
+        // `.grouped` creates the rounded row clusters that read as an in-content
+        // dashboard in this macOS Settings window. Keep the platform's automatic
+        // Form treatment so Tahoe can use the normal aligned macOS controls instead.
+        .formStyle(.automatic)
         .task {
             await refreshBackgroundServiceStatus()
         }
@@ -319,7 +322,9 @@ private struct TrackDResourceSettings: View {
                 }
             }
         }
-        .formStyle(.grouped)
+        // Resource controls are a preference form, not a collection of dashboard
+        // cards. Automatic is the macOS-native Form treatment.
+        .formStyle(.automatic)
         .task(id: store.draft.diskSizeGiB) {
             diskCapacity = MorbDiskCapacity.inspect(configuredGiB: store.draft.diskSizeGiB)
         }
@@ -512,7 +517,9 @@ private struct TrackDAdvancedSettings: View {
                 }
             }
         }
-        .formStyle(.grouped)
+        // Keep diagnostic facts in the standard macOS Form presentation rather than
+        // forcing the grouped-row visual treatment.
+        .formStyle(.automatic)
     }
 
     private var commandLineToolsSection: some View {
