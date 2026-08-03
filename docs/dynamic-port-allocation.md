@@ -39,6 +39,44 @@ The only truthful host-owned design is therefore to select a port first and make
 guest Engine receive that concrete port *in its create document*. That requires an
 intentional request-transforming proxy path, not another passive observer.
 
+## Source audit: why `-P` is not another empty `HostPort`
+
+`PublishAllPorts` must stay outside Phase 1. It is not just a set of empty
+`PortBindings` entries that a host-side JSON rewrite can see.
+
+The normal Docker CLI constructs its create request's `Config.ExposedPorts` from
+explicit `-p` and `--expose` options; it does not copy an image's Dockerfile
+`EXPOSE` entries into that request. The daemon subsequently resolves `Config.Image`
+and merges the image configuration during container creation. Its networking code
+then clones `HostConfig.PortBindings`, adds every *merged* exposed port missing from
+that map, and turns each empty binding into an ephemeral publication. The relevant
+upstream paths are [Docker CLI option construction](https://github.com/docker/cli/blob/master/cli/command/container/opts.go#L2962-L3067),
+[Moby image resolution and config merge](https://github.com/moby/moby/blob/master/daemon/create.go#L1337-L1387),
+and [Moby's port-map expansion](https://github.com/moby/moby/blob/master/daemon/network.go#L912-L962).
+
+Consequently, the ordinary `docker run -P image` body does not identify the complete
+set that dockerd will publish. Rewriting only request-visible `ExposedPorts` would
+silently omit ports supplied by the image, while waiting for `containers/json` or
+inspect after create would again learn the endpoint too late to reserve it.
+
+An extra image-inspect request is not a safe shortcut. A mutable tag can resolve to a
+different image between that inspect and the unmodified create request. Rewriting the
+create to an immutable image ID would close that particular race only by changing the
+request's image-reference semantics, and still would not preserve `-P` lifecycle
+semantics: upstream may release its allocated ports when a container stops and choose
+new ones on a later start. Materializing fixed `PortBindings` and clearing
+`PublishAllPorts` would instead make those endpoints persistent.
+
+A future `-P` implementation therefore needs an atomic guest-Engine integration that
+uses the same immutable image/config resolution as the create operation, asks the host
+allocator to hold every selected loopback TCP endpoint before the Engine persists it,
+and defines the corresponding stop/start/restart reallocation protocol. It must reject
+the complete operation before guest side effects when the resolved set contains UDP,
+SCTP, ranges, a non-loopback address, or any ambiguous/unsupported form. A proxy-only
+request rewriter may support a clearly labeled direct-API subset whose complete
+`ExposedPorts` set is already in the body, but that is not compatible support for the
+standard Docker CLI `-P image` path and must not be advertised as such.
+
 ## Implemented Phase 1 transaction
 
 For one recognized normal `POST .../containers/create`, Morbstack now supports an
@@ -99,8 +137,9 @@ The following remain unsupported or explicitly outside this transaction:
   `"0"`, and any opaque/slow/oversized create that does not enter the bounded
   preflight. They retain the raw Engine relay and therefore make **no** Phase 1
   synchronous allocation claim.
-- `HostConfig.PublishAllPorts` (`docker run -P`), which needs every eligible
-  `ExposedPorts` entry materialized into an explicit binding.
+- `HostConfig.PublishAllPorts` (`docker run -P`). The standard CLI body omits image
+  `EXPOSE` entries; an allocation contract needs atomic guest image/config resolution
+  and separate stop/start/restart semantics, as documented in the source audit above.
 - Host-port ranges, which need an unambiguous container-port-to-host-port mapping
   before any listener can be reserved.
 - Dynamic UDP, dynamic TCP combined with a non-TCP sibling, non-loopback addresses,
@@ -128,18 +167,21 @@ Further allocation work must preserve these invariants:
    either receive a clear pre-create error or remain explicitly outside the synchronous
    contract; forwarding one dynamically would restore the race this design removes.
 2. Parse the create JSON exactly enough to identify published TCP and UDP bindings,
-   loopback address spelling, and `ExposedPorts`. Reject unsupported protocols,
-   addresses, ambiguous duplicates, and ranges before a guest side effect. TCP and UDP
-   use independent reservations, so they may legitimately share one numeric port.
+   loopback address spelling, and direct-API `ExposedPorts`. Reject unsupported
+   protocols, addresses, ambiguous duplicates, and ranges before a guest side effect.
+   TCP and UDP use independent reservations, so they may legitimately share one
+   numeric port. Do not mistake this request-visible subset for normal CLI `-P`: its
+   complete image-derived set is available only during guest Engine image resolution.
 3. The host allocator chooses candidate numeric ports and *holds real macOS loopback
    listeners/sockets* before the request is forwarded. A candidate may be released
    only on a failed create, a failed association, destroy, forwarder/VM shutdown, or
    the relevant documented lifecycle transition.
-4. Rewrite every dynamic binding into the selected single concrete `HostPort`. For
-   `PublishAllPorts`, materialize supported `ExposedPorts` into concrete `PortBindings`
-   and clear `PublishAllPorts`, so the guest Engine sees only the host-selected values.
-   Re-encode the body and its `Content-Length`; do not depend on a later inspect call
-   to learn an endpoint.
+4. Rewrite every Phase-1 dynamic binding into the selected single concrete `HostPort`.
+   Do not clear `PublishAllPorts` merely to materialize ports from a pre-create image
+   inspect: that changes both image-reference and reallocation semantics. `-P` needs
+   its own guest-Engine allocation handshake before any transformed request is sent.
+   Re-encode a bounded transformed body and its `Content-Length`; do not depend on a
+   later inspect call to learn an endpoint.
 5. Send that rewritten document to the guest Engine. Its normal create success proves
    that the selected number was usable in the guest as well as already reserved on the
    host. If guest bind/setup fails, return Docker's failure and release every host
@@ -178,9 +220,12 @@ for all non-dynamic calls:
    held Mac listener and is reachable immediately after a successful start response.
 2. Add explicit UDP using a true UDP reservation/lease (not the present availability
    snapshot), including bidirectional datagrams and same-number TCP+UDP publication.
-3. Add `PublishAllPorts` and ranges only after their mappings have dedicated parser,
-   collision, lifecycle, and recovery tests. Do not infer range semantics from string
-   splitting.
+3. Add `PublishAllPorts` only after its guest image-resolution, held-allocation, and
+   stop/start/restart contract exists; cover image-tag replacement, image-provided
+   TCP/UDP/SCTP exposure, explicit `-p` precedence, `--expose`, conflict, destroy, and
+   restart reallocation. Add ranges only after their mappings have dedicated parser,
+   collision, lifecycle, and recovery coverage. Do not infer range semantics from
+   string splitting.
 
 The integration matrix must cover direct Docker API clients as well as Docker CLI,
 create without start, start retry, create/start failure, client disconnect, destroy,
