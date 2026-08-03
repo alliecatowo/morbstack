@@ -74,11 +74,16 @@ only cue.
 ### Images
 
 Keep the selected-image inspector as a compact `Form` at `340/400/460`. Repository,
-digest, architecture, tags, archive/run/remove actions, and other selected-image facts
-belong together without tabs. Long digests and tag collections must be validated in the
-real inspector at its minimum width. If they are unreadable, change the relevant
-system-container presentation or disclose a full selectable value; do not introduce
-summary cards or a second visual system.
+digest, architecture, tags, compatibility, and other selected-image facts belong together
+without tabs. Architecture is one scalar `LabeledContent` value; a consequential platform
+mismatch gets a concise `Compatibility` section rather than nested stacks, inline badges,
+or advice inside the value column. Repo tags are secondary metadata in a standard
+count-labelled `DisclosureGroup`, collapsed when selection changes. Archive, run, copy,
+and removal commands remain in the selection-aware toolbar, Image menu, and context menu;
+the destructive command retains its explicit confirmation. Long digests and expanded tag
+collections must be validated in the real inspector at its minimum width. If they are
+unreadable, change the relevant system-container presentation or disclose a full
+selectable value; do not introduce summary cards or a second visual system.
 
 ### Stacks
 

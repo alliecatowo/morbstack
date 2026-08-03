@@ -83,6 +83,9 @@ struct ImagesRootView: View {
     /// Whether the trailing inspector column is open. SwiftUI restores this across
     /// launches for a trailing-column inspector, so it is not persisted here.
     @State private var showsInspector = true
+    /// Tags are supporting metadata. Keep them collapsed until a person asks for the
+    /// full repository history rather than making every selected image read as a list.
+    @State private var repoTagsExpanded = false
 
     @State private var removal: ImageRemovalConfirmation?
     @State private var operationFailure: ImageOperationFailure?
@@ -138,6 +141,7 @@ struct ImagesRootView: View {
             // already carries it for anything pulled from a multi-arch index; this only
             // fires for the remainder — locally built images, mostly.
             .task(id: selection) {
+                repoTagsExpanded = false
                 guard let selection else { return }
                 await model.resolveArchitecture(for: selection)
             }
@@ -455,7 +459,7 @@ struct ImagesRootView: View {
             ContentUnavailableView {
                 Label("No Images", systemImage: "square.on.square")
             } description: {
-                Text("Pull an image to inspect it here, or run a container and Docker fetches it automatically.")
+                Text("No local Docker images are available yet.")
             } actions: {
                 Button("Pull an Image") {
                     showingPull = true
@@ -568,8 +572,7 @@ struct ImagesRootView: View {
     @ViewBuilder
     private func architectureLabel(_ image: ImageSummary) -> some View {
         if let badge = TrackCImageArch.badge(for: image.architecture), badge.isNoteworthy {
-            Label(badge.text, systemImage: badge.symbol ?? "exclamationmark.triangle")
-                .font(.caption)
+            Image(systemName: badge.symbol ?? "exclamationmark.triangle")
                 .foregroundStyle(.secondary)
                 .accessibilityLabel("Architecture mismatch: \(badge.text)")
                 .accessibilityHint("This image is not built for this Mac’s native architecture.")
@@ -652,41 +655,18 @@ struct ImagesRootView: View {
                 }
 
                 if !image.repoTags.isEmpty {
-                    Section("Repo Tags") {
-                        ForEach(image.repoTags, id: \.self) { tag in
-                            Text(tag)
-                                .font(.system(.callout, design: .monospaced))
-                                .textSelection(.enabled)
+                    Section {
+                        DisclosureGroup("Repo Tags (\(image.repoTags.count))", isExpanded: $repoTagsExpanded) {
+                            ForEach(image.repoTags, id: \.self) { tag in
+                                Text(tag)
+                                    .font(.system(.callout, design: .monospaced))
+                                    .textSelection(.enabled)
+                            }
                         }
                     }
                 }
 
-                Section("Archive") {
-                    Button {
-                        chooseImageArchiveDestination(for: image)
-                    } label: {
-                        Label("Export Image Archive…", systemImage: "square.and.arrow.down")
-                    }
-                    .disabled(imageArchiveExport != nil)
-                }
-
-                Section("Container") {
-                    Button {
-                        localImageRun = image
-                    } label: {
-                        Label("Run Local Image…", systemImage: "play")
-                    }
-                    .disabled(!model.engine.isRunning || imageArchiveExport != nil)
-                }
-
-                Section {
-                    Button(role: .destructive) {
-                        removal = ImageRemovalConfirmation(image: image)
-                    } label: {
-                        Label("Remove Image", systemImage: "trash")
-                    }
-                    .disabled(busy)
-                }
+                compatibilitySection(for: image)
             }
         } else {
             ContentUnavailableView {
@@ -701,42 +681,38 @@ struct ImagesRootView: View {
         }
     }
 
-    /// The platform row, with the nudge towards an arm64 variant underneath it.
+    /// The platform is a single selected-record fact; compatibility guidance has its
+    /// own Form section instead of becoming a small custom dashboard inside this value.
     @ViewBuilder
     private func architectureField(_ image: ImageSummary) -> some View {
-        let badge = TrackCImageArch.badge(for: image.architecture)
         LabeledContent("Architecture") {
-            VStack(alignment: .leading) {
-                if let badge, let architecture = image.architecture {
-                    HStack {
-                        Text(architecture.platformString)
-                            .font(.system(.callout, design: .monospaced))
-                            .textSelection(.enabled)
-                        if let consequence = badge.consequenceLabel {
-                            Label(consequence, systemImage: badge.symbol ?? "exclamationmark.triangle")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                } else {
-                    // The lookup is one request and it is in flight; saying "unknown" for
-                    // the half-second it takes would read as a defect rather than latency.
-                    HStack {
-                        ProgressView().controlSize(.small)
-                        Text("Checking…").font(.callout).foregroundStyle(.tertiary)
-                    }
-                }
-                if let badge, let advice = TrackCImageArch.advice(
-                    for: badge, rosettaAvailable: model.rosetta.availability == .active
-                ) {
-                    Label {
-                        Text(advice)
-                    } icon: {
-                        Image(systemName: badge.symbol ?? "info.circle")
-                    }
-                    .font(.caption)
+            if let architecture = image.architecture {
+                Text(architecture.platformString)
+                    .font(.system(.callout, design: .monospaced))
+                    .textSelection(.enabled)
+            } else {
+                // The lookup is commonly still in flight when the inspector first
+                // appears. This remains a scalar fact, not a custom loading row.
+                Text("Checking…")
                     .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func compatibilitySection(for image: ImageSummary) -> some View {
+        if let badge = TrackCImageArch.badge(for: image.architecture), badge.isNoteworthy {
+            Section("Compatibility") {
+                if let consequence = badge.consequenceLabel {
+                    LabeledContent("Status", value: consequence)
+                }
+                if let advice = TrackCImageArch.advice(
+                    for: badge,
+                    rosettaAvailable: model.rosetta.availability == .active)
+                {
+                    Label(advice, systemImage: badge.symbol ?? "info.circle")
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
