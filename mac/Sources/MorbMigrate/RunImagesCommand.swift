@@ -121,7 +121,10 @@ enum RunImagesCommand {
                     throw ArgumentError.unknown(arguments[index])
                 }
             }
-            guard allImages != imageReferences.isEmpty else {
+            // Exactly one selection form is required: one or more named images, or
+            // the explicit all-planned selection. `allImages == imageReferences.isEmpty`
+            // is true only for those two valid states.
+            guard allImages == imageReferences.isEmpty else {
                 throw ArgumentError.selectionRequired
             }
             guard source != nil else { throw ArgumentError.sourceRequired }

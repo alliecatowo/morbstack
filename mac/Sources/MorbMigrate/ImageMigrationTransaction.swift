@@ -365,8 +365,8 @@ public enum ImageMigrationTransaction {
     public static func execute(
         _ prepared: PreparedImageMigration,
         confirmation: ImageMigrationConfirmation,
-        progress: (ImageMigrationProgress) -> Void = { _ in },
-        isCancelled: () -> Bool = { false }
+        progress: @escaping (ImageMigrationProgress) -> Void = { _ in },
+        isCancelled: @escaping () -> Bool = { false }
     ) throws -> ImageMigrationTransactionReport {
         guard confirmation.transactionID == prepared.transactionID else {
             throw ImageMigrationTransactionError.confirmationDoesNotMatch
@@ -448,8 +448,8 @@ public enum ImageMigrationTransaction {
         prepared: PreparedImageMigration,
         source: MigrationSource,
         destination: EngineClient,
-        progress: (ImageMigrationProgress) -> Void,
-        isCancelled: () -> Bool
+        progress: @escaping (ImageMigrationProgress) -> Void,
+        isCancelled: @escaping () -> Bool
     ) -> ImageMigrationItemReport {
         func event(
             _ phase: ImageMigrationProgressPhase, bytes: Int64? = nil, detail: String? = nil

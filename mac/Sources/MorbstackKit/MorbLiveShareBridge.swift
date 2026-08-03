@@ -458,7 +458,7 @@ public enum MorbLiveShareBridge {
         }
         let plan: Plan
         do {
-            plan = try plan(paths: paths, shares: shares)
+            plan = try Self.plan(paths: paths, shares: shares)
         } catch {
             return Diagnostic(
                 state: .invalidConfiguration,
