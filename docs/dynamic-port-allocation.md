@@ -141,6 +141,9 @@ The concrete implementation evidence is `DockerPortPublicationPreflight` for
 classification/rewrite, `DockerProxy` for the bounded request/response hand-off, and
 `PortForwarder`/`TCPListener` for the retained macOS listener. The remaining
 dual-family row is an explicit known gap in that chain, not a compatibility claim.
+The required fixed-UDP cross-transport transaction is recorded separately in
+[`fixed-udp-port-publication-design.md`](fixed-udp-port-publication-design.md); it is
+not current implementation evidence.
 
 ## Fixed-TCP recovery after a VM stop
 
