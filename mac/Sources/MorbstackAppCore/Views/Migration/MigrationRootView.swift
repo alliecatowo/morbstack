@@ -147,7 +147,8 @@ struct MigrationRootView: View {
             }
             .sheet(isPresented: $volumeMigration.isPresented) {
                 volumeMigrationSheet
-                    .interactiveDismissDisabled(volumeMigration.stage == .transferring)
+                    .interactiveDismissDisabled(
+                        volumeMigration.stage == .rechecking || volumeMigration.stage == .transferring)
             }
             .alert(
                 "Image Migration Couldn’t Continue",
@@ -585,9 +586,13 @@ struct MigrationRootView: View {
                 MigrationVolumeReviewSheet(
                     prepared: prepared,
                     networkConsentGranted: $volumeMigration.networkConsentGranted,
+                    recheckNotice: volumeMigration.recheckNotice,
                     onBack: volumeMigration.returnToSelection,
                     onConfirm: volumeMigration.executePreparedSelection)
             }
+
+        case .rechecking:
+            MigrationVolumeRecheckingSheet()
 
         case .transferring:
             MigrationVolumeProgressSheet(progress: volumeMigration.progress)
@@ -1128,6 +1133,7 @@ private struct MigrationVolumeSelectionSheet: View {
 private struct MigrationVolumeReviewSheet: View {
     let prepared: PreparedVolumeMigration
     @Binding var networkConsentGranted: Bool
+    let recheckNotice: String?
     let onBack: () -> Void
     let onConfirm: () -> Void
 
@@ -1150,6 +1156,13 @@ private struct MigrationVolumeReviewSheet: View {
                         LabeledContent(
                             "Selection",
                             value: "\(prepared.items.count) volume\(prepared.items.count == 1 ? "" : "s")")
+                    }
+
+                    if let recheckNotice {
+                        Section("Review Required") {
+                            Text(recheckNotice)
+                                .foregroundStyle(.secondary)
+                        }
                     }
 
                     Section("Transfer Effects") {
@@ -1217,6 +1230,26 @@ private struct MigrationVolumeReviewSheet: View {
             }
         }
         .frame(minWidth: 640, minHeight: 540)
+    }
+}
+
+/// The final confirmation repeats the read-only preparation for exactly the names the
+/// user reviewed. This makes a changed destination or helper-image state visible
+/// before any helper container, pull, or volume can be created.
+private struct MigrationVolumeRecheckingSheet: View {
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Rechecking Selected Volumes") {
+                    ProgressView("Checking current eligibility and helper-image availability…")
+                    Text(
+                        "Morbstack is refreshing the exact selected names before it starts the transfer. No volume, helper container, or image pull is created while this check runs.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("Rechecking Volume Transfer")
+        }
+        .frame(minWidth: 480, minHeight: 220)
     }
 }
 
@@ -1633,6 +1666,7 @@ private final class VolumeMigrationWorkflow {
     enum Stage {
         case selection
         case review
+        case rechecking
         case transferring
         case report
     }
@@ -1656,6 +1690,7 @@ private final class VolumeMigrationWorkflow {
     var progress: VolumeMigrationProgress?
     var isPreparing = false
     var networkConsentGranted = false
+    var recheckNotice: String?
     var errorMessage: String?
     var latestReport: VolumeMigrationTransactionReport?
 
@@ -1669,6 +1704,7 @@ private final class VolumeMigrationWorkflow {
         progress = nil
         isPreparing = false
         networkConsentGranted = false
+        recheckNotice = nil
         errorMessage = nil
         stage = .selection
         isPresented = true
@@ -1684,6 +1720,7 @@ private final class VolumeMigrationWorkflow {
         progress = nil
         isPreparing = false
         networkConsentGranted = false
+        recheckNotice = nil
         stage = .selection
     }
 
@@ -1691,6 +1728,7 @@ private final class VolumeMigrationWorkflow {
         guard stage == .review else { return }
         prepared = nil
         networkConsentGranted = false
+        recheckNotice = nil
         stage = .selection
     }
 
@@ -1729,6 +1767,7 @@ private final class VolumeMigrationWorkflow {
             case .prepared(let prepared):
                 self.prepared = prepared
                 self.networkConsentGranted = false
+                self.recheckNotice = nil
                 self.stage = .review
             case .failed(let message):
                 self.errorMessage = message
@@ -1746,6 +1785,57 @@ private final class VolumeMigrationWorkflow {
             return
         }
 
+        let names = prepared.items.map(\.name)
+        guard !names.isEmpty, let sourceToken = source?.transferSourceToken else {
+            errorMessage = "Review the selected volumes again before transfer."
+            return
+        }
+
+        recheckNotice = nil
+        stage = .rechecking
+        Task { [weak self] in
+            let result = await Task.detached(priority: .userInitiated) {
+                do {
+                    return PreparationResult.prepared(
+                        try VolumeMigrationTransaction.prepare(
+                            from: sourceToken,
+                            selection: .names(names)))
+                } catch {
+                    return PreparationResult.failed(String(describing: error))
+                }
+            }.value
+
+            guard let self else { return }
+            switch result {
+            case .prepared(let refreshed):
+                guard self.stage == .rechecking else { return }
+                self.prepared = refreshed
+                if Self.helperImageStateChanged(from: prepared, to: refreshed) {
+                    self.networkConsentGranted = false
+                    self.stage = .review
+                    self.recheckNotice = "Helper-image availability changed while rechecking. Review the refreshed transfer details before transferring."
+                    return
+                }
+                self.beginExecution(with: refreshed)
+            case .failed(let message):
+                self.prepared = nil
+                self.networkConsentGranted = false
+                self.stage = .selection
+                self.errorMessage = "Could not recheck the selected volumes before transfer: \(message)"
+            }
+        }
+    }
+
+    private static func helperImageStateChanged(
+        from previous: PreparedVolumeMigration,
+        to refreshed: PreparedVolumeMigration
+    ) -> Bool {
+        previous.helperImageNetworkConsentRequired != refreshed.helperImageNetworkConsentRequired
+            || previous.sourceHasHelperImage != refreshed.sourceHasHelperImage
+            || previous.destinationHasHelperImage != refreshed.destinationHasHelperImage
+    }
+
+    private func beginExecution(with prepared: PreparedVolumeMigration) {
         progress = nil
         stage = .transferring
 
