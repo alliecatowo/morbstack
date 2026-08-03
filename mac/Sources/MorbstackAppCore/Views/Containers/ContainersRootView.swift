@@ -187,7 +187,7 @@ struct ContainersRootView: View {
             .help("Show all containers or only running containers")
         }
 
-        ToolbarItem(id: "containers.refresh", placement: .primaryAction) {
+        ToolbarItem(id: "containers.refresh", placement: .secondaryAction) {
             Button {
                 Task { await model.refreshAll() }
             } label: {
@@ -198,7 +198,7 @@ struct ContainersRootView: View {
         }
 
         if !model.containers.isEmpty {
-            ToolbarItem(id: "containers.inspector", placement: .primaryAction) {
+            ToolbarItem(id: "containers.inspector", placement: .automatic) {
                 Button { showsInspector.toggle() } label: {
                     Image(systemName: "sidebar.right")
                 }
@@ -208,22 +208,30 @@ struct ContainersRootView: View {
         }
 
         if let selected {
-            ToolbarItemGroup(placement: .primaryAction) {
+            ToolbarItem(id: "containers.primaryLifecycle", placement: .primaryAction) {
                 if busy.contains(selected.id) {
-                    ProgressView().controlSize(.small)
-                } else {
-                    ForEach(selected.availableActions.filter { !$0.isDestructive }, id: \.rawValue) { action in
-                        Button { perform(action, on: selected.id) } label: {
-                            Image(systemName: action.symbol)
-                        }
-                        .accessibilityLabel(action.title)
-                        .help("\(action.title) \(selected.displayName)")
+                    ProgressView()
+                        .controlSize(.small)
+                        .accessibilityLabel("Updating \(selected.displayName)")
+                } else if let action = primaryLifecycleAction(for: selected) {
+                    Button { perform(action, on: selected.id) } label: {
+                        Image(systemName: action.symbol)
                     }
+                    .accessibilityLabel(action.title)
+                    .help("\(action.title) \(selected.displayName)")
                 }
             }
 
             ToolbarItem(id: "containers.more", placement: .secondaryAction) {
                 Menu {
+                    ForEach(secondaryLifecycleActions(for: selected), id: \.rawValue) { action in
+                        Button(action.title, systemImage: action.symbol) {
+                            perform(action, on: selected.id)
+                        }
+                    }
+                    if !secondaryLifecycleActions(for: selected).isEmpty {
+                        Divider()
+                    }
                     Button("Copy Container ID") { MorbPasteboard.copy(selected.id) }
                     Button("Copy Image") { MorbPasteboard.copy(selected.image) }
                     if let url = selected.ports.compactMap(\.url).first {
@@ -249,6 +257,23 @@ struct ContainersRootView: View {
                 stoppedCount == 0
                     ? "No stopped containers to remove"
                     : "Remove \(stoppedCount) stopped container\(stoppedCount == 1 ? "" : "s")")
+        }
+    }
+
+    /// One selected container gets one obvious toolbar command. All other lifecycle
+    /// actions remain in the system-managed secondary menu, where they do not crowd
+    /// search, the inspector control, or the route's toolbar at narrow widths.
+    private func primaryLifecycleAction(for container: ContainerSummary) -> ContainerAction? {
+        switch container.state {
+        case "running", "restarting": return container.availableActions.contains(.stop) ? .stop : nil
+        case "paused": return container.availableActions.contains(.unpause) ? .unpause : nil
+        default: return container.availableActions.contains(.start) ? .start : nil
+        }
+    }
+
+    private func secondaryLifecycleActions(for container: ContainerSummary) -> [ContainerAction] {
+        container.availableActions.filter {
+            !$0.isDestructive && $0 != primaryLifecycleAction(for: container)
         }
     }
 
