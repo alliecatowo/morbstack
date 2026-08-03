@@ -315,7 +315,7 @@ private struct PaletteRow: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(result.command.title)
-        .accessibilityHint(result.command.isDestructive ? "Destructive command. Press Return to run." : "Press Return to run this command.")
+        .accessibilityHint(result.command.isDestructive ? "Destructive command. Press Return to review it before running." : "Press Return to run this command.")
     }
 
     private var highlightedTitle: AttributedString {

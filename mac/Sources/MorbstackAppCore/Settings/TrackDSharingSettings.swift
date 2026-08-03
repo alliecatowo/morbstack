@@ -34,18 +34,15 @@ struct TrackDSharingSettings: View {
 
             Section {
                 if status.shares.isEmpty {
-                    ContentUnavailableView(
-                        label: {
-                            Label("No Shared Folders", systemImage: "folder.badge.plus")
-                        },
-                        description: {
-                            Text("Add only folders you want every container to be able to access.")
-                        },
-                        actions: {
-                            Button("Open Configuration", systemImage: "doc.text") {
-                                openConfiguration()
-                            }
-                        })
+                    Label("No Shared Folders", systemImage: "folder.badge.plus")
+                    Text("Add only folders you want every container to be able to access.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    LabeledContent("Configuration") {
+                        Button("Open config.toml", systemImage: "doc.text") {
+                            openConfiguration()
+                        }
+                    }
                 } else {
                     ForEach(status.shares, id: \.path) { share in
                         TrackDShareRow(

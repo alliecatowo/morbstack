@@ -28,20 +28,6 @@ struct MorbMenuBarLabel: View {
     }
 }
 
-// MARK: - Focus
-
-/// Keyboard stops in the popover, in visual order. The system still draws the focus
-/// treatment; this enum only lets Up/Down move through a mixed group of controls.
-enum TrackDMenuFocus: Hashable {
-    case engine(String)
-    case container(String)
-    case port(String)
-    case openApp
-    case prune
-    case settings
-    case quit
-}
-
 // MARK: - Live CPU
 
 /// Streams `/stats` for the containers visible while the extra is open.
@@ -98,7 +84,6 @@ struct MorbMenuBarContent: View {
 
     @State private var stats = TrackDMenuBarStats()
     @State private var busy: Set<String> = []
-    @FocusState private var focus: TrackDMenuFocus?
 
     @Environment(\.openSettings) private var openSettings
 
@@ -125,9 +110,6 @@ struct MorbMenuBarContent: View {
             stats.sync(ids: runningIDs, client: model.client)
         }
         .onDisappear { stats.stopAll() }
-        .focusable()
-        .onKeyPress(.downArrow) { moveFocus(by: 1); return .handled }
-        .onKeyPress(.upArrow) { moveFocus(by: -1); return .handled }
     }
 
     // MARK: Engine
@@ -193,7 +175,6 @@ struct MorbMenuBarContent: View {
                 .labelStyle(.iconOnly)
         }
         .buttonStyle(.borderless)
-        .focused($focus, equals: .engine(action.rawValue))
         .disabled(busy.contains("engine"))
         .help(engineTitle(action))
         .accessibilityLabel(engineTitle(action))
@@ -243,7 +224,6 @@ struct MorbMenuBarContent: View {
                         TrackDAppBridge.reveal(.containers, in: model)
                     }
                     .buttonStyle(.link)
-                    .focused($focus, equals: .openApp)
                 }
             }
         }
@@ -271,7 +251,6 @@ struct MorbMenuBarContent: View {
                 }
             }
             .buttonStyle(.plain)
-            .focused($focus, equals: .container(container.id))
             .help(rowTooltip(container))
             .accessibilityLabel("Open \(container.displayName), \(container.status), CPU \(cpuText(container))")
 
@@ -286,7 +265,6 @@ struct MorbMenuBarContent: View {
             .menuStyle(.borderlessButton)
             .disabled(busy.contains(container.id))
         }
-        .opacity(busy.contains(container.id) ? 0.5 : 1)
     }
 
     private func containerStatusSymbol(_ container: ContainerSummary) -> String {
@@ -359,7 +337,6 @@ struct MorbMenuBarContent: View {
                     }
                 }
                 .buttonStyle(.plain)
-                .focused($focus, equals: .port(port.id))
                 .help("Open http://127.0.0.1:\(port.hostPort) — container port \(port.containerPort)")
                 .accessibilityLabel("Open port \(port.hostPort) for \(port.owner)")
             }
@@ -369,7 +346,6 @@ struct MorbMenuBarContent: View {
                     TrackDAppBridge.reveal(.containers, in: model)
                 }
                 .buttonStyle(.link)
-                .focused($focus, equals: .openApp)
             }
         }
     }
@@ -382,14 +358,12 @@ struct MorbMenuBarContent: View {
                 TrackDAppBridge.revealMainWindow()
             }
             .buttonStyle(.plain)
-            .focused($focus, equals: .openApp)
             .keyboardShortcut("o", modifiers: .command)
 
             Button("Review Disk Cleanup…", systemImage: "trash") {
                 TrackDAppBridge.reveal(.disk, in: model)
             }
             .buttonStyle(.plain)
-            .focused($focus, equals: .prune)
             .help("Review reclaimable disk in the main window")
 
             Button("Settings…", systemImage: "gearshape") {
@@ -397,34 +371,12 @@ struct MorbMenuBarContent: View {
                 openSettings()
             }
             .buttonStyle(.plain)
-            .focused($focus, equals: .settings)
 
             Button("Quit Morbstack", systemImage: "power") {
                 NSApp.terminate(nil)
             }
             .buttonStyle(.plain)
-            .focused($focus, equals: .quit)
         }
-    }
-
-    // MARK: Keyboard
-
-    private var focusOrder: [TrackDMenuFocus] {
-        var order: [TrackDMenuFocus] = engineActions.map { TrackDMenuFocus.engine($0.rawValue) }
-        order += running.prefix(Self.containerLimit).map { TrackDMenuFocus.container($0.id) }
-        order += ports.map { TrackDMenuFocus.port($0.id) }
-        order += [.openApp, .prune, .settings, .quit]
-        return order
-    }
-
-    private func moveFocus(by delta: Int) {
-        let order = focusOrder
-        guard !order.isEmpty else { return }
-        guard let current = focus, let index = order.firstIndex(of: current) else {
-            focus = delta > 0 ? order.first : order.last
-            return
-        }
-        focus = order[(index + delta + order.count) % order.count]
     }
 
     // MARK: Actions
