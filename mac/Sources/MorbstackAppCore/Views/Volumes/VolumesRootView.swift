@@ -344,6 +344,9 @@ struct VolumesRootView: View {
             } message: { volume in
                 if volume.isUnused {
                     Text("Everything stored in this volume is deleted permanently.")
+                } else if volume.refCount == nil {
+                    Text(
+                        "Docker did not report whether containers use this volume. The engine will refuse removal if it is still attached.")
                 } else {
                     Text(
                         "\(volume.refCount ?? 0) container\((volume.refCount ?? 0) == 1 ? "" : "s") "
@@ -519,6 +522,7 @@ struct VolumesRootView: View {
                 .monospacedDigit()
         } else if volume.refCount == nil {
             Text("—")
+                .accessibilityLabel("Usage unreported")
         } else {
             Text("Unused")
         }
@@ -560,7 +564,7 @@ struct VolumesRootView: View {
                             .lineLimit(2)
                             .truncationMode(.middle)
                     }
-                    LabeledContent("Status", value: volume.isUnused ? "Unused" : "In use")
+                    LabeledContent("Status", value: volume.usageStatus)
                     LabeledContent("Size", value: volume.size.map(Formatters.bytesString) ?? "Unreported")
                     LabeledContent("Driver", value: volume.driver)
                     LabeledContent("Guest Mount Point") {

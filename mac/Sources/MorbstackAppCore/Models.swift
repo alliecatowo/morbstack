@@ -292,7 +292,15 @@ struct VolumeSummary: Identifiable, Sendable, Hashable {
 
     var id: String { name }
 
-    var isUnused: Bool { (refCount ?? 0) == 0 }
+    /// Docker omits `UsageData.RefCount` when usage was not requested or could not be
+    /// reported. That is not evidence that a volume is unused, and it must never make
+    /// the volume eligible for a bulk destructive operation.
+    var isUnused: Bool { refCount == 0 }
+
+    var usageStatus: String {
+        guard let refCount else { return "Usage unreported" }
+        return refCount == 0 ? "Unused" : "In use"
+    }
 }
 
 struct NetworkSummary: Identifiable, Sendable, Hashable {
