@@ -182,10 +182,11 @@ public final class UDPListener {
             let received: Int = storage.withUnsafeMutableBytes { bytes in
                 withUnsafeMutablePointer(to: &sender) { pointer in
                     pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { generic in
-                        POSIXSocketSupport.retryOnInterrupt {
-                            Darwin.recvfrom(descriptor, bytes.baseAddress, bytes.count, 0,
-                                           generic, &senderLength)
-                        }
+                        Int(POSIXSocketSupport.retryOnInterrupt {
+                            Int32(clamping: Darwin.recvfrom(
+                                descriptor, bytes.baseAddress, bytes.count, 0,
+                                generic, &senderLength))
+                        })
                     }
                 }
             }

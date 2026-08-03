@@ -307,7 +307,7 @@ public final class DockerProxy {
                 head: parsed.head,
                 headBytes: headBytes,
                 body: body,
-                rawRequest: Data(bytes[0..<bodyEnd]))
+                rawRequest: Data(bytes[0..<bodyEnd])))
         }
         return .other
     }

@@ -376,11 +376,11 @@ public final class PortForwarder {
     public var failedForwards: [String] {
         lock.lock()
         defer { lock.unlock() }
-        let tcp = failedBinds.keys.sorted().compactMap { port in
+        let tcp: [String] = failedBinds.keys.sorted().compactMap { port -> String? in
             guard let failure = failedBinds[port] else { return nil }
             return "\(failure.binding.description) — \(failure.reason)"
         }
-        let udp = failedUDPBinds.keys.sorted().compactMap { port in
+        let udp: [String] = failedUDPBinds.keys.sorted().compactMap { port -> String? in
             guard let failure = failedUDPBinds[port] else { return nil }
             return "\(failure.binding.description) — \(failure.reason)"
         }
