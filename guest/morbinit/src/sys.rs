@@ -116,6 +116,13 @@ struct PollFd {
 }
 const POLLIN: i16 = 0x0001;
 const POLLOUT: i16 = 0x0004;
+// `poll(2)` reports these conditions even when callers request no ordinary
+// readiness events.  Keep `POLLRDHUP` deliberately out of this group: a Docker
+// client may half-close stdin and still need the Engine's response, so only a
+// fully unusable peer may interrupt a relay retry.
+const POLLERR: i16 = 0x0008;
+const POLLHUP: i16 = 0x0010;
+const POLLNVAL: i16 = 0x0020;
 
 /// `struct utsname`, from sys/utsname.h. Field width is 65 bytes on Linux
 /// (glibc and musl agree here).
@@ -380,6 +387,34 @@ pub fn poll_writable(fd: RawFd, timeout_ms: i32) -> io::Result<bool> {
         Err(io::Error::last_os_error())
     } else {
         Ok(ret > 0 && (pfd.revents & POLLOUT) != 0)
+    }
+}
+
+/// Wait for a stream peer to become permanently unusable, without treating a
+/// directional EOF as cancellation.
+///
+/// Docker's API is full duplex: `docker build -`, `docker exec -i`, and archive
+/// uploads may close their write side while the Engine still owes output.  This
+/// helper therefore watches only `POLLERR`, `POLLHUP`, and `POLLNVAL`, never
+/// `POLLRDHUP` or `POLLIN`.  It is used while a relay is waiting for dockerd to
+/// come back after a restart, so a CLI cancellation releases that bounded relay
+/// slot promptly instead of sleeping through the whole retry window.
+pub fn poll_disconnected(fd: RawFd, timeout_ms: i32) -> io::Result<bool> {
+    let mut pfd = PollFd {
+        fd,
+        events: 0,
+        revents: 0,
+    };
+    loop {
+        let ret = unsafe { raw::poll(&mut pfd as *mut PollFd, 1, timeout_ms) };
+        if ret >= 0 {
+            return Ok(ret > 0 && (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0);
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::Interrupted {
+            continue;
+        }
+        return Err(error);
     }
 }
 

@@ -79,7 +79,7 @@ pub fn copy_stream<R: Read + ?Sized, W: Write + ?Sized>(
                     return Err(io::Error::new(
                         io::ErrorKind::WriteZero,
                         "peer accepted 0 bytes; refusing to spin",
-                    ))
+                    ));
                 }
                 Ok(w) => written += w,
                 Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
@@ -186,7 +186,13 @@ mod imp {
 
     /// Dial dockerd's Unix socket, retrying with backoff while dockerd is
     /// still coming up (or restarting after a crash).
-    fn connect_dockerd(timeout: Duration) -> io::Result<UnixStream> {
+    ///
+    /// The accepted vsock belongs to one Docker CLI connection.  Keep retrying
+    /// for a real client, but do not hold one of the bounded proxy slots for the
+    /// whole startup timeout after that client has cancelled.  The disconnect
+    /// probe intentionally ignores a directional EOF: `docker build -` and
+    /// interactive execs may be finished writing while still awaiting output.
+    fn connect_dockerd(vsock_fd: RawFd, timeout: Duration) -> io::Result<UnixStream> {
         let deadline = Instant::now() + timeout;
         let mut backoff = DOCKERD_CONNECT_INITIAL_BACKOFF;
         loop {
@@ -197,7 +203,23 @@ mod imp {
             if Instant::now() >= deadline {
                 return Err(last_err);
             }
-            thread::sleep(backoff);
+            let wait = std::cmp::min(backoff, deadline.saturating_duration_since(Instant::now()));
+            let wait_millis = wait.as_millis().min(i32::MAX as u128) as i32;
+            match sys::poll_disconnected(vsock_fd, wait_millis) {
+                Ok(true) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::ConnectionAborted,
+                        "Docker client disconnected while waiting for dockerd",
+                    ));
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    return Err(io::Error::new(
+                        e.kind(),
+                        format!("watching Docker client while dockerd restarts: {}", e),
+                    ));
+                }
+            }
             backoff = std::cmp::min(backoff * 2, DOCKERD_CONNECT_MAX_BACKOFF);
         }
     }
@@ -219,7 +241,8 @@ mod imp {
 
     /// Splice one accepted vsock connection to a fresh dockerd connection.
     fn handle_connection(vsock: std::fs::File) -> io::Result<()> {
-        let unix = connect_dockerd(DOCKERD_CONNECT_TIMEOUT).map_err(|e| {
+        let vsock_fd = vsock.as_raw_fd();
+        let unix = connect_dockerd(vsock_fd, DOCKERD_CONNECT_TIMEOUT).map_err(|e| {
             io::Error::new(
                 e.kind(),
                 format!("connect {}: {} (is dockerd running?)", DOCKER_SOCK, e),
