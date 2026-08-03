@@ -252,10 +252,10 @@ public enum MorbDockerContext {
         case refused(current: String)
     }
 
-    /// Sets `currentContext` to `morbstack` in `config.json`, preserving every other key
-    /// byte-for-byte (this is the file with `credHelpers`/`credsStore`/registry
-    /// `mirrors` docs/compat.md commits to honouring — rewriting it from scratch would
-    /// silently drop all of that).
+    /// Sets `currentContext` to `morbstack` in `config.json`, preserving every other
+    /// JSON key/value (including the `credHelpers`, `credsStore`, and registry `auths`
+    /// values docs/compat.md commits to honouring). Existing `config.json` symlinks
+    /// remain links and their resolved target keeps its POSIX mode.
     ///
     /// Refuses when another *explicit* context already owns default — the "never stomp"
     /// rule — unless `force` is `true`. `docs/compat.md`'s own definition of "explicit":
@@ -273,29 +273,13 @@ public enum MorbDockerContext {
         if current != "default", current != name, !force {
             return .refused(current: current)
         }
+        if current == name {
+            return .current
+        }
         let file = configFile(dockerConfigDirectory: configDir)
-        var object: [String: Any] = [:]
-        if let data = try? Data(contentsOf: file), !data.isEmpty {
-            guard let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                // A config.json we cannot parse is not a config.json we will silently
-                // overwrite — that is exactly the kind of file this project's own tooling
-                // warns about (docs/parity.md's `credsStore: "desktop"` hang). Fail loudly
-                // instead of guessing.
-                throw MorbError.config(
-                    "\(file.path) exists but is not valid JSON — refusing to modify it; "
-                        + "edit it by hand (or run `docker context use morbstack` yourself)")
-            }
-            object = parsed
-        }
+        var object = try readConfigJSONObject(at: file)
         object["currentContext"] = name
-        do {
-            try FileManager.default.createDirectory(
-                at: configDir, withIntermediateDirectories: true)
-            let data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
-            try data.write(to: file, options: .atomic)
-        } catch {
-            throw MorbError.io("could not write \(file.path): \(error.localizedDescription)")
-        }
+        try writeConfigJSON(object, to: file)
         return .current
     }
 
@@ -331,22 +315,9 @@ public enum MorbDockerContext {
         let file = configFile(dockerConfigDirectory: configDir)
         let current = currentContextName(dockerConfigDirectory: configDir)
         if current == name {
-            var object: [String: Any] = [:]
-            if let data = try? Data(contentsOf: file), !data.isEmpty {
-                guard let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                    throw MorbError.config(
-                        "\(file.path) exists but is not valid JSON — refusing to remove its currentContext key")
-                }
-                object = parsed
-            }
+            var object = try readConfigJSONObject(at: file)
             object.removeValue(forKey: "currentContext")
-            do {
-                try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
-                let data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
-                try data.write(to: file, options: .atomic)
-            } catch {
-                throw MorbError.io("could not update \(file.path): \(error.localizedDescription)")
-            }
+            try writeConfigJSON(object, to: file)
         }
 
         do {
@@ -355,6 +326,134 @@ public enum MorbDockerContext {
             throw MorbError.io("could not remove \(meta.path): \(error.localizedDescription)")
         }
         return .removed(wasCurrent: current == name)
+    }
+
+    // MARK: - Docker configuration persistence
+
+    /// Reads an existing configuration exactly once before a context mutation. A
+    /// failed read is not an invitation to replace the file: it may contain registry
+    /// credentials which the current process lacks permission to read. A dangling
+    /// `config.json` symlink counts as absent, matching the Docker CLI's ability to
+    /// create its target through an explicitly user-owned link.
+    private static func readConfigJSONObject(at configFile: URL) throws -> [String: Any] {
+        guard FileManager.default.fileExists(atPath: configFile.path) else { return [:] }
+        let data: Data
+        do {
+            data = try Data(contentsOf: configFile)
+        } catch {
+            throw MorbError.config(
+                "could not read \(configFile.path); refusing to modify Docker configuration: "
+                    + error.localizedDescription)
+        }
+        guard !data.isEmpty else { return [:] }
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw MorbError.config(
+                "\(configFile.path) exists but is not valid JSON — refusing to modify it; "
+                    + "edit it by hand (or run `docker context use morbstack` yourself)")
+        }
+        return object
+    }
+
+    /// Docker permits its `config.json` to contain either credential-helper settings
+    /// or inline registry credentials. Match the Docker CLI's write semantics here:
+    /// resolve an existing config-file symlink, atomically replace its *target*, and
+    /// retain the target's permissions. `Data.write(options: .atomic)` would instead
+    /// replace the symlink and recreate its target with the process's default mode.
+    private static func writeConfigJSON(_ object: [String: Any], to configFile: URL) throws {
+        let data: Data
+        do {
+            data = try JSONSerialization.data(
+                withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
+        } catch {
+            throw MorbError.io("could not encode \(configFile.path): \(error.localizedDescription)")
+        }
+
+        let destination = configFile.resolvingSymlinksInPath()
+        let directory = destination.deletingLastPathComponent()
+        do {
+            try FileManager.default.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: NSNumber(value: Int16(0o700))])
+        } catch {
+            throw MorbError.io("could not create Docker configuration directory \(directory.path): \(error.localizedDescription)")
+        }
+
+        let mode = try existingRegularFileMode(at: destination) ?? mode_t(0o600)
+        var template = directory
+            .appendingPathComponent(".morbstack-config.XXXXXXXX", isDirectory: false)
+            .path
+            .utf8CString
+        let descriptor = template.withUnsafeMutableBufferPointer { buffer -> Int32 in
+            guard let base = buffer.baseAddress else { return -1 }
+            return Darwin.mkstemp(base)
+        }
+        guard descriptor >= 0 else {
+            let code = errno
+            throw MorbError.io(
+                "could not create a temporary Docker configuration file: \(String(cString: strerror(code)))")
+        }
+
+        // `mkstemp` replaces its X suffix in this C-char buffer. Keep the concrete
+        // path for cleanup and the atomic same-directory rename below.
+        let temporaryPath = String(cString: Array(template))
+        var openDescriptor: Int32? = descriptor
+        var committed = false
+        defer {
+            if let openDescriptor { Darwin.close(openDescriptor) }
+            if !committed { _ = Darwin.unlink(temporaryPath) }
+        }
+
+        guard POSIXSocketSupport.writeAll(descriptor, data) else {
+            let code = errno
+            throw MorbError.io(
+                "could not write Docker configuration data: \(String(cString: strerror(code)))")
+        }
+        guard Darwin.fsync(descriptor) == 0 else {
+            let code = errno
+            throw MorbError.io(
+                "could not synchronize Docker configuration data: \(String(cString: strerror(code)))")
+        }
+        // Keep the temporary private until every data write is durable. The source
+        // mode is restored immediately before rename, just as the Docker CLI does.
+        guard Darwin.fchmod(descriptor, mode) == 0 else {
+            let code = errno
+            throw MorbError.io(
+                "could not preserve Docker configuration permissions: \(String(cString: strerror(code)))")
+        }
+        guard Darwin.close(descriptor) == 0 else {
+            let code = errno
+            openDescriptor = nil
+            throw MorbError.io(
+                "could not close Docker configuration data: \(String(cString: strerror(code)))")
+        }
+        openDescriptor = nil
+
+        guard Darwin.rename(temporaryPath, destination.path) == 0 else {
+            let code = errno
+            throw MorbError.io(
+                "could not replace Docker configuration \(destination.path): \(String(cString: strerror(code)))")
+        }
+        committed = true
+    }
+
+    private static func existingRegularFileMode(at url: URL) throws -> mode_t? {
+        var metadata = stat()
+        let result = url.withUnsafeFileSystemRepresentation { path -> Int32 in
+            guard let path else { return -1 }
+            return Darwin.stat(path, &metadata)
+        }
+        if result == 0 {
+            guard (metadata.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG) else {
+                throw MorbError.config(
+                    "\(url.path) is not a regular Docker configuration file; refusing to replace it")
+            }
+            return metadata.st_mode & mode_t(0o7777)
+        }
+        let code = errno
+        if code == ENOENT { return nil }
+        throw MorbError.io(
+            "could not inspect Docker configuration \(url.path): \(String(cString: strerror(code)))")
     }
 
     // MARK: - User-owned direct Docker discovery

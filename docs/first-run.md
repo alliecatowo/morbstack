@@ -67,6 +67,12 @@ consented `--make-default` option is required to put Morbstack's client ahead
 of it. Unsupported shells and a temporary `MORBSTACK_HOME` override are never
 silently written into a persistent profile.
 
+When the person explicitly selects the `morbstack` context, the update keeps
+all unrelated `config.json` values, including inline registry `auths`, writes
+through an existing `config.json` symlink, and retains the resolved target's
+POSIX mode. This keeps the standard Docker credential and helper configuration
+authoritative rather than copying it into a Morbstack-owned file.
+
 The graphical first-run sheet invokes this same host-integration transaction
 only after showing the exact links, PATH effect, Docker-context effect, and
 socket effect. Its native `Form` provides `Not Now`, a visible mutually

@@ -52,7 +52,10 @@ working" has a precise, checkable answer rather than a marketing claim.
   - registry `mirrors` configuration.
   Morbstack reads this file the same way the standard Docker CLI/Engine
   tooling does; it does not require a separate, Morbstack-specific config
-  file for any of the above.
+  file for any of the above. Its explicit context selection retains every
+  unrelated JSON value (including inline registry `auths`), writes through an
+  existing `config.json` symlink rather than replacing it, and preserves the
+  resolved target file's POSIX mode.
 
 ## CI-enforced ecosystem compatibility matrix
 
