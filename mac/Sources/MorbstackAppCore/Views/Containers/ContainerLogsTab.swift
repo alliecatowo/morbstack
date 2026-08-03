@@ -267,14 +267,16 @@ struct TrackBLogRow: View {
                 .frame(width: 78, alignment: .leading)
 
             if line.stream == .stderr {
-                Image(systemName: "exclamationmark.triangle")
+                Image(systemName: isCurrentError
+                    ? "exclamationmark.triangle.fill"
+                    : "exclamationmark.triangle")
                     .font(.caption2)
-                    .foregroundStyle(isCurrentError ? .orange : .secondary)
+                    .foregroundStyle(isCurrentError ? .primary : .secondary)
                     .accessibilityHidden(true)
             }
 
             Text(line.attributed)
-                .font(.body.monospaced())
+                .font(.body.monospaced().weight(isCurrentError ? .semibold : .regular))
                 .lineSpacing(2)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -282,6 +284,5 @@ struct TrackBLogRow: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 1)
-        .background(isCurrentError ? Color.accentColor.opacity(0.12) : .clear)
     }
 }
