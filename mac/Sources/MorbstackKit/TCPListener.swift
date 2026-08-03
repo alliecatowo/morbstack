@@ -92,7 +92,12 @@ public final class TCPListener {
     }
 
     /// The loopback port this listener binds.
-    public let port: Int
+    ///
+    /// A listener constructed with port `0` receives an ephemeral port from the
+    /// kernel. `start()` replaces that sentinel with the concrete value before it
+    /// returns, so a caller can retain an actual dynamic port rather than sampling a
+    /// free port and racing another process to it.
+    public private(set) var port: Int
 
     /// Invoked on the listener's queue for every accepted connection, with an owned fd.
     public var onConnection: ((Int32) -> Void)?
@@ -175,6 +180,31 @@ public final class TCPListener {
             if code == EADDRINUSE { throw TCPListenerError.addressInUse(port: port) }
             throw TCPListenerError.failed("bind(127.0.0.1:\(port)) failed: \(String(cString: strerror(code)))")
         }
+
+        // `port == 0` asks the kernel to allocate a free ephemeral port. Read the
+        // bound address while this descriptor is still private and before exposing
+        // the accept source; a later `getsockname` would merely report a port we had
+        // already made observable rather than proving which one is reserved.
+        var boundAddress = sockaddr_in()
+        var boundLength = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let nameResult = withUnsafeMutablePointer(to: &boundAddress) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { generic in
+                POSIXSocketSupport.retryOnInterrupt {
+                    Darwin.getsockname(fd, generic, &boundLength)
+                }
+            }
+        }
+        guard nameResult == 0 else {
+            let message = String(cString: strerror(errno))
+            Darwin.close(fd)
+            throw TCPListenerError.failed("getsockname(127.0.0.1) failed: \(message)")
+        }
+        let boundPort = Int(UInt16(bigEndian: boundAddress.sin_port))
+        guard (1...65535).contains(boundPort) else {
+            Darwin.close(fd)
+            throw TCPListenerError.failed("getsockname(127.0.0.1) returned invalid port \(boundPort)")
+        }
+        port = boundPort
 
         guard POSIXSocketSupport.retryOnInterrupt({ listen(fd, 128) }) == 0 else {
             let message = String(cString: strerror(errno))

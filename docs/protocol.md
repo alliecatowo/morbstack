@@ -524,19 +524,20 @@ missing-directory creation behavior only under a verified live share. Named volu
 and malformed shapes remain dockerd's responsibility.
 
 This is deliberately a narrow lease protocol, **not a generic HTTP proxy, dynamic
-port allocator, or filesystem sandbox**. The peek does not remove any bytes, and a
-chunked, oversized, malformed, pipelined, or otherwise unrecognized create response
-causes its provisional TCP lease to be released rather than guessed. Dynamic
-(`-P`/empty host port), ranges, UDP, unsupported addresses, opaque creates, start by
-name, and nonstandard start framing have no synchronous **TCP** create/start lease
-guarantee.
+port allocator, or filesystem sandbox**. A dedicated transaction now covers only a
+recognized bounded, explicit-empty `HostPort` TCP create: it holds a kernel-selected
+Mac listener, rewrites that one create before the guest sees it, associates the full
+ID from the complete `201`, and only then exposes the `201`. The ordinary `MSG_PEEK`
+path still does not remove bytes, and unrecognized responses release a provisional
+TCP lease rather than guessing. `-P`, ranges, UDP, unsupported addresses, omitted or
+opaque dynamic creates, start by name, and nonstandard start framing have no
+synchronous **TCP** create/start lease guarantee.
 An event-driven running-container snapshot can still promote an already-associated
 lease after an opaque or name-based start, but that happens after the Engine reply and
 is not equivalent to the 204 handoff guarantee. Dynamic publication needs a real
-guest-to-host allocation-and-response contract; its required request-transforming
-transaction and explicit unsupported boundary are in
-[`dynamic-port-allocation.md`](dynamic-port-allocation.md). UDP already has a real
-data plane, but deliberately has no TCP-style reservation claim.
+guest-to-host allocation-and-response contract. Phase 1 and its explicit unsupported
+boundary are in [`dynamic-port-allocation.md`](dynamic-port-allocation.md). UDP
+already has a real data plane, but deliberately has no TCP-style reservation claim.
 Likewise, a bind source can change after its share/symlink snapshot.
 
 ---

@@ -232,6 +232,17 @@ public final class PortForwarder {
         let publications: [DockerExplicitTCPPortBinding]
     }
 
+    /// The held lease plus the concrete bindings allocated for a dynamic create.
+    ///
+    /// `publications` preserves the request-plan order, allowing DockerProxy to put
+    /// each kernel-reserved port into the exact `PortBindings` entry that caused it.
+    /// The opaque lease contains both these entries and any fixed TCP entries from the
+    /// same create, so all of them use one existing create/start lifecycle.
+    struct DynamicTCPPortReservation {
+        let lease: TCPPortLease
+        let publications: [DockerExplicitTCPPortBinding]
+    }
+
     private struct LeaseRecord {
         let lease: TCPPortLease
         var listeners: [Int: TCPListener]
@@ -396,15 +407,41 @@ public final class PortForwarder {
         _ publications: [DockerExplicitTCPPortBinding]
     ) throws -> TCPPortLease {
         precondition(!publications.isEmpty, "a TCP lease needs at least one fixed publication")
-        let lease = TCPPortLease(identifier: UUID(), publications: publications)
+        return try reserveTCPPorts(fixed: publications, dynamic: []).lease
+    }
+
+    /// Reserves fixed TCP ports and kernel-selected dynamic TCP ports as one lease.
+    ///
+    /// This is intentionally the only allocator for the dynamic create transaction:
+    /// each `TCPListener(port: 0)` stays bound while the guest Engine receives the
+    /// concrete number. A separate availability probe would immediately reintroduce
+    /// the race this path exists to close.
+    func reserveDynamicTCPPorts(
+        _ publications: [DockerExplicitTCPPortBinding],
+        alongside fixedPublications: [DockerExplicitTCPPortBinding]
+    ) throws -> DynamicTCPPortReservation {
+        precondition(!publications.isEmpty, "a dynamic TCP transaction needs at least one publication")
+        return try reserveTCPPorts(fixed: fixedPublications, dynamic: publications)
+    }
+
+    /// The one lock covers both concrete binds and `port: 0` allocation. This makes
+    /// the returned lease an ownership record for every listener before a Docker
+    /// create can reach the guest.
+    private func reserveTCPPorts(
+        fixed fixedPublications: [DockerExplicitTCPPortBinding],
+        dynamic dynamicPublications: [DockerExplicitTCPPortBinding]
+    ) throws -> DynamicTCPPortReservation {
+        let leaseID = UUID()
         var listeners: [Int: TCPListener] = [:]
+        var allocatedDynamic: [DockerExplicitTCPPortBinding] = []
+        let expectedPublicationCount = fixedPublications.count + dynamicPublications.count
 
         // Hold the ledger lock across the actual binds and insertion. Otherwise a
         // concurrent stop could clear the ledger between these two steps, leaving an
         // anonymous descriptor alive with no owner that can release it.
         lock.lock()
         do {
-            for publication in publications {
+            for publication in fixedPublications {
                 let listener = TCPListener(port: publication.hostPort, queue: acceptQueue)
                 do {
                     try listener.start()
@@ -416,6 +453,36 @@ public final class PortForwarder {
                 }
                 listeners[publication.hostPort] = listener
             }
+
+            for publication in dynamicPublications {
+                // Port zero is a kernel allocation request, not an endpoint we will
+                // ever send to dockerd. TCPListener reports its concrete bound port
+                // before this listener becomes part of the lease.
+                let listener = TCPListener(port: 0, queue: acceptQueue)
+                do {
+                    try listener.start()
+                } catch {
+                    throw TCPPortLeaseError.unavailable(
+                        "could not allocate a dynamic published TCP port on 127.0.0.1: \(error.localizedDescription)")
+                }
+                let allocated = DockerExplicitTCPPortBinding(
+                    hostIP: publication.hostIP,
+                    hostPort: listener.port,
+                    containerPort: publication.containerPort)
+                guard listeners[allocated.hostPort] == nil else {
+                    listener.stop()
+                    throw TCPPortLeaseError.unavailable(
+                        "kernel returned an already-reserved dynamic TCP port \(allocated.hostPort)")
+                }
+                listeners[allocated.hostPort] = listener
+                allocatedDynamic.append(allocated)
+            }
+
+            let allPublications = fixedPublications + allocatedDynamic
+            guard allPublications.count == expectedPublicationCount else {
+                throw TCPPortLeaseError.unavailable("dynamic TCP allocation did not retain every requested listener")
+            }
+            let lease = TCPPortLease(identifier: leaseID, publications: allPublications)
             leases[lease.identifier] = LeaseRecord(lease: lease, listeners: listeners)
             lock.unlock()
         } catch {
@@ -424,9 +491,10 @@ public final class PortForwarder {
             throw error
         }
 
-        let ports = publications.map(\.hostPort).map(String.init).joined(separator: ", ")
-        log.info("reserved fixed TCP port\(publications.count == 1 ? "" : "s") \(ports) for Docker create")
-        return lease
+        let ports = (fixedPublications + allocatedDynamic).map(\.hostPort).map(String.init).joined(separator: ", ")
+        log.info("reserved TCP port\(expectedPublicationCount == 1 ? "" : "s") \(ports) for Docker create")
+        let lease = TCPPortLease(identifier: leaseID, publications: fixedPublications + allocatedDynamic)
+        return DynamicTCPPortReservation(lease: lease, publications: allocatedDynamic)
     }
 
     /// Records the only stable identity returned by Docker's create response.

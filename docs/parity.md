@@ -122,12 +122,14 @@ listener before forwarding create, associates it from a bounded normal create
 response, and activates that same descriptor before an exact start `204` reaches
 the client. This removes the prior success-with-no-listener race without changing
 Docker request/response bytes. The claim is intentionally narrower than complete
-Docker Desktop parity: dynamic/ranged allocation, opaque or chunked response framing,
-name-based/nonstandard start handoff, and lease survival across VM/daemon shutdown
-still need their own allocation or lifecycle contract. UDP datagrams and reply flows
-now cross a dedicated framed vsock relay, but are intentionally event-confirmed rather
-than promoted to the fixed-TCP synchronous lease claim. Dynamic publication's exact
-host-owned allocation transaction and present blocked boundary are documented in
+Docker Desktop parity: a bounded Phase 1 now transforms a recognized explicit-empty
+TCP `HostPort` create into a held Mac listener before the guest sees it, but it still
+needs a live VM run before it can count as verified parity. Ranged allocation, `-P`,
+dynamic UDP, opaque/chunked framing, name-based/nonstandard start handoff, and lease
+survival across VM/daemon shutdown still need their own allocation or lifecycle
+contract. UDP datagrams and reply flows now cross a dedicated framed vsock relay, but
+are intentionally event-confirmed rather than promoted to the fixed-TCP synchronous
+lease claim. The exact dynamic transaction and unsupported boundary are in
 [`dynamic-port-allocation.md`](dynamic-port-allocation.md); no event-derived endpoint
 is counted as synchronous support.
 

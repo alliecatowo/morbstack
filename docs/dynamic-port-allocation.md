@@ -1,7 +1,9 @@
 # Dynamic published-port allocation
 
-Status: design prerequisite. This document deliberately records a boundary; it does
-not enable dynamic published ports yet.
+Status: Phase 1 implementation complete; live Docker/VM acceptance evidence pending.
+This document distinguishes the implemented bounded TCP transaction from the broader
+dynamic-publication work that remains. It is not a release claim until the live matrix
+at the end passes.
 
 ## Decision
 
@@ -37,37 +39,59 @@ The only truthful host-owned design is therefore to select a port first and make
 guest Engine receive that concrete port *in its create document*. That requires an
 intentional request-transforming proxy path, not another passive observer.
 
-## Current boundary
+## Implemented Phase 1 transaction
 
-Until that transaction exists, the following stay outside the synchronous publication
-guarantee:
+For one recognized normal `POST .../containers/create`, Morbstack now supports an
+explicit empty `HostPort: ""` on one or more TCP `PortBindings` entries. It holds a
+real `127.0.0.1` listener allocated by the macOS kernel, writes each concrete number
+into a re-encoded create body and matching `Content-Length`, and sends that body to
+the guest Engine. The host associates the full ID from a bounded normal `201` response
+*before any `201` byte reaches the Docker client*. A later recognized start continues
+to promote the same held listener under the existing lease lifecycle.
 
-- Empty or omitted `HostPort` values, including `HostPort: "0"` when the Engine treats
-  it as dynamic.
+The transaction consumes precisely the original create header and declared body; it
+does not read ahead. On an HTTP keep-alive connection, it closes only the guest-side
+one-request connection and gives the unconsumed client socket back to `DockerProxy`
+for a fresh preflight. That means a same-connection or already-pipelined `start`
+request still takes the normal start-response activation path after the create ID is
+associated. A client-requested `Connection: close` closes normally after the create
+response instead.
+
+This Phase 1 path is bounded to a valid fixed-length JSON request already visible in
+the existing 256 KiB preflight window, a single numeric `Content-Length`, no
+`Expect: 100-continue`, and a nonchunked Engine response with at most 64 KiB of head
+and 128 KiB of body. It returns a clear host error rather than exposing an unassociated
+`201` if the response does not meet that contract.
+
+## Still outside the synchronous guarantee
+
+The following remain unsupported or explicitly outside this transaction:
+
+- Omitted `HostPort`, `HostPort: "0"`, and any opaque/slow/oversized create that does
+  not enter the bounded preflight. They retain the raw Engine relay and therefore make
+  **no** Phase 1 synchronous allocation claim.
 - `HostConfig.PublishAllPorts` (`docker run -P`), which needs every eligible
   `ExposedPorts` entry materialized into an explicit binding.
 - Host-port ranges, which need an unambiguous container-port-to-host-port mapping
   before any listener can be reserved.
-- A dynamic request whose HTTP framing or JSON shape cannot be proved within the
-  transaction's explicit limits.
+- Dynamic UDP, dynamic TCP combined with a non-TCP sibling, non-loopback addresses,
+  missing/ambiguous binding fields, and unsupported protocols. UDP's existing
+  post-start datagram forwarding remains unchanged; it is not a held dynamic lease.
+- Chunked, malformed, upgraded, or otherwise opaque dynamic HTTP framing, and
+  nonstandard/oversized/chunked create responses.
 
-The existing proxy preserves those API calls byte-for-byte for the guest Engine. It
-does **not** represent a later event-derived listener as proof that the create/start
-reply had a matching host endpoint. Fixed TCP leases, explicit UDP's availability
-diagnostic, event reconciliation, and loopback-only address/protocol validation are
-unchanged by this document.
+No event-derived listener is represented as proof that its create/start reply had a
+matching host endpoint. Fixed TCP leases, explicit UDP's availability diagnostic,
+event reconciliation, and loopback-only address/protocol validation are unchanged.
 
-## Required allocation transaction
+## Required work beyond Phase 1
 
-The future implementation must be a separately owned, stateful create path with these
-invariants:
+Further allocation work must preserve these invariants:
 
-1. Classify a dynamic create before any request byte reaches the guest. Only normal
-   HTTP/1.x `POST .../containers/create` with a complete, bounded body may enter this
-   path. Chunked, malformed, oversized, upgraded, or otherwise opaque dynamic creates
-   must receive a clear pre-create error; forwarding them dynamically would restore the
-   race this design exists to remove. Non-dynamic opaque traffic continues through the
-   raw relay.
+1. Extend classification only when the exact framing and JSON ownership can be proved.
+   Chunked, malformed, oversized, upgraded, or otherwise opaque dynamic creates must
+   either receive a clear pre-create error or remain explicitly outside the synchronous
+   contract; forwarding one dynamically would restore the race this design removes.
 2. Parse the create JSON exactly enough to identify published TCP and UDP bindings,
    loopback address spelling, and `ExposedPorts`. Reject unsupported protocols,
    addresses, ambiguous duplicates, and ranges before a guest side effect. TCP and UDP
@@ -92,7 +116,7 @@ invariants:
    and reconciliation of an absent container must all retire the transaction without a
    leaked reservation.
 
-## Why this is a larger protocol change
+## Why the remaining work is still a larger protocol change
 
 Reading a single create body is not sufficient. A Docker client may keep the Unix
 connection alive, and the first read that completes a request can already contain a
@@ -102,26 +126,24 @@ transition safely into raw relay mode for ordinary Engine traffic. It must also 
 the transformed create response without releasing it before container-ID association.
 
 `MinimalHTTP` is deliberately a read-only parser and `FDRelay` deliberately has no
-byte-mutation hook. Extending either opportunistically would make it a partial generic
-HTTP proxy with silent data-loss or semantic risk. The work therefore needs a new
-component with an explicit ownership model, such as
-`DockerCreateTransactionRelay`, rather than a small change to preflight.
+byte-mutation hook. Phase 1 therefore adds a separate
+`DockerDynamicCreateTransaction` with explicit ownership, rather than weakening the
+raw relay. Broader forms must extend that transaction deliberately rather than turning
+either existing primitive into a partial generic HTTP proxy.
 
 ## Delivery plan and acceptance evidence
 
 Build the transaction in narrowly enabled stages, while retaining raw relay behavior
 for all non-dynamic calls:
 
-1. Establish the stateful buffering/half-close component and prove it preserves a
-   keep-alive create followed by another request, including a request already buffered
-   with the create body. Add unit coverage for request parsing, JSON rewrite,
-   `Content-Length`, unsupported-shape rejection, and cleanup on every response path.
-2. Add one explicit empty `HostPort` for TCP. Verify a competing Mac bind fails before
+1. **Implemented, pending execution:** the bounded stateful TCP transaction preserves
+   unread keep-alive bytes for fresh preflight and includes offline parser/rewrite
+   coverage. Verify that a competing Mac bind fails before
    guest create, then verify the created container's reported port equals the still
    held Mac listener and is reachable immediately after a successful start response.
-3. Add explicit UDP using a true UDP reservation/lease (not the present availability
+2. Add explicit UDP using a true UDP reservation/lease (not the present availability
    snapshot), including bidirectional datagrams and same-number TCP+UDP publication.
-4. Add `PublishAllPorts` and ranges only after their mappings have dedicated parser,
+3. Add `PublishAllPorts` and ranges only after their mappings have dedicated parser,
    collision, lifecycle, and recovery tests. Do not infer range semantics from string
    splitting.
 

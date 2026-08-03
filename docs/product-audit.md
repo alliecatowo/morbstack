@@ -74,12 +74,12 @@ guarantee.
 
 ### P1 — make the daily development loop reliable
 
-1. Complete Docker publication parity beyond the fixed-TCP create/start lease: add a
-   guest allocation-and-response contract for dynamic/range ports and a
-   persistence/recovery design for VM-unavailable intervals while preserving
-   loopback-safe defaults. UDP already uses a real framed datagram relay after Docker
-   confirms a concrete publication, but deliberately has no invented reservation. The
-   dynamic-port prerequisite and delivery constraints are explicit in
+1. Complete Docker publication parity beyond the fixed-TCP create/start lease: execute
+   the live evidence for Phase 1's explicit-empty TCP allocation transaction, then add
+   `-P`, ranges, dynamic UDP, and a persistence/recovery design for VM-unavailable
+   intervals while preserving loopback-safe defaults. UDP already uses a real framed
+   datagram relay after Docker confirms a concrete publication, but deliberately has
+   no invented reservation. The dynamic-port boundary and delivery constraints are in
    [`dynamic-port-allocation.md`](dynamic-port-allocation.md).
 2. Turn unshared/misresolved bind sources into clear Docker errors, then
    ship FSEvents-to-inotify forwarding or an explicit synced-share tier.

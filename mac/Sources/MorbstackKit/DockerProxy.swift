@@ -40,6 +40,10 @@ public final class DockerProxy {
     /// Live relays, keyed by a sequence number rather than by object identity so the
     /// key exists *before* the relay does — see ``startRelay(clientFD:guestFD:leaseObservation:)``.
     private var relays: [UInt64: FDRelay] = [:]
+    /// Bounded dynamic-create exchanges. They own descriptors until their complete
+    /// `201` has been associated (or rejected), so daemon stop must cancel them just
+    /// as it cancels ordinary opaque relays.
+    private var dynamicCreateTransactions: [UInt64: DockerDynamicCreateTransaction] = [:]
     private var relaySequence: UInt64 = 0
 
     /// Called on the proxy's queue when the last active relay finishes.
@@ -116,10 +120,13 @@ public final class DockerProxy {
         server.stop()
         countLock.lock()
         let inFlight = Array(relays.values)
+        let inFlightTransactions = Array(dynamicCreateTransactions.values)
         relays.removeAll()
+        dynamicCreateTransactions.removeAll()
         _activeConnections = 0
         countLock.unlock()
         for relay in inFlight { relay.cancel() }
+        for transaction in inFlightTransactions { transaction.cancel() }
     }
 
     // MARK: - Connection handling
@@ -148,8 +155,8 @@ public final class DockerProxy {
         case .other:
             relayAfterPreflight(clientFD: clientFD, createBody: nil, leaseObservation: nil)
 
-        case .create(let createBody):
-            switch DockerPortPublicationPreflight.inspectContainerCreate(body: createBody) {
+        case .create(let create):
+            switch DockerPortPublicationPreflight.inspectContainerCreate(body: create.body) {
             case .rejected(let message):
                 rejectContainerCreate(
                     clientFD: clientFD,
@@ -158,10 +165,30 @@ public final class DockerProxy {
                     message: message)
 
             case .allowed:
+                switch DockerPortPublicationPreflight.dynamicTCPCreatePlan(in: create.body) {
+                case .rejected(let message):
+                    rejectContainerCreate(
+                        clientFD: clientFD,
+                        statusCode: 500,
+                        reason: "Internal Server Error",
+                        message: message)
+                    return
+
+                case .supported(let plan):
+                    beginDynamicTCPCreate(
+                        clientFD: clientFD,
+                        create: create,
+                        plan: plan)
+                    return
+
+                case .notDynamic:
+                    break
+                }
+
                 // A successful snapshot is still not enough. Hold the real listeners
                 // before the create reaches dockerd; a failed bind here has the same
                 // Docker-style error, but no guest side effect to roll back.
-                let publications = DockerPortPublicationPreflight.explicitTCPBindings(in: createBody)
+                let publications = DockerPortPublicationPreflight.explicitTCPBindings(in: create.body)
                 let lease: PortForwarder.TCPPortLease?
                 do {
                     lease = publications.isEmpty ? nil : try forwarder.reserveExplicitTCPPorts(publications)
@@ -177,7 +204,7 @@ public final class DockerProxy {
                 // guest's post-boot mount report, so it runs after `ensureRunning`.
                 relayAfterPreflight(
                     clientFD: clientFD,
-                    createBody: createBody,
+                    createBody: create.body,
                     leaseObservation: lease.map(PortLeaseObservation.create))
             }
 
@@ -190,8 +217,20 @@ public final class DockerProxy {
 
     private enum DockerRequestInspection {
         case other
-        case create(Data)
+        case create(ContainerCreateRequest)
         case start(String)
+    }
+
+    /// A complete create request as seen non-consumingly by `MSG_PEEK`.
+    ///
+    /// `rawRequest` is consumed only by the dynamic transaction, in exactly this
+    /// length. A following request remains unread in the client socket until the
+    /// transaction has associated its `201` and hands the socket back here.
+    private struct ContainerCreateRequest {
+        let head: HTTPRequestHead
+        let headBytes: Data
+        let body: Data
+        let rawRequest: Data
     }
 
     private enum PortLeaseObservation {
@@ -262,7 +301,13 @@ public final class DockerProxy {
                 usleep(1_000)
                 continue
             }
-            return .create(Data(bytes[parsed.consumed..<bodyEnd]))
+            let headBytes = Data(bytes[0..<parsed.consumed])
+            let body = Data(bytes[parsed.consumed..<bodyEnd])
+            return .create(ContainerCreateRequest(
+                head: parsed.head,
+                headBytes: headBytes,
+                body: body,
+                rawRequest: Data(bytes[0..<bodyEnd]))
         }
         return .other
     }
@@ -296,6 +341,180 @@ public final class DockerProxy {
         }
         let identifier = String(components[components.count - 2])
         return identifier.isEmpty ? nil : identifier
+    }
+
+    // MARK: - Bounded dynamic TCP create transaction
+
+    /// Starts Phase 1's only request-transforming path: an explicit empty TCP
+    /// `HostPort` and a normal fixed-length create body.
+    ///
+    /// The original request remains in the Unix socket until this point. It is read
+    /// with an exact byte count — never a generous buffer — so a following request
+    /// remains available for a fresh preflight after the `201` is associated.
+    private func beginDynamicTCPCreate(
+        clientFD: Int32,
+        create: ContainerCreateRequest,
+        plan: DockerDynamicTCPCreatePlan
+    ) {
+        guard dynamicCreateDoesNotExpectContinue(create) else {
+            rejectContainerCreate(
+                clientFD: clientFD,
+                statusCode: 500,
+                reason: "Internal Server Error",
+                message: "dynamic published TCP ports do not support Expect: 100-continue requests")
+            return
+        }
+        guard consumeExactly(clientFD, expected: create.rawRequest) else {
+            // No Engine request has crossed the boundary. A client that disappeared
+            // cannot consume a useful HTTP diagnosis, so cleanly finish its slot.
+            Darwin.close(clientFD)
+            connectionFinished()
+            return
+        }
+
+        let fixedPublications = DockerPortPublicationPreflight.explicitTCPBindings(in: create.body)
+        let reservation: PortForwarder.DynamicTCPPortReservation
+        do {
+            reservation = try forwarder.reserveDynamicTCPPorts(
+                plan.requestedPublications,
+                alongside: fixedPublications)
+        } catch {
+            rejectContainerCreate(
+                clientFD: clientFD,
+                statusCode: 500,
+                reason: "Internal Server Error",
+                message: error.localizedDescription)
+            return
+        }
+
+        let rewrittenBody: Data
+        let rewrittenHead: Data
+        do {
+            rewrittenBody = try plan.rewrittenBody(with: reservation.publications)
+            guard let head = DockerDynamicCreateTransaction.rewritingContentLength(
+                in: create.headBytes,
+                bodyLength: rewrittenBody.count)
+            else {
+                throw MorbError.protocolViolation("dynamic TCP create did not have one rewritable Content-Length header")
+            }
+            rewrittenHead = head
+        } catch {
+            forwarder.abandon(reservation.lease, reason: "the dynamic TCP create request could not be rewritten")
+            rejectContainerCreate(
+                clientFD: clientFD,
+                statusCode: 500,
+                reason: "Internal Server Error",
+                message: "morbstack could not prepare the dynamic TCP port allocation")
+            return
+        }
+
+        relayDynamicCreateAfterPreflight(
+            clientFD: clientFD,
+            createBody: rewrittenBody,
+            rewrittenRequest: rewrittenHead + rewrittenBody,
+            lease: reservation.lease,
+            closeClientAfterResponse: dynamicCreateRequestsConnectionClose(create))
+    }
+
+    private func dynamicCreateDoesNotExpectContinue(_ create: ContainerCreateRequest) -> Bool {
+        !(create.head.headers["expect"] ?? "").lowercased().contains("100-continue")
+    }
+
+    private func dynamicCreateRequestsConnectionClose(_ create: ContainerCreateRequest) -> Bool {
+        let values = (create.head.headers["connection"] ?? "")
+            .split(separator: ",")
+            .map { String($0).trimmingCharacters(in: .whitespaces).lowercased() }
+        return values.contains("close")
+    }
+
+    /// Reads exactly a request we just saw through `MSG_PEEK`. Each `read(2)` is
+    /// capped at the remaining byte count, so a later pipelined request stays in the
+    /// kernel buffer until the associated create response hands the client socket
+    /// back to this proxy for a fresh preflight.
+    private func consumeExactly(_ fd: Int32, expected: Data) -> Bool {
+        var received = Data()
+        received.reserveCapacity(expected.count)
+        while received.count < expected.count {
+            let remaining = expected.count - received.count
+            var bytes = [UInt8](repeating: 0, count: min(16 * 1024, remaining))
+            let count = bytes.withUnsafeMutableBytes { raw -> Int in
+                guard let base = raw.baseAddress else { return -1 }
+                return POSIXSocketSupport.readSome(fd, into: base, count: raw.count)
+            }
+            guard count > 0 else { return false }
+            received.append(contentsOf: bytes[0..<count])
+        }
+        return received == expected
+    }
+
+    private func relayDynamicCreateAfterPreflight(
+        clientFD: Int32,
+        createBody: Data,
+        rewrittenRequest: Data,
+        lease: PortForwarder.TCPPortLease,
+        closeClientAfterResponse: Bool
+    ) {
+        vm.ensureRunning(timeout: DockerProxy.bootTimeout) { [weak self] result in
+            guard let self else {
+                Darwin.close(clientFD)
+                return
+            }
+            switch result {
+            case .failure(let error):
+                if self.isShuttingDown {
+                    self.log.info("client arrived during shutdown; rejected cleanly (\(error))")
+                } else {
+                    self.log.error("dynamic Docker create rejected: \(error)")
+                }
+                self.writeGatewayError(to: clientFD, message: "\(error)")
+                Darwin.close(clientFD)
+                self.forwarder.abandon(lease, reason: "the VM was unavailable before dynamic Docker create could be relayed")
+                self.connectionFinished()
+
+            case .success:
+                switch DockerBindMountPreflight.inspectContainerCreate(
+                    body: createBody,
+                    shares: self.vm.shares,
+                    guestShareStates: self.vm.guestShareStates)
+                {
+                case .allowed:
+                    break
+                case .rejected(let message):
+                    self.forwarder.abandon(lease, reason: "bind source validation rejected the dynamic create")
+                    self.rejectContainerCreate(
+                        clientFD: clientFD,
+                        statusCode: 400,
+                        reason: "Bad Request",
+                        message: message)
+                    return
+                }
+                self.vm.connectVsock(port: MorbVsockPorts.dockerAPI) { [weak self] vsockResult in
+                    guard let self else {
+                        Darwin.close(clientFD)
+                        return
+                    }
+                    switch vsockResult {
+                    case .failure(let error):
+                        if self.isShuttingDown {
+                            self.log.info("client arrived during shutdown; rejected cleanly (\(error))")
+                        } else {
+                            self.log.error("dynamic Docker create relay could not reach the guest: \(error)")
+                        }
+                        self.writeGatewayError(to: clientFD, message: "\(error)")
+                        Darwin.close(clientFD)
+                        self.forwarder.abandon(lease, reason: "the Docker API vsock connection failed for dynamic create")
+                        self.connectionFinished()
+                    case .success(let guestFD):
+                        self.startDynamicCreateTransaction(
+                            clientFD: clientFD,
+                            guestFD: guestFD,
+                            request: rewrittenRequest,
+                            lease: lease,
+                            closeClientAfterResponse: closeClientAfterResponse)
+                    }
+                }
+            }
+        }
     }
 
     private func relayAfterPreflight(
@@ -412,6 +631,64 @@ public final class DockerProxy {
         countLock.unlock()
 
         relay.start()
+    }
+
+    /// Registers and starts the one-way bounded transaction for a rewritten dynamic
+    /// create. The transaction owns both descriptors; unlike `FDRelay`, it must keep
+    /// the complete `201` private until its lease is associated.
+    private func startDynamicCreateTransaction(
+        clientFD: Int32,
+        guestFD: Int32,
+        request: Data,
+        lease: PortForwarder.TCPPortLease,
+        closeClientAfterResponse: Bool
+    ) {
+        let transactionQueue = DispatchQueue(
+            label: "dev.morbstack.dynamic-create-transaction",
+            target: relayQueue)
+
+        countLock.lock()
+        relaySequence &+= 1
+        let key = relaySequence
+        let transaction = DockerDynamicCreateTransaction(
+            clientFD: clientFD,
+            guestFD: guestFD,
+            request: request,
+            closeClientAfterResponse: closeClientAfterResponse,
+            queue: transactionQueue,
+            associate: { [forwarder] containerID in
+                forwarder.associate(lease, withContainerID: containerID)
+            },
+            abandon: { [forwarder] reason in
+                forwarder.abandon(lease, reason: reason)
+            },
+            reportTransactionError: { [weak self] message in
+                self?.writeEngineError(
+                    to: clientFD,
+                    statusCode: 500,
+                    reason: "Internal Server Error",
+                    message: message)
+            }
+        ) { [weak self] handoffClientFD in
+            guard let self else {
+                if let handoffClientFD { Darwin.close(handoffClientFD) }
+                return
+            }
+            self.countLock.lock()
+            self.dynamicCreateTransactions.removeValue(forKey: key)
+            self.countLock.unlock()
+            if let handoffClientFD {
+                self.relayQueue.async { [weak self] in
+                    self?.preflightThenRelay(clientFD: handoffClientFD)
+                }
+            } else {
+                self.connectionFinished()
+            }
+        }
+        dynamicCreateTransactions[key] = transaction
+        countLock.unlock()
+
+        transaction.start()
     }
 
     private func makeLeaseResponseObserver(
