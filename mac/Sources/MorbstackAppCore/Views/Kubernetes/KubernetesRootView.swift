@@ -590,7 +590,7 @@ struct KubernetesRootView: View {
             TableColumn("Status", sortUsing: KubernetesPodComparator(key: .phase)) { pod in
                 Text(pod.phase.label)
             }
-            .width(min: 100, ideal: 120, max: 160)
+            .width(min: 120, ideal: 128, max: 180)
             TableColumn("Ready", sortUsing: KubernetesPodComparator(key: .ready)) { pod in
                 Text("\(pod.readyContainers)/\(pod.totalContainers)")
                     .monospacedDigit()
