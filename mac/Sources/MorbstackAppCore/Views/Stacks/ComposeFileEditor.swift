@@ -115,6 +115,7 @@ final class ComposeFileEditor {
     var openError: String?
     var saveError: String?
     var pendingDiscard: PendingDiscard?
+    var pendingSaveReview = false
 
     var isDirty: Bool { text != originalText }
     var displayName: String { fileURL?.lastPathComponent ?? sourceKind?.defaultDisplayName ?? "Source File" }
@@ -148,7 +149,7 @@ final class ComposeFileEditor {
     var commandActions: ComposeFileEditorCommandActions? {
         guard isPresented else { return nil }
         return ComposeFileEditorCommandActions(
-            save: { self.save() },
+            save: { self.requestSave() },
             discard: { self.requestDiscard() },
             canSave: isDirty,
             canDiscard: isDirty)
@@ -199,6 +200,24 @@ final class ComposeFileEditor {
         }
     }
 
+    /// Source changes never deploy or reload a Compose project, but they still alter a
+    /// person-selected file. The editor therefore presents a standard review before
+    /// calling the coordinated, conflict-detecting save path above.
+    func requestSave() {
+        guard isDirty else { return }
+        pendingSaveReview = true
+    }
+
+    func confirmSave() {
+        guard pendingSaveReview else { return }
+        pendingSaveReview = false
+        save()
+    }
+
+    func cancelSaveReview() {
+        pendingSaveReview = false
+    }
+
     func requestDiscard() {
         guard isDirty else { return }
         pendingDiscard = .revert
@@ -241,6 +260,7 @@ final class ComposeFileEditor {
         text = ""
         isPresented = false
         pendingDiscard = nil
+        pendingSaveReview = false
         saveError = nil
     }
 
@@ -341,6 +361,13 @@ struct ComposeFileEditorSheet: View {
     @Bindable var editor: ComposeFileEditor
     @Bindable var validation: ComposeSourceValidationModel
     @State private var environmentValuesAreRevealed = false
+    @State private var environmentDeclarationsExpanded = true
+    @State private var sourceSecretsExpanded = false
+
+    private var sourceInspection: ComposeProjectSourceInspection? {
+        guard let sourceKind = editor.sourceKind else { return nil }
+        return ComposeProjectSourceInspection.inspect(text: editor.text, sourceKind: sourceKind)
+    }
 
     var body: some View {
         NavigationStack {
@@ -355,29 +382,36 @@ struct ComposeFileEditorSheet: View {
                                 .truncationMode(.middle)
                         }
                         LabeledContent("Format", value: editor.sourceKind?.formatDescription ?? "Unavailable")
+                        LabeledContent(
+                            "Provenance",
+                            value: editor.isDirty ? "Unsaved editor text" : "Selected file snapshot")
                         LabeledContent("Deployment", value: "Not applied automatically")
                         if editor.isEnvironmentFile {
+                            LabeledContent("Scope", value: "Selected .env file only")
                             LabeledContent(
                                 "Values",
-                                value: environmentValuesAreRevealed ? "Revealed in this editor" : "Hidden")
+                                value: environmentValuesAreRevealed ? "Source shown for editing" : "Redacted")
                             LabeledContent("Compose Result", value: "Not evaluated")
                         }
                     }
+                    if let sourceInspection {
+                        sourceInspectionSections(sourceInspection)
+                    }
                 }
                 .formStyle(.automatic)
-                .frame(maxHeight: editor.isEnvironmentFile ? 194 : 148)
+                .frame(maxHeight: editor.isEnvironmentFile ? 280 : 240)
 
                 if editor.isEnvironmentFile && !environmentValuesAreRevealed {
                     ContentUnavailableView {
-                        Label("Environment Values Hidden", systemImage: "eye.slash")
+                        Label("Environment Source Values Redacted", systemImage: "eye.slash")
                     } description: {
-                        Text("Reveal values only when you are ready to view and edit this selected .env file. Morbstack does not read a sibling file, interpolate values, or determine the environment Docker Compose would use.")
+                        Text("The source summary lists declaration names, line provenance, and whether a value is set. It never evaluates Compose or exposes source values. Reveal source text only when you are ready to edit this selected .env file.")
                     } actions: {
-                        Button("Reveal Values and Edit") {
+                        Button("Reveal Source and Edit") {
                             environmentValuesAreRevealed = true
                         }
                     }
-                    .accessibilityLabel("Environment values hidden")
+                    .accessibilityLabel("Environment source values redacted")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     TextEditor(text: $editor.text)
@@ -391,8 +425,8 @@ struct ComposeFileEditorSheet: View {
             .navigationTitle(editor.displayName)
             .navigationSubtitle(
                 editor.isDirty
-                    ? "Edited"
-                    : (editor.isEnvironmentFile && !environmentValuesAreRevealed ? "Values hidden" : "Saved"))
+                    ? "Unsaved changes"
+                    : (editor.isEnvironmentFile && !environmentValuesAreRevealed ? "Values redacted" : "Saved"))
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button { editor.requestClose() } label: {
@@ -439,12 +473,12 @@ struct ComposeFileEditorSheet: View {
                     .help("Discard unsaved source changes")
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button { editor.save() } label: {
+                    Button { editor.requestSave() } label: {
                         Image(systemName: "square.and.arrow.down")
                     }
                     .disabled(!editor.isDirty)
-                    .accessibilityLabel("Save source file")
-                    .help("Save source file")
+                    .accessibilityLabel("Review and save source file")
+                    .help("Review and save source file")
                 }
             }
         }
@@ -461,6 +495,16 @@ struct ComposeFileEditorSheet: View {
             Button("Keep Editing", role: .cancel) { editor.cancelDiscard() }
         } message: {
             Text("Morbstack will discard only the unsaved text in this editor. The source file on disk will not change.")
+        }
+        .confirmationDialog(
+            "Save source changes?",
+            isPresented: $editor.pendingSaveReview,
+            titleVisibility: .visible
+        ) {
+            Button("Save") { editor.confirmSave() }
+            Button("Cancel", role: .cancel) { editor.cancelSaveReview() }
+        } message: {
+            Text("Morbstack will write only this editor’s reviewed UTF-8 text to the selected source file after checking that it has not changed on disk. This does not deploy, interpolate, or reload the Compose project.")
         }
         .alert(
             editor.saveErrorTitle,
@@ -488,6 +532,100 @@ struct ComposeFileEditorSheet: View {
                 set: { if !$0 { validation.requestDismissal() } })
         ) {
             ComposeSourceValidationSheet(validation: validation)
+        }
+        .onChange(of: editor.fileURL) { _, _ in
+            environmentValuesAreRevealed = false
+            environmentDeclarationsExpanded = true
+            sourceSecretsExpanded = false
+        }
+    }
+
+    @ViewBuilder
+    private func sourceInspectionSections(_ inspection: ComposeProjectSourceInspection) -> some View {
+        if editor.isEnvironmentFile {
+            Section("Environment Declarations") {
+                LabeledContent("Interpretation", value: "Source only")
+                DisclosureGroup(
+                    "Declarations (\(inspection.environmentDeclarations.count))",
+                    isExpanded: $environmentDeclarationsExpanded)
+                {
+                    if inspection.environmentDeclarations.isEmpty {
+                        Text("No simple KEY=value declarations were recognized in this selected source file.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(inspection.environmentDeclarations) { declaration in
+                            environmentDeclarationRow(declaration)
+                        }
+                    }
+                }
+            }
+        } else {
+            Section("Secret Declarations") {
+                LabeledContent("Interpretation", value: "Top-level source names only")
+                DisclosureGroup(
+                    "Recognized declarations (\(inspection.secretDeclarations.count))",
+                    isExpanded: $sourceSecretsExpanded)
+                {
+                    if inspection.secretDeclarations.isEmpty {
+                        Text("No conventional top-level secrets block was recognized in this source file.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(inspection.secretDeclarations) { declaration in
+                            LabeledContent("Name") {
+                                Text(declaration.name)
+                                    .font(.system(.body, design: .monospaced))
+                                    .textSelection(.enabled)
+                            }
+                            .accessibilityLabel("Source secret \(declaration.name), line \(declaration.line)")
+                            .help("Declared on source line \(declaration.line)")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func environmentDeclarationRow(
+        _ declaration: ComposeProjectSourceInspection.EnvironmentDeclaration
+    ) -> some View {
+        LabeledContent {
+            HStack(spacing: 8) {
+                Text(environmentDispositionLabel(declaration.valueDisposition))
+                    .foregroundStyle(.secondary)
+                Text("Line \(declaration.line)")
+                    .foregroundStyle(.tertiary)
+            }
+        } label: {
+            if declaration.isPotentiallySensitive {
+                Label(declaration.key, systemImage: "key.fill")
+                    .font(.system(.body, design: .monospaced))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .textSelection(.enabled)
+            } else {
+                Text(declaration.key)
+                    .font(.system(.body, design: .monospaced))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .textSelection(.enabled)
+            }
+        }
+        .accessibilityLabel(
+            "\(declaration.key), \(environmentDispositionLabel(declaration.valueDisposition)), source line \(declaration.line)")
+        .help(
+            declaration.isPotentiallySensitive
+                ? "Potentially sensitive source declaration; its value is redacted"
+                : "Source declaration; its value is not shown in this summary")
+    }
+
+    private func environmentDispositionLabel(
+        _ disposition: ComposeProjectSourceInspection.EnvironmentDeclaration.ValueDisposition
+    ) -> String {
+        switch disposition {
+        case .empty: "Empty"
+        case .set: "Set"
+        case .redacted: "Redacted"
         }
     }
 }
