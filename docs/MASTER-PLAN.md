@@ -33,7 +33,7 @@ The foundation. Everything here is about making it impossible to *not know* some
 | 0.5 | Git remote exists | **done** — private, `alliecatowo/morbstack` |
 | 0.6 | CI actually runs, on every push, and is red when it should be | push and confirm |
 | 0.7 | Pre-commit hook installed and documented (`mise run install-hooks`) | **done**, not yet installed locally |
-| 0.8 | Guest image rebuild is part of the loop, not a rite | see 0.9 |
+| 0.8 | Guest image rebuild is part of the loop | **done** — and the loop is `guest-image` → `app` → restart, because the daemon boots `runtime/current` staged from the bundle, not `data/kernel/`. A self-referential manifest check also froze the staged image permanently; fixed in `9f81cf4`. |
 | 0.9 | **Remove the Docker-to-build-Docker bootstrap.** `build-patched-dockerd` needs `docker buildx`. Publish the built engine as a pinned, SHA-verified release artifact so a contributor with no Docker can build Morbstack. | **open** |
 | 0.10 | A `mise run doctor` that reports staleness: is the initrd older than `guest/`? is the running daemon's inode the one on disk? is the patched dockerd in the image? | **open** |
 | 0.11 | Complete the security review of the untrusted-input surfaces: vsock 1024/2375/2376/2377/2378/2379/2380/2381 and the MCP server | **open — treat as unreviewed** |
@@ -50,16 +50,44 @@ is the mechanical answer.
 Table stakes. If any of this is wrong, no differentiator matters, because the user's existing
 workflow breaks on day one.
 
+### 1.0 — THE BLOCKER: the Docker API preflight is fail-open for real CLI traffic
+
+`DockerProxy.preflightThenRelay` inspects **only the first HTTP request per connection**, then
+splices the socket raw. The `docker` CLI opens a connection, pings, and *reuses* it — so
+`POST /containers/create` is essentially never inspected. Proven with one identical body:
+**HTTP 400 on a fresh connection, HTTP 201 as the second request on a keep-alive connection.**
+
+`DockerProxy.swift:24` already documents the preflight as "best-effort" for large or chunked
+requests. What nobody caught is that keep-alive makes the bypass near-universal.
+
+Consequences, none of which are theoretical:
+
+- Every preflight guard in this codebase is **correct, unit-tested, and not actually running**. That
+  includes the bind-mount alias guard (`435d09f`) and the port-publication preflight. They pass their
+  tests and never see production traffic.
+- `-v /etc/hosts:/x` still serves the **guest's** file (`e3998dbe…` vs the Mac's `c7dd0e2e…`).
+  `/var/log` and `/Library` silently become guest directories, and **container writes to them
+  silently vanish** — a later container still saw a file the host never received.
+
+This single defect invalidates the "fixed in source, gated on a rebuild" framing for an entire class
+of findings: the fixes are in the image now, and they still do not run.
+
+Fixing it is not a one-liner. Forcing one-request-per-connection interacts with `logs -f`, `exec`,
+`attach` and the events stream, all of which legitimately hijack the connection. The likely shape is
+a real HTTP/1.1 framing layer that parses each request on the connection until a hijack is
+negotiated, then splices. **Nothing else in Phase 1 should be trusted until this lands**, because
+every guard sits behind it.
+
 | # | Item | State |
 | --- | --- | --- |
-| 1.1 | `docker run -P` end to end | in progress — executes, fails at the vsock 2379 handshake |
-| 1.2 | Explicit `-p` in every form incl. UDP, ranges, `127.0.0.1:`, and the ambiguity case | `-p 8080:80 -p 8080:81` preflight bug fixed; matrix running |
-| 1.3 | Bind mounts: `/tmp`, `/var`, `/etc`, `$HOME`, symlink-traversing paths | fix landed (`435d09f`), first runtime verification in progress |
-| 1.4 | `host.docker.internal` | source-only until the matrix confirms |
-| 1.5 | Disk grow, fail-closed across crash/retry | source-only |
-| 1.6 | Live-share / hot reload | source-only; first compile was today |
-| 1.7 | Compose, BuildKit, buildx | runs-here |
-| 1.8 | `logs -f`, `exec`, `cp`, `stats`, volumes, networks, context | mostly runs-here; re-verify post-rebuild |
+| 1.1 | `docker run -P` end to end | first run **PASS**; stop/start/restart **FAIL** — the durable session EOFs 6 ms after its successful first allocation |
+| 1.2 | Explicit `-p` in every form incl. UDP, ranges, `127.0.0.1:`, and the ambiguity case | **PASS**, incl. first-ever UDP run |
+| 1.3 | Bind mounts: `/tmp`, `/var`, `/etc`, `$HOME`, symlink-traversing paths | shared roots **PASS**; `/etc` and `/var` **FAIL (critical)** — blocked on 1.0, not on the guard |
+| 1.4 | `host.docker.internal` | **PARTIAL** — needs an explicit `--add-host` |
+| 1.5 | Disk grow, fail-closed across crash/retry | **FAIL** — host/guest contract mismatch (`keyNotFound: 'device'`); image grew to 72 GiB while the guest filesystem stayed 62.4 G, and a *refused* grow still mutated configured capacity |
+| 1.6 | Live-share / hot reload | `source-only`; first compile was today, listener now binds |
+| 1.7 | Compose, BuildKit, buildx | `runs-here` — 3-service fixture, no regression |
+| 1.8 | `logs -f`, `exec`, `cp`, `stats`, volumes, networks, context | **PASS** post-rebuild |
 | 1.9 | Testcontainers (Java/Go/Node/Python) | **untested** |
 | 1.10 | Dev Containers | **untested** |
 | 1.11 | Clean-profile CP-01–CP-07 on a machine that never had Docker | **never run — the release gate** |
