@@ -387,6 +387,24 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
     /// the boot probe's first `info` reply.
     private var _guestShareStates: [String: MorbShares.GuestMountState] = [:]
 
+    /// The one coherent read of the live VirtioFS contract used to admit a Docker
+    /// bind mount. A share plan and its guest report must come from the same state
+    /// lock acquisition: reading them separately can otherwise pair a freshly
+    /// planned root with a previous VM's `mounted` result while the VM is being
+    /// reconfigured.
+    public struct ShareMountSnapshot: Sendable {
+        public let shares: [MorbDirectoryShare]
+        public let guestShareStates: [String: MorbShares.GuestMountState]
+
+        public init(
+            shares: [MorbDirectoryShare],
+            guestShareStates: [String: MorbShares.GuestMountState]
+        ) {
+            self.shares = shares
+            self.guestShareStates = guestShareStates
+        }
+    }
+
     /// The host directories shared with the guest, as configured. Safe from any thread.
     ///
     /// Populated when a configuration is built, so it is empty before the first boot
@@ -402,6 +420,15 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
         stateLock.lock()
         defer { stateLock.unlock() }
         return _guestShareStates
+    }
+
+    /// Atomically snapshots the attached share roots and the running guest's mount
+    /// report. Callers that make an admission decision must use this rather than
+    /// independently reading ``shares`` and ``guestShareStates``.
+    public var shareMountSnapshot: ShareMountSnapshot {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return ShareMountSnapshot(shares: _shares, guestShareStates: _guestShareStates)
     }
 
     /// The sharing plan for the current configuration, without building a VM.

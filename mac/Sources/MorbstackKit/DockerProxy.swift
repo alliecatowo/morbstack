@@ -549,10 +549,11 @@ public final class DockerProxy {
                 self.connectionFinished()
 
             case .success:
+                let shareSnapshot = self.vm.shareMountSnapshot
                 switch DockerBindMountPreflight.inspectContainerCreate(
                     body: createBody,
-                    shares: self.vm.shares,
-                    guestShareStates: self.vm.guestShareStates)
+                    shares: shareSnapshot.shares,
+                    guestShareStates: shareSnapshot.guestShareStates)
                 {
                 case .allowed:
                     break
@@ -618,10 +619,11 @@ public final class DockerProxy {
                 self.connectionFinished()
             case .success:
                 if let createBody {
+                    let shareSnapshot = self.vm.shareMountSnapshot
                     switch DockerBindMountPreflight.inspectContainerCreate(
                         body: createBody,
-                        shares: self.vm.shares,
-                        guestShareStates: self.vm.guestShareStates)
+                        shares: shareSnapshot.shares,
+                        guestShareStates: shareSnapshot.guestShareStates)
                     {
                     case .allowed:
                         break
