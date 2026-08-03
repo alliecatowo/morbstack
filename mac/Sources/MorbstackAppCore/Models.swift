@@ -218,7 +218,14 @@ struct ContainerSummary: Identifiable, Sendable, Hashable {
         case "running": return [.stop, .restart, .pause]
         case "paused": return [.unpause, .stop]
         case "restarting": return [.stop]
-        default: return [.start, .remove]
+        // Docker documents `dead` as a defunct container that cannot be started
+        // again.  Treating it like an ordinary stopped container makes a recovery
+        // action fail after it has already changed other services in the stack.
+        case "dead": return [.remove]
+        case "created", "exited": return [.start, .remove]
+        // `removing` and an unrecognised daemon state are not safe guesses.  A
+        // refresh can turn either into a known state; an invented action cannot.
+        default: return []
         }
     }
 }

@@ -333,6 +333,13 @@ final class ContainerSummaryTests: XCTestCase {
         XCTAssertEqual(ContainerSummary(wire(state: "paused")).availableActions, [.unpause, .stop])
         XCTAssertEqual(ContainerSummary(wire(state: "exited")).availableActions, [.start, .remove])
     }
+
+    /// Docker documents a `dead` container as defunct: it can be removed but not
+    /// started.  Keeping that distinction in the shared action contract also keeps a
+    /// Compose project's recovery action from targeting an unrecoverable member.
+    func testDeadContainerIsOnlyRemovable() {
+        XCTAssertEqual(ContainerSummary(wire(state: "dead")).availableActions, [.remove])
+    }
 }
 
 // MARK: - Network mapping

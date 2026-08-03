@@ -669,9 +669,10 @@ struct StacksRootView: View {
                 .controlSize(.small)
                 .accessibilityLabel("Updating \(stack.title)")
         } else {
-            if !hidingUnavailableActions || !stack.isFullyRunning {
+            let hasStartableService = stack.containers.contains { $0.availableActions.contains(.start) }
+            if !hidingUnavailableActions || hasStartableService {
                 Button("Start Stopped Services") { run(.start, on: stack) }
-                    .disabled(stack.isFullyRunning)
+                    .disabled(!hasStartableService)
             }
             if !hidingUnavailableActions || stack.runningCount > 0 {
                 Button("Restart All Services") { run(.restart, on: stack) }
@@ -735,7 +736,11 @@ struct StacksRootView: View {
         let targets: [ContainerSummary]
         switch action {
         case .start:
-            targets = stack.containers.filter { !$0.isRunning }
+            // `dead`, `paused`, and `restarting` are not stopped services Docker can
+            // start.  Selecting by the single-container contract prevents one
+            // defunct member from failing a project recovery after earlier members
+            // have already started.
+            targets = stack.containers.filter { $0.availableActions.contains(.start) }
         case .stop:
             targets = stack.containers.filter(\.isRunning)
         default:
