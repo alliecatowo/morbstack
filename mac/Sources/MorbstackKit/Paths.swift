@@ -128,6 +128,17 @@ public struct MorbPaths {
     /// `~/.morbstack/data/disk.img` — the sparse raw root disk.
     public static var diskImage: URL { dataDirectory.appendingPathComponent("disk.img", isDirectory: false) }
 
+    /// `~/.morbstack/data/disk-grow-journal.json` — the durable recovery record for
+    /// an explicit grow-only VM disk transaction.
+    ///
+    /// This is intentionally beside `disk.img`, not in the run directory: a host
+    /// restart in the middle of a grow must leave enough information to prove the
+    /// exact image identity and resume safely. It is removed only after the guest has
+    /// proved both the device capacity and the mounted filesystem result.
+    public static var diskGrowJournal: URL {
+        dataDirectory.appendingPathComponent("disk-grow-journal.json", isDirectory: false)
+    }
+
     /// `~/.morbstack/data/vmstate.bin` — Virtualization.framework save/restore blob.
     public static var vmState: URL { dataDirectory.appendingPathComponent("vmstate.bin", isDirectory: false) }
 

@@ -115,11 +115,14 @@ public enum MorbCommandPolicy {
     /// `k8s-enable` qualifies for the same reason `start` does: asking for a cluster
     /// is asking for the engine it runs on, and refusing to start one would make the
     /// command fail with "the VM is stopped" every single time from a cold machine.
+    /// `disk-grow` is likewise an explicit state-changing request. It deliberately
+    /// starts the daemon (and then its own proof-only VM boot), unlike `disk status`,
+    /// which remains a local observation.
     /// The other `k8s-*` commands do not — `k8s-status` and `k8s-describe`
     /// describing a stopped stack are correct answers, and conjuring a VM to
     /// produce a kubeconfig for a cluster that is not running would be worse than
     /// saying so.
-    public static let autoStartingCommands: Set<String> = ["start", "resume", "k8s-enable"]
+    public static let autoStartingCommands: Set<String> = ["start", "resume", "k8s-enable", "disk-grow"]
 
     /// Commands the CLI answers itself, with the daemon consulted only if it happens
     /// to be there.

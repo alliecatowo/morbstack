@@ -94,6 +94,7 @@ public final class Daemon {
     private let vm: VMManager
     private let proxy: DockerProxy
     private let forwarder: PortForwarder
+    private let liveShareTransport: MorbLiveShareTransport
     private let k8s: K8sManager
     private let controlServer: UnixSocketServer
     private let instanceLock: FileLock
@@ -114,6 +115,9 @@ public final class Daemon {
     /// it. Serial, so a fast running → stopped → running flap cannot reorder into a
     /// stop that lands after the start it preceded.
     private let forwarderQueue = DispatchQueue(label: "dev.morbstack.forwarder.lifecycle")
+    /// Owns FSEvent/session orchestration independently of forwarded Docker
+    /// ports: a blocked acknowledgement must never delay VM state callbacks.
+    private let liveShareQueue = DispatchQueue(label: "dev.morbstack.live-share.lifecycle")
     /// Performs Kubernetes readiness reads away from the VM and idle queues.
     ///
     /// A k3s status read can wait for a guest-control timeout while a cluster is
@@ -190,6 +194,7 @@ public final class Daemon {
             hostNetworkPortPublishing: config.allowHostNetworkPortPublishing)
         self.forwarder = portForwarder
         self.proxy = DockerProxy(vm: vm, log: logger, forwarder: portForwarder)
+        self.liveShareTransport = MorbLiveShareTransport(vm: vm, config: config, log: logger)
         self.k8s = K8sManager(vm: vm, log: logger)
         self.controlServer = UnixSocketServer(path: MorbPaths.controlSocket.path, queue: controlQueue)
         self.instanceLock = FileLock(path: MorbPaths.lockFile.path)
@@ -232,6 +237,14 @@ public final class Daemon {
                     // previous VM was still running.
                     self.k8s.cancelPodPortForwards(reason: "the VM \(state.token)")
                     self.stopKubernetesAPIServerForwardOnForwarderQueue()
+                }
+            }
+            self.liveShareQueue.async { [weak self] in
+                guard let self else { return }
+                if state == .running {
+                    self.liveShareTransport.start()
+                } else {
+                    self.liveShareTransport.stop(reason: "the VM \(state.token)")
                 }
             }
         }
@@ -697,11 +710,35 @@ public final class Daemon {
             let forwards = forwarder.activeForwards
             let failedForwards = forwarder.failedForwards
             let liveShareBridge = liveShareBridgeDiagnostic()
-            let diskCapacity = MorbDiskCapacity.inspect(configuredGiB: config.diskSizeGiB)
-            let diskResize = MorbDiskResize.diagnose(
-                capacity: diskCapacity,
-                vmState: vm.state,
-                guestCapability: MorbDiskResize.GuestCapability(wireValue: vm.guestDiskResize))
+            // `disk-grow` is explicitly preceded by a preserving config write from
+            // the app or CLI. Reload this one field for status so the daemon never
+            // reports its startup snapshot after a successful transaction.
+            let configuredDiskGiB = (try? MorbConfig.load())?.diskSizeGiB ?? config.diskSizeGiB
+            let diskCapacity = MorbDiskCapacity.inspect(configuredGiB: configuredDiskGiB)
+            let guestDiskResize = MorbDiskResize.GuestCapability(
+                wireValue: vm.guestDiskResize ?? vm.lastGuestDiskResize)
+            let diskResize: MorbDiskResize.Diagnostic
+            do {
+                if let journal = try MorbDiskGrowth.loadJournal() {
+                    // A RAW image at the target length is not enough. Prioritize the
+                    // journal over capacity facts so a crash cannot masquerade as a
+                    // completed filesystem resize.
+                    diskResize = MorbDiskResize.recoveryDiagnostic(
+                        journal: journal, guestCapability: guestDiskResize)
+                } else {
+                    diskResize = MorbDiskResize.diagnose(
+                        capacity: diskCapacity,
+                        vmState: vm.state,
+                        guestCapability: guestDiskResize)
+                }
+            } catch {
+                diskResize = MorbDiskResize.Diagnostic(
+                    state: .capacityUnavailable,
+                    guestCapability: guestDiskResize,
+                    currentBytes: diskCapacity.currentBytes,
+                    targetBytes: diskCapacity.configuredBytes,
+                    summary: "Morbstack cannot read the disk-growth recovery journal, so it will not alter the disk: \(error)")
+            }
             return .success([
                 "failed_port_forwards": .array(failedForwards.map { AnyCodableValue.string($0) }),
                 "state": .string(vm.state.token),
@@ -762,6 +799,39 @@ public final class Daemon {
         case "start":
             markBusy()
             return awaitVMOperation("start") { self.vm.start(completion: $0) }
+
+        case "disk-grow":
+            // The target must agree with the latest preserving config write. That
+            // keeps one source of truth for the next daemon start and prevents a
+            // caller from mutating the image to an unrecorded capacity.
+            guard let rawTarget = request.args?["target_gib"],
+                  let targetGiB = Int(rawTarget), targetGiB > 0
+            else {
+                return .failure("disk-grow requires a positive target_gib argument")
+            }
+            do {
+                let saved = try MorbConfig.load()
+                guard saved.diskSizeGiB == targetGiB else {
+                    return .failure(
+                        "disk-grow target \(targetGiB) GiB does not match disk_size_gib "
+                            + "(\(saved.diskSizeGiB) GiB); save the requested capacity first")
+                }
+            } catch {
+                return .failure("could not read disk_size_gib before growing the disk: \(error)")
+            }
+            // The proxy stays closed through both host mutation and the guest proof;
+            // queued Docker clients are released by VMManager only after completion.
+            proxy.beginOrderlyShutdown()
+            defer { proxy.endOrderlyShutdown() }
+            markBusy()
+            var response = awaitVMOperation("disk-grow", timeout: 110) {
+                self.vm.growDisk(targetGiB: targetGiB, completion: $0)
+            }
+            if response.ok {
+                response.data?["target_gib"] = .int(targetGiB)
+                response.data?["target_bytes"] = .int(Int(MorbDiskCapacity.configuredBytes(forGiB: targetGiB)))
+            }
+            return response
 
         case "stop":
             markBusy()
@@ -930,19 +1000,10 @@ public final class Daemon {
         return rows
     }
 
-    /// The preparatory FSEvents/inotify bridge state. It consumes only config and
-    /// facts already observed from the current VM; in particular it does not create a
-    /// broad host watcher or ask the guest to start anything while answering status.
+    /// The live-share notification status.  The transport owns activation and
+    /// teardown; answering status only reads its current immutable lifecycle fact.
     private func liveShareBridgeDiagnostic() -> MorbLiveShareBridge.Diagnostic {
-        var planned = vm.shares
-        if planned.isEmpty { planned = (try? vm.sharePlan())?.shares ?? [] }
-        return MorbLiveShareBridge.diagnose(
-            paths: config.liveSharePaths,
-            shares: planned,
-            guestShareStates: vm.guestShareStates,
-            guestAdvertisement: MorbLiveShareBridge.GuestAdvertisement(
-                wireCapability: vm.guestShareEventBridge,
-                contractVersion: vm.guestShareEventBridgeContractVersion))
+        liveShareTransport.diagnostic()
     }
 
     /// The one-line reason a share is not usable, or `nil` when it is.

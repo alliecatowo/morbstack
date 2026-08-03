@@ -1,7 +1,7 @@
 // Copyright 2026 The Morbstack Authors.
 // Licensed under the Apache License, Version 2.0 (the "License").
 //
-// Read-only readiness for the future stop-only VM disk grow transaction.
+// Readiness and recovery reporting for the stop-only VM disk grow transaction.
 
 import Foundation
 
@@ -11,7 +11,7 @@ import Foundation
 /// A larger host file is not a larger guest filesystem. This diagnostic is therefore
 /// deliberately separate from ``MorbDiskCapacity``: it consumes capacity and lifecycle
 /// facts but never opens, truncates, attaches, starts, or stops a disk. A future
-/// mutator must require ``GuestCapability/ready``, a stopped VM, a retained journal of
+/// mutator requires ``GuestCapability/ready``, a stopped VM, a retained journal of
 /// the prior capacity, an explicit grow request, guest-side resize, and post-resize
 /// verification before it can alter the image.
 public enum MorbDiskResize {
@@ -40,9 +40,27 @@ public enum MorbDiskResize {
         case vmMustStop = "vm-must-stop"
         case guestCapabilityUnknown = "guest-capability-unknown"
         case guestResizeUnavailable = "guest-resize-unavailable"
-        /// Reserved for the future end-to-end transaction; no current caller treats
-        /// it as authorisation on its own.
+        /// A durable host journal exists. The only permitted next action is to retry
+        /// the exact journal target and obtain a fresh guest proof.
+        case recoveryRequired = "recovery-required"
+        /// The ordinary preflight for an explicit end-to-end transaction.
         case readyForExplicitTransaction = "ready-for-explicit-transaction"
+    }
+
+    /// Reports a host crash or explicit interruption after a journal was written.
+    /// This takes priority over ordinary file-length inspection: a RAW file can match
+    /// its configured capacity while the filesystem proof is still missing, and
+    /// presenting that state as "not needed" would be dangerously misleading.
+    public static func recoveryDiagnostic(
+        journal: MorbDiskGrowth.Journal,
+        guestCapability: GuestCapability
+    ) -> Diagnostic {
+        Diagnostic(
+            state: .recoveryRequired,
+            guestCapability: guestCapability,
+            currentBytes: journal.targetBytes,
+            targetBytes: journal.targetBytes,
+            summary: "A disk-growth transaction needs recovery. Retry the saved target to verify the guest filesystem; Morbstack will not shrink the disk.")
     }
 
     /// A fact-only diagnosis of one configured capacity change.

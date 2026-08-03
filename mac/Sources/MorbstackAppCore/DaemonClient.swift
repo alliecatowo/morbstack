@@ -268,6 +268,27 @@ class DaemonClient: @unchecked Sendable {
         try await call(DaemonRequest(cmd: "resume"), timeout: Self.lifecycleTimeout)
     }
 
+    /// Performs an explicit, journalled grow-only data-disk transaction.
+    ///
+    /// Like `start`, this may launch the host daemon because the user explicitly
+    /// pressed a destructive-adjacent Settings action. Launching the daemon does not
+    /// launch the VM by itself; the daemon owns the stopped-state check, RAW mutation,
+    /// guest filesystem proof, and recovery journal as one operation.
+    func growDisk(targetGiB: Int) async throws {
+        guard targetGiB > 0 else {
+            throw MorbError.config("disk growth requires a positive capacity")
+        }
+        if !UnixSocketClient.isAlive(path: socketPath, timeout: 0.5) {
+            try spawnDaemon()
+            guard await waitForSocket(deadline: 10) else {
+                throw MorbError.timeout("morbstackd did not open its control socket")
+            }
+        }
+        try await call(
+            DaemonRequest(cmd: "disk-grow", args: ["target_gib": String(targetGiB)]),
+            timeout: Self.lifecycleTimeout)
+    }
+
     /// Sends a command and turns a `{"ok":false}` reply into a thrown error.
     private func call(_ request: DaemonRequest, timeout: TimeInterval) async throws {
         let response = try await roundTrip(request, timeout: timeout)

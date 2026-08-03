@@ -157,6 +157,12 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
     private let config: MorbConfig
     private let log: MorbLog
 
+    /// A successful disk grow updates this override so a same-daemon reset cannot
+    /// recreate a fresh image at the pre-grow capacity. Other boot settings remain
+    /// the immutable daemon-start configuration and still apply on restart.
+    private let diskCapacityLock = NSLock()
+    private var configuredDiskSizeGiB: Int
+
     private var virtualMachine: VZVirtualMachine?
     private var consoleHandle: FileHandle?
 
@@ -171,6 +177,10 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
     private var controlReady = false
     private var controlProbeInFlight = false
     private var bringUpStartedAt: Date?
+
+    /// Prevents socket activation from admitting Docker work between the host RAW
+    /// growth and the durable guest filesystem proof.
+    private var diskGrowthInFlight = false
 
     /// Bumped whenever a probe in flight is superseded. Guarded by ``stateLock`` so
     /// the probe worker, which does not run on ``queue``, can read it safely.
@@ -207,6 +217,7 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
     public init(config: MorbConfig, log: MorbLog) {
         self.config = config
         self.log = log
+        self.configuredDiskSizeGiB = max(1, config.diskSizeGiB)
         super.init()
 
         _saveRestoreBroken = FileManager.default.fileExists(atPath: MorbPaths.saveRestoreUnsupported.path)
@@ -333,6 +344,11 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
     /// boundary, not a transient resize failure.
     private var _guestDiskResize: String?
 
+    /// Capability most recently observed during this daemon lifetime. A stopped VM
+    /// cannot answer `info`, so Settings may use this only as a preflight hint; the
+    /// transaction asks the freshly booted guest to prove `ready` again.
+    private var _lastGuestDiskResize: String?
+
     /// Whether the running guest has Rosetta working, or `nil` if no guest has
     /// said (not booted, or an initramfs older than the field).
     ///
@@ -378,6 +394,13 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
         stateLock.lock()
         defer { stateLock.unlock() }
         return _guestDiskResize
+    }
+
+    /// The last guest protocol advertisement observed by this daemon.
+    public var lastGuestDiskResize: String? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _lastGuestDiskResize
     }
 
     /// The VirtioFS shares handed to the current (or most recent) configuration.
@@ -558,6 +581,7 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
         guard let capability else { return }
         stateLock.lock()
         _guestDiskResize = capability
+        _lastGuestDiskResize = capability
         stateLock.unlock()
     }
 
@@ -634,6 +658,21 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
         }
     }
 
+    /// Performs the complete grow-only persistent Docker-disk transaction.
+    ///
+    /// The VM must be fully stopped. This method journals the exact regular RAW file,
+    /// extends only that file, boots a fresh guest, and completes only after the guest
+    /// identifies `/dev/vda`, grows the mounted filesystem, and returns a proof that
+    /// matches the journal. A failure after `ftruncate` intentionally leaves the
+    /// journal for an explicit safe retry; no rollback ever shrinks the disk.
+    public func growDisk(targetGiB: Int, completion: @escaping (Result<Void, Error>) -> Void) {
+        let done = CompletionOnce(completion)
+        queue.async { [weak self] in
+            guard let self else { return done.fire(.failure(CompletionOnce.managerGone)) }
+            self.growDiskOnQueue(targetGiB: targetGiB, done: done)
+        }
+    }
+
     /// Brings the VM to a state where the guest answers its control channel, booting
     /// or resuming as appropriate.
     ///
@@ -647,6 +686,10 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
         let done = CompletionOnce(completion)
         queue.async { [weak self] in
             guard let self else { return done.fire(.failure(CompletionOnce.managerGone)) }
+            if self.diskGrowthInFlight {
+                self.addWaiter(timeout: timeout, done: done)
+                return
+            }
             switch self.state {
             case .running:
                 if self.controlReady {
@@ -1234,6 +1277,221 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
         }
     }
 
+    // MARK: - Durable disk growth
+
+    /// Runs only on the VM queue. That serializes the stopped-state proof with every
+    /// Virtualization.framework attachment, closing the window between lifecycle
+    /// observation and the host-side `ftruncate`.
+    private func growDiskOnQueue(targetGiB: Int, done: CompletionOnce) {
+        guard !diskGrowthInFlight else {
+            done.fire(.failure(MorbError.vm("a disk-growth transaction is already in progress")))
+            return
+        }
+        guard targetGiB > 0 else {
+            done.fire(.failure(MorbError.config("disk growth requires a positive GiB target")))
+            return
+        }
+        let targetBytes = MorbDiskCapacity.configuredBytes(forGiB: targetGiB)
+        guard targetBytes != Int64.max else {
+            done.fire(.failure(MorbError.config("disk growth target is too large")))
+            return
+        }
+        guard virtualMachine == nil, state == .stopped else {
+            done.fire(.failure(MorbError.vm(
+                "the VM is \(state.description); stop it completely before growing its disk.")))
+            return
+        }
+        guard !FileManager.default.fileExists(atPath: MorbPaths.vmState.path) else {
+            done.fire(.failure(MorbError.vm(
+                "a saved VM state still describes this disk; resume or discard it before growing the disk.")))
+            return
+        }
+
+        do {
+            var journal: MorbDiskGrowth.Journal
+            if let existing = try MorbDiskGrowth.loadJournal() {
+                guard existing.targetBytes == targetBytes else {
+                    throw MorbError.protocolViolation(
+                        "a disk-grow recovery journal targets \(existing.targetBytes) bytes; retry that target "
+                            + "before requesting \(targetBytes) bytes")
+                }
+                journal = existing
+            } else {
+                let capacity = MorbDiskCapacity.inspect(configuredGiB: targetGiB)
+                switch capacity.state {
+                case .willCreate:
+                    // No filesystem exists yet. The normal first boot will create a
+                    // sparse image at this capacity, so do not boot merely to resize.
+                    setConfiguredDiskSizeGiB(targetGiB)
+                    done.fire(.success(()))
+                    return
+                case .matchesConfiguration:
+                    setConfiguredDiskSizeGiB(targetGiB)
+                    done.fire(.success(()))
+                    return
+                case .decreaseUnsupported:
+                    throw MorbError.unsupported("Morbstack never shrinks an existing VM disk")
+                case .unavailable:
+                    throw MorbError.io(capacity.inspectionError ?? "could not inspect the VM disk image")
+                case .increaseRequiresGuestResize:
+                    guard let originalBytes = capacity.currentBytes else {
+                        throw MorbError.io("disk capacity inspection returned no existing image length")
+                    }
+                    journal = try MorbDiskGrowth.makeJournal(
+                        originalBytes: originalBytes, targetBytes: targetBytes)
+                    // This must be durable before the RAW file changes length.
+                    try MorbDiskGrowth.storeJournal(journal)
+                }
+            }
+
+            if journal.phase != .guestProved {
+                journal.phase = try MorbDiskGrowth.extendRawImage(journal)
+                try MorbDiskGrowth.storeJournal(journal)
+            }
+            try MorbDiskGrowth.verifyHostGrowth(journal)
+
+            diskGrowthInFlight = true
+            log.info(
+                "disk-grow journal is durable: \(journal.originalBytes) -> \(journal.targetBytes) bytes; "
+                    + "booting guest for filesystem proof")
+            let bootDone = CompletionOnce { [weak self] result in
+                guard let self else { return done.fire(.failure(CompletionOnce.managerGone)) }
+                self.diskGrowthBootDidComplete(result, journal: journal, targetGiB: targetGiB, done: done)
+            }
+            startOnQueue(done: bootDone)
+        } catch {
+            done.fire(.failure(error))
+        }
+    }
+
+    /// Starts the MRB0 proof exchange off the Virtualization queue. `morbinit` offers
+    /// control before dockerd is ready, which is exactly when this must happen.
+    private func diskGrowthBootDidComplete(
+        _ result: Result<Void, Error>,
+        journal: MorbDiskGrowth.Journal,
+        targetGiB: Int,
+        done: CompletionOnce
+    ) {
+        switch result {
+        case .failure(let error):
+            finishDiskGrowth(.failure(error), targetGiB: targetGiB, done: done)
+        case .success:
+            probeQueue.async { [weak self] in
+                guard let self else {
+                    return done.fire(.failure(CompletionOnce.managerGone))
+                }
+                let result = self.obtainDiskGrowthProof(journal: journal)
+                self.queue.async { [weak self] in
+                    self?.finishDiskGrowth(result, targetGiB: targetGiB, done: done)
+                }
+            }
+        }
+    }
+
+    /// A missing control server is expected while a guest is booting. A guest that
+    /// answers but lacks the protocol, or rejects its grow tool, fails immediately and
+    /// leaves the journal as the only recovery authority.
+    private func obtainDiskGrowthProof(journal: MorbDiskGrowth.Journal) -> Result<Void, Error> {
+        let deadline = Date().addingTimeInterval(VMManager.controlReadyTimeout)
+        var lastError: Error = MorbError.timeout("guest control did not answer")
+        while Date() < deadline {
+            guard state == .running else {
+                return .failure(MorbError.vm("the VM stopped before its disk resize could be proved"))
+            }
+            switch connectVsockBlocking(port: MorbVsockPorts.guestControl, timeout: 3) {
+            case .failure(let error):
+                lastError = error
+                usleep(VMManager.controlProbeInterval)
+            case .success(let fd):
+                let control = GuestControl(fd: fd)
+                defer { control.closeOwnedDescriptor() }
+                do {
+                    let info: GuestReply
+                    do {
+                        info = try control.info(timeout: 3)
+                    } catch {
+                        lastError = error
+                        usleep(VMManager.controlProbeInterval)
+                        continue
+                    }
+                    guard info.diskResize == MorbDiskResize.GuestCapability.ready.rawValue else {
+                        return .failure(MorbError.unsupported(
+                            "the freshly booted guest does not support the verified disk-resize protocol"))
+                    }
+                    let proof: GuestDiskResizeProof
+                    do {
+                        proof = try control.diskResize(targetBytes: journal.targetBytes)
+                    } catch let error as MorbError {
+                        // The guest returned an explicit control error (for example a
+                        // mount mismatch or a missing grow tool). Do not turn that
+                        // deterministic safety refusal into an unbounded retry.
+                        if case .protocolViolation(_) = error { return .failure(error) }
+                        lastError = error
+                        usleep(VMManager.controlProbeInterval)
+                        continue
+                    }
+                    let journalProof = proof.journalProof
+                    try MorbDiskGrowth.validateGuestProof(journalProof, journal: journal)
+
+                    // A crash after this write but before removal is safe: recovery
+                    // re-queries the guest, and this phase permits its idempotent
+                    // `resized: false` response only after a prior durable proof.
+                    var completed = journal
+                    completed.phase = .guestProved
+                    completed.proof = journalProof
+                    try MorbDiskGrowth.storeJournal(completed)
+                    try MorbDiskGrowth.removeJournal()
+                    return .success(())
+                } catch let error as MorbError {
+                    return .failure(error)
+                } catch {
+                    lastError = error
+                    usleep(VMManager.controlProbeInterval)
+                }
+            }
+        }
+        return .failure(MorbError.timeout(
+            "guest did not provide a disk-resize proof within \(Int(VMManager.controlReadyTimeout))s "
+                + "(last error: \(lastError))"))
+    }
+
+    /// Releases socket-activation waiters only after the full journal/proof protocol.
+    /// On failure the VM is stopped before a client can use a raw-grown but unverified
+    /// filesystem; the journal deliberately remains in place for a retry.
+    private func finishDiskGrowth(
+        _ result: Result<Void, Error>,
+        targetGiB: Int,
+        done: CompletionOnce
+    ) {
+        guard diskGrowthInFlight else { return }
+        diskGrowthInFlight = false
+        switch result {
+        case .success:
+            setConfiguredDiskSizeGiB(targetGiB)
+            log.info("disk-grow completed with verified guest filesystem proof (\(targetGiB) GiB)")
+            if controlReady { flushWaiters(.success(())) }
+            done.fire(.success(()))
+        case .failure(let error):
+            log.error("disk-grow stopped before proof: \(error). Recovery journal retained.")
+            flushWaiters(.failure(error))
+            hardStopOnQueue(done: CompletionOnce { _ in
+                done.fire(.failure(error))
+            })
+        }
+    }
+
+    private func setConfiguredDiskSizeGiB(_ value: Int) {
+        diskCapacityLock.lock()
+        configuredDiskSizeGiB = max(1, value)
+        diskCapacityLock.unlock()
+    }
+
+    private var effectiveDiskSizeGiB: Int {
+        diskCapacityLock.lock()
+        defer { diskCapacityLock.unlock() }
+        return configuredDiskSizeGiB
+    }
+
     private func releaseVirtualMachine(_ vm: VZVirtualMachine) {
         vm.delegate = nil
         virtualMachine = nil
@@ -1295,6 +1553,10 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
 
     /// Re-evaluates queued waiters after settling into a new state. Runs on ``queue``.
     private func serviceWaitersOnQueue() {
+        // An explicit disk growth owns this boot until its guest proof is durable.
+        // Starting a queued Docker relay here would otherwise reopen the same race the
+        // transaction gate in `ensureRunning` closes.
+        guard !diskGrowthInFlight else { return }
         guard !runWaiters.isEmpty else { return }
         switch state {
         case .running:
@@ -1389,7 +1651,9 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
                         self.noteGuestPinged()
                         self.noteDockerDataOnDisk(dataOnDisk)
                         self.noteGuestShares(shares)
-                        self.flushWaiters(.success(()))
+                        if !self.diskGrowthInFlight {
+                            self.flushWaiters(.success(()))
+                        }
                     }
                     return
                 case .dockerStarting(let uptimeMilliseconds):
@@ -1764,7 +2028,7 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
         }
         // `truncate` on APFS produces a sparse file: the apparent size is the full
         // disk, but no blocks are allocated until the guest writes.
-        let bytes = UInt64(max(1, config.diskSizeGiB)) * 1024 * 1024 * 1024
+        let bytes = UInt64(effectiveDiskSizeGiB) * 1024 * 1024 * 1024
         do {
             let handle = try FileHandle(forWritingTo: url)
             defer { try? handle.close() }
@@ -1773,7 +2037,7 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
             try? fm.removeItem(at: url)
             throw MorbError.io("could not size \(url.path): \(error.localizedDescription)")
         }
-        log.info("created sparse disk image \(url.path) (\(config.diskSizeGiB) GiB)")
+        log.info("created sparse disk image \(url.path) (\(effectiveDiskSizeGiB) GiB)")
         return url
     }
 
@@ -1828,4 +2092,6 @@ public enum MorbVsockPorts {
     /// Read-only presence probe for guest-local TCP/UDP listeners discovered from
     /// an opted-in host-network container's effective Docker `ExposedPorts`.
     public static let listenerProbe: UInt32 = 2380
+    /// Bounded host-to-guest shared-file event receiver.
+    public static let liveShareReceiver: UInt32 = 2381
 }

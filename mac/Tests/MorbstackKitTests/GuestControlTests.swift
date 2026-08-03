@@ -174,13 +174,13 @@ final class GuestControlTests: XCTestCase {
         XCTAssertNil(legacy.tmpAliasMounted)
     }
 
-    /// Disk expansion is similarly fail-closed: a current guest can explicitly say
-    /// it has no verified resize contract, while an older guest remains unknown.
+    /// Disk expansion is additive: a current guest can advertise the verified
+    /// transaction contract, while an older guest remains unknown.
     func testInfoDecodesTheDiskResizeCapability() throws {
         let current = try JSONDecoder().decode(
             GuestReply.self,
-            from: Data(#"{"type":"info","disk_resize":"unavailable"}"#.utf8))
-        XCTAssertEqual(current.diskResize, "unavailable")
+            from: Data(#"{"type":"info","disk_resize":"ready"}"#.utf8))
+        XCTAssertEqual(current.diskResize, "ready")
 
         let legacy = try JSONDecoder().decode(
             GuestReply.self, from: Data(#"{"type":"info","kernel":"6.1"}"#.utf8))

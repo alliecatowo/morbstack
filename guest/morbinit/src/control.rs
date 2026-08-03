@@ -28,34 +28,26 @@ const MAGIC: &[u8; 4] = b"MRB0";
 /// can't be used to force a huge allocation.
 const MAX_PAYLOAD: u32 = 1 << 20;
 
-/// Guest capability for the future host FSEvents delivery contract.
+/// Guest capability for the authenticated host-edit notification receiver.
 ///
-/// This is intentionally a negative, additive capability rather than a fake control
-/// request. Linux inotify queues are owned by the kernel and there is no userspace API
-/// for injecting host-originated events into arbitrary watcher descriptors. Until the
-/// guest has an explicit kernel/filesystem endpoint *and* a bounded event transport,
-/// `morbinit` must report `unavailable` rather than implying VirtioFS supports hot
-/// reload. See docs/protocol.md §5.4.
+/// The receiver is deliberately not a synthetic inotify injector. It authenticates a
+/// bounded data-plane session for an exact mounted VirtioFS root, then performs a
+/// descriptor-confined VFS metadata nudge so Linux generates an ordinary filesystem
+/// notification for workloads watching that object. See docs/protocol.md §3.6.
 pub const SHARE_EVENT_BRIDGE_CAPABILITY: &str = crate::live_share::ADVERTISED_CAPABILITY;
 
-/// The reserved schema version for a future acknowledged share-event receiver.
-///
-/// This describes the event-record shape in `docs/protocol.md` §5.4 only. It is
-/// deliberately independent of ``SHARE_EVENT_BRIDGE_CAPABILITY``: reporting version
-/// 1 while the capability remains `unavailable` does not advertise a receiver,
-/// transport, acknowledgement path, or hot-reload support. A future host must require
-/// both an exact supported version and an explicit `ready` capability before it starts
-/// an FSEvents stream.
+/// Version of the acknowledged share-event receiver contract. A host requires this
+/// exact value *and* the `ready` capability before it starts an FSEvents stream.
 pub const SHARE_EVENT_BRIDGE_CONTRACT_VERSION: i64 = crate::live_share::CONTRACT_VERSION;
 
-/// Guest capability for a future stop-only host disk-growth transaction.
+/// Guest capability for Morbstack's stop-only, grow-only disk transaction.
 ///
-/// The initramfs contains filesystem utilities, but that is not a resize protocol:
-/// the host has no explicit target/transaction request, and the guest has no way to
-/// identify the mounted filesystem, resize it safely, and prove the result back to
-/// the host. Advertise the absence so a larger `disk.img` is never mistaken for a
-/// larger Docker filesystem. See docs/protocol.md §2.2.
-pub const DISK_RESIZE_CAPABILITY: &str = "unavailable";
+/// `ready` means this guest accepts an explicit target, verifies that the mounted
+/// Docker data root is directly on `/dev/vda`, runs the appropriate online grow tool,
+/// and returns a post-fact filesystem/device proof. It is deliberately distinct from
+/// merely shipping `resize2fs` or `btrfs`: an older guest that cannot perform this
+/// exact protocol must report `unavailable`.
+pub const DISK_RESIZE_CAPABILITY: &str = "ready";
 
 /// Read one MRB0 frame from `r`, returning its JSON payload bytes.
 pub fn read_frame<R: Read>(r: &mut R) -> io::Result<Vec<u8>> {
@@ -74,7 +66,10 @@ pub fn read_frame<R: Read>(r: &mut R) -> io::Result<Vec<u8>> {
     if len > MAX_PAYLOAD {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("frame payload too large: {} bytes (cap {})", len, MAX_PAYLOAD),
+            format!(
+                "frame payload too large: {} bytes (cap {})",
+                len, MAX_PAYLOAD
+            ),
         ));
     }
 
@@ -378,9 +373,11 @@ pub fn kernel_string() -> String {
 /// to send back and whether the caller should shut down after sending it
 /// (only true for a successfully-parsed `shutdown` request).
 ///
-/// Side effects belong to the caller: this function never touches
-/// processes, disks, or power state — it only decides *what to say*, which
-/// keeps it plain, portable, and easy to unit test.
+/// Most message families are pure dispatch. `disk_resize` is the deliberate exception:
+/// it is an explicit, journal-authorized mutating operation whose control reply is the
+/// proof the host needs before it can clear its recovery record. The underlying disk
+/// helper remains separately testable; the wire dispatch merely validates the target
+/// and serializes the flat result.
 pub fn handle_request(payload: &[u8], ctx: &ControlContext) -> (Vec<u8>, bool) {
     let text = match std::str::from_utf8(payload) {
         Ok(t) => t,
@@ -413,10 +410,7 @@ pub fn handle_request(payload: &[u8], ctx: &ControlContext) -> (Vec<u8>, bool) {
                     "docker_ready",
                     Value::Bool(ctx.docker_ready.load(Ordering::SeqCst)),
                 ),
-                (
-                    "docker_data_on_disk",
-                    Value::Bool(ctx.docker_data_on_disk),
-                ),
+                ("docker_data_on_disk", Value::Bool(ctx.docker_data_on_disk)),
                 ("userland_proxy", Value::Bool(ctx.userland_proxy)),
                 ("rosetta", Value::Bool(ctx.binfmt.rosetta)),
                 (
@@ -463,6 +457,7 @@ pub fn handle_request(payload: &[u8], ctx: &ControlContext) -> (Vec<u8>, bool) {
                 false,
             ),
         },
+        "disk_resize" => (handle_disk_resize(&fields), false),
         "k8s" => (handle_k8s(&fields, ctx), false),
         "shutdown" => {
             log::log("shutdown requested by host");
@@ -475,6 +470,44 @@ pub fn handle_request(payload: &[u8], ctx: &ControlContext) -> (Vec<u8>, bool) {
     }
 }
 
+/// The explicit guest half of a durable host disk-growth transaction.
+///
+/// The target is an integer rather than a string to keep the shared MRB0 schema
+/// unambiguous. The host validates every response against its journal before treating
+/// it as complete, so this function never claims that an `ok` from `resize2fs` alone
+/// is evidence of a resized filesystem.
+fn handle_disk_resize(fields: &std::collections::HashMap<String, Value>) -> Vec<u8> {
+    let target_bytes = match fields.get("target_bytes") {
+        Some(Value::Int(value)) if *value > 0 => *value,
+        Some(Value::Int(_)) => return error_response("disk_resize target_bytes must be positive"),
+        _ => return error_response("disk_resize requires an integer \"target_bytes\" field"),
+    };
+
+    match crate::disk::grow_mounted_data(target_bytes) {
+        Ok(proof) => jsonlite::emit(&[
+            ("type", Value::Str("disk_resize".to_string())),
+            ("device", Value::Str(proof.device)),
+            ("mount_point", Value::Str(proof.mount_point)),
+            ("filesystem", Value::Str(proof.filesystem)),
+            ("device_bytes", Value::Int(proof.device_bytes)),
+            (
+                "before_filesystem_bytes",
+                Value::Int(proof.before_filesystem_bytes),
+            ),
+            (
+                "after_filesystem_bytes",
+                Value::Int(proof.after_filesystem_bytes),
+            ),
+            ("resized", Value::Bool(proof.resized)),
+            ("previously_proved", Value::Bool(proof.previously_proved)),
+        ])
+        .into_bytes(),
+        Err(error) => {
+            log::log(&format!("disk_resize refused: {}", error));
+            error_response(&error)
+        }
+    }
+}
 
 /// The `k8s` message family: `{"type":"k8s","action":"..."}`.
 ///
@@ -488,10 +521,7 @@ pub fn handle_request(payload: &[u8], ctx: &ControlContext) -> (Vec<u8>, bool) {
 /// thread — and `status` reads the monitor's cached snapshot. A control
 /// connection must never be parked behind a Kubernetes API server that is
 /// still finding its feet.
-fn handle_k8s(
-    fields: &std::collections::HashMap<String, Value>,
-    ctx: &ControlContext,
-) -> Vec<u8> {
+fn handle_k8s(fields: &std::collections::HashMap<String, Value>, ctx: &ControlContext) -> Vec<u8> {
     let action = match fields.get("action") {
         Some(Value::Str(s)) => s.as_str(),
         _ => return error_response("k8s requires a string \"action\" field"),
@@ -515,7 +545,10 @@ fn handle_k8s(
             Ok(text) => jsonlite::emit(&[
                 ("type", Value::Str("k8s_kubeconfig".to_string())),
                 ("kubeconfig", Value::Str(text)),
-                ("apiserver_port", Value::Int(crate::k8s::APISERVER_PORT as i64)),
+                (
+                    "apiserver_port",
+                    Value::Int(crate::k8s::APISERVER_PORT as i64),
+                ),
             ])
             .into_bytes(),
             Err(e) => error_response(&format!(
@@ -531,7 +564,11 @@ fn handle_k8s(
 /// The status object, shared by `status`, `enable` and `disable`.
 fn k8s_status_response(ctx: &ControlContext, note: String) -> Vec<u8> {
     let snapshot = ctx.k8s.snapshot();
-    let message = if note.is_empty() { snapshot.message } else { note };
+    let message = if note.is_empty() {
+        snapshot.message
+    } else {
+        note
+    };
     jsonlite::emit(&[
         ("type", Value::Str("k8s_status".to_string())),
         ("installed", Value::Bool(crate::k8s::is_installed())),
@@ -545,7 +582,10 @@ fn k8s_status_response(ctx: &ControlContext, note: String) -> Vec<u8> {
         ("nodes_ready", Value::Int(snapshot.nodes_ready as i64)),
         ("pods", Value::Int(snapshot.pods as i64)),
         ("pods_ready", Value::Int(snapshot.pods_ready as i64)),
-        ("apiserver_port", Value::Int(crate::k8s::APISERVER_PORT as i64)),
+        (
+            "apiserver_port",
+            Value::Int(crate::k8s::APISERVER_PORT as i64),
+        ),
         ("message", Value::Str(message)),
     ])
     .into_bytes()
@@ -691,7 +731,10 @@ fn accept_loop(listener: crate::sys::VsockListener, ctx: Arc<ControlContext>) {
             });
         if let Err(e) = spawned {
             live.fetch_sub(1, Ordering::SeqCst);
-            log::log(&format!("could not spawn control connection handler: {}", e));
+            log::log(&format!(
+                "could not spawn control connection handler: {}",
+                e
+            ));
         }
     }
 }
@@ -808,14 +851,11 @@ mod tests {
         );
         assert_eq!(fields.get("docker_ready"), Some(&Value::Bool(false)));
         assert_eq!(fields.get("tmp_alias_mounted"), Some(&Value::Bool(false)));
-        assert_eq!(
-            fields.get("docker_data_on_disk"),
-            Some(&Value::Bool(false))
-        );
+        assert_eq!(fields.get("docker_data_on_disk"), Some(&Value::Bool(false)));
         assert_eq!(fields.get("userland_proxy"), Some(&Value::Bool(true)));
         assert_eq!(
             fields.get("share_event_bridge"),
-            Some(&Value::Str("unavailable".to_string()))
+            Some(&Value::Str("ready".to_string()))
         );
         assert_eq!(
             fields.get("share_event_bridge_contract_version"),
@@ -823,7 +863,7 @@ mod tests {
         );
         assert_eq!(
             fields.get("disk_resize"),
-            Some(&Value::Str("unavailable".to_string()))
+            Some(&Value::Str("ready".to_string()))
         );
     }
 
@@ -921,8 +961,10 @@ mod tests {
     #[test]
     fn handles_clock_sync() {
         let ctx = test_ctx();
-        let (resp, shutdown) =
-            handle_request(br#"{"type":"clock_sync","unix_nanos":1730000000000000000}"#, &ctx);
+        let (resp, shutdown) = handle_request(
+            br#"{"type":"clock_sync","unix_nanos":1730000000000000000}"#,
+            &ctx,
+        );
         assert!(!shutdown);
         let fields = jsonlite::parse(std::str::from_utf8(&resp).unwrap()).unwrap();
         assert_eq!(fields.get("type"), Some(&Value::Str("ok".to_string())));
@@ -1066,8 +1108,7 @@ mod tests {
         };
 
         let ctx_for_thread = Arc::clone(&ctx);
-        let handle =
-            std::thread::spawn(move || handle_connection(&mut duplex, &ctx_for_thread));
+        let handle = std::thread::spawn(move || handle_connection(&mut duplex, &ctx_for_thread));
 
         // Stand in for the supervisor: wait for the request to be raised,
         // "stop services", then release the reply.

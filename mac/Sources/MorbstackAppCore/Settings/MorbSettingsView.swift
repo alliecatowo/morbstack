@@ -264,6 +264,10 @@ private struct TrackDResourceSettings: View {
     let model: AppModel
     let store: TrackDSettingsStore
     @State private var diskCapacity: MorbDiskCapacity.Status?
+    @State private var isGrowingDisk = false
+    @State private var diskGrowthError: String?
+    @State private var showsDiskGrowthConfirmation = false
+    @State private var diskGrowthRecoveryNeeded = false
 
     var body: some View {
         Form {
@@ -336,11 +340,39 @@ private struct TrackDResourceSettings: View {
             }
 
             Section("Storage") {
-                if let diskCapacity {
-                    LabeledContent("New disk capacity") {
-                        Text("\(diskCapacity.configuredGiB) GiB")
-                            .monospacedDigit()
+                LabeledContent("Disk capacity") {
+                    HStack(spacing: 6) {
+                        TextField(
+                            "Disk capacity",
+                            value: Binding(
+                                get: { store.draft.diskSizeGiB },
+                                set: { requested in
+                                    store.draft.diskSizeGiB = max(1, requested)
+                                    _ = store.save()
+                                }
+                            ),
+                            format: .number
+                        )
+                        .multilineTextAlignment(.trailing)
+                        .frame(width: 72)
+                        .accessibilityLabel("Disk capacity")
+                        Text("GiB")
+                            .foregroundStyle(.secondary)
+                        Stepper(
+                            "Disk capacity",
+                            value: Binding(
+                                get: { store.draft.diskSizeGiB },
+                                set: { requested in
+                                    store.draft.diskSizeGiB = max(1, requested)
+                                    _ = store.save()
+                                }
+                            ),
+                            in: 1...65_536
+                        )
+                        .labelsHidden()
                     }
+                }
+                if let diskCapacity {
                     if let currentBytes = diskCapacity.currentBytes {
                         LabeledContent("Current capacity") {
                             Text(Formatters.bytesString(currentBytes))
@@ -357,13 +389,39 @@ private struct TrackDResourceSettings: View {
                             .textSelection(.enabled)
                     }
                 } else {
-                    LabeledContent("New disk capacity") {
-                        Text("\(store.draft.diskSizeGiB) GiB")
-                            .monospacedDigit()
-                    }
                     Text("Checking the existing disk image…")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                }
+
+                if needsDiskGrowth {
+                    Button("Grow Disk…", systemImage: "arrow.up.right") {
+                        diskGrowthError = nil
+                        showsDiskGrowthConfirmation = true
+                    }
+                    .disabled(model.engine.isRunning || isGrowingDisk)
+
+                    if model.engine.isRunning {
+                        Text("Stop the engine before growing its disk. Morbstack will start it only to verify the filesystem expansion.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if isGrowingDisk {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Growing disk and verifying its filesystem…")
+                    }
+                    .accessibilityElement(children: .combine)
+                }
+
+                if let diskGrowthError {
+                    Label(diskGrowthError, systemImage: "exclamationmark.triangle")
+                        .font(.footnote)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
@@ -372,6 +430,46 @@ private struct TrackDResourceSettings: View {
         .formStyle(.automatic)
         .task(id: store.draft.diskSizeGiB) {
             diskCapacity = MorbDiskCapacity.inspect(configuredGiB: store.draft.diskSizeGiB)
+            diskGrowthRecoveryNeeded = (try? MorbDiskGrowth.loadJournal()) != nil
+        }
+        .confirmationDialog(
+            "Grow VM Disk?",
+            isPresented: $showsDiskGrowthConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Grow to \(store.draft.diskSizeGiB) GiB") {
+                growDisk()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(
+                "Morbstack will extend the existing disk, start the VM long enough to grow its Docker filesystem, and verify the result. Disk growth can’t be undone."
+            )
+        }
+    }
+
+    private var needsDiskGrowth: Bool {
+        diskCapacity?.state == .increaseRequiresGuestResize
+            || diskGrowthRecoveryNeeded
+    }
+
+    private func growDisk() {
+        guard !isGrowingDisk, store.save() else { return }
+        isGrowingDisk = true
+        diskGrowthError = nil
+        let targetGiB = store.draft.diskSizeGiB
+        Task { @MainActor in
+            defer { isGrowingDisk = false }
+            do {
+                try await model.daemon.growDisk(targetGiB: targetGiB)
+                diskCapacity = MorbDiskCapacity.inspect(configuredGiB: targetGiB)
+                diskGrowthRecoveryNeeded = (try? MorbDiskGrowth.loadJournal()) != nil
+                await model.refreshEngine()
+            } catch {
+                diskGrowthError = MorbErrorMessage.text(for: error)
+                diskCapacity = MorbDiskCapacity.inspect(configuredGiB: targetGiB)
+                diskGrowthRecoveryNeeded = (try? MorbDiskGrowth.loadJournal()) != nil
+            }
         }
     }
 

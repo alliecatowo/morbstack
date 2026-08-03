@@ -59,6 +59,7 @@
 use crate::log;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 /// The guest's raw data disk, as attached by morbstackd on the host side.
 pub const DATA_DISK: &str = "/dev/vda";
@@ -67,6 +68,32 @@ pub const DATA_DISK: &str = "/dev/vda";
 /// private mountpoint we then bind into place) means dockerd's layer store
 /// lands on real storage with no extra plumbing.
 pub const DOCKER_DATA_ROOT: &str = "/var/lib/docker";
+
+/// The device/filesystem facts returned after an explicit host-authorized grow.
+///
+/// This is intentionally a flat value because MRB0 accepts only flat JSON objects.
+/// It is a proof for the host to validate against its durable journal, not a request
+/// to trust a bare command exit status.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResizeProof {
+    pub device: String,
+    pub mount_point: String,
+    pub filesystem: String,
+    pub device_bytes: i64,
+    pub before_filesystem_bytes: i64,
+    pub after_filesystem_bytes: i64,
+    pub resized: bool,
+    /// `true` only when a previous successful grow left a durable receipt on this
+    /// same filesystem. This closes the crash window after a grow tool succeeds but
+    /// before the host can record its MRB0 reply.
+    pub previously_proved: bool,
+}
+
+/// `disk_resize` is a mutating control operation. The host normally has only one
+/// control client, but serializing here makes a duplicated/retried request prove one
+/// whole state transition at a time instead of running two filesystem tools against
+/// the same mounted data root.
+static DISK_GROW_LOCK: Mutex<()> = Mutex::new(());
 
 /// How much of the device has to read back as zeros before we are willing
 /// to call it blank and format it.
@@ -450,7 +477,10 @@ pub fn provision() -> bool {
             format_and_mount()
         }
         DiskState::Formatted => {
-            log::log(&format!("{} already holds data — mounting as-is", DATA_DISK));
+            log::log(&format!(
+                "{} already holds data — mounting as-is",
+                DATA_DISK
+            ));
             mount_existing()
         }
     };
@@ -756,10 +786,428 @@ pub fn flush_docker_data(on_disk: bool) {
     crate::sys::sync();
 }
 
+// ---------------------------------------------------------------------------
+// Explicit grow-only transaction (Linux guest only)
+// ---------------------------------------------------------------------------
+
+/// The relevant entry from `/proc/mounts`, reduced to the identity facts a disk
+/// growth operation must check before executing any filesystem tool.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MountedFilesystem {
+    source: String,
+    mount_point: String,
+    filesystem: String,
+}
+
+/// Decodes Linux's octal escaping in `/proc/mounts` (for example `\\040` for a
+/// space). We do not accept a malformed escape as an equivalent path: a grow action
+/// is authorised for one literal mount point, so ambiguity fails closed.
+fn decode_mount_field(input: &str) -> Option<String> {
+    let mut out = String::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'\\' {
+            out.push(bytes[index] as char);
+            index += 1;
+            continue;
+        }
+        if index + 3 >= bytes.len()
+            || !bytes[index + 1..index + 4]
+                .iter()
+                .all(|byte| (b'0'..=b'7').contains(byte))
+        {
+            return None;
+        }
+        let value = (bytes[index + 1] - b'0') * 64
+            + (bytes[index + 2] - b'0') * 8
+            + (bytes[index + 3] - b'0');
+        out.push(value as char);
+        index += 4;
+    }
+    Some(out)
+}
+
+/// Locates the exact mounted filesystem at `/var/lib/docker`; never picks an
+/// ancestor, a bind mount, or a similarly named path.
+fn mounted_data_filesystem(mounts: &str) -> Option<MountedFilesystem> {
+    for line in mounts.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() < 3 {
+            continue;
+        }
+        let source = decode_mount_field(fields[0])?;
+        let mount_point = decode_mount_field(fields[1])?;
+        let filesystem = decode_mount_field(fields[2])?;
+        if mount_point == DOCKER_DATA_ROOT {
+            return Some(MountedFilesystem {
+                source,
+                mount_point,
+                filesystem,
+            });
+        }
+    }
+    None
+}
+
+/// Parses the POSIX `df -Pk` capacity column (1024-byte blocks) into bytes.
+/// Split from command execution because output handling is part of the safety proof
+/// and deserves portable tests.
+fn parse_df_capacity_bytes(output: &str) -> Option<i64> {
+    let line = output
+        .lines()
+        .skip(1)
+        .find(|line| !line.trim().is_empty())?;
+    let fields: Vec<&str> = line.split_whitespace().collect();
+    let kibibytes = fields.get(1)?.parse::<i64>().ok()?;
+    kibibytes.checked_mul(1024).filter(|value| *value > 0)
+}
+
+/// Guest-side durable acknowledgement of a successful grow. The host retains the
+/// authoritative transaction journal; this tiny receipt exists only to make that
+/// journal recoverable if the guest completed its filesystem operation and the host
+/// crashed before it could persist the returned proof.
+#[cfg(target_os = "linux")]
+const GROW_RECEIPT_DIRECTORY: &str = "/var/lib/docker/.morbstack";
+#[cfg(target_os = "linux")]
+const GROW_RECEIPT_PATH: &str = "/var/lib/docker/.morbstack/disk-grow-v1";
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GrowReceipt {
+    phase: GrowReceiptPhase,
+    target_bytes: i64,
+    filesystem: String,
+    device_bytes: i64,
+    before_filesystem_bytes: i64,
+    after_filesystem_bytes: i64,
+}
+
+/// The receipt is a tiny write-ahead log rather than merely a completion marker.
+/// If PID 1 crashes after `resize2fs` succeeds but before it can record its reply,
+/// the durable `prepared` capacity lets the next boot prove that the filesystem did
+/// in fact become larger. Without that intent record, a retry would see an already
+/// grown filesystem and have no sound way to distinguish it from an unrelated state.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GrowReceiptPhase {
+    Prepared,
+    Completed,
+}
+
+#[cfg(target_os = "linux")]
+impl GrowReceiptPhase {
+    fn token(self) -> &'static str {
+        match self {
+            Self::Prepared => "prepared",
+            Self::Completed => "completed",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "prepared" => Some(Self::Prepared),
+            "completed" => Some(Self::Completed),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn load_grow_receipt() -> Option<GrowReceipt> {
+    let text = std::fs::read_to_string(GROW_RECEIPT_PATH).ok()?;
+    let fields: Vec<&str> = text.split_whitespace().collect();
+    if fields.len() != 7 || fields[0] != "MRBDISKGROW2" {
+        return None;
+    }
+    let phase = GrowReceiptPhase::parse(fields[1])?;
+    let target_bytes = fields[2].parse().ok()?;
+    let device_bytes = fields[4].parse().ok()?;
+    let before_filesystem_bytes = fields[5].parse().ok()?;
+    let after_filesystem_bytes = fields[6].parse().ok()?;
+    if target_bytes <= 0
+        || device_bytes <= 0
+        || before_filesystem_bytes <= 0
+        || after_filesystem_bytes < before_filesystem_bytes
+    {
+        return None;
+    }
+    Some(GrowReceipt {
+        phase,
+        target_bytes,
+        filesystem: fields[3].to_string(),
+        device_bytes,
+        before_filesystem_bytes,
+        after_filesystem_bytes,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn store_grow_receipt(receipt: &GrowReceipt) -> Result<(), String> {
+    use std::fs::{self, File, OpenOptions};
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    fs::create_dir_all(GROW_RECEIPT_DIRECTORY)
+        .map_err(|e| format!("could not create disk-grow receipt directory: {}", e))?;
+    // `create_new` refuses an attacker-controlled final name, while a PID-specific
+    // temporary avoids ever following or truncating a stale `.tmp` from a crash.
+    // `rename` replaces the final receipt atomically rather than following a link.
+    let temporary = format!("{}.tmp.{}", GROW_RECEIPT_PATH, std::process::id());
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temporary)
+        .map_err(|e| format!("could not create disk-grow receipt: {}", e))?;
+    write!(
+        file,
+        "MRBDISKGROW2 {} {} {} {} {} {}\n",
+        receipt.phase.token(),
+        receipt.target_bytes,
+        receipt.filesystem,
+        receipt.device_bytes,
+        receipt.before_filesystem_bytes,
+        receipt.after_filesystem_bytes,
+    )
+    .map_err(|e| format!("could not write disk-grow receipt: {}", e))?;
+    file.sync_all()
+        .map_err(|e| format!("could not sync disk-grow receipt: {}", e))?;
+    fs::rename(&temporary, GROW_RECEIPT_PATH)
+        .map_err(|e| format!("could not install disk-grow receipt: {}", e))?;
+    File::open(GROW_RECEIPT_DIRECTORY)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|e| format!("could not sync disk-grow receipt directory: {}", e))
+}
+
+#[cfg(target_os = "linux")]
+fn block_device_bytes() -> Result<i64, String> {
+    let sectors = std::fs::read_to_string("/sys/class/block/vda/size")
+        .map_err(|e| format!("could not read /sys/class/block/vda/size: {}", e))?
+        .trim()
+        .parse::<i64>()
+        .map_err(|e| format!("could not parse /sys/class/block/vda/size: {}", e))?;
+    sectors
+        .checked_mul(512)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| "invalid /dev/vda capacity from sysfs".to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn filesystem_capacity_bytes() -> Result<i64, String> {
+    use std::process::{Command, Stdio};
+
+    let output = Command::new("df")
+        .args(["-Pk", DOCKER_DATA_ROOT])
+        .env("PATH", crate::supervisor::GUEST_PATH)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("could not execute df for {}: {}", DOCKER_DATA_ROOT, e))?;
+    if !output.status.success() {
+        return Err(format!(
+            "df for {} failed ({})",
+            DOCKER_DATA_ROOT, output.status
+        ));
+    }
+    let text =
+        String::from_utf8(output.stdout).map_err(|_| "df returned non-UTF-8 output".to_string())?;
+    parse_df_capacity_bytes(&text)
+        .ok_or_else(|| format!("could not parse df capacity for {}", DOCKER_DATA_ROOT))
+}
+
+#[cfg(target_os = "linux")]
+fn run_filesystem_grow(filesystem: &str) -> Result<(), String> {
+    use std::process::{Command, Stdio};
+
+    let mut command = match filesystem {
+        "ext4" => {
+            let binary = which("resize2fs")
+                .ok_or_else(|| "resize2fs is not available in this guest".to_string())?;
+            let mut command = Command::new(binary);
+            command.arg(DATA_DISK);
+            command
+        }
+        "btrfs" => {
+            let binary =
+                which("btrfs").ok_or_else(|| "btrfs is not available in this guest".to_string())?;
+            let mut command = Command::new(binary);
+            command.args(["filesystem", "resize", "max", DOCKER_DATA_ROOT]);
+            command
+        }
+        other => return Err(format!("unsupported mounted filesystem {}", other)),
+    };
+    let status = command
+        .env("PATH", crate::supervisor::GUEST_PATH)
+        .stdin(Stdio::null())
+        .status()
+        .map_err(|e| format!("could not start filesystem grow tool: {}", e))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("filesystem grow tool exited with {}", status))
+    }
+}
+
+/// Performs the guest half of Morbstack's explicit disk-growth transaction.
+///
+/// The host first proves the VM is stopped, then journals and extends its RAW image.
+/// This function refuses to act unless the *running guest* now sees precisely that
+/// target on `/dev/vda`, and unless `/var/lib/docker` is mounted directly from that
+/// device as ext4 or btrfs. It captures capacity before and after the filesystem tool
+/// so the host receives evidence of the actual result rather than a success-shaped
+/// promise. This may safely report `resized: false` on a journal-recovery retry only
+/// when the guest has a durable receipt from the earlier successful grow.
+#[cfg(target_os = "linux")]
+pub fn grow_mounted_data(target_bytes: i64) -> Result<ResizeProof, String> {
+    if target_bytes <= 0 {
+        return Err("disk_resize requires a positive target_bytes".to_string());
+    }
+    let _guard = DISK_GROW_LOCK
+        .lock()
+        .map_err(|_| "disk resize lock was poisoned".to_string())?;
+
+    let mounts = std::fs::read_to_string("/proc/mounts")
+        .map_err(|e| format!("could not read /proc/mounts: {}", e))?;
+    let mounted = mounted_data_filesystem(&mounts)
+        .ok_or_else(|| format!("{} is not mounted", DOCKER_DATA_ROOT))?;
+    if mounted.source != DATA_DISK {
+        return Err(format!(
+            "{} is mounted from {}, not {}; refusing resize",
+            DOCKER_DATA_ROOT, mounted.source, DATA_DISK
+        ));
+    }
+    if mounted.filesystem != "ext4" && mounted.filesystem != "btrfs" {
+        return Err(format!(
+            "{} uses {}, not an expandable Morbstack filesystem",
+            DOCKER_DATA_ROOT, mounted.filesystem
+        ));
+    }
+
+    let device_bytes = block_device_bytes()?;
+    if device_bytes != target_bytes {
+        return Err(format!(
+            "{} reports {} bytes, but host authorised {} bytes",
+            DATA_DISK, device_bytes, target_bytes
+        ));
+    }
+    let before = filesystem_capacity_bytes()?;
+    let prior_receipt = load_grow_receipt();
+    if let Some(receipt) = prior_receipt.as_ref() {
+        if receipt.target_bytes == target_bytes
+            && receipt.filesystem == mounted.filesystem
+            && receipt.device_bytes == device_bytes
+        {
+            let was_completed = receipt.phase == GrowReceiptPhase::Completed
+                && before >= receipt.after_filesystem_bytes;
+            let grew_after_preparation = before > receipt.before_filesystem_bytes;
+            if was_completed || grew_after_preparation {
+                // If an earlier host crash cut off the MRB0 reply, a prepared receipt
+                // plus a strictly larger measured filesystem is the durable proof.
+                // Promote it before replying so another crash remains recoverable.
+                if !was_completed {
+                    store_grow_receipt(&GrowReceipt {
+                        phase: GrowReceiptPhase::Completed,
+                        target_bytes,
+                        filesystem: mounted.filesystem.clone(),
+                        device_bytes,
+                        before_filesystem_bytes: receipt.before_filesystem_bytes,
+                        after_filesystem_bytes: before,
+                    })?;
+                }
+                return Ok(ResizeProof {
+                    device: mounted.source,
+                    mount_point: mounted.mount_point,
+                    filesystem: mounted.filesystem,
+                    device_bytes,
+                    before_filesystem_bytes: before,
+                    after_filesystem_bytes: before,
+                    resized: false,
+                    previously_proved: true,
+                });
+            }
+        }
+    }
+    // This receipt is the guest's write-ahead record. It must reach stable storage
+    // before the filesystem tool runs, otherwise a post-tool crash would leave no
+    // recoverable proof that the capacity transition occurred.
+    store_grow_receipt(&GrowReceipt {
+        phase: GrowReceiptPhase::Prepared,
+        target_bytes,
+        filesystem: mounted.filesystem.clone(),
+        device_bytes,
+        before_filesystem_bytes: before,
+        after_filesystem_bytes: before,
+    })?;
+    run_filesystem_grow(&mounted.filesystem)?;
+    let after = filesystem_capacity_bytes()?;
+    if after < before {
+        return Err(format!(
+            "filesystem capacity fell from {} to {} bytes after resize; refusing proof",
+            before, after
+        ));
+    }
+    let resized = after > before;
+    if !resized {
+        return Err(
+            "filesystem grow completed without increasing capacity and no prior durable proof exists"
+                .to_string(),
+        );
+    }
+    store_grow_receipt(&GrowReceipt {
+        phase: GrowReceiptPhase::Completed,
+        target_bytes,
+        filesystem: mounted.filesystem.clone(),
+        device_bytes,
+        before_filesystem_bytes: before,
+        after_filesystem_bytes: after,
+    })?;
+    Ok(ResizeProof {
+        device: mounted.source,
+        mount_point: mounted.mount_point,
+        filesystem: mounted.filesystem,
+        device_bytes,
+        before_filesystem_bytes: before,
+        after_filesystem_bytes: after,
+        resized,
+        previously_proved: false,
+    })
+}
+
+/// Keeps the portable control codec testable on macOS without pretending the host
+/// filesystem can resize the Linux guest's `/dev/vda`.
+#[cfg(not(target_os = "linux"))]
+pub fn grow_mounted_data(_target_bytes: i64) -> Result<ResizeProof, String> {
+    Err("disk resize is available only inside the Linux guest".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn mounted_data_root_requires_the_exact_mount_and_decodes_proc_escaping() {
+        let mounts = "/dev/vda /var/lib/docker ext4 rw 0 0\n\
+            /dev/vdb /var/lib/docker-old ext4 rw 0 0\n\
+            host\\040share /workspace virtiofs rw 0 0\n";
+        let mounted = mounted_data_filesystem(mounts).expect("data mount");
+        assert_eq!(mounted.source, "/dev/vda");
+        assert_eq!(mounted.mount_point, DOCKER_DATA_ROOT);
+        assert_eq!(mounted.filesystem, "ext4");
+        assert_eq!(
+            decode_mount_field("host\\040share"),
+            Some("host share".to_string())
+        );
+        assert_eq!(decode_mount_field("bad\\0x0"), None);
+    }
+
+    #[test]
+    fn df_capacity_parser_uses_total_kibibytes_not_used_or_available_space() {
+        let output = "Filesystem 1024-blocks Used Available Capacity Mounted on\n\
+            /dev/vda 67108864 4096 67104768 1% /var/lib/docker\n";
+        assert_eq!(parse_df_capacity_bytes(output), Some(68_719_476_736));
+        assert_eq!(parse_df_capacity_bytes("Filesystem 1024-blocks\n"), None);
+    }
 
     #[test]
     fn an_all_zero_probe_window_is_blank() {

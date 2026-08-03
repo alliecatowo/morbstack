@@ -37,7 +37,7 @@ let usage = """
       version      Print CLI and daemon versions
       doctor       Diagnose the host; works without the daemon
       diagnose     Create a redacted, reviewable support bundle; never starts the daemon
-      disk         Inspect VM disk capacity and safe resize status; never changes it
+      disk         Inspect or grow VM disk capacity with an explicit target
       ports        Check loopback port availability; never reserves or starts the daemon
       reset-disk   Delete the Docker data disk and start over (destructive)
       mcp          Model Context Protocol server; read-only unless granted
@@ -84,7 +84,8 @@ let usage = """
       service enable         Register the signed app's per-user LaunchAgent
       service disable        Unregister it; does not stop a manually started daemon
       service settings       Open System Settings > Login Items explicitly
-      disk status            Show VM disk capacity and whether a configured change is safe
+      disk status            Show VM disk capacity and safe growth status
+      disk grow <GiB>        Grow an existing disk (never shrink); verifies the guest filesystem
       ports check --tcp <port>
       ports check --udp <port>
                              Check one or more loopback endpoints before a Docker
@@ -369,40 +370,87 @@ case "doctor":
 
 case "disk":
     let action = extraArguments.first ?? "status"
-    guard extraArguments.count == 1 || extraArguments.isEmpty else {
-        fail("disk accepts one action: status", code: 2)
-    }
-    guard action == "status" else {
-        fail("unknown disk action `\(action)`; expected status", code: 2)
-    }
-
-    let config: MorbConfig
-    do {
-        config = try MorbConfig.load()
-    } catch {
-        fail((error as? MorbError)?.description ?? error.localizedDescription, code: 2)
-    }
-    let capacity = MorbDiskCapacity.inspect(configuredGiB: config.diskSizeGiB)
-    let fields: [String: AnyCodableValue] = [
-        "path": .string(capacity.imagePath),
-        "configured_gib": .int(capacity.configuredGiB),
-        "configured_bytes": .int(Int(capacity.configuredBytes)),
-        "current_bytes": capacity.currentBytes.map { .int(Int($0)) } ?? .null,
-        "state": .string(capacity.state.rawValue),
-        "message": .string(capacity.summary),
-        "inspection_error": capacity.inspectionError.map(AnyCodableValue.string) ?? .null,
-    ]
-    finish(.success(fields)) { _ in
-        printAligned([
-            ("disk image", capacity.imagePath),
-            ("configured", "\(capacity.configuredGiB) GiB"),
-            ("current", capacity.currentBytes.map { "\($0) bytes" } ?? "not created"),
-            ("resize", capacity.state.rawValue),
-        ])
-        out("\n  \(capacity.summary)")
-        if let inspectionError = capacity.inspectionError {
-            out("  \(inspectionError)")
+    switch action {
+    case "status":
+        guard extraArguments.count == 1 || extraArguments.isEmpty else {
+            fail("disk status accepts no additional arguments", code: 2)
         }
+        let config: MorbConfig
+        do {
+            config = try MorbConfig.load()
+        } catch {
+            fail((error as? MorbError)?.description ?? error.localizedDescription, code: 2)
+        }
+        let capacity = MorbDiskCapacity.inspect(configuredGiB: config.diskSizeGiB)
+        let fields: [String: AnyCodableValue] = [
+            "path": .string(capacity.imagePath),
+            "configured_gib": .int(capacity.configuredGiB),
+            "configured_bytes": .int(Int(capacity.configuredBytes)),
+            "current_bytes": capacity.currentBytes.map { .int(Int($0)) } ?? .null,
+            "state": .string(capacity.state.rawValue),
+            "message": .string(capacity.summary),
+            "inspection_error": capacity.inspectionError.map(AnyCodableValue.string) ?? .null,
+        ]
+        finish(.success(fields)) { _ in
+            printAligned([
+                ("disk image", capacity.imagePath),
+                ("configured", "\(capacity.configuredGiB) GiB"),
+                ("current", capacity.currentBytes.map { "\($0) bytes" } ?? "not created"),
+                ("resize", capacity.state.rawValue),
+            ])
+            out("\n  \(capacity.summary)")
+            if let inspectionError = capacity.inspectionError {
+                out("  \(inspectionError)")
+            }
+        }
+
+    case "grow":
+        guard extraArguments.count == 2, let targetGiB = Int(extraArguments[1]), targetGiB > 0 else {
+            fail("usage: morb disk grow <positive-GiB>", code: 2)
+        }
+        guard targetGiB <= Int(Int64.max / MorbDiskCapacity.bytesPerGiB) else {
+            fail("disk target is too large", code: 2)
+        }
+
+        let targetCapacity = MorbDiskCapacity.inspect(configuredGiB: targetGiB)
+        do {
+            if let journal = try MorbDiskGrowth.loadJournal() {
+                guard journal.targetBytes == targetCapacity.configuredBytes else {
+                    fail(
+                        "a disk-growth recovery is pending for \(journal.targetBytes) bytes; retry that exact target",
+                        code: 2)
+                }
+            } else {
+                switch targetCapacity.state {
+                case .decreaseUnsupported:
+                    fail("Morbstack never shrinks an existing VM disk", code: 2)
+                case .unavailable:
+                    fail(targetCapacity.summary, code: 2)
+                case .willCreate, .matchesConfiguration, .increaseRequiresGuestResize:
+                    break
+                }
+            }
+
+            let loaded = try MorbConfig.load()
+            var requested = loaded
+            requested.diskSizeGiB = targetGiB
+            let changed = MorbConfig.changedKeys(from: loaded, to: requested)
+            if !changed.isEmpty {
+                try requested.savePreservingFile(expected: loaded, changing: changed)
+            }
+        } catch {
+            fail((error as? MorbError)?.description ?? error.localizedDescription, code: 2)
+        }
+
+        let response = callDaemon(
+            DaemonRequest(cmd: "disk-grow", args: ["target_gib": String(targetGiB)]), timeout: 120)
+        finish(response) { data in
+            let target = data["target_gib"]?.displayString ?? "\(targetGiB)"
+            out("Disk growth verified at \(target) GiB.")
+        }
+
+    default:
+        fail("unknown disk action `\(action)`; expected status or grow", code: 2)
     }
 
 case "ports":

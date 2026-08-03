@@ -180,19 +180,71 @@ public struct GuestReply: Codable, Equatable, Sendable {
 /// `unixNanos` is only populated for `clock_sync`; it is omitted from the wire form
 /// for every other message type.
 public struct GuestRequest: Codable, Equatable, Sendable {
-    /// `ping`, `info`, `clock_sync` or `shutdown`.
+    /// `ping`, `info`, `clock_sync`, `disk_resize` or `shutdown`.
     public var type: String
     /// Host wall clock for `clock_sync`.
     public var unixNanos: Int64?
+    /// The exact RAW capacity the guest must observe before it may resize the
+    /// filesystem mounted at `/var/lib/docker`. Only populated for `disk_resize`.
+    public var targetBytes: Int64?
 
-    public init(type: String, unixNanos: Int64? = nil) {
+    public init(type: String, unixNanos: Int64? = nil, targetBytes: Int64? = nil) {
         self.type = type
         self.unixNanos = unixNanos
+        self.targetBytes = targetBytes
     }
 
     enum CodingKeys: String, CodingKey {
         case type
         case unixNanos = "unix_nanos"
+        case targetBytes = "target_bytes"
+    }
+}
+
+/// A post-fact statement from the guest's explicit mounted-filesystem grow action.
+///
+/// The host accepts this only when it also matches the durable RAW-image journal;
+/// see ``MorbDiskGrowth/validateGuestProof(_:journal:)``. Keeping it separate from
+/// ``GuestReply`` prevents unrelated control callers from receiving a bag of optional
+/// disk fields and makes the transaction response impossible to mistake for `info`.
+public struct GuestDiskResizeProof: Codable, Equatable, Sendable {
+    public let type: String
+    public let device: String
+    public let mountPoint: String
+    public let filesystem: String
+    public let deviceBytes: Int64
+    public let beforeFilesystemBytes: Int64
+    public let afterFilesystemBytes: Int64
+    public let resized: Bool
+    /// `true` when the guest is replaying a durable receipt from a grow that
+    /// completed before a host crash could record its MRB0 proof.
+    public let previouslyProved: Bool
+    public let message: String?
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case device
+        case mountPoint = "mount_point"
+        case filesystem
+        case deviceBytes = "device_bytes"
+        case beforeFilesystemBytes = "before_filesystem_bytes"
+        case afterFilesystemBytes = "after_filesystem_bytes"
+        case resized
+        case previouslyProved = "previously_proved"
+        case message
+    }
+
+    /// Converts the wire response into the journal's deliberately host-owned schema.
+    public var journalProof: MorbDiskGrowth.GuestProof {
+        MorbDiskGrowth.GuestProof(
+            device: device,
+            mountPoint: mountPoint,
+            filesystem: filesystem,
+            deviceBytes: deviceBytes,
+            beforeFilesystemBytes: beforeFilesystemBytes,
+            afterFilesystemBytes: afterFilesystemBytes,
+            resized: resized,
+            previouslyProved: previouslyProved)
     }
 }
 
@@ -293,6 +345,28 @@ public final class GuestControl {
     public func shutdown(timeout: TimeInterval = 10) throws {
         let reply = try send(GuestRequest(type: "shutdown"), timeout: timeout)
         guard reply.type == "ok" else { throw Self.unexpected(reply, expected: "ok") }
+    }
+
+    /// Runs the guest half of a journalled grow-only transaction.
+    ///
+    /// `targetBytes` is not advisory: the guest must prove `/dev/vda` reports exactly
+    /// this capacity before it runs a filesystem tool. The caller must validate the
+    /// returned proof against the host journal before considering the operation done.
+    public func diskResize(targetBytes: Int64, timeout: TimeInterval = 45) throws -> GuestDiskResizeProof {
+        guard targetBytes > 0 else {
+            throw MorbError.config("disk resize requires a positive target capacity")
+        }
+        let payload = try JSONEncoder().encode(
+            GuestRequest(type: "disk_resize", targetBytes: targetBytes))
+        let reply = try sendRaw(payload: payload, describing: "disk_resize", timeout: timeout)
+        let proof = try JSONDecoder().decode(GuestDiskResizeProof.self, from: reply)
+        if proof.type == "error" {
+            throw MorbError.protocolViolation("guest reported: \(proof.message ?? "disk resize failed")")
+        }
+        guard proof.type == "disk_resize" else {
+            throw MorbError.protocolViolation("expected `disk_resize` reply, got `\(proof.type)`")
+        }
+        return proof
     }
 
     // MARK: - Framing
