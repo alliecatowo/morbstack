@@ -18,9 +18,9 @@ import Foundation
 /// both            raw bidirectional splice
 /// ```
 ///
-/// The port in the preamble is *guest-local*: it is the same number as the published
-/// host port, because that is what dockerd's own userland proxy listens on inside the
-/// guest.
+/// The port in the preamble is *guest-local*: bridge networking reaches dockerd's
+/// proxy on the published host port, while an opted-in guest host-network mapping
+/// reaches the declared container port directly.
 public enum StreamDial {
 
     /// How long the guest gets to answer the preamble.
@@ -33,9 +33,9 @@ public enum StreamDial {
     /// Longest reply line accepted, so a confused guest cannot stream forever.
     public static let maxReplyBytes = 256
 
-    /// Encodes the preamble that names `hostPort` as the guest-local destination.
-    public static func preamble(hostPort: Int) -> Data {
-        Data("TCP \(hostPort)\n".utf8)
+    /// Encodes the preamble that names `guestPort` as the guest-local destination.
+    public static func preamble(guestPort: Int) -> Data {
+        Data("TCP \(guestPort)\n".utf8)
     }
 
     /// Interprets the guest's reply line (terminator already stripped or not).
@@ -100,9 +100,9 @@ public enum StreamDial {
     ///
     /// The descriptor is left open and usable for splicing on success, and is *not*
     /// closed on failure — ownership stays with the caller either way.
-    public static func perform(fd: Int32, hostPort: Int, timeout: TimeInterval = replyTimeout) throws {
+    public static func perform(fd: Int32, guestPort: Int, timeout: TimeInterval = replyTimeout) throws {
         POSIXSocketSupport.suppressSIGPIPE(fd)
-        guard POSIXSocketSupport.writeAll(fd, preamble(hostPort: hostPort)) else {
+        guard POSIXSocketSupport.writeAll(fd, preamble(guestPort: guestPort)) else {
             throw MorbError.io("could not send the stream-dial preamble: \(String(cString: strerror(errno)))")
         }
         let line = try readReplyLine(fd: fd, deadline: Date().addingTimeInterval(timeout))

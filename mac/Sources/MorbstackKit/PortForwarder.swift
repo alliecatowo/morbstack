@@ -237,6 +237,7 @@ public final class PortForwarder {
         let identifier: UUID
         let tcp: [DockerExplicitTCPPortBinding]
         let udp: [DockerExplicitUDPPortBinding]
+        let guestDialPort: DockerGuestDialPort
     }
 
     /// The held lease plus the concrete bindings allocated for a dynamic create.
@@ -386,16 +387,22 @@ public final class PortForwarder {
 
     /// The immutable-at-engine-start port exposure policy selected in Settings.
     public let portExposure: MorbPortExposure
+    /// Whether an explicit `-p` declaration on guest host networking may be
+    /// bridged back to the Mac. The policy is read at daemon start with the rest of
+    /// the VM configuration, so Settings correctly requires an engine restart.
+    public let hostNetworkPortPublishing: Bool
 
     /// Creates a forwarder. Nothing happens until ``start()``.
     public init(
         vm: VMManager,
         log: MorbLog,
-        portExposure: MorbPortExposure = .localNetwork
+        portExposure: MorbPortExposure = .localNetwork,
+        hostNetworkPortPublishing: Bool = false
     ) {
         self.vm = vm
         self.log = log
         self.portExposure = portExposure
+        self.hostNetworkPortPublishing = hostNetworkPortPublishing
     }
 
     // MARK: - Observable state
@@ -508,7 +515,8 @@ public final class PortForwarder {
         guard case .reserved(let reservation) = try reservePorts(
             fixedTCP: plan.tcp,
             fixedUDP: plan.udp,
-            dynamic: [])
+            dynamic: [],
+            guestDialPort: plan.guestDialPort)
         else {
             preconditionFailure("an unconditional fixed port reservation cannot become stale")
         }
@@ -528,7 +536,8 @@ public final class PortForwarder {
         guard case .reserved(let reservation) = try reservePorts(
             fixedTCP: fixedPlan.tcp,
             fixedUDP: fixedPlan.udp,
-            dynamic: publications)
+            dynamic: publications,
+            guestDialPort: fixedPlan.guestDialPort)
         else {
             preconditionFailure("an unconditional dynamic published-port reservation cannot become stale")
         }
@@ -648,7 +657,8 @@ public final class PortForwarder {
 
         guard let plan = DockerPortPublicationPreflight.stoppedContainerFixedPortLeasePlan(
             in: inspectBody,
-            expectedContainerID: containerID)
+            expectedContainerID: containerID,
+            hostNetworkPortPublishing: hostNetworkPortPublishing)
         else {
             return nil
         }
@@ -660,6 +670,7 @@ public final class PortForwarder {
             fixedTCP: plan.tcp,
             fixedUDP: plan.udp,
             dynamic: [],
+            guestDialPort: plan.guestDialPort,
             startLeaseAssociation: association)
         {
         case .reserved(let reservation):
@@ -701,6 +712,7 @@ public final class PortForwarder {
         fixedTCP: [DockerExplicitTCPPortBinding],
         fixedUDP: [DockerExplicitUDPPortBinding],
         dynamic: [DockerDynamicPortPublication],
+        guestDialPort: DockerGuestDialPort = .publishedHostPort,
         startLeaseAssociation: StartLeaseAssociation? = nil,
         releaseOnStop: Bool = false
     ) throws -> PortLeaseReservationAttempt {
@@ -916,7 +928,11 @@ public final class PortForwarder {
             guard allTCP.count + allUDP.count == expectedPublicationCount else {
                 throw PortLeaseError.unavailable("fixed port allocation did not retain every requested listener")
             }
-            let lease = PortLease(identifier: leaseID, tcp: allTCP, udp: allUDP)
+            let lease = PortLease(
+                identifier: leaseID,
+                tcp: allTCP,
+                udp: allUDP,
+                guestDialPort: guestDialPort)
             leases[lease.identifier] = LeaseRecord(
                 lease: lease,
                 tcpListeners: tcpListeners,
@@ -937,7 +953,8 @@ public final class PortForwarder {
         let lease = PortLease(
             identifier: leaseID,
             tcp: fixedTCP + allocatedDynamicTCP,
-            udp: fixedUDP + allocatedDynamicUDP)
+            udp: fixedUDP + allocatedDynamicUDP,
+            guestDialPort: guestDialPort)
         let purpose = startLeaseAssociation == nil ? "Docker create" : "Docker start"
         log.info("reserved fixed-port lease \(leasePortDescription(lease)) for \(purpose)")
         return .reserved(DynamicPortReservation(lease: lease, publications: allocatedDynamic))
@@ -1103,6 +1120,9 @@ public final class PortForwarder {
                 hostIP: publication.hostIP,
                 hostPort: publication.hostPort,
                 containerPort: publication.containerPort,
+                guestPort: record.lease.guestDialPort.resolve(
+                    hostPort: publication.hostPort,
+                    containerPort: publication.containerPort),
                 networkProtocol: "tcp",
                 containerID: containerID,
                 containerName: String(containerID.prefix(12)))
@@ -1125,6 +1145,9 @@ public final class PortForwarder {
                 hostIP: publication.hostIP,
                 hostPort: publication.hostPort,
                 containerPort: publication.containerPort,
+                guestPort: record.lease.guestDialPort.resolve(
+                    hostPort: publication.hostPort,
+                    containerPort: publication.containerPort),
                 networkProtocol: "udp",
                 containerID: containerID,
                 containerName: String(containerID.prefix(12)))
@@ -1591,6 +1614,7 @@ public final class PortForwarder {
                     // for a lease that intentionally kept its host port reserved.
                     releaseLease(forContainerID: event.containerID, reason: "container destroyed")
                 }
+                reconcileHostNetworkLease(forContainerID: event.containerID, action: event.action)
                 guard event.affectsPublishedPorts else { continue }
                 let who = event.containerName ?? String(event.containerID.prefix(12))
                 scheduleRefresh(reason: "container \(who) \(event.action)")
@@ -1852,8 +1876,18 @@ public final class PortForwarder {
     private func apply(bindings: [DockerPortBinding], generation: Int, reason: String) {
         let tcpReconciliation = PortForwardPlan.reconcileTCPListeners(bindings, exposure: portExposure)
         let udpReconciliation = PortForwardPlan.reconcileUDPListeners(bindings, exposure: portExposure)
-        let tcpDesired = tcpReconciliation.listeners
-        let udpDesired = udpReconciliation.listeners
+        var tcpDesired = tcpReconciliation.listeners
+        var udpDesired = udpReconciliation.listeners
+
+        // Moby intentionally omits host-network mappings from `/containers/json`.
+        // Their lease is activated only after the exact Docker start response (or
+        // a corresponding lifecycle event), then remains a first-class desired
+        // listener until the container stops. Without this merge, a routine event
+        // refresh would immediately tear down a truthful Mac bridge that Moby's
+        // standard snapshot cannot describe.
+        let hostNetworkLeases = activeHostNetworkLeaseBindings()
+        for (endpoint, binding) in hostNetworkLeases.tcp { tcpDesired[endpoint] = binding }
+        for (endpoint, binding) in hostNetworkLeases.udp { udpDesired[endpoint] = binding }
 
         let newTCPConflicts = updateTCPConflicts(tcpReconciliation.conflicts)
         let newUDPConflicts = updateUDPConflicts(udpReconciliation.conflicts)
@@ -1873,6 +1907,55 @@ public final class PortForwarder {
 
         applyTCP(desired: tcpDesired, generation: generation, reason: reason)
         applyUDP(desired: udpDesired, generation: generation, reason: reason)
+    }
+
+    /// Returns the active Mac bridges Moby cannot represent in its normal published
+    /// ports snapshot. The forward maps are already the authoritative lifecycle
+    /// state: an entry appears only after a successful start handoff and disappears
+    /// synchronously when that container stops or is destroyed.
+    private func activeHostNetworkLeaseBindings() -> (
+        tcp: [DockerHostEndpoint: DockerPortBinding],
+        udp: [DockerHostEndpoint: DockerPortBinding]
+    ) {
+        lock.lock()
+        defer { lock.unlock() }
+        var tcp: [DockerHostEndpoint: DockerPortBinding] = [:]
+        var udp: [DockerHostEndpoint: DockerPortBinding] = [:]
+        for (endpoint, forward) in forwards {
+            guard let identifier = forward.leaseID,
+                  leases[identifier]?.lease.guestDialPort == .containerPort
+            else { continue }
+            tcp[endpoint] = forward.binding
+        }
+        for (endpoint, forward) in udpForwards {
+            guard let identifier = forward.leaseID,
+                  leases[identifier]?.lease.guestDialPort == .containerPort
+            else { continue }
+            udp[endpoint] = forward.binding
+        }
+        return (tcp, udp)
+    }
+
+    /// Moby's published-port snapshot deliberately says nothing about guest host
+    /// networking. Its lifecycle events still state whether the process sharing the
+    /// guest namespace is running, so use those events to pause or re-arm an already
+    /// associated opt-in bridge. Normal bridge leases continue to be reconciled from
+    /// Docker's concrete published-port list.
+    private func reconcileHostNetworkLease(forContainerID containerID: String, action: String) {
+        lock.lock()
+        let identifier = leaseByContainerID[containerID]
+        let isHostNetworkLease = identifier.flatMap { leases[$0]?.lease.guestDialPort } == .containerPort
+        lock.unlock()
+        guard let identifier, isHostNetworkLease else { return }
+
+        switch action {
+        case "start":
+            _ = promoteLease(identifier)
+        case "die", "stop", "kill", "restart":
+            deactivateLease(identifier, reason: "container \(action)")
+        default:
+            break
+        }
     }
 
     private func reconcileHeldLeases(
@@ -2177,6 +2260,7 @@ public final class PortForwarder {
     private func forwardTargetMatches(_ lhs: DockerPortBinding, _ rhs: DockerPortBinding) -> Bool {
         PortForwardPlan.endpoint(for: lhs) == PortForwardPlan.endpoint(for: rhs)
             && lhs.containerPort == rhs.containerPort
+            && lhs.guestPort == rhs.guestPort
             && lhs.networkProtocol == rhs.networkProtocol
             && lhs.containerID == rhs.containerID
     }
@@ -2328,7 +2412,7 @@ public final class PortForwarder {
             descriptor = fd
         }
         do {
-            try DatagramDial.perform(fd: descriptor, hostPort: flow.binding.hostPort)
+            try DatagramDial.perform(fd: descriptor, guestPort: flow.binding.guestPort)
         } catch {
             Darwin.close(descriptor)
             log.warn("datagram-dial to \(flow.binding.description) refused: \(error)")
@@ -2503,7 +2587,7 @@ public final class PortForwarder {
         }
 
         do {
-            try StreamDial.perform(fd: guestFD, hostPort: binding.hostPort)
+            try StreamDial.perform(fd: guestFD, guestPort: binding.guestPort)
         } catch {
             log.warn("stream-dial to \(binding.description) refused: \(error)")
             Darwin.close(guestFD)

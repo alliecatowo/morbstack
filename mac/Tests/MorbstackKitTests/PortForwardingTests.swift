@@ -245,14 +245,14 @@ final class PortForwardingTests: XCTestCase {
             Set([endpoint("0.0.0.0", 8443), endpoint("::", 8443)]))
     }
 
-    func testHostAndContainerNetworkModesLeavePortPublishingToMoby() {
+    func testHostNetworkLeavesPortPublishingToMobyUntilThePolicyIsEnabled() {
         let hostNetwork = Data(
             #"{"HostConfig":{"NetworkMode":"host","PortBindings":{"80/tcp":[{"HostPort":"8080-8082"}]}}}"#.utf8)
         let sharedContainerNetwork = Data(
             #"{"HostConfig":{"NetworkMode":"container:anchor","PortBindings":{"80/tcp":[{"HostPort":"8080"}]}}}"#.utf8)
 
-        // Moby discards `-p`/`-P` for host networking with its standard warning.
-        // The proxy must not create a Mac listener for a publication Moby ignores.
+        // The explicit host-network policy defaults off. Until it is enabled, Moby
+        // owns its standard warning and Morbstack must not bind a Mac endpoint.
         XCTAssertEqual(DockerPortPublicationPreflight.inspectContainerCreate(body: hostNetwork), .allowed)
         guard case .notDynamic = DockerPortPublicationPreflight.dynamicPortCreatePlan(in: hostNetwork) else {
             return XCTFail("host networking must remain an unmodified Engine create")
@@ -267,6 +267,51 @@ final class PortForwardingTests: XCTestCase {
             return XCTFail("container network sharing must remain an unmodified Engine create")
         }
         XCTAssertNil(DockerPortPublicationPreflight.fixedPortLeasePlan(in: sharedContainerNetwork))
+    }
+
+    func testOptedInHostNetworkUsesTheContainerPortAsItsGuestDialTarget() {
+        let fixed = Data(
+            #"{"HostConfig":{"NetworkMode":"host","PortBindings":{"80/tcp":[{"HostPort":"8080"}],"53/udp":[{"HostPort":"5353"}]}}}"#.utf8)
+        let dynamic = Data(
+            #"{"HostConfig":{"NetworkMode":"host","PortBindings":{"80/tcp":[{"HostPort":""}]}}}"#.utf8)
+
+        XCTAssertEqual(
+            DockerPortPublicationPreflight.inspectContainerCreate(
+                body: fixed,
+                hostNetworkPortPublishing: true),
+            .allowed)
+        let fixedPlan = DockerPortPublicationPreflight.fixedPortLeasePlan(
+            in: fixed,
+            hostNetworkPortPublishing: true)
+        XCTAssertEqual(fixedPlan?.guestDialPort, .containerPort)
+        XCTAssertEqual(fixedPlan?.tcp.first?.hostPort, 8080)
+        XCTAssertEqual(fixedPlan?.tcp.first?.containerPort, 80)
+        XCTAssertEqual(fixedPlan?.udp.first?.hostPort, 5353)
+        XCTAssertEqual(fixedPlan?.udp.first?.containerPort, 53)
+
+        guard case .supported(let dynamicPlan) =
+            DockerPortPublicationPreflight.dynamicPortCreatePlan(
+                in: dynamic,
+                hostNetworkPortPublishing: true)
+        else {
+            return XCTFail("an opted-in host-network dynamic mapping needs the held lease path")
+        }
+        XCTAssertEqual(dynamicPlan.fixedPlan.guestDialPort, .containerPort)
+        XCTAssertEqual(dynamicPlan.requestedPublications.first?.containerPort, 80)
+    }
+
+    func testContainerNetworkNeverEntersTheHostNetworkForwardingPath() {
+        let sharedContainerNetwork = Data(
+            #"{"HostConfig":{"NetworkMode":"container:anchor","PortBindings":{"80/tcp":[{"HostPort":"8080"}]}}}"#.utf8)
+
+        XCTAssertEqual(
+            DockerPortPublicationPreflight.inspectContainerCreate(
+                body: sharedContainerNetwork,
+                hostNetworkPortPublishing: true),
+            .allowed)
+        XCTAssertNil(DockerPortPublicationPreflight.fixedPortLeasePlan(
+            in: sharedContainerNetwork,
+            hostNetworkPortPublishing: true))
     }
 
     func testCustomBridgeNetworkKeepsTheHostPortReservationPath() {
@@ -478,8 +523,8 @@ final class PortForwardingTests: XCTestCase {
     // MARK: - Stream dial
 
     func testPreambleEncoding() {
-        XCTAssertEqual(String(decoding: StreamDial.preamble(hostPort: 8080), as: UTF8.self), "TCP 8080\n")
-        XCTAssertEqual(String(decoding: StreamDial.preamble(hostPort: 1), as: UTF8.self), "TCP 1\n")
+        XCTAssertEqual(String(decoding: StreamDial.preamble(guestPort: 8080), as: UTF8.self), "TCP 8080\n")
+        XCTAssertEqual(String(decoding: StreamDial.preamble(guestPort: 1), as: UTF8.self), "TCP 1\n")
     }
 
     func testReplyParsing() {
@@ -536,7 +581,7 @@ final class PortForwardingTests: XCTestCase {
     // MARK: - Datagram dial
 
     func testDatagramDialPreambleAndFramingPreservePacketBoundaries() throws {
-        XCTAssertEqual(String(decoding: DatagramDial.preamble(hostPort: 5353), as: UTF8.self), "UDP 5353\n")
+        XCTAssertEqual(String(decoding: DatagramDial.preamble(guestPort: 5353), as: UTF8.self), "UDP 5353\n")
 
         var sockets: [Int32] = [-1, -1]
         guard socketpair(AF_UNIX, SOCK_STREAM, 0, &sockets) == 0 else {

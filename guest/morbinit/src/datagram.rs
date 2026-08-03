@@ -11,9 +11,10 @@
 //! ```
 //!
 //! After the successful handshake the guest owns one connected UDP socket to
-//! `127.0.0.1:<port>` (dockerd's userland proxy). Frames moving in either direction
-//! are complete UDP datagrams, including zero-length datagrams. The portable parser
-//! and frame codec unit test on macOS; only the vsock listener lives under Linux.
+//! `127.0.0.1:<port>` (dockerd's bridge proxy or an opted-in host-network process).
+//! Frames moving in either direction are complete UDP datagrams, including zero-length
+//! datagrams. The portable parser and frame codec unit test on macOS; only the vsock
+//! listener lives under Linux.
 
 use std::io::{self, Read, Write};
 

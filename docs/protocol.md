@@ -425,11 +425,12 @@ guest -> host:  "OK\n"              connection established; splice begins
            or:  "ERR <reason>\n"    then the guest closes the connection
 ```
 
-- **`<port>`** is the *guest-local* port — the same number as the
-  published host port, because dockerd's own userland proxy listens on
-  that number inside the guest too. There is no host-port-to-guest-port
-  remapping at this layer; if that's ever needed it happens above this
-  protocol, not within it.
+- **`<port>`** is the *guest-local* port. For normal bridge networking it is
+  the published host port because dockerd's userland proxy listens there.
+  With `allow_host_network_port_publishing = true`, an explicit
+  `--network host -p HOST:CONTAINER` mapping instead sends `CONTAINER`; no
+  userland proxy exists in that network mode. The same protocol therefore
+  supports the two different host-to-guest mappings without a new wire format.
 - **The preamble is read one byte at a time on both the guest
   implementation (`dial.rs`) and the host implementation
   (`StreamDial.swift`)**, never buffered. Everything after the newline
@@ -595,9 +596,10 @@ guest -> host:  "OK\n" or "ERR <reason>\n"
 both directions: [u32 big-endian payload length][exactly that many payload bytes]
 ```
 
-- `<port>` is the guest-local published port, the same numeric port Docker exposed
-  on the host. `OK` is emitted only after the guest creates and connects its UDP
-  socket to `127.0.0.1:<port>`.
+- `<port>` is the guest-local target. It is the normal published host port for a
+  bridge publication, or `CONTAINER` for an opted-in `--network host -p
+  HOST:CONTAINER` mapping. `OK` is emitted only after the guest creates and
+  connects its UDP socket to `127.0.0.1:<port>`.
 - The length is 0 through 65,507 inclusive. Zero-length datagrams are valid; EOF
   before a new header is connection teardown, while EOF inside a header or payload is
   a protocol error rather than a silently truncated packet.

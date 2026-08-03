@@ -361,6 +361,32 @@ For each route, record a compact review card before calling it complete:
 | Exception | AppKit/custom code only: the missing system behavior, owner, accessibility behavior, and removal condition |
 | Evidence | Build/typecheck, real-window dimensions/appearance, keyboard/accessibility checks, and safe interaction result |
 
+### Settings route handoff: host-network port forwarding — 2026-08-03
+
+- **User task:** make a deliberate security and connectivity choice for guest
+  host-network containers; this is a durable preference, not a run-time dashboard
+  control.
+- **HIG/API read:** [Settings](https://developer.apple.com/design/human-interface-guidelines/settings),
+  [Toggles](https://developer.apple.com/design/human-interface-guidelines/toggles), and
+  [Form](https://developer.apple.com/documentation/swiftui/form).
+- **Native choice:** a labelled `Toggle` in the existing Resources `Form`'s
+  `Host Networking` section, followed by a concise secondary explanatory text. The
+  standard Settings scene, form spacing, control size, focus behavior, VoiceOver
+  name, and Tahoe treatment remain system-owned.
+- **Rejected alternative:** no custom switch, lifecycle pill, material card, or
+  inline port dashboard. The setting has one Boolean, restart-gated effect and needs
+  no bespoke visual language.
+- **Data/action behavior:** the value persists as
+  `allow_host_network_port_publishing`; after the required engine restart it permits
+  explicit `--network host -p HOST:CONTAINER` TCP and UDP mappings to bridge from
+  the Mac listener to the guest-local `CONTAINER` port. It is default-off because
+  guest host networking is otherwise not Mac-reachable through VZNAT.
+- **Evidence:** source-only implementation and focused model tests were added in
+  this change. Per the serialized validation constraint, no build, XCUITest, app
+  launch, or Computer Use inspection was run; light/dark, narrow width,
+  keyboard/VoiceOver, reduced-transparency/contrast, and real Engine verification
+  remain required before visual or runtime acceptance.
+
 ## Required evidence at handoff
 
 ### Live evidence — 2026-08-03

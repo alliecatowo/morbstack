@@ -129,6 +129,7 @@ enum TrackDConfigEditor {
             || applied.kernelCmdline != pending.kernelCmdline
             || applied.autoSuspendMinutes != pending.autoSuspendMinutes
             || applied.allowLANPortPublishing != pending.allowLANPortPublishing
+            || applied.allowHostNetworkPortPublishing != pending.allowHostNetworkPortPublishing
     }
 
     /// A one-line description of what changed, for the restart banner.
@@ -148,6 +149,9 @@ enum TrackDConfigEditor {
         }
         if applied.allowLANPortPublishing != pending.allowLANPortPublishing {
             changes.append("local-network port publishing \(pending.allowLANPortPublishing ? "on" : "off")")
+        }
+        if applied.allowHostNetworkPortPublishing != pending.allowHostNetworkPortPublishing {
+            changes.append("host-network port forwarding \(pending.allowHostNetworkPortPublishing ? "on" : "off")")
         }
         if applied.kernelPath != pending.kernelPath
             || applied.initrdPath != pending.initrdPath

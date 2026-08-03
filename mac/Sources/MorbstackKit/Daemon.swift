@@ -186,7 +186,8 @@ public final class Daemon {
         let portForwarder = PortForwarder(
             vm: vm,
             log: logger,
-            portExposure: config.allowLANPortPublishing ? .localNetwork : .loopbackOnly)
+            portExposure: config.allowLANPortPublishing ? .localNetwork : .loopbackOnly,
+            hostNetworkPortPublishing: config.allowHostNetworkPortPublishing)
         self.forwarder = portForwarder
         self.proxy = DockerProxy(vm: vm, log: logger, forwarder: portForwarder)
         self.k8s = K8sManager(vm: vm, log: logger)

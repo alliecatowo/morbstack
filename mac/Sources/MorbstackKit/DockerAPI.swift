@@ -123,6 +123,10 @@ public struct DockerPortBinding: Hashable, Sendable {
     public var hostPort: Int
     /// The port inside the container.
     public var containerPort: Int
+    /// The guest-local port the vsock dialer reaches. Bridge publications target
+    /// dockerd's proxy on `hostPort`; opted-in guest host networking targets the
+    /// process's `containerPort` directly.
+    public var guestPort: Int
     /// `tcp` or `udp`, lowercased.
     public var networkProtocol: String
     /// The full container id.
@@ -134,6 +138,7 @@ public struct DockerPortBinding: Hashable, Sendable {
         hostIP: String,
         hostPort: Int,
         containerPort: Int,
+        guestPort: Int? = nil,
         networkProtocol: String,
         containerID: String,
         containerName: String
@@ -141,6 +146,7 @@ public struct DockerPortBinding: Hashable, Sendable {
         self.hostIP = hostIP
         self.hostPort = hostPort
         self.containerPort = containerPort
+        self.guestPort = guestPort ?? hostPort
         self.networkProtocol = networkProtocol
         self.containerID = containerID
         self.containerName = containerName

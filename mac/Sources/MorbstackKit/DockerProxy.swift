@@ -156,7 +156,10 @@ public final class DockerProxy {
             relayAfterPreflight(clientFD: clientFD, createBody: nil, leaseObservation: nil)
 
         case .create(let create):
-            switch DockerPortPublicationPreflight.inspectContainerCreate(body: create.body) {
+            switch DockerPortPublicationPreflight.inspectContainerCreate(
+                body: create.body,
+                hostNetworkPortPublishing: forwarder.hostNetworkPortPublishing)
+            {
             case .rejected(let message):
                 rejectContainerCreate(
                     clientFD: clientFD,
@@ -165,7 +168,10 @@ public final class DockerProxy {
                     message: message)
 
             case .allowed:
-                switch DockerPortPublicationPreflight.dynamicPortCreatePlan(in: create.body) {
+                switch DockerPortPublicationPreflight.dynamicPortCreatePlan(
+                    in: create.body,
+                    hostNetworkPortPublishing: forwarder.hostNetworkPortPublishing)
+                {
                 case .rejected(let message):
                     rejectContainerCreate(
                         clientFD: clientFD,
@@ -188,7 +194,9 @@ public final class DockerProxy {
                 // A successful snapshot is still not enough. Hold the real listeners
                 // before the create reaches dockerd; a failed bind here has the same
                 // Docker-style error, but no guest side effect to roll back.
-                let plan = DockerPortPublicationPreflight.fixedPortLeasePlan(in: create.body)
+                let plan = DockerPortPublicationPreflight.fixedPortLeasePlan(
+                    in: create.body,
+                    hostNetworkPortPublishing: forwarder.hostNetworkPortPublishing)
                 let lease: PortForwarder.PortLease?
                 do {
                     if let plan {

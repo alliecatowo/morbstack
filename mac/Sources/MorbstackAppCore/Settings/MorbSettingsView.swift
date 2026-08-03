@@ -317,6 +317,24 @@ private struct TrackDResourceSettings: View {
                 .foregroundStyle(.secondary)
             }
 
+            Section("Host Networking") {
+                Toggle(
+                    "Forward ports requested by host-network containers",
+                    isOn: Binding(
+                        get: { store.draft.allowHostNetworkPortPublishing },
+                        set: {
+                            store.draft.allowHostNetworkPortPublishing = $0
+                            store.save()
+                        }
+                    )
+                )
+                Text(
+                    "When enabled, an explicit --network host -p HOST:CONTAINER mapping forwards the requested Mac port to CONTAINER in the guest. The service must listen on the guest loopback address or all guest interfaces. Restart the engine to apply this change."
+                )
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            }
+
             Section("Storage") {
                 if let diskCapacity {
                     LabeledContent("New disk capacity") {

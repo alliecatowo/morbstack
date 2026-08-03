@@ -83,15 +83,10 @@ pub const BUSY_REASON: &str = "busy";
 
 /// The address the dialer connects to on the host's behalf.
 ///
-/// Loopback is correct *because* dockerd runs with the userland proxy: each
-/// published port gets a real `docker-proxy` listener on `127.0.0.1:<port>`
-/// inside the guest. Without it (`--userland-proxy=false`, which
-/// `supervisor::default_services` falls back to when the helper is missing
-/// from the image) publishing is DNAT-only: the rules rewrite packets
-/// arriving from outside, nothing listens on loopback, and every dial here
-/// gets ECONNREFUSED with no hint as to why. `dial_error_reason` supplies
-/// the hint, and the MRB0 `info` reply's `userland_proxy` field lets the
-/// host see the state before anything fails.
+/// Normal bridge publications reach dockerd's `docker-proxy` listener here;
+/// an opted-in guest host-network publication reaches a process that is itself
+/// listening on loopback or all guest interfaces. Both are guest-local
+/// destinations, so the vsock protocol needs no second address grammar.
 pub const DIAL_ADDR: &str = "127.0.0.1";
 
 /// Build an `ERR <reason>\n` reply.
@@ -111,15 +106,14 @@ pub fn err_line(reason: &str) -> Vec<u8> {
 
 /// The `ERR` reason for a failed dial to `127.0.0.1:<port>`.
 ///
-/// ECONNREFUSED gets its own wording because it is the one failure whose
-/// cause is invisible from the host: "nothing is listening on loopback" is
-/// the exact symptom of dockerd running without the userland proxy, and
-/// without naming that, the host sees a published port that simply refuses
-/// every connection and no way to find out why. See `DIAL_ADDR`.
+/// ECONNREFUSED gets its own wording because the host needs to distinguish a
+/// missing guest-local listener from a transport failure. It can mean a bridge
+/// publication without `docker-proxy`, or a guest host-network process that has
+/// not bound its declared port yet, so the message deliberately does not guess.
 pub fn dial_error_reason(port: u16, e: &io::Error) -> String {
     if e.kind() == io::ErrorKind::ConnectionRefused {
         format!(
-            "connection refused on {}:{} (userland-proxy disabled?)",
+            "connection refused on {}:{} (no guest loopback listener)",
             DIAL_ADDR, port
         )
     } else {
@@ -648,7 +642,7 @@ mod tests {
         let reason = dial_error_reason(8080, &refused);
         assert_eq!(
             reason,
-            "connection refused on 127.0.0.1:8080 (userland-proxy disabled?)"
+            "connection refused on 127.0.0.1:8080 (no guest loopback listener)"
         );
         // Still one line once it is on the wire.
         let line = String::from_utf8(err_line(&reason)).unwrap();
@@ -658,8 +652,8 @@ mod tests {
 
     #[test]
     fn other_dial_failures_keep_the_generic_wording() {
-        // Only ECONNREFUSED implicates the userland proxy; blaming it for a
-        // timeout or an ENETUNREACH would send the reader somewhere useless.
+        // Only ECONNREFUSED can prove the guest-local listener is absent; a
+        // timeout or ENETUNREACH needs its ordinary operating-system wording.
         for kind in [
             io::ErrorKind::TimedOut,
             io::ErrorKind::PermissionDenied,
@@ -677,8 +671,8 @@ mod tests {
 
     #[test]
     fn the_dial_address_is_loopback() {
-        // Documented as load-bearing: it is only correct while dockerd runs
-        // with the userland proxy. See DIAL_ADDR.
+        // Documented as load-bearing for bridge proxies and host-network
+        // processes alike. See DIAL_ADDR.
         assert_eq!(DIAL_ADDR, "127.0.0.1");
     }
 

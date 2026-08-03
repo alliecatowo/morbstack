@@ -15,17 +15,17 @@ public enum DatagramDial {
     public static let maximumDatagramBytes = UDPListener.maximumDatagramBytes
     private static let frameHeaderBytes = 4
 
-    public static func preamble(hostPort: Int) -> Data {
-        Data("UDP \(hostPort)\n".utf8)
+    public static func preamble(guestPort: Int) -> Data {
+        Data("UDP \(guestPort)\n".utf8)
     }
 
     public static func perform(
         fd: Int32,
-        hostPort: Int,
+        guestPort: Int,
         timeout: TimeInterval = StreamDial.replyTimeout
     ) throws {
         POSIXSocketSupport.suppressSIGPIPE(fd)
-        guard POSIXSocketSupport.writeAll(fd, preamble(hostPort: hostPort)) else {
+        guard POSIXSocketSupport.writeAll(fd, preamble(guestPort: guestPort)) else {
             throw MorbError.io(
                 "could not send the datagram-dial preamble: \(String(cString: strerror(errno)))")
         }

@@ -251,7 +251,7 @@ public final class K8sAPIServerForward {
         }
 
         do {
-            try StreamDial.perform(fd: dialFD, hostPort: guestPort)
+            try StreamDial.perform(fd: dialFD, guestPort: guestPort)
         } catch {
             // Overwhelmingly the ordinary case rather than a fault: `kubectl` is
             // being run while the control plane is still starting, so nothing is
