@@ -74,6 +74,32 @@ final class PortForwardingTests: XCTestCase {
         XCTAssertFalse(PortForwardPlan.isForwardable(binding(ip: "not-an-ip"), exposure: .localNetwork))
     }
 
+    func testHostEndpointIdentityMatchesMobysMappedIPv6Normalization() {
+        // Moby's bridge binding path calls To4/Unmap on an IPv4-mapped HostIp.
+        // The Mac listener must use that exact same effective endpoint; otherwise a
+        // create-time lease is keyed as IPv6 while the later Engine port snapshot is
+        // keyed as IPv4, producing a spurious close/re-open cycle (or a failed bind).
+        XCTAssertEqual(
+            DockerHostAddress(dockerHostIP: "::ffff:127.0.0.1"),
+            DockerHostAddress(dockerHostIP: "127.0.0.1"))
+        XCTAssertEqual(
+            DockerHostEndpoint(hostIP: "::ffff:0.0.0.0", port: 8080),
+            DockerHostEndpoint(hostIP: "0.0.0.0", port: 8080))
+        XCTAssertEqual(
+            DockerHostAddress(dockerHostIP: "0:0:0:0:0:0:0:1"),
+            DockerHostAddress(dockerHostIP: "::1"))
+
+        let mapped = DockerPortBinding(
+            hostIP: "::ffff:127.0.0.1", hostPort: 8080, containerPort: 80,
+            networkProtocol: "udp", containerID: "abc", containerName: "dns")
+        let reported = DockerPortBinding(
+            hostIP: "127.0.0.1", hostPort: 8080, containerPort: 80,
+            networkProtocol: "udp", containerID: "abc", containerName: "dns")
+        XCTAssertEqual(
+            Set(PortForwardPlan.desiredUDPListeners([mapped], exposure: .localNetwork).keys),
+            Set(PortForwardPlan.desiredUDPListeners([reported], exposure: .localNetwork).keys))
+    }
+
     func testUDPPortsGetTheirOwnConcreteListenerPlan() throws {
         let json = Data(
             """

@@ -15,26 +15,57 @@ public enum DockerHostAddress: Hashable, Sendable {
     case ipv4(String)
     case ipv6(String)
 
-    /// Parses one Engine `HostIp` spelling. The empty spelling is Docker's IPv4
-    /// wildcard address. Host names are intentionally not accepted: Engine port
-    /// bindings describe socket addresses, not an address lookup that could change
-    /// between Docker's create reply and the host listener bind.
+    /// Parses one Engine `HostIp` spelling into the same effective endpoint Moby
+    /// publishes back through `NetworkSettings.Ports`.
+    ///
+    /// The empty spelling is Docker's IPv4 wildcard address. Host names are
+    /// intentionally not accepted: Engine port bindings describe socket addresses,
+    /// not an address lookup that could change between the create reply and the host
+    /// listener bind. IPv4-mapped IPv6 input is deliberately normalized to IPv4.
+    /// Moby performs that same `Unmap` step while it builds its effective bridge
+    /// bindings, so treating `::ffff:127.0.0.1` as an IPv6 listener here would make
+    /// the create-time lease disagree with `docker inspect`, `docker port`, and the
+    /// later event reconciliation.
     public init?(dockerHostIP: String) {
         let candidate = dockerHostIP.trimmingCharacters(in: .whitespacesAndNewlines)
         let address = candidate.isEmpty ? "0.0.0.0" : candidate
 
         var ipv4 = in_addr()
         if inet_pton(AF_INET, address, &ipv4) == 1 {
-            self = .ipv4(address)
+            self = .ipv4(Self.numericString(family: AF_INET, value: &ipv4))
             return
         }
 
         var ipv6 = in6_addr()
         if inet_pton(AF_INET6, address, &ipv6) == 1 {
-            self = .ipv6(address)
+            let bytes = withUnsafeBytes(of: ipv6) { Array($0) }
+            // IPv4-mapped IPv6 addresses are exactly 80 zero bits, 16 one bits,
+            // then the four IPv4 octets. Moby's bridge binding path calls To4/Unmap
+            // for this form, so it must share the ordinary IPv4 host socket here.
+            if bytes.prefix(10).allSatisfy({ $0 == 0 }),
+               bytes[10] == 0xff,
+               bytes[11] == 0xff
+            {
+                self = .ipv4("\(bytes[12]).\(bytes[13]).\(bytes[14]).\(bytes[15])")
+            } else {
+                self = .ipv6(Self.numericString(family: AF_INET6, value: &ipv6))
+            }
             return
         }
         return nil
+    }
+
+    /// `inet_ntop` gives endpoint keys one canonical numeric spelling. This avoids
+    /// an otherwise false duplicate between equivalent IPv6 text forms in a raw
+    /// Engine API request (for example `0:0:0:0:0:0:0:1` and `::1`).
+    private static func numericString<T>(family: Int32, value: inout T) -> String {
+        var buffer = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+        return buffer.withUnsafeMutableBufferPointer { output in
+            precondition(
+                inet_ntop(family, &value, output.baseAddress, socklen_t(output.count)) != nil,
+                "inet_ntop must format a value inet_pton already accepted")
+            return String(cString: output.baseAddress!)
+        }
     }
 
     /// The exact (or empty-normalized) spelling the Mac listener binds.
