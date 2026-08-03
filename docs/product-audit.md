@@ -124,9 +124,12 @@ guarantee.
    placeholder shell.
 4. Isolated, ephemeral agent/untrusted-code sandboxes first; then general
    Linux machines, cloud-init, SSH/editor integration and, only where the
-   service foundation supports it, advanced hardware forwarding. The planned
-   machine authority model, native route semantics, and promotion gates are in
-   [`machines.md`](machines.md); this remains an unshipped S6 capability.
+   service foundation supports it, advanced hardware forwarding. M0’s registry
+   plus the pure M0.1 source/provenance admission plan now reject unsafe or
+   expired declarations without doing I/O, but cannot acquire, verify, store,
+   boot, or present a machine. The planned machine authority model, native
+   route semantics, and promotion gates are in [`machines.md`](machines.md);
+   this remains an unshipped S6 capability.
 
 ## What OrbStack establishes as the experience bar
 

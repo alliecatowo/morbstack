@@ -1,8 +1,8 @@
 # Linux Machines
 
-Status: **M0 schema-only foundation is implemented; no machine runtime or UI exists yet.**
-The M1 blueprint below is planned architecture, not implementation evidence or a
-user-visible capability.
+Status: **M0 registry and a no-I/O M0.1 acquisition-admission boundary are
+implemented; no machine runtime or UI exists yet.** The M1 blueprint below is
+planned architecture, not implementation evidence or a user-visible capability.
 
 M0 is deliberately an inventory contract, not a partial VM feature. The pure
 [MachineRegistry.swift](../mac/Sources/MorbstackKit/MachineRegistry.swift) model
@@ -28,6 +28,33 @@ machine agent.
 - Provenance is a declaration in M0, even when its stated result is `verified`.
   M1 must independently verify publisher material and every acquired artifact
   before any base becomes attachable.
+
+### M0.1 image-acquisition admission boundary
+
+[MachineImageAdmission.swift](../mac/Sources/MorbstackKit/MachineImageAdmission.swift)
+adds a separate, pure `MachineImageAcquisitionManifest` for the first M1
+precondition. It is not an image downloader or a partially implemented Create
+path. Its strict decoder rejects unknown fields throughout the outer declaration
+and M0 image manifest, then requires:
+
+- one direct credential-free HTTPS source, expected byte count, and SHA-256 for
+  each required artifact role, with no archive fan-out or duplicate source;
+- a Sigstore-only policy whose publisher/release, verification-material digest,
+  and expiry exactly match the content-addressed M0 image declaration, plus an
+  exact issuer, signer identity, and detached-bundle source/digest;
+- an explicit host architecture fact supplied by the future supervisor, never a
+  Docker-guest label or an implicit translated-process guess; and
+- a current policy expiry, exact source-to-artifact digest agreement, and a
+  lexical owner-only storage plan beneath `~/.morbstack/data/machines/`.
+
+The layout plan names content-addressed immutable image files, a policy-digest
+staging namespace, and a separate policy receipt. It only computes those names
+and desired `0700`/`0600` modes. It does not inspect or create a directory, read
+or download a source, validate a signature, create a disk, change SSH/config,
+or construct a VM. Even a valid, native-architecture declaration returns the
+specific **acquisition and verification unavailable** state until an explicitly
+initiated M1 transaction safely creates private paths, verifies every byte and
+the Sigstore policy, and publishes an immutable base atomically.
 
 ## Decision
 
@@ -339,6 +366,7 @@ live toggle.
 | Phase | Outcome | Acceptance gate |
 | --- | --- | --- |
 | M0 — records/images | Strict manifest/registry model, content-addressed identity, expiry/provenance declaration, and secret-free desired/observed records. No payload acquisition or lifecycle surface. | No VM creation; reject bad hash, wrong architecture, missing artifact, mutable identity, unknown secret-bearing field, and record/image platform mismatch. |
+| M0.1 — acquisition admission | Strict source-bearing manifest and pure storage-layout plan bind each required role to one HTTPS source, exact byte count/digest, native architecture, Sigstore signer policy, and expiry. The only non-rejected result remains unavailable. | No network, manifest file read, directory/disk creation, signature verification, SSH/config mutation, Docker access, VM construction, or Create UI. M1 must still prove secure private-path creation, source/policy verification, atomic publish, and Docker-state isolation. |
 | M1 — isolated VM | One curated image with supervisor, disk, console, NoCloud seed, agent readiness, create/start/stop/delete. | Prove Docker VM state, disk, socket, Kubernetes, shares, and published ports stay unchanged through every machine lifecycle path. |
 | M2 — NAT/SSH | Explicit NAT, public-key review, loopback relay, host-key verification, SSH snippet, truthful retry. | Prove no non-loopback listener and no private key/user data in records, logs, diagnostics, or exports. |
 | M3 — export/shares | Stopped export/import; single-folder VirtioFS, read-only default, read-write review, share receipts. | Prove no Docker/global-share inheritance, ownership mutation, or delete path can touch base cache or selected host folder. |
