@@ -55,6 +55,7 @@ mod mounts;
 mod net;
 mod netaddr;
 mod k8s;
+mod live_share;
 mod proxy;
 mod sha256;
 mod shares;

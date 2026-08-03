@@ -840,6 +840,18 @@ an explicit `"ready"` receiver capability with a separately documented duplex,
 acknowledged transport before constructing an FSEvent stream. An absent version from an
 older guest is unsupported, not version `1` by default.
 
+The guest now compiles a validation-only schema boundary in
+`guest/morbinit/src/live_share.rs`. It rejects a wrong schema version, zero session,
+boot, or capability values, malformed IDs and paths, roots outside or equal to their
+actually mounted backing share, access-mode changes, overlapping roots, stale epochs,
+wrong sessions or boot IDs, wrong-direction records, and skipped or replayed sequence
+numbers. It neither binds a new vsock port nor authenticates a peer, creates a cache,
+mounts a filesystem, processes payloads, sends acknowledgements, or starts a watcher.
+In particular, structural validation of an opaque capability is not authentication. The
+future receiver remains unavailable until an authenticated dedicated transport and a
+durably acknowledged initial synchronization are implemented; no port is reserved by
+this scaffolding.
+
 `MorbLiveShareBridge` defines the preparatory host contract. It is deliberately
 opt-in through `live_share_paths = []`, separate from broad `shared_paths` defaults.
 Each selected root must be a strict descendant of an actually configured VirtioFS

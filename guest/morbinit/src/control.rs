@@ -36,7 +36,7 @@ const MAX_PAYLOAD: u32 = 1 << 20;
 /// guest has an explicit kernel/filesystem endpoint *and* a bounded event transport,
 /// `morbinit` must report `unavailable` rather than implying VirtioFS supports hot
 /// reload. See docs/protocol.md §5.4.
-pub const SHARE_EVENT_BRIDGE_CAPABILITY: &str = "unavailable";
+pub const SHARE_EVENT_BRIDGE_CAPABILITY: &str = crate::live_share::ADVERTISED_CAPABILITY;
 
 /// The reserved schema version for a future acknowledged share-event receiver.
 ///
@@ -46,7 +46,7 @@ pub const SHARE_EVENT_BRIDGE_CAPABILITY: &str = "unavailable";
 /// transport, acknowledgement path, or hot-reload support. A future host must require
 /// both an exact supported version and an explicit `ready` capability before it starts
 /// an FSEvents stream.
-pub const SHARE_EVENT_BRIDGE_CONTRACT_VERSION: i64 = 1;
+pub const SHARE_EVENT_BRIDGE_CONTRACT_VERSION: i64 = crate::live_share::CONTRACT_VERSION;
 
 /// Guest capability for a future stop-only host disk-growth transaction.
 ///
