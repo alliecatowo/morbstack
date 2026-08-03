@@ -242,6 +242,17 @@ private final class BuildProcessRun: @unchecked Sendable {
         // operation must be aimed at the same engine the Morbstack window observes.
         environment["DOCKER_HOST"] = "unix://\(socketPath)"
         environment.removeValue(forKey: "DOCKER_CONTEXT")
+        // `DOCKER_TLS`, `DOCKER_TLS_VERIFY`, and `DOCKER_CERT_PATH` are Docker CLI
+        // connection settings, and TLS is enabled implicitly when a TLS option is
+        // present. They make sense for a person's remote-engine shell, but conflict
+        // with this explicit local Unix-socket request. Likewise an inherited API
+        // version can make Buildx negotiate a stale client contract with the engine
+        // this window already talks to. The local-build sheet must not depend on any
+        // of those ambient shell choices.
+        environment.removeValue(forKey: "DOCKER_TLS")
+        environment.removeValue(forKey: "DOCKER_TLS_VERIFY")
+        environment.removeValue(forKey: "DOCKER_CERT_PATH")
+        environment.removeValue(forKey: "DOCKER_API_VERSION")
         // Use Docker's documented `cliPluginsExtraDirs` configuration rather than a
         // private environment-variable convention. The temporary config contains only
         // the reviewed bundled Buildx path and is removed after this one build; no
