@@ -7,7 +7,7 @@
 // and `none`: they are always present, they are never what the user came here to look
 // at, and the engine will refuse to delete them. Rather than let them sit at the top of
 // the list looking like ordinary rows with a broken delete button, they are pushed to
-// their own section, drawn at reduced emphasis, and carry a lock instead of a trash can.
+// their own section and omit removal commands altogether.
 //
 // A standard `Table` presents the two operational groups, while selection reveals the
 // chosen network's facts in the system inspector. This keeps inventory, selection, and
@@ -289,7 +289,8 @@ struct NetworksRootView: View {
                 guard !busy,
                       let selection,
                       let network = model.networks.first(where: { $0.id == selection }),
-                      !network.isBuiltIn
+                      !network.isBuiltIn,
+                      network.containers == 0
                 else { return }
                 removal = network
             }
@@ -434,7 +435,11 @@ struct NetworksRootView: View {
             if !network.isBuiltIn {
                 Divider()
                 Button("Remove…", role: .destructive) { removal = network }
-                    .disabled(busy)
+                    .disabled(network.containers > 0 || busy)
+                    .help(
+                        network.containers > 0
+                            ? "Disconnect every attached container first"
+                            : "Remove this network")
             }
         }
     }
@@ -511,7 +516,7 @@ struct NetworksRootView: View {
 
     @MainActor
     private func remove(_ network: NetworkSummary) async {
-        guard !network.isBuiltIn, !busy else { return }
+        guard !network.isBuiltIn, network.containers == 0, !busy else { return }
         busy = true
         defer { busy = false }
         do {
