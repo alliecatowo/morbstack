@@ -36,6 +36,7 @@ let usage = """
       version      Print CLI and daemon versions
       doctor       Diagnose the host; works without the daemon
       diagnose     Create a redacted, reviewable support bundle; never starts the daemon
+      ports        Check loopback port availability; never reserves or starts the daemon
       reset-disk   Delete the Docker data disk and start over (destructive)
       mcp          Model Context Protocol server; read-only unless granted
       migrate      Import images, volumes and config from another runtime
@@ -63,6 +64,10 @@ let usage = """
       context use            Make it the default context. Always asks; refuses
                              to replace another explicit default without --force
                              (never stomps — see docs/compat.md).
+      ports check --tcp <port>
+      ports check --udp <port>
+                             Check one or more loopback endpoints before a Docker
+                             publish. Results are snapshots, not reservations.
       install-cli --make-default
                              Put Morbstack's docker before an existing docker on PATH.
 
@@ -299,6 +304,77 @@ case "doctor":
         out(Doctor.renderText(report))
     }
     exit(report.healthy ? 0 : 2)
+
+case "ports":
+    // A local bind snapshot is useful before `docker run -p`, but it deliberately
+    // never goes through callDaemon/probeDaemon and never claims to reserve a port.
+    let portSubcommand: String
+    let portArguments: [String]
+    if let first = extraArguments.first, !first.hasPrefix("-") {
+        portSubcommand = first
+        portArguments = Array(extraArguments.dropFirst())
+    } else {
+        portSubcommand = "check"
+        portArguments = extraArguments
+    }
+    guard portSubcommand == "check" else {
+        fail("unknown ports subcommand `\(portSubcommand)` (expected `check`)", code: 2)
+    }
+
+    var requests: [(HostPortPreflight.Transport, Int)] = []
+    var portIndex = 0
+    while portIndex < portArguments.count {
+        let argument = portArguments[portIndex]
+        let transport: HostPortPreflight.Transport
+        let rawPort: String
+        switch argument {
+        case "--tcp", "--udp":
+            guard portIndex + 1 < portArguments.count else {
+                fail("ports check \(argument) needs a port", code: 2)
+            }
+            transport = argument == "--tcp" ? .tcp : .udp
+            rawPort = portArguments[portIndex + 1]
+            portIndex += 2
+        default:
+            if argument.hasPrefix("--tcp=") {
+                transport = .tcp
+                rawPort = String(argument.dropFirst("--tcp=".count))
+                portIndex += 1
+            } else if argument.hasPrefix("--udp=") {
+                transport = .udp
+                rawPort = String(argument.dropFirst("--udp=".count))
+                portIndex += 1
+            } else {
+                fail("unknown ports check option `\(argument)` (expected --tcp <port> or --udp <port>)", code: 2)
+            }
+        }
+        guard let port = Int(rawPort) else {
+            fail("ports check needs an integer port, got `\(rawPort)`", code: 2)
+        }
+        requests.append((transport, port))
+    }
+    guard !requests.isEmpty else {
+        fail("ports check needs at least one --tcp <port> or --udp <port>", code: 2)
+    }
+
+    let results = requests.map { HostPortPreflight.check(port: $0.1, transport: $0.0) }
+    let hasUnavailable = results.contains { $0.availability != .available }
+    if wantsJSON {
+        out((try? IPCCodec.prettyJSON(results)) ?? "[]")
+    } else {
+        for result in results {
+            let marker: String
+            switch result.availability {
+            case .available: marker = result.publication == .loopbackOnly ? "[ok]" : "[--]"
+            case .inUse, .invalid, .unavailable: marker = "[!!]"
+            }
+            out("\(marker) \(result.transport.rawValue) \(result.bindAddress):\(result.port) — \(result.detail)")
+        }
+        out("")
+        out("TCP publishes on 127.0.0.1 only; Morbstack never exposes a container port to the LAN.")
+        out("A free result is a point-in-time check, not a reservation. UDP is checked but not forwarded yet.")
+    }
+    exit(hasUnavailable ? 2 : 0)
 
 case "diagnose":
     // A support bundle is intentionally local-only. Do not route this through
