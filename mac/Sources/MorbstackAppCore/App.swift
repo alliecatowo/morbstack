@@ -476,8 +476,10 @@ struct DetailHost: View {
             }
         }
         // The one toolbar item that is true on every screen in every state. It is a
-        // standard toolbar command rather than a separately drawn control, so AppKit
-        // can collapse it with the screen's contextual actions as the window narrows.
+        // standard *secondary* toolbar command rather than a separately drawn control:
+        // the selected route owns the one primary action for its current task, while
+        // AppKit can move this universal refresh into its system overflow as the window
+        // narrows.
         .toolbar { refreshItem }
         .alert("Unable to Complete Operation", isPresented: errorIsPresented) {
             Button("OK", role: .cancel) { model.dismissError() }
@@ -517,12 +519,12 @@ struct DetailHost: View {
 
     /// Refresh, in the toolbar, on every screen.
     ///
-    /// `.primaryAction` rather than `.automatic` so it lands with the screens' own
-    /// actions rather than beside the sidebar toggle, and a `Label` rather than a bare
-    /// `Image` so it has an accessibility name and a Customize Toolbar title.
+    /// This is deliberately a secondary action: a contextual route decides whether it
+    /// has a primary command such as Pull or Build. A `Label` rather than a bare
+    /// `Image` preserves the accessibility name and Customize Toolbar title.
     @ToolbarContentBuilder
     private var refreshItem: some ToolbarContent {
-        ToolbarItem(id: "app.refresh", placement: .primaryAction) {
+        ToolbarItem(id: "app.refresh", placement: .secondaryAction) {
             Button {
                 Task { await model.refreshAll() }
             } label: {
