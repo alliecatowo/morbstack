@@ -26,18 +26,18 @@ enum FirstRunEngineVerificationChoice: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .startAndVerify:
-            return "Start Morbstack and verify Docker"
+            return "Start Morbstack, then check Docker"
         case .configureOnly:
-            return "Set up tools without starting Morbstack"
+            return "Set up without starting Morbstack"
         }
     }
 
     var detail: String {
         switch self {
         case .startAndVerify:
-            return "After applying the reviewed host setup, starts only Morbstack’s engine and waits for Docker’s read-only health check. It does not start containers or alter another Docker runtime."
+            return "Starts Morbstack after setup and waits for Docker to respond."
         case .configureOnly:
-            return "Applies only the reviewed host integrations. Morbstack stays stopped until you start it later from the app."
+            return "Leaves Morbstack stopped until you start it from the app."
         }
     }
 
@@ -150,9 +150,9 @@ final class FirstRunCLISetupModel {
     var confirmationHelp: String {
         switch engineVerificationChoice {
         case .startAndVerify:
-            return "Apply the changes shown in this sheet, start Morbstack, and verify Docker"
+            return "Apply this reviewed setup, start Morbstack, and check Docker"
         case .configureOnly:
-            return "Apply the changes shown in this sheet without starting Morbstack"
+            return "Apply this reviewed setup without starting Morbstack"
         }
     }
 
@@ -161,9 +161,9 @@ final class FirstRunCLISetupModel {
     var transactionSummary: String {
         switch engineVerificationChoice {
         case .startAndVerify:
-            return "Applies the reviewed host changes, then starts only Morbstack and verifies Docker. It does not start containers, modify another Docker runtime, or access credentials."
+            return "Applies the reviewed host changes, starts only Morbstack, then runs a read-only Docker health check. It does not start containers, change another Docker runtime, or access credentials."
         case .configureOnly:
-            return "Applies only the reviewed host changes. Morbstack stays stopped; no containers or other Docker runtimes are changed, and no credentials are accessed."
+            return "Applies the reviewed host changes only. Morbstack stays stopped. It does not start containers, change another Docker runtime, or access credentials."
         }
     }
 
@@ -404,7 +404,7 @@ struct FirstRunCLISetupSheet: View {
         Form {
             Section {
                 Text(
-                    "Use Morbstack’s bundled Docker client, Compose, and Buildx from new Terminal sessions."
+                    "Set up Morbstack’s bundled Docker, Compose, and Buildx tools for new Terminal sessions. Review the changes below before continuing."
                 )
                 .fixedSize(horizontal: false, vertical: true)
             }
@@ -416,7 +416,7 @@ struct FirstRunCLISetupSheet: View {
                 }
             }
 
-            Section("Shell, Docker context, and discovery") {
+            Section("Shell and Docker Access") {
                 planLine(title: "PATH", detail: plan.pathRegistration.firstRunDescription)
                 planLine(title: "Context", detail: plan.contextRegistration.firstRunDescription)
                 planLine(title: "Direct socket", detail: plan.directSocket.firstRunDescription)
@@ -425,7 +425,7 @@ struct FirstRunCLISetupSheet: View {
             backgroundServiceSection
             engineVerificationSection
 
-            Section {
+            Section("Review") {
                 Label(
                     model.transactionSummary,
                     systemImage: "checkmark.shield"
@@ -442,7 +442,7 @@ struct FirstRunCLISetupSheet: View {
                 }
             } footer: {
                 Text(
-                    "Morbstack never makes another named Docker context current from this sheet. You can inspect or remove this setup later with morb uninstall-cli."
+                    "This sheet never changes a named Docker context you already selected. You can inspect or remove this setup later with morb uninstall-cli."
                 )
             }
 
@@ -499,17 +499,17 @@ struct FirstRunCLISetupSheet: View {
     @ViewBuilder
     private var backgroundServiceSection: some View {
         if model.offersBackgroundService {
-            Section("Background Service") {
-                Toggle("Start Morbstack’s host service at login", isOn: $model.enableBackgroundService)
+            Section("Optional Background Service") {
+                Toggle("Start Morbstack’s lightweight host service at login", isOn: $model.enableBackgroundService)
 
                 Text(
-                    "If selected, Morbstack registers a per-user background service in Login Items. macOS may run the lightweight host service now and after future sign-in; it does not start the VM or containers, and it does not change Docker data, images, volumes, or credentials."
+                    "Registers a per-user service in Login Items. macOS may run it now and after sign-in; it never starts the VM or containers, and does not change Docker data, images, volumes, or credentials."
                 )
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
                 Text(
-                    "You can turn it off later in System Settings > Login Items or with morb service disable."
+                    "Turn it off later in System Settings > Login Items or with morb service disable."
                 )
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -534,8 +534,8 @@ struct FirstRunCLISetupSheet: View {
     }
 
     private var engineVerificationSection: some View {
-        Section("Engine Verification") {
-            Picker("After setup", selection: $model.engineVerificationChoice) {
+        Section("After Setup") {
+            Picker("What happens next", selection: $model.engineVerificationChoice) {
                 ForEach(FirstRunEngineVerificationChoice.allCases) { choice in
                     Text(choice.title)
                         .tag(choice)
@@ -595,33 +595,33 @@ struct FirstRunCLISetupSheet: View {
             }
             if let verification = model.verification {
                 verificationSection(
-                    title: "Verified Host Integration",
+                    title: "Host Setup",
                     checks: verification.integrations)
                 verificationSection(
-                    title: "Engine and Socket",
+                    title: "Docker",
                     checks: verification.runtime)
             }
             if let engineRepairMessage = model.engineRepairMessage {
                 Section("Engine Verification Needs Attention") {
-                    Label("Docker Isn’t Verified Yet", systemImage: "exclamationmark.triangle")
+                    Label("Docker Isn’t Ready Yet", systemImage: "exclamationmark.triangle")
                         .foregroundStyle(.orange)
                     Text(engineRepairMessage)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                     Text(
-                        "Try Engine Health Check Again repeats only the Morbstack start and read-only Docker health check you already approved. It does not repeat host setup or change the Login Item selection."
+                        "Try Engine Health Check Again repeats only the Morbstack start and read-only Docker health check you approved. It leaves your host setup and Login Item choice unchanged."
                     )
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            Section("Next Step") {
-                if model.needsEngineRepair {
-                    Text("Use Try Engine Health Check Again when you are ready to retry Morbstack’s engine.")
-                } else if model.result != nil {
-                    Text("Open a new Terminal session to use the updated command-line tools.")
-                } else {
-                    Text("Use the Morbstack menu to start the engine when you are ready.")
+            if model.needsEngineRepair || model.result == nil {
+                Section("Next Step") {
+                    if model.needsEngineRepair {
+                        Text("Retry Morbstack’s engine health check when you are ready.")
+                    } else {
+                        Text("Start the engine from the Morbstack menu when you are ready.")
+                    }
                 }
             }
         }
