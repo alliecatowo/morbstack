@@ -59,7 +59,7 @@ struct DockerDynamicTCPCreatePlan {
     private let body: Data
     private let entries: [Entry]
 
-    init(
+    fileprivate init(
         body: Data,
         entries: [(
             containerPortKey: String,
