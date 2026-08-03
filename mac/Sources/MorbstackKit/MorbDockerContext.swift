@@ -116,6 +116,15 @@ public enum MorbDockerContext {
         public var currentContext: String
         /// `currentContext == "morbstack"`.
         public var isCurrent: Bool
+        /// A non-empty `DOCKER_CONTEXT` set by the invoking process. Docker gives this
+        /// environment selection precedence over the saved `currentContext`; retain it
+        /// separately so a status report never mistakes the saved preference for the
+        /// endpoint a command in this process will actually select.
+        public var environmentContext: String?
+        /// Whether the invoking process sets `DOCKER_HOST`. Like an explicit context,
+        /// this is an environment-level endpoint override, so callers must not claim
+        /// that the saved context alone determines where `docker` will connect.
+        public var hasDockerHostOverride: Bool
         public var dockerConfigDirectory: String
         public var socketPath: String
 
@@ -136,12 +145,17 @@ public enum MorbDockerContext {
         let host = readHost(metaFile: meta)
         let registered = FileManager.default.fileExists(atPath: meta.path)
         let current = currentContextName(dockerConfigDirectory: configDir)
+        let environmentContext = environment["DOCKER_CONTEXT"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let nonEmptyEnvironmentContext = environmentContext?.isEmpty == false ? environmentContext : nil
+        let dockerHost = environment["DOCKER_HOST"]?.trimmingCharacters(in: .whitespacesAndNewlines)
         return Status(
             registered: registered,
             registeredHost: host,
             matchesSocket: host == "unix://\(socketPath)",
             currentContext: current,
             isCurrent: current == name,
+            environmentContext: nonEmptyEnvironmentContext,
+            hasDockerHostOverride: dockerHost?.isEmpty == false,
             dockerConfigDirectory: configDir.path,
             socketPath: socketPath)
     }

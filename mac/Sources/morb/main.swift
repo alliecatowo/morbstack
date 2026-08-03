@@ -801,6 +801,16 @@ case "context":
         out("")
         out("  current context: \(status.currentContext)"
             + (status.isCurrent ? " (morbstack)" : ""))
+        if status.hasDockerHostOverride {
+            out("  DOCKER_HOST is set in this shell and overrides the saved context.")
+            out("  Unset it before using the configured Morbstack context.")
+        } else if let environmentContext = status.environmentContext {
+            if environmentContext == MorbDockerContext.name {
+                out("  DOCKER_CONTEXT selects Morbstack for this shell.")
+            } else {
+                out("  DOCKER_CONTEXT=\(environmentContext) overrides the saved context for this shell.")
+            }
+        }
         if !status.isCurrent {
             if status.wouldRefuseUse {
                 out("  `morb context use` will refuse to switch: \"\(status.currentContext)\" is an")
@@ -872,6 +882,8 @@ case "context":
             "matches_socket": .bool(status.matchesSocket),
             "current_context": .string(status.currentContext),
             "is_current": .bool(status.isCurrent),
+            "environment_context": status.environmentContext.map { AnyCodableValue.string($0) } ?? .null,
+            "docker_host_override": .bool(status.hasDockerHostOverride),
             "docker_config_directory": .string(status.dockerConfigDirectory),
             "socket_path": .string(status.socketPath),
             "direct_socket_path": .string(directSocket.path),
@@ -929,7 +941,14 @@ case "context":
         // report success until the registered endpoint also matches this runtime.
         if status.isCurrent && status.matchesSocket {
             finish(.success(["switched": .bool(false), "already_current": .bool(true)])) { _ in
-                out("[ok] \"\(MorbDockerContext.name)\" is already the current context")
+                out("[ok] \"\(MorbDockerContext.name)\" is already the saved current context")
+                if status.hasDockerHostOverride {
+                    out("[--] DOCKER_HOST is set in this shell, so it overrides that saved context")
+                } else if let environmentContext = status.environmentContext,
+                          environmentContext != MorbDockerContext.name
+                {
+                    out("[--] DOCKER_CONTEXT=\(environmentContext) overrides that saved context in this shell")
+                }
             }
         }
         if !status.registered || !status.matchesSocket {
@@ -972,7 +991,14 @@ case "context":
             switch result {
             case .current:
                 finish(.success(["switched": .bool(true)])) { _ in
-                    out("[ok] current context is now \"\(MorbDockerContext.name)\"")
+                    out("[ok] saved current context is now \"\(MorbDockerContext.name)\"")
+                    if status.hasDockerHostOverride {
+                        out("[--] DOCKER_HOST is set in this shell, so it overrides that saved context")
+                    } else if let environmentContext = status.environmentContext,
+                              environmentContext != MorbDockerContext.name
+                    {
+                        out("[--] DOCKER_CONTEXT=\(environmentContext) overrides that saved context in this shell")
+                    }
                 }
             case .refused(let current):
                 // Only reachable if something changed `currentContext` between the check
