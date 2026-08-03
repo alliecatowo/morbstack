@@ -203,6 +203,12 @@ run = """
 # compiling if the staged files, their manifest, or their bytes are incomplete or
 # mismatched. An executable bit alone is not provenance: without this gate a signed
 # app could truthfully look complete while installing a stale/altered plugin.
+# mise may run this recipe with a sealed toolchain PATH.  Keep that path intact, but
+# append the macOS system locations this recipe itself needs for checksum parsing.
+# The bundled Docker helpers are data under verification, never PATH-provided build
+# tools, so this cannot cause the app assembly to pick up a staged `docker` binary.
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
 verify_host_toolchain() {
 	TOOLCHAIN_ROOT="$1"
 	TOOLCHAIN_MODE="$2"
@@ -242,7 +248,7 @@ verify_host_toolchain() {
 			echo "       run scripts/fetch-guest-assets.sh --host-cli first" >&2
 			exit 1
 		fi
-		GOT_SHA256=$(shasum -a 256 "$TOOL" | awk '{print $1}')
+		GOT_SHA256=$(/usr/bin/shasum -a 256 "$TOOL" | /usr/bin/awk '{print $1}')
 		if [ "$GOT_SHA256" != "$MANIFEST_SHA256" ]; then
 			echo "error: bundled Docker CLI asset failed SHA-256 verification: $TOOL" >&2
 			exit 1
@@ -262,7 +268,7 @@ seal_host_toolchain() {
 	TOOLCHAIN_MANIFEST="$TOOLCHAIN_ROOT/TOOLCHAIN.plist"
 	while IFS='|' read -r INDEX PATH; do
 		TOOL="$TOOLCHAIN_ROOT/$PATH"
-		GOT_SHA256=$(shasum -a 256 "$TOOL" | awk '{print $1}')
+		GOT_SHA256=$(/usr/bin/shasum -a 256 "$TOOL" | /usr/bin/awk '{print $1}')
 		/usr/bin/plutil -replace "tools.$INDEX.sha256" -string "$GOT_SHA256" "$TOOLCHAIN_MANIFEST" \
 			|| { echo "error: could not seal Docker CLI toolchain manifest" >&2; exit 1; }
 	done <<'EOF'
@@ -284,7 +290,7 @@ if [ -e "$KUBECTL" ] || [ -L "$KUBECTL" ]; then
 		echo "error: optional bundled kubectl is not an executable regular file: $KUBECTL" >&2
 		exit 1
 	fi
-	KUBECTL_SHA256=`shasum -a 256 "$KUBECTL" | awk '{print $1}'`
+	KUBECTL_SHA256=`/usr/bin/shasum -a 256 "$KUBECTL" | /usr/bin/awk '{print $1}'`
 	if [ "$KUBECTL_SHA256" != "4408c85c83fd3a31adaa555bdf3c7a6c81f74b19449a9060ba31ab91926f023d" ]; then
 		echo "error: optional bundled kubectl failed SHA-256 verification: $KUBECTL" >&2
 		exit 1
