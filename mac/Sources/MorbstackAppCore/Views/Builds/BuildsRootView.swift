@@ -242,7 +242,7 @@ struct BuildsRootView: View {
             .help("Build an image from a local Dockerfile")
             .disabled(isPruning)
         }
-        ToolbarItem(id: "builds.refresh", placement: .primaryAction) {
+        ToolbarItem(id: "builds.refresh", placement: .secondaryAction) {
             Button {
                 Task { await refreshBuildCache() }
             } label: {
@@ -277,7 +277,7 @@ struct BuildsRootView: View {
             .disabled(unusedCount == 0 || isPruning || isRefreshing)
         }
         if !records.isEmpty {
-            ToolbarItem(id: "builds.inspector", placement: .primaryAction) {
+            ToolbarItem(id: "builds.inspector", placement: .secondaryAction) {
                 Button {
                     showsInspector.toggle()
                 } label: {
