@@ -150,21 +150,7 @@ class DaemonClient: @unchecked Sendable {
     /// recovery action from fixture-style assumptions.
     func diagnoseKubernetes() async throws -> K8s.Diagnosis {
         let fields = try await kubernetesCommand("k8s-diagnose")
-        let status = try decodeKubernetesStatus(fields)
-        let port: Int?
-        if case .int(let value)? = fields["host_api_port"] {
-            port = value
-        } else {
-            port = nil
-        }
-        let kubeconfigExists: Bool
-        if case .bool(let value)? = fields["kubeconfig_exists"] {
-            kubeconfigExists = value
-        } else {
-            throw MorbError.protocolViolation("morbstackd returned no kubeconfig status")
-        }
-        return K8s.Diagnosis(
-            status: status, hostAPIServerPort: port, kubeconfigExists: kubeconfigExists)
+        return try K8s.Diagnosis(ipcFields: fields)
     }
 
     /// Explicitly enables the local cluster. The app only exposes this after the

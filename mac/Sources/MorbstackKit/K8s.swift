@@ -281,6 +281,61 @@ public enum K8s {
             }
         }
 
+        /// Decodes the daemon-owned diagnosis contract without re-deriving recovery
+        /// guidance in a client. The loopback-forward and kubeconfig facts belong to
+        /// the daemon; fabricating a recommendation from only the status fields can
+        /// make an older or malformed daemon look safe after an app update.
+        public init(ipcFields: [String: AnyCodableValue]) throws {
+            let status: Status
+            do {
+                status = try JSONDecoder().decode(Status.self, from: JSONEncoder().encode(ipcFields))
+            } catch {
+                throw MorbError.protocolViolation(
+                    "morbstackd returned an invalid Kubernetes diagnosis status: \(error.localizedDescription)")
+            }
+
+            guard case .bool(let kubeconfigExists)? = ipcFields["kubeconfig_exists"] else {
+                throw MorbError.protocolViolation("morbstackd returned no kubeconfig status in its Kubernetes diagnosis")
+            }
+
+            let hostAPIServerPort: Int?
+            switch ipcFields["host_api_port"] {
+            case .int(let port)? where (1...65_535).contains(port):
+                hostAPIServerPort = port
+            case .null?:
+                hostAPIServerPort = nil
+            default:
+                throw MorbError.protocolViolation("morbstackd returned an invalid API forward in its Kubernetes diagnosis")
+            }
+
+            guard case .string(let rawAction)? = ipcFields["recovery_action"],
+                  let recommendedAction = RecommendedAction(rawValue: rawAction),
+                  case .string(let summary)? = ipcFields["summary"], !summary.isEmpty,
+                  case .string(let guidance)? = ipcFields["guidance"], !guidance.isEmpty
+            else {
+                throw MorbError.protocolViolation(
+                    "morbstackd returned an incomplete Kubernetes diagnosis; restart Morbstack, then try again")
+            }
+
+            let persistenceWarning: String?
+            switch ipcFields["persistence_warning"] {
+            case .string(let warning)? where !warning.isEmpty:
+                persistenceWarning = warning
+            case .null?:
+                persistenceWarning = nil
+            default:
+                throw MorbError.protocolViolation("morbstackd returned an invalid persistence warning in its Kubernetes diagnosis")
+            }
+
+            self.status = status
+            self.hostAPIServerPort = hostAPIServerPort
+            self.kubeconfigExists = kubeconfigExists
+            self.persistenceWarning = persistenceWarning
+            self.recommendedAction = recommendedAction
+            self.summary = summary
+            self.guidance = guidance
+        }
+
         /// The `data` bag for `morb k8s diagnose --json` and the native app client.
         public var ipcFields: [String: AnyCodableValue] {
             var fields = status.ipcFields
