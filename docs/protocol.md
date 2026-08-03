@@ -524,11 +524,19 @@ Once the VM is ready, the same preserved request body is also checked for bind
 sources in `HostConfig.Binds`, `HostConfig.Mounts`, and the older top-level `Mounts`
 shape. The check uses the directory shares actually attached to that VM plus the
 guest's `info.shares` mount report—not the next-boot `shared_paths` configuration.
-A lexical `/tmp` source is compared as
-`/private/tmp`; no source bytes are rewritten. It rejects an unshared source, a
-failed/unreported VirtioFS root, or a source (including a missing legacy `-v` child)
-whose existing symlink ancestor resolves outside a live share with a Docker-style
-HTTP 400 `invalid mount config for type "bind": ...` response. Explicit
+For a literal macOS `/tmp` source, it also requires the additive
+`info.tmp_alias_mounted: true` fact: `/private/tmp` being mounted proves only the
+VirtioFS root, while the guest's subsequent bind mount of literal `/tmp` can still
+fail. An older guest that omits that fact is not guessed to be safe; `/tmp` receives a
+Docker-style HTTP 400 instead of becoming guest-local. The request body and source
+bytes are never rewritten: `/tmp` is compared to `/private/tmp` only for host-share
+coverage, while source existence and symlink resolution use the original spelling.
+The other macOS `/private` aliases, bare `/var` and `/etc`, are rejected because those
+literal paths are guest system paths that cannot safely be mirrored; callers can use a
+shared explicit `/private/var/...` or `/private/etc/...` source instead. It rejects an
+unshared source, a failed/unreported VirtioFS root, or a source (including a missing
+legacy `-v` child) whose existing symlink ancestor resolves outside a live share with a
+Docker-style HTTP 400 `invalid mount config for type "bind": ...` response. Explicit
 `--mount type=bind` sources must exist; legacy `-v` sources retain Docker's normal
 missing-directory creation behavior only under a verified live share. Named volumes
 and malformed shapes remain dockerd's responsibility.
@@ -816,6 +824,12 @@ report on its shares" rather than as a failure.
 The host decodes it with `MorbShares.parseGuestShares`, surfaces it through
 the daemon's `shares` command and the `shares_degraded` count in `status`,
 and renders it in `morb shares`, `morb doctor` and the app.
+
+`info` also carries additive `tmp_alias_mounted: true|false`. It is not a share
+entry: it reports the distinct guest-side bind mount that makes literal `/tmp` resolve
+to a live `/private/tmp` share. The Docker proxy accepts a bare macOS `/tmp` bind
+source only when this value is exactly `true`; an absent field from an older guest is
+not evidence that the alias exists.
 
 ### 5.4 Future scoped file-event contract
 

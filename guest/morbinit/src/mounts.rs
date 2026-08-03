@@ -189,14 +189,15 @@ const GUEST_TMP_PATH: &str = "/tmp";
 /// paths a Mac user can type, that trade is made unconditionally by
 /// default; see `docs/sharing.md` for the user-facing writeup.
 ///
-/// Best effort and entirely silent-safe in the other direction too: if
-/// `/private/tmp` was never shared (a customized `shared_paths` without it,
-/// or the mount failed) this does nothing and says so loudly instead —
-/// `morb doctor`'s existing `shares-tmp` check (see
-/// `MorbstackKit/DirectoryShares.swift`) already tells the user what to do
-/// on the host side, which is the fallback the audit itself calls out
-/// ("detect and warn loudly" where the safe fix cannot apply).
-pub fn alias_tmp_to_shared_private_tmp(share_results: &[(String, MountState)]) {
+/// If `/private/tmp` was never shared (a customized `shared_paths` without it,
+/// or the mount failed), this reports `false` to the host. A current host then
+/// rejects a literal `/tmp` bind source before it reaches dockerd; this log still
+/// gives the necessary diagnosis to an older host that cannot consume the report.
+/// Returns `true` only after the literal guest `/tmp` is mounted onto the live
+/// `/private/tmp` share. The host uses this fact to admit a Docker bind source that
+/// still spells `/tmp`; the mounted VirtioFS root alone is not proof that this second
+/// mount worked.
+pub fn alias_tmp_to_shared_private_tmp(share_results: &[(String, MountState)]) -> bool {
     let shared_tmp_is_live = share_results
         .iter()
         .any(|(path, state)| path == SHARED_TMP_PATH && *state == MountState::Mounted);
@@ -204,25 +205,30 @@ pub fn alias_tmp_to_shared_private_tmp(share_results: &[(String, MountState)]) {
     if !shared_tmp_is_live {
         log::log(&format!(
             "{} is not a live host share (not in shared_paths, or it failed to mount) — \
-             the guest's {} stays its own tmpfs, so a bind mount source under the bare, \
-             unresolved {} (as opposed to {}) will silently see an empty directory; see \
-             `morb doctor`'s shares-tmp check",
+             the guest's {} stays its own tmpfs, so a current host rejects a bare {} bind \
+             source; use {} instead and see `morb doctor`'s shares-tmp check",
             SHARED_TMP_PATH, GUEST_TMP_PATH, GUEST_TMP_PATH, SHARED_TMP_PATH
         ));
-        return;
+        return false;
     }
 
     match sys::mount(SHARED_TMP_PATH, GUEST_TMP_PATH, "", sys::MS_BIND) {
-        Ok(()) => log::log(&format!(
-            "bind-mounted {} onto {} — `-v /tmp/...` bind-mount sources now resolve the \
-             same way they do on the Mac itself",
-            SHARED_TMP_PATH, GUEST_TMP_PATH
-        )),
-        Err(e) => log::log(&format!(
-            "WARNING: could not bind-mount {} onto {}: {} — a bind mount source under the \
-             bare, unresolved {} will silently see an empty directory; use {} instead",
-            SHARED_TMP_PATH, GUEST_TMP_PATH, e, GUEST_TMP_PATH, SHARED_TMP_PATH
-        )),
+        Ok(()) => {
+            log::log(&format!(
+                "bind-mounted {} onto {} — `-v /tmp/...` bind-mount sources now resolve the \
+                 same way they do on the Mac itself",
+                SHARED_TMP_PATH, GUEST_TMP_PATH
+            ));
+            true
+        }
+        Err(e) => {
+            log::log(&format!(
+                "WARNING: could not bind-mount {} onto {}: {} — a bind mount source under the \
+                 bare, unresolved {} is rejected by a current host; use {} instead",
+                SHARED_TMP_PATH, GUEST_TMP_PATH, e, GUEST_TMP_PATH, SHARED_TMP_PATH
+            ));
+            false
+        }
     }
 }
 

@@ -128,9 +128,9 @@ public enum MorbShares {
     /// The note `morb doctor` prints about the `/tmp` alias, kept here so the daemon
     /// log and the report cannot drift apart.
     public static let tmpAliasWarning =
-        "when /private/tmp is mounted, the guest aliases /tmp to it, so `-v /tmp/x:/y` "
-        + "sees the Mac's files; if that share is omitted or fails, /tmp is guest-local "
-        + "and such bind mounts can be empty"
+        "when /private/tmp is mounted, the guest attempts to alias /tmp to it; the Docker "
+        + "proxy admits `-v /tmp/x:/y` only after the guest confirms that alias, so an "
+        + "omitted or failed share receives a bind-mount error instead of guest-local data"
 
     // MARK: - Planning
 

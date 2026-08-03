@@ -343,6 +343,11 @@ pub struct ControlContext {
     /// directory inside the container with nothing anywhere saying why.
     /// Additive field — hosts that predate it ignore it.
     pub shares: String,
+    /// `true` only when the guest successfully bound its literal `/tmp` onto the
+    /// mounted `/private/tmp` VirtioFS root. The source-path spelling remains owned
+    /// by Docker; this is only an admission fact for a macOS `/tmp` bind source.
+    /// Additive so a host can reject rather than guess when an older guest omits it.
+    pub tmp_alias_mounted: bool,
     /// The Kubernetes subsystem: the enable gate, the persistence fact, and
     /// the monitor's cached cluster snapshot.
     ///
@@ -419,6 +424,7 @@ pub fn handle_request(payload: &[u8], ctx: &ControlContext) -> (Vec<u8>, bool) {
                     Value::Str(ctx.binfmt.amd64.as_str().to_string()),
                 ),
                 ("shares", Value::Str(ctx.shares.clone())),
+                ("tmp_alias_mounted", Value::Bool(ctx.tmp_alias_mounted)),
                 (
                     "share_event_bridge",
                     Value::Str(SHARE_EVENT_BRIDGE_CAPABILITY.to_string()),
@@ -708,6 +714,7 @@ mod tests {
                 "/Users".to_string(),
                 crate::shares::MountState::Mounted,
             )]),
+            tmp_alias_mounted: false,
             // Nothing is installed on the macOS test host, so this reports
             // `not-installed` — which is exactly the state a fresh guest is in
             // and the one the protocol tests want to pin.
@@ -800,6 +807,7 @@ mod tests {
             Some(&Value::Str("test-kernel".to_string()))
         );
         assert_eq!(fields.get("docker_ready"), Some(&Value::Bool(false)));
+        assert_eq!(fields.get("tmp_alias_mounted"), Some(&Value::Bool(false)));
         assert_eq!(
             fields.get("docker_data_on_disk"),
             Some(&Value::Bool(false))
@@ -1045,6 +1053,7 @@ mod tests {
             userland_proxy: true,
             binfmt: crate::binfmt::BinfmtStatus::disabled(),
             shares: String::new(),
+            tmp_alias_mounted: false,
             k8s: Arc::new(crate::k8s::K8sState::from_disk(true)),
             shutdown: Arc::new(ShutdownSignal::new()),
         });

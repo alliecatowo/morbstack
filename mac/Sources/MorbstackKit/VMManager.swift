@@ -387,6 +387,11 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
     /// the boot probe's first `info` reply.
     private var _guestShareStates: [String: MorbShares.GuestMountState] = [:]
 
+    /// Whether this guest explicitly confirmed that its literal `/tmp` aliases the
+    /// mounted `/private/tmp` share. `nil` is an older guest and must not admit a
+    /// bare macOS `/tmp` bind source.
+    private var _guestTmpAliasMounted: Bool?
+
     /// The one coherent read of the live VirtioFS contract used to admit a Docker
     /// bind mount. A share plan and its guest report must come from the same state
     /// lock acquisition: reading them separately can otherwise pair a freshly
@@ -395,13 +400,16 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
     public struct ShareMountSnapshot: Sendable {
         public let shares: [MorbDirectoryShare]
         public let guestShareStates: [String: MorbShares.GuestMountState]
+        public let guestTmpAliasMounted: Bool?
 
         public init(
             shares: [MorbDirectoryShare],
-            guestShareStates: [String: MorbShares.GuestMountState]
+            guestShareStates: [String: MorbShares.GuestMountState],
+            guestTmpAliasMounted: Bool?
         ) {
             self.shares = shares
             self.guestShareStates = guestShareStates
+            self.guestTmpAliasMounted = guestTmpAliasMounted
         }
     }
 
@@ -428,7 +436,10 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
     public var shareMountSnapshot: ShareMountSnapshot {
         stateLock.lock()
         defer { stateLock.unlock() }
-        return ShareMountSnapshot(shares: _shares, guestShareStates: _guestShareStates)
+        return ShareMountSnapshot(
+            shares: _shares,
+            guestShareStates: _guestShareStates,
+            guestTmpAliasMounted: _guestTmpAliasMounted)
     }
 
     /// The sharing plan for the current configuration, without building a VM.
@@ -447,6 +458,14 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
     private func noteGuestShares(_ states: [String: MorbShares.GuestMountState]) {
         stateLock.lock()
         _guestShareStates = states
+        stateLock.unlock()
+    }
+
+    /// Records the guest's `/tmp`-alias outcome for the running boot. Safe from any
+    /// thread; absence is kept distinct from a reported failure.
+    private func noteGuestTmpAliasMounted(_ mounted: Bool?) {
+        stateLock.lock()
+        _guestTmpAliasMounted = mounted
         stateLock.unlock()
     }
 
@@ -487,6 +506,7 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
             _guestPingedSnapshot = false
             _dockerDataOnDisk = nil
             _guestShareStates = [:]
+            _guestTmpAliasMounted = nil
             _guestRosetta = nil
             _guestBinfmtAmd64 = nil
             _guestShareEventBridge = nil
@@ -1465,6 +1485,7 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
                 // ~220ms, dockerd ready at ~730ms), so `morb rosetta` should be able
                 // to answer during that window instead of reporting "unknown".
                 noteGuestRosetta(rosetta: info.rosetta, binfmtAmd64: info.binfmtAmd64)
+                noteGuestTmpAliasMounted(info.tmpAliasMounted)
                 noteGuestShareEventBridge(
                     capability: info.shareEventBridge,
                     contractVersion: info.shareEventBridgeContractVersion)

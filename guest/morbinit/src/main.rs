@@ -136,6 +136,7 @@ fn run_linux(args: &[String]) {
             binfmt: binfmt::BinfmtStatus::disabled(),
             // Nor does it mount anything, so it has no shares to report.
             shares: String::new(),
+            tmp_alias_mounted: false,
             // Reads whatever the disk says, so `--serve-control` can be
             // pointed at a guest image to inspect its persisted k8s state —
             // but nothing here supervises the services, so an `enable` through
@@ -179,7 +180,7 @@ fn real_init() {
     // via the same symlink) does not silently see an empty directory. Right
     // after the shares themselves mount, and well before dockerd starts, so
     // every container sees the aliased /tmp from its very first bind mount.
-    mounts::alias_tmp_to_shared_private_tmp(&share_results);
+    let tmp_alias_mounted = mounts::alias_tmp_to_shared_private_tmp(&share_results);
     let share_report = shares::encode_report(&share_results);
 
     // After `early_mounts`, which is what puts /dev/vda on /dev in the first
@@ -281,6 +282,7 @@ fn real_init() {
         userland_proxy,
         binfmt: binfmt_status,
         shares: share_report,
+        tmp_alias_mounted,
         k8s: Arc::clone(&k8s_state),
         shutdown: Arc::clone(&shutdown),
     });

@@ -108,6 +108,10 @@ public struct GuestReply: Codable, Equatable, Sendable {
     /// than a nested object because MRB0's JSON is single-level by construction (see
     /// `jsonlite.rs` in the guest).
     public var shares: String?
+    /// Whether the guest successfully made literal `/tmp` resolve to the mounted
+    /// `/private/tmp` VirtioFS share. `nil` denotes an older guest that cannot prove
+    /// this additional mount; callers must not treat absence as success.
+    public var tmpAliasMounted: Bool?
     /// `true` when the guest mounted the host's Rosetta share *and* registered it
     /// with `binfmt_misc` — present on `info` from guests that do amd64 setup.
     ///
@@ -161,6 +165,7 @@ public struct GuestReply: Codable, Equatable, Sendable {
         case dockerReady = "docker_ready"
         case dockerDataOnDisk = "docker_data_on_disk"
         case shares
+        case tmpAliasMounted = "tmp_alias_mounted"
         case rosetta
         case binfmtAmd64 = "binfmt_amd64"
         case shareEventBridge = "share_event_bridge"

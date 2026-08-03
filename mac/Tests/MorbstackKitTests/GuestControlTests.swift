@@ -162,6 +162,18 @@ final class GuestControlTests: XCTestCase {
         XCTAssertNil(legacy.shareEventBridge)
     }
 
+    func testInfoDistinguishesTheGuestTmpAliasFromThePrivateTmpShare() throws {
+        let current = try JSONDecoder().decode(
+            GuestReply.self,
+            from: Data(#"{"type":"info","tmp_alias_mounted":true}"#.utf8))
+        XCTAssertEqual(current.tmpAliasMounted, true)
+
+        let legacy = try JSONDecoder().decode(
+            GuestReply.self,
+            from: Data(#"{"type":"info"}"#.utf8))
+        XCTAssertNil(legacy.tmpAliasMounted)
+    }
+
     /// Disk expansion is similarly fail-closed: a current guest can explicitly say
     /// it has no verified resize contract, while an older guest remains unknown.
     func testInfoDecodesTheDiskResizeCapability() throws {

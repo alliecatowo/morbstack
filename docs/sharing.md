@@ -42,7 +42,9 @@ everything under a home directory, external and network volumes, and the
 real location of `/tmp`. macOS makes `/tmp` a symlink to `/private/tmp`;
 after that share mounts, Morbstack aliases the guest's `/tmp` to the same
 VirtioFS content, so `-v /tmp/x` and `-v /private/tmp/x` see the same host
-path too.
+path too. The Docker proxy admits bare `/tmp` only after the running guest
+confirms that alias mount; a failed or older guest gets a Docker-style bind-mount
+error instead of a guest-local empty directory.
 
 Anything **not** under one of these roots is invisible to the VM. `/opt`,
 `/usr/local`, `/etc` and `/` itself are not shared, and deliberately so: a

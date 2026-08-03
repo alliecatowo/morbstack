@@ -29,6 +29,9 @@ public enum DockerBindMountPreflight {
     ///   - body: The JSON document from `POST /containers/create`.
     ///   - shares: The directories attached to the running VM, not prospective config.
     ///   - guestShareStates: The guest's report for those attached share roots.
+    ///   - guestTmpAliasMounted: Whether the guest confirmed its literal `/tmp`
+    ///     alias to the live `/private/tmp` share. `nil` is an older guest that
+    ///     cannot prove the alias; it is not treated as a successful alias.
     ///   - sourceExists: Injected for deterministic tests. It is only used for
     ///     explicit `Mounts` bind sources, which Docker itself requires to exist.
     ///   - sourcePathResolving: Resolves symlinks through the nearest existing
@@ -38,6 +41,7 @@ public enum DockerBindMountPreflight {
         body: Data,
         shares: [MorbDirectoryShare],
         guestShareStates: [String: MorbShares.GuestMountState],
+        guestTmpAliasMounted: Bool? = nil,
         sourceExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
         sourcePathResolving: ((String) -> String)? = nil
     ) -> Verdict {
@@ -75,6 +79,28 @@ public enum DockerBindMountPreflight {
                 return .rejected(
                     message: "invalid mount config for type \"bind\": bind source path must be absolute: \(bindSource.path)")
             }
+
+            // `/tmp` is a macOS symlink to `/private/tmp`, while the guest starts
+            // with its own tmpfs at the literal `/tmp`. The guest can mirror the
+            // alias only after its `/private/tmp` VirtioFS share mounts; a successful
+            // share alone is not proof that that second bind mount worked. Do not
+            // relay a literal `/tmp` request to a guest that has not proved the
+            // alias, because dockerd would create a guest-local source instead.
+            if isBareTmpAlias(bindSource.path), guestTmpAliasMounted != true {
+                return .rejected(
+                    message: "invalid mount config for type \"bind\": bind source path uses macOS /tmp, but the running VM has not confirmed its /tmp alias to the shared /private/tmp directory; repair that share and restart Morbstack")
+            }
+
+            // macOS also aliases `/var` and `/etc` through `/private`, but those
+            // literal guest paths are part of the Docker VM's own system. Unlike
+            // `/tmp`, they cannot safely be aliased without hiding the guest's
+            // runtime or configuration. Require the caller to choose the real
+            // `/private/...` spelling instead of approving a request that dockerd
+            // would resolve against guest-local system data.
+            if let alias = unsupportedBareSystemAlias(bindSource.path) {
+                return .rejected(
+                    message: "invalid mount config for type \"bind\": bind source path uses the macOS /\(alias) alias, but /\(alias) is a guest system path; use the explicit /private/\(alias) source path after sharing it")
+            }
             let source = MorbShares.canonicalBindSource(bindSource.path)
 
             // The original spelling has to enter through a live share. A source
@@ -82,7 +108,7 @@ public enum DockerBindMountPreflight {
             // symlink on the host, but the guest cannot even begin that traversal.
             guard coveringShare(for: source, in: shares) != nil else {
                 return .rejected(
-                    message: "invalid mount config for type \"bind\": bind source path is not shared with the Morbstack VM: \(source) (add a shared_paths root that contains it, then restart Morbstack)")
+                    message: "invalid mount config for type \"bind\": bind source path is not shared with the Morbstack VM: \(bindSource.path) (add a shared_paths root that contains it, then restart Morbstack)")
             }
 
             // A symlink inside a shared root can point outside it. dockerd resolves
@@ -90,10 +116,10 @@ public enum DockerBindMountPreflight {
             // the empty guest-local directory this preflight exists to prevent. For
             // a missing legacy `-v` source, resolving its nearest existing ancestor
             // also checks where Docker would create it.
-            let resolvedSource = MorbShares.canonicalHostPath(sourcePathResolving(source))
+            let resolvedSource = MorbShares.canonicalHostPath(sourcePathResolving(bindSource.path))
             guard let share = coveringShare(for: resolvedSource, in: shares) else {
                 return .rejected(
-                    message: "invalid mount config for type \"bind\": bind source path resolves outside directories shared with the Morbstack VM: \(source) -> \(resolvedSource) (add the resolved root to shared_paths, then restart Morbstack)")
+                    message: "invalid mount config for type \"bind\": bind source path resolves outside directories shared with the Morbstack VM: \(bindSource.path) -> \(resolvedSource) (add the resolved root to shared_paths, then restart Morbstack)")
             }
 
             guard let mountState = guestShareStates[share.path] else {
@@ -105,9 +131,9 @@ public enum DockerBindMountPreflight {
                     message: "invalid mount config for type \"bind\": share \(share.path) is not mounted in the running VM; repair the share and restart Morbstack")
             }
 
-            if bindSource.mustExist, !sourceExists(source) {
+            if bindSource.mustExist, !sourceExists(bindSource.path) {
                 return .rejected(
-                    message: "invalid mount config for type \"bind\": bind source path does not exist: \(source)")
+                    message: "invalid mount config for type \"bind\": bind source path does not exist: \(bindSource.path)")
             }
         }
         return .allowed
@@ -130,6 +156,20 @@ public enum DockerBindMountPreflight {
     private struct BindSource {
         var path: String
         var mustExist: Bool
+    }
+
+    private static func isBareTmpAlias(_ source: String) -> Bool {
+        source == "/tmp" || source.hasPrefix("/tmp/")
+    }
+
+    private static func unsupportedBareSystemAlias(_ source: String) -> String? {
+        for alias in ["var", "etc"] {
+            let path = "/\(alias)"
+            if source == path || source.hasPrefix(path + "/") {
+                return alias
+            }
+        }
+        return nil
     }
 
     /// Returns the host path from Docker's legacy `source:target[:options]` form.

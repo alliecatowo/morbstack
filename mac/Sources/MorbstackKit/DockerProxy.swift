@@ -581,7 +581,8 @@ public final class DockerProxy {
                 switch DockerBindMountPreflight.inspectContainerCreate(
                     body: createBody,
                     shares: shareSnapshot.shares,
-                    guestShareStates: shareSnapshot.guestShareStates)
+                    guestShareStates: shareSnapshot.guestShareStates,
+                    guestTmpAliasMounted: shareSnapshot.guestTmpAliasMounted)
                 {
                 case .allowed:
                     break
@@ -651,7 +652,8 @@ public final class DockerProxy {
                     switch DockerBindMountPreflight.inspectContainerCreate(
                         body: createBody,
                         shares: shareSnapshot.shares,
-                        guestShareStates: shareSnapshot.guestShareStates)
+                        guestShareStates: shareSnapshot.guestShareStates,
+                        guestTmpAliasMounted: shareSnapshot.guestTmpAliasMounted)
                     {
                     case .allowed:
                         break
