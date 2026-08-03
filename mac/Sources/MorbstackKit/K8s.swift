@@ -699,7 +699,8 @@ public enum K8s {
     /// to `~/.kube/config`, and it is reached only from an explicit
     /// `morb k8s kubeconfig --merge`.
     public static func writeMergedKubeconfig(
-        _ text: String, to url: URL, replacedExisting: Bool, switchedContext: Bool
+        _ text: String, to url: URL, replacedExisting: Bool, switchedContext: Bool,
+        now: Date = Date()
     ) throws -> MergeOutcome {
         let fm = FileManager.default
         try fm.createDirectory(
@@ -710,13 +711,18 @@ public enum K8s {
         if fm.fileExists(atPath: url.path) {
             let stamp = ISO8601DateFormatter()
             stamp.formatOptions = [.withYear, .withMonth, .withDay, .withTime]
-            let suffix = stamp.string(from: Date())
+            let suffix = stamp.string(from: now)
                 .replacingOccurrences(of: ":", with: "")
                 .replacingOccurrences(of: "-", with: "")
-            let backup = url.appendingPathExtension("morbstack-backup-\(suffix)")
+            var backup = url.appendingPathExtension("morbstack-backup-\(suffix)")
+            var collision = 2
+            while fm.fileExists(atPath: backup.path) {
+                backup = url.appendingPathExtension("morbstack-backup-\(suffix)-\(collision)")
+                collision += 1
+            }
             // Copy rather than move: if the write below fails, the original must
-            // still be exactly where kubectl expects it.
-            try? fm.removeItem(at: backup)
+            // still be exactly where kubectl expects it. Never replace an earlier
+            // backup: two explicit merges can legitimately happen in one second.
             try fm.copyItem(at: url, to: backup)
             backupPath = backup.path
         }

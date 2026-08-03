@@ -291,6 +291,29 @@ final class K8sTests: XCTestCase {
         XCTAssertTrue(outcome.switchedContext)
     }
 
+    func testWritingTwiceInOneSecondKeepsBothRecoveryBackups() throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("morbstack-k8s-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let target = dir.appendingPathComponent("config")
+        try Data("original contents".utf8).write(to: target)
+        let timestamp = Date(timeIntervalSince1970: 1_722_679_200)
+
+        let first = try K8s.writeMergedKubeconfig(
+            "first merge", to: target, replacedExisting: false, switchedContext: false, now: timestamp)
+        let second = try K8s.writeMergedKubeconfig(
+            "second merge", to: target, replacedExisting: true, switchedContext: false, now: timestamp)
+
+        let firstBackup = try XCTUnwrap(first.backupPath)
+        let secondBackup = try XCTUnwrap(second.backupPath)
+        XCTAssertNotEqual(firstBackup, secondBackup, "a backup collision must not replace recovery data")
+        XCTAssertEqual(try String(contentsOfFile: firstBackup, encoding: .utf8), "original contents")
+        XCTAssertEqual(try String(contentsOfFile: secondBackup, encoding: .utf8), "first merge")
+        XCTAssertEqual(try String(contentsOf: target, encoding: .utf8), "second merge")
+    }
+
     func testWritingWhereNoConfigExistsTakesNoBackupAndStillSucceeds() throws {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("morbstack-k8s-test-\(UUID().uuidString)", isDirectory: true)
