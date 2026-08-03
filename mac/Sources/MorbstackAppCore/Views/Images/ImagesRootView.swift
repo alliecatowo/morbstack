@@ -130,7 +130,7 @@ struct ImagesRootView: View {
             }
             .alert(
                 removal.map { $0.inUse ? "\($0.label) is in use" : "Remove \($0.label)?" } ?? "",
-                isPresented: Binding(get: { removal != nil }, set: { if !$0 { removal = nil } }),
+                isPresented: removalPresented,
                 presenting: removal
             ) { target in
                 Button("Cancel", role: .cancel) {}
@@ -155,9 +155,7 @@ struct ImagesRootView: View {
             }
             .alert(
                 operationFailure?.title ?? "",
-                isPresented: Binding(
-                    get: { operationFailure != nil },
-                    set: { if !$0 { operationFailure = nil } }),
+                isPresented: operationFailurePresented,
                 presenting: operationFailure
             ) { _ in
                 Button("OK", role: .cancel) {}
@@ -205,9 +203,26 @@ struct ImagesRootView: View {
 
     // MARK: Toolbar
 
-    /// Keep the alert binding out of `body`: Swift's type checker otherwise has to
-    /// infer a nested optional-state mutation while it is building the long modifier
-    /// chain above.
+    /// Keep alert bindings out of `body`: Swift's type checker otherwise has to infer
+    /// nested optional-state mutations while it is building the long modifier chain.
+    private var removalPresented: Binding<Bool> {
+        Binding(get: { removal != nil }, set: dismissRemoval)
+    }
+
+    private func dismissRemoval(_ isPresented: Bool) {
+        guard !isPresented else { return }
+        removal = nil
+    }
+
+    private var operationFailurePresented: Binding<Bool> {
+        Binding(get: { operationFailure != nil }, set: dismissOperationFailure)
+    }
+
+    private func dismissOperationFailure(_ isPresented: Bool) {
+        guard !isPresented else { return }
+        operationFailure = nil
+    }
+
     private var imageArchiveExportNoticePresented: Binding<Bool> {
         Binding(
             get: { imageArchiveExportNotice != nil },
