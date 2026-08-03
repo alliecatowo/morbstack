@@ -19,6 +19,13 @@ public final class DockerProxy {
     /// than this layer's generic one.
     public static let bootTimeout: TimeInterval = 50
 
+    /// Ordinary Docker create documents are small JSON. This is a strict upper bound
+    /// for the non-consuming admission peek, not a request-size limit for the Engine:
+    /// a larger or chunked request simply bypasses this best-effort preflight and is
+    /// relayed byte-for-byte as it was before.
+    private static let portPreflightPeekLimit = 256 * 1024
+    private static let portPreflightPeekBudget: TimeInterval = 0.25
+
     private let vm: VMManager
     private let log: MorbLog
     private let server: UnixSocketServer
@@ -117,6 +124,103 @@ public final class DockerProxy {
         _activeConnections += 1
         countLock.unlock()
 
+        // Do the short, non-consuming preflight away from the Unix listener's serial
+        // accept queue. A local client that dribbles a request head must not delay
+        // unrelated Docker clients from connecting.
+        relayQueue.async { [weak self] in
+            guard let self else {
+                Darwin.close(clientFD)
+                return
+            }
+            self.preflightThenRelay(clientFD: clientFD)
+        }
+    }
+
+    private func preflightThenRelay(clientFD: Int32) {
+        switch inspectPublishedPorts(in: clientFD) {
+        case .allowed:
+            relayAfterPortPreflight(clientFD: clientFD)
+        case .rejected(let message):
+            log.warn("docker container create rejected before relay: \(message)")
+            writeEngineError(to: clientFD, statusCode: 500, reason: "Internal Server Error", message: message)
+            Darwin.close(clientFD)
+            connectionFinished()
+        }
+    }
+
+    /// Performs a bounded `MSG_PEEK` only for a normal fixed-length Docker create
+    /// request. No bytes are removed from `clientFD`; the original stream remains
+    /// intact for ``FDRelay``. That is what lets the normal proxy preserve upgraded,
+    /// chunked, and otherwise opaque Engine traffic without a second HTTP proxy.
+    private func inspectPublishedPorts(in clientFD: Int32) -> DockerPortPublicationPreflight.Verdict {
+        let deadline = Date().addingTimeInterval(DockerProxy.portPreflightPeekBudget)
+
+        while Date() < deadline {
+            let remainingMilliseconds = max(1, Int32((deadline.timeIntervalSinceNow * 1_000).rounded(.up)))
+            var descriptor = pollfd(fd: clientFD, events: Int16(POLLIN), revents: 0)
+            let polled = POSIXSocketSupport.retryOnInterrupt {
+                withUnsafeMutablePointer(to: &descriptor) { poll($0, 1, remainingMilliseconds) }
+            }
+            guard polled > 0 else { return .allowed }
+
+            guard let bytes = peekClientBytes(clientFD) else { return .allowed }
+            let parsed: (head: HTTPRequestHead, consumed: Int)?
+            do {
+                parsed = try MinimalHTTP.parseRequestHead(bytes)
+            } catch {
+                return .allowed
+            }
+            guard let parsed else {
+                // The complete header is not visible yet. Keep waiting only while it
+                // can still fit in the bounded peek buffer.
+                guard bytes.count < DockerProxy.portPreflightPeekLimit else { return .allowed }
+                // `MSG_PEEK` leaves the partial head readable, so `poll` would wake
+                // immediately again. Yield briefly rather than spinning a relay worker
+                // while the local client finishes writing its request.
+                usleep(1_000)
+                continue
+            }
+
+            guard isContainerCreate(parsed.head) else { return .allowed }
+            guard
+                !(parsed.head.headers["transfer-encoding"] ?? "").lowercased().contains("chunked"),
+                let contentLength = parsed.head.headers["content-length"].flatMap(Int.init),
+                contentLength >= 0,
+                contentLength <= DockerProxy.portPreflightPeekLimit - parsed.consumed
+            else {
+                return .allowed
+            }
+
+            let bodyEnd = parsed.consumed + contentLength
+            guard bytes.count >= bodyEnd else {
+                usleep(1_000)
+                continue
+            }
+            return DockerPortPublicationPreflight.inspectContainerCreate(
+                body: Data(bytes[parsed.consumed..<bodyEnd]))
+        }
+        return .allowed
+    }
+
+    private func peekClientBytes(_ clientFD: Int32) -> Data? {
+        var buffer = [UInt8](repeating: 0, count: DockerProxy.portPreflightPeekLimit)
+        let count = buffer.withUnsafeMutableBytes { raw -> Int in
+            guard let base = raw.baseAddress else { return -1 }
+            return Darwin.recv(clientFD, base, raw.count, Int32(MSG_PEEK))
+        }
+        guard count > 0 else { return nil }
+        return Data(buffer[0..<count])
+    }
+
+    private func isContainerCreate(_ request: HTTPRequestHead) -> Bool {
+        guard request.method.uppercased() == "POST" else { return false }
+        let path = request.target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first ?? ""
+        let components = path.split(separator: "/", omittingEmptySubsequences: true)
+        return components.suffix(2).map(String.init) == ["containers", "create"]
+    }
+
+    private func relayAfterPortPreflight(clientFD: Int32) {
+
         vm.ensureRunning(timeout: DockerProxy.bootTimeout) { [weak self] result in
             guard let self else {
                 Darwin.close(clientFD)
@@ -204,10 +308,22 @@ public final class DockerProxy {
     /// Writes a minimal HTTP 502 so `docker ps` shows a real message instead of
     /// "connection reset by peer".
     private func writeGatewayError(to fd: Int32, message: String) {
-        let sanitized = message.replacingOccurrences(of: "\n", with: " ")
-        let body = "{\"message\":\"morbstack: \(sanitized.replacingOccurrences(of: "\"", with: "'"))\"}"
+        writeEngineError(to: fd, statusCode: 502, reason: "Bad Gateway", message: "morbstack: \(message)")
+    }
+
+    /// Writes a Docker-style JSON error without forwarding the rejected request.
+    ///
+    /// Port preflight failures are deliberately `500`, matching the class Docker
+    /// clients already treat as an Engine-side publication failure. The body remains
+    /// the standard `{ "message": ... }` shape the Docker CLI reads.
+    private func writeEngineError(to fd: Int32, statusCode: Int, reason: String, message: String) {
+        let sanitized = message
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+            .replacingOccurrences(of: "\"", with: "'")
+        let body = "{\"message\":\"\(sanitized)\"}"
         let response = """
-            HTTP/1.1 502 Bad Gateway\r
+            HTTP/1.1 \(statusCode) \(reason)\r
             Content-Type: application/json\r
             Content-Length: \(body.utf8.count)\r
             Connection: close\r

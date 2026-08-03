@@ -387,13 +387,12 @@ of what its docs say.
   workload that refuses to start unless a config file has a specific
   non-root owner will not work against a Morbstack bind mount today
   ([sharing.md](sharing.md)).
-- **`docker run` succeeds where real Docker Desktop would fail
-  synchronously on a taken host port.** If the host port is already bound,
-  Morbstack's `docker run` still returns success and `docker ps` still
-  *shows* the port as published — only `morb status` reveals the truth.
-  Any script or CI job that trusts `docker run`'s exit code or `docker
-  ps`'s port column to detect a port conflict will behave differently
-  under Morbstack than under Docker Desktop ([parity.md #27](parity.md)).
+- **Published-port collision handling is only a partial compatibility layer.** A
+  conventional fixed TCP `docker run -p <port>:...` now rejects a host port that is
+  already occupied before the create reaches the guest. That closes the common
+  success-with-no-listener failure, but it is a non-reserving snapshot: a later race,
+  dynamic/ranged allocation, or a separately-created container started later can
+  still diverge from Docker Desktop's synchronous port-lease contract.
 - **No UDP port forwarding at all.** The published-port forwarder is
   TCP-only.
 - **No qemu fallback for amd64**, despite the plumbing existing — no

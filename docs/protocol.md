@@ -455,6 +455,28 @@ guest -> host:  "OK\n"              connection established; splice begins
   specific host IP (`-p 127.0.0.1:8081:80`) is honored as that specific
   bind address, never widened.
 
+#### Engine create preflight for explicit host ports
+
+Before relaying an ordinary fixed-length `POST .../containers/create`, the
+host-side `DockerProxy` takes a bounded non-consuming `MSG_PEEK` of the request.
+For an explicit single TCP host port in `HostConfig.PortBindings`, it takes the
+same short loopback snapshot as `morb ports check`. A port already held by another
+Mac process is rejected with a Docker-style HTTP 500 error *before the request
+reaches the guest Engine*, so the usual `docker run -p 8080:80 ...` path does not
+create a container and then claim its unavailable host port is usable. The same
+preflight rejects explicit UDP publications (there is no UDP relay) and host
+addresses outside the loopback-only forwarder's supported set rather than letting
+them become a successful-looking but unreachable publish.
+
+This is deliberately an admission check, **not a lease**. The peek does not remove
+any bytes, and unrecognized, chunked, oversized, dynamic (`-P`/empty host port), and
+range requests remain opaque byte streams for the Engine. The preflight socket is
+closed immediately, so another process can still claim the port before Docker starts
+the container; a separately-created container can also be started after the snapshot.
+Full Docker-compatible publication still requires a create/start response-aware TCP
+lease ledger, listener handoff, rollback/expiry, a guest allocation protocol for
+dynamic ports, and a real UDP data plane.
+
 ---
 
 ### 3.3 The vsock 2377 payload install protocol

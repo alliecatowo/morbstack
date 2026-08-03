@@ -32,6 +32,24 @@ public struct HTTPResponseHead: Equatable, Sendable {
     }
 }
 
+/// A parsed HTTP request line plus headers.
+///
+/// The Docker socket proxy normally treats Engine traffic as an opaque byte stream.
+/// This deliberately small representation exists for bounded, read-only admission
+/// checks before a request is relayed; it is not an HTTP server or a replacement for
+/// the Engine's own request parser.
+public struct HTTPRequestHead: Equatable, Sendable {
+    public var method: String
+    public var target: String
+    public var headers: [String: String]
+
+    public init(method: String, target: String, headers: [String: String]) {
+        self.method = method
+        self.target = target
+        self.headers = headers
+    }
+}
+
 /// The smallest HTTP/1.1 client Morbstack can get away with.
 ///
 /// The Docker Engine API is reached over a vsock stream rather than a socket
@@ -98,6 +116,58 @@ public enum MinimalHTTP {
             index += 1
         }
         return nil
+    }
+
+    /// Parses an HTTP/1.x request head without consuming a body.
+    ///
+    /// `nil` means the blank line terminating the head has not arrived yet. Callers
+    /// that only need an admission check must pass the original bytes through unchanged
+    /// after parsing; this parser never owns a connection or attempts to decode a
+    /// request body.
+    public static func parseRequestHead(_ buffer: Data) throws -> (head: HTTPRequestHead, consumed: Int)? {
+        let bytes = [UInt8](buffer)
+        var lines: [String] = []
+        var cursor = 0
+        var consumed: Int?
+
+        while let (contentEnd, next) = lineBounds(bytes, from: cursor) {
+            let line = String(decoding: bytes[cursor..<contentEnd], as: UTF8.self)
+            cursor = next
+            if line.isEmpty {
+                consumed = cursor
+                break
+            }
+            lines.append(line)
+        }
+        guard let consumed else { return nil }
+        guard let first = lines.first else {
+            throw MorbError.protocolViolation("empty HTTP request head")
+        }
+
+        let fields = first.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true)
+        guard fields.count == 3, fields[2].hasPrefix("HTTP/") else {
+            throw MorbError.protocolViolation("malformed HTTP request line")
+        }
+
+        var headers: [String: String] = [:]
+        for line in lines.dropFirst() {
+            guard let colon = line.firstIndex(of: ":") else {
+                throw MorbError.protocolViolation("malformed HTTP request header")
+            }
+            let name = String(line[..<colon]).trimmingCharacters(in: .whitespaces).lowercased()
+            let value = String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+            guard !name.isEmpty else {
+                throw MorbError.protocolViolation("empty HTTP request header name")
+            }
+            if let existing = headers[name] {
+                headers[name] = existing + ", " + value
+            } else {
+                headers[name] = value
+            }
+        }
+        return (
+            HTTPRequestHead(method: String(fields[0]), target: String(fields[1]), headers: headers),
+            consumed)
     }
 
     /// Parses a response head.

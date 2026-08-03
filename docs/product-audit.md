@@ -73,8 +73,11 @@ guarantee.
 
 ### P1 — make the daily development loop reliable
 
-1. Make host-port conflicts fail synchronously at Docker create/start time;
-   add UDP forwarding and preserve loopback-safe defaults.
+1. Extend the current explicit-create port preflight into a create/start TCP lease
+   protocol, then add UDP forwarding while preserving loopback-safe defaults. The
+   preflight rejects known fixed TCP conflicts before an ordinary create reaches the
+   guest, but it is intentionally not a reservation and does not cover dynamic/range
+   ports or later starts.
 2. Turn unshared/misresolved bind sources into clear Docker errors, then
    ship FSEvents-to-inotify forwarding or an explicit synced-share tier.
 3. Add grow-only disk expansion, truthful idle-stop wording until genuine
