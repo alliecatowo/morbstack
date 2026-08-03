@@ -463,8 +463,13 @@ struct VolumesRootView: View {
             ContentUnavailableView {
                 Label("No Volumes", systemImage: "externaldrive")
             } description: {
-                Text("Volumes appear here when a container asks for persistent storage.")
+                Text("No Docker volumes are reported by the engine.")
             } actions: {
+                Button {
+                    Task { await model.refreshAll() }
+                } label: {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                }
                 Button {
                     MorbPasteboard.copy(
                         "docker --host unix://\(MorbPaths.dockerSocket.path) volume create my-data")
@@ -478,6 +483,7 @@ struct VolumesRootView: View {
             table
                 .inspector(isPresented: $showsInspector) {
                     detailPane
+                        .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
                 }
         }
     }
@@ -587,21 +593,6 @@ struct VolumesRootView: View {
                         value: TrackCDiskMath.isAnonymousVolumeName(volume.name) ? "Eligible" : "Retained")
                 }
 
-                Section {
-                    Button {
-                        chooseVolumeArchiveDestination(for: volume)
-                    } label: {
-                        Label("Export Volume Archive…", systemImage: "square.and.arrow.down")
-                    }
-                    .disabled(volume.driver != "local" || isPerformingVolumeOperation)
-
-                    Button(role: .destructive) {
-                        removal = volume
-                    } label: {
-                        Label("Remove Volume", systemImage: "trash")
-                    }
-                    .disabled(isPerformingVolumeOperation)
-                }
             }
         } else {
             ContentUnavailableView(

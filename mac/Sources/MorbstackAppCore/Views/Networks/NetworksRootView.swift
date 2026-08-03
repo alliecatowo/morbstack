@@ -13,6 +13,7 @@
 // and detail as distinct macOS interactions instead of a hand-built split layout.
 
 import AppKit
+import MorbstackKit
 import SwiftUI
 
 // MARK: - Sorting and filtering
@@ -364,12 +365,18 @@ struct NetworksRootView: View {
             ContentUnavailableView {
                 Label("No Networks", systemImage: "network")
             } description: {
-                Text("Docker's built-in networks appear here once the engine has started.")
+                Text("No Docker networks are reported by the engine.")
             } actions: {
                 Button {
                     Task { await model.refreshAll() }
                 } label: {
                     Label("Refresh", systemImage: "arrow.clockwise")
+                }
+                Button {
+                    MorbPasteboard.copy(
+                        "docker --host unix://\(MorbPaths.dockerSocket.path) network create my-network")
+                } label: {
+                    Label("Copy a Create Command", systemImage: "doc.on.doc")
                 }
             }
         } else if visibleNetworks.isEmpty {
@@ -378,6 +385,7 @@ struct NetworksRootView: View {
             table
                 .inspector(isPresented: $showsInspector) {
                     detailPane
+                        .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
                 }
         }
     }
@@ -488,20 +496,6 @@ struct NetworksRootView: View {
                             : (network.containers > 0 ? "Detach containers first" : "Available"))
                 }
 
-                if !network.isBuiltIn {
-                    Section {
-                        Button(role: .destructive) {
-                            removal = network
-                        } label: {
-                            Label("Remove Network", systemImage: "trash")
-                        }
-                        .disabled(network.containers > 0 || busy)
-                        .help(
-                            network.containers > 0
-                                ? "Disconnect every attached container first"
-                                : "Remove this network")
-                    }
-                }
             }
         } else {
             ContentUnavailableView(
