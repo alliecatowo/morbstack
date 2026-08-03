@@ -226,6 +226,7 @@ public enum ImageArchiveExporter {
         case .stagingFileUnavailable: return .stagingFileUnavailable
         case .writeFailed: return .writeFailed
         case .commitFailed: return .commitFailed
+        }
     }
 
     private static func appendErrorBody(_ chunk: Data, to destination: inout Data) {
