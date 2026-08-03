@@ -309,6 +309,8 @@ Rancher Desktop) is in [`docs/comparison.md`](docs/comparison.md).
 - [`docs/amd64.md`](docs/amd64.md) — running amd64 images through
   Rosetta, and what the qemu fallback does not yet cover.
 - [`docs/protocol.md`](docs/protocol.md) — the vsock wire protocols.
+- [`docs/dynamic-port-allocation.md`](docs/dynamic-port-allocation.md) — the
+  truthful allocation boundary for dynamic published ports.
 - [`docs/compat.md`](docs/compat.md) — the drop-in compatibility
   contract and CI-enforced ecosystem matrix.
 - [`docs/parity.md`](docs/parity.md) — a live, honest audit of where

@@ -126,7 +126,10 @@ Docker Desktop parity: dynamic/ranged allocation, opaque or chunked response fra
 name-based/nonstandard start handoff, and lease survival across VM/daemon shutdown
 still need their own allocation or lifecycle contract. UDP datagrams and reply flows
 now cross a dedicated framed vsock relay, but are intentionally event-confirmed rather
-than promoted to the fixed-TCP synchronous lease claim.
+than promoted to the fixed-TCP synchronous lease claim. Dynamic publication's exact
+host-owned allocation transaction and present blocked boundary are documented in
+[`dynamic-port-allocation.md`](dynamic-port-allocation.md); no event-derived endpoint
+is counted as synchronous support.
 
 ## Priority list — what to fix first for a credible "drop-in" claim
 

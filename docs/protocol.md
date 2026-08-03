@@ -533,8 +533,10 @@ guarantee.
 An event-driven running-container snapshot can still promote an already-associated
 lease after an opaque or name-based start, but that happens after the Engine reply and
 is not equivalent to the 204 handoff guarantee. Dynamic publication needs a real
-guest-to-host allocation-and-response contract. UDP already has a real data plane,
-but deliberately has no TCP-style reservation claim.
+guest-to-host allocation-and-response contract; its required request-transforming
+transaction and explicit unsupported boundary are in
+[`dynamic-port-allocation.md`](dynamic-port-allocation.md). UDP already has a real
+data plane, but deliberately has no TCP-style reservation claim.
 Likewise, a bind source can change after its share/symlink snapshot.
 
 ---
