@@ -407,7 +407,10 @@ public final class K8sPodPortForwardCoordinator: @unchecked Sendable {
         }
         defer { Darwin.close(outputPipe.write) }
 
-        var actions = posix_spawn_file_actions_t()
+        // Darwin declares both spawn handles as opaque `void *` values. Keep the
+        // imported pointer optional until their corresponding init functions fill it
+        // in; constructing a value with `()` is not valid under Swift 6's C importer.
+        var actions: posix_spawn_file_actions_t? = nil
         guard posix_spawn_file_actions_init(&actions) == 0 else {
             throw MorbError.io("could not initialise the Kubernetes port-forward process actions")
         }
@@ -439,7 +442,7 @@ public final class K8sPodPortForwardCoordinator: @unchecked Sendable {
             throw MorbError.io("could not configure the Kubernetes port-forward process descriptors")
         }
 
-        var attributes = posix_spawnattr_t()
+        var attributes: posix_spawnattr_t? = nil
         guard posix_spawnattr_init(&attributes) == 0 else {
             throw MorbError.io("could not initialise the Kubernetes port-forward process attributes")
         }
@@ -658,7 +661,10 @@ public final class K8sPodPortForwardCoordinator: @unchecked Sendable {
         guard descriptor >= 0 else {
             throw MorbError.io("could not create the private Kubernetes port-forward credential descriptor")
         }
-        let temporaryPath = String(cString: template)
+        // `mkstemp` replaces the trailing Xs in the same NUL-terminated C-char
+        // buffer. Its `ContiguousArray` does not bridge directly to Swift 6's C-string
+        // overload, so pass the equivalent `[CChar]` value explicitly.
+        let temporaryPath = String(cString: Array(template))
         defer { _ = Darwin.unlink(temporaryPath) }
         guard Darwin.fchmod(descriptor, 0o600) == 0 else {
             Darwin.close(descriptor)
@@ -745,8 +751,8 @@ public final class K8sPodPortForwardCoordinator: @unchecked Sendable {
         executable: String,
         arguments: [String],
         environment: [String],
-        actions: inout posix_spawn_file_actions_t,
-        attributes: inout posix_spawnattr_t
+        actions: inout posix_spawn_file_actions_t?,
+        attributes: inout posix_spawnattr_t?
     ) throws -> pid_t {
         let argumentStorage = arguments.map { strdup($0) }
         let environmentStorage = environment.map { strdup($0) }
