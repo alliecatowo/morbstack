@@ -127,6 +127,21 @@ public struct MorbstackMainApp: App {
 
 // MARK: - Commands
 
+/// The current route's refresh command, exposed to the menu bar without coupling the
+/// app command graph to an individual route view. A route with a more specific refresh
+/// operation can publish this same focused value at its root and replace the shell
+/// fallback below.
+private struct RouteRefreshActionKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
+extension FocusedValues {
+    var routeRefreshAction: (() -> Void)? {
+        get { self[RouteRefreshActionKey.self] }
+        set { self[RouteRefreshActionKey.self] = newValue }
+    }
+}
+
 /// The menu bar's own commands, and with them every keyboard shortcut in the app.
 ///
 /// Shortcuts live here rather than on the views they act on so that they work from
@@ -136,6 +151,7 @@ struct MorbCommands: Commands {
 
     let model: AppModel
     @Binding var isPalettePresented: Bool
+    @FocusedValue(\.routeRefreshAction) private var routeRefreshAction
     @FocusedValue(\.imageArchiveExportAction) private var imageArchiveExportAction
 
     var body: some Commands {
@@ -157,10 +173,10 @@ struct MorbCommands: Commands {
 
         CommandMenu("Engine") {
             Button("Refresh") {
-                Task { await model.refreshAll() }
+                routeRefreshAction?()
             }
             .keyboardShortcut("r", modifiers: .command)
-            .disabled(!model.engine.isRunning)
+            .disabled(routeRefreshAction == nil)
 
             Divider()
 
@@ -443,6 +459,11 @@ struct DetailHost: View {
         // AppKit can move this universal refresh into its system overflow as the window
         // narrows.
         .toolbar { refreshItem }
+        // The standard refresh item must have an equivalent in the Engine menu. The
+        // focused value keeps the menu truthful to the detail route that owns it, and
+        // lets a route replace the shell's general refresh without editing the command
+        // graph again.
+        .focusedSceneValue(\.routeRefreshAction, routeRefreshAction)
         .alert("Unable to Complete Operation", isPresented: errorIsPresented) {
             Button("OK", role: .cancel) { model.dismissError() }
         } message: {
@@ -488,13 +509,21 @@ struct DetailHost: View {
     private var refreshItem: some ToolbarContent {
         ToolbarItem(id: "app.refresh", placement: .secondaryAction) {
             Button {
-                Task { await model.refreshAll() }
+                routeRefreshAction?()
             } label: {
                 Label("Refresh", systemImage: "arrow.clockwise")
             }
-            .disabled(!model.engine.isRunning)
+            .disabled(routeRefreshAction == nil)
             .help("Refresh everything (⌘R)")
         }
+    }
+
+    /// The fallback visible on every running-engine route. Disk and Builds retain their
+    /// explicitly scoped toolbar commands; when either needs that narrower operation in
+    /// the menu, its route can publish `routeRefreshAction` over this fallback.
+    private var routeRefreshAction: (() -> Void)? {
+        guard model.engine.isRunning else { return nil }
+        return { Task { await model.refreshAll() } }
     }
 
     @ViewBuilder
