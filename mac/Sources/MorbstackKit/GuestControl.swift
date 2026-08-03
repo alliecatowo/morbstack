@@ -130,6 +130,13 @@ public struct GuestReply: Codable, Equatable, Sendable {
     /// a host where the Rosetta path did not come together. Absent means an
     /// older guest, not `"none"`.
     public var binfmtAmd64: String?
+    /// Whether the guest can accept the future bounded host file-event contract.
+    ///
+    /// "unavailable" is a positive statement that this guest has no kernel/filesystem
+    /// endpoint capable of delivering host-originated notifications to container
+    /// watchers; it is not a transient failure. `nil` means an older guest did not
+    /// report the additive capability. Neither state claims hot reload.
+    public var shareEventBridge: String?
     /// Failure detail — present on `error`.
     public var message: String?
 
@@ -143,6 +150,7 @@ public struct GuestReply: Codable, Equatable, Sendable {
         case shares
         case rosetta
         case binfmtAmd64 = "binfmt_amd64"
+        case shareEventBridge = "share_event_bridge"
         case message
     }
 }

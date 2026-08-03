@@ -148,6 +148,20 @@ final class GuestControlTests: XCTestCase {
         XCTAssertNil(legacy.binfmtAmd64, "an absent field must not decode as \"none\"")
     }
 
+    /// An explicit negative guest capability is different from an older guest that
+    /// did not know the field: neither says hot reload works, but the first gives the
+    /// bridge diagnostic a precise reason not to create an unconsumed FSEvents watch.
+    func testInfoDecodesTheShareEventCapability() throws {
+        let current = try JSONDecoder().decode(
+            GuestReply.self,
+            from: Data(#"{"type":"info","share_event_bridge":"unavailable"}"#.utf8))
+        XCTAssertEqual(current.shareEventBridge, "unavailable")
+
+        let legacy = try JSONDecoder().decode(
+            GuestReply.self, from: Data(#"{"type":"info","kernel":"6.1"}"#.utf8))
+        XCTAssertNil(legacy.shareEventBridge)
+    }
+
     /// A well-formed exchange leaves the channel usable, and closing is idempotent.
     func testASuccessfulExchangeKeepsTheChannelUsable() throws {
         let control = try makeChannel()

@@ -140,6 +140,47 @@ CPU. The real fix is an FSEvents bridge on the host that injects the correspondi
 inotify events into the guest, or a synced-share tier that keeps a guest-local copy —
 a separate milestone.
 
+### Scoped event-bridge foundation (not hot reload)
+
+The codebase now has the **contract and diagnostics** for a future FSEvents bridge,
+but it intentionally creates no FSEvent stream and delivers no notifications. The
+current guest reports `share_event_bridge = "unavailable"`: Linux inotify queues are
+kernel-owned, and there is no userspace API that can inject synthetic events into
+arbitrary container watchers. The current MRB0 channel is also single-flight
+host-request/guest-reply, not an event stream. A future implementation therefore
+needs both a guest filesystem/kernel delivery endpoint and a bounded transport before
+it can truthfully say that hot reload works.
+
+The only opt-in selection is empty by default:
+
+```toml
+# This does not enable hot reload in the current build.
+live_share_paths = []
+```
+
+When the delivery endpoint exists, every path must be a **strict descendant** of one
+configured `shared_paths` root. `/Users` and `/Volumes` are normal VirtioFS roots but
+are rejected as event-watch roots: watching them would collect far more of a person's
+filesystem than a named project needs. A narrow root such as
+`/Users/you/work/project` below a `/Users` share is the intended shape. `morb shares`
+reports whether this selection is disabled, malformed, waiting for its backing share
+to mount, or blocked on the guest capability; none of those states starts the engine
+or a watcher.
+
+The future callback-to-guest contract is deliberately lossy and bounded. FSEvents is
+directory-granular and may coalesce changes, so normal records are called
+`invalidated`, not fabricated create/write/delete inotify masks. A 1,024-record host
+buffer converts a queue overflow, FSEvents dropped records, event-ID wrap, root move,
+or `MustScanSubDirs` into an explicit root `rescan` marker. A receiver must discard
+incremental state and recursively rescan that root; it may never treat the marker as
+an ordinary event. The selected roots, event shape, flags, and overflow rule are
+documented in [`protocol.md`](protocol.md#54-future-scoped-file-event-contract).
+
+The acceptance boundary remains unchanged: until the guest endpoint, transport, and
+real-container tests prove the behavior, **VirtioFS content coherence works but
+host-originated inotify and hot reload do not**. Keep using tool-specific polling when
+needed.
+
 ### Performance
 
 2000-file and 256 MiB workloads run inside a container, share vs. the guest's own

@@ -50,6 +50,16 @@ public struct MorbConfig: Equatable, Codable, Sendable {
     /// configuration: bind mounts then only see paths that exist inside the guest.
     public var sharedPaths: [String]
 
+    /// Narrow host subdirectories that are eligible for a future file-event bridge.
+    ///
+    /// This is intentionally empty by default, and it is deliberately distinct from
+    /// ``sharedPaths``: the default VirtioFS roots include `/Users` and `/Volumes`,
+    /// which are sensible mount roots but dangerously broad FSEvents subscriptions.
+    /// Each path must be a strict descendant of a configured shared root; validation
+    /// and the bounded event contract live in ``MorbLiveShareBridge``. Naming a path
+    /// here does not claim that inotify delivery exists yet.
+    public var liveSharePaths: [String]
+
     /// How the guest is brought up.
     public enum BootMode: String, Equatable, Sendable {
         /// Kernel + initramfs; `morbinit` runs as `/init` and the rootfs lives in RAM.
@@ -81,7 +91,8 @@ public struct MorbConfig: Equatable, Codable, Sendable {
         kernelCmdline: String? = nil,
         rosetta: Bool = true,
         autoSuspendMinutes: Int = 5,
-        sharedPaths: [String] = MorbShares.defaultSharedPaths
+        sharedPaths: [String] = MorbShares.defaultSharedPaths,
+        liveSharePaths: [String] = []
     ) {
         self.cpus = cpus
         self.memoryMiB = memoryMiB
@@ -92,6 +103,7 @@ public struct MorbConfig: Equatable, Codable, Sendable {
         self.rosetta = rosetta
         self.autoSuspendMinutes = autoSuspendMinutes
         self.sharedPaths = sharedPaths
+        self.liveSharePaths = liveSharePaths
     }
 
     /// The concrete CPU count to hand to the hypervisor, resolving the `0` sentinel.
@@ -176,6 +188,7 @@ public struct MorbConfig: Equatable, Codable, Sendable {
         case rosetta
         case autoSuspendMinutes = "auto_suspend_minutes"
         case sharedPaths = "shared_paths"
+        case liveSharePaths = "live_share_paths"
     }
 
     /// Loads a configuration from disk, returning defaults when the file does not exist.
@@ -221,6 +234,7 @@ public struct MorbConfig: Equatable, Codable, Sendable {
         if baseline.rosetta != candidate.rosetta { changed.insert(.rosetta) }
         if baseline.autoSuspendMinutes != candidate.autoSuspendMinutes { changed.insert(.autoSuspendMinutes) }
         if baseline.sharedPaths != candidate.sharedPaths { changed.insert(.sharedPaths) }
+        if baseline.liveSharePaths != candidate.liveSharePaths { changed.insert(.liveSharePaths) }
         return changed
     }
 
@@ -303,6 +317,7 @@ public struct MorbConfig: Equatable, Codable, Sendable {
         case .rosetta: .boolean(rosetta)
         case .autoSuspendMinutes: .integer(autoSuspendMinutes)
         case .sharedPaths: .stringArray(sharedPaths)
+        case .liveSharePaths: .stringArray(liveSharePaths)
         }
     }
 
@@ -317,6 +332,7 @@ public struct MorbConfig: Equatable, Codable, Sendable {
         case (.rosetta, .boolean(let value)): rosetta = value
         case (.autoSuspendMinutes, .integer(let value)): autoSuspendMinutes = value
         case (.sharedPaths, .stringArray(let value)): sharedPaths = value
+        case (.liveSharePaths, .stringArray(let value)): liveSharePaths = value
         default:
             assertionFailure("PersistedKey and TOMLValue no longer agree")
         }
@@ -496,6 +512,11 @@ public struct MorbConfig: Equatable, Codable, Sendable {
         out += "# sees the real directory. Paths that do not exist are skipped. Set to [] to\n"
         out += "# turn directory sharing off. Must be written on one line.\n"
         out += "shared_paths = \(MorbConfig.quoteArray(sharedPaths))\n"
+        out += "\n"
+        out += "# Narrow project directories eligible for the future file-event bridge. This is\n"
+        out += "# off by default and does not enable hot reload today. Each path must be a\n"
+        out += "# strict descendant of one shared_paths root. Must be written on one line.\n"
+        out += "live_share_paths = \(MorbConfig.quoteArray(liveSharePaths))\n"
         return out
     }
 
@@ -573,6 +594,11 @@ public struct MorbConfig: Equatable, Codable, Sendable {
                 // An explicit `[]` really does mean "share nothing"; only an absent key
                 // falls back to the defaults, which `MorbConfig()` already installed.
                 config.sharedPaths = try requireStringArray(value, key: key, line: lineNumber)
+            case .liveSharePaths:
+                // This remains opt-in even though shared_paths has broad defaults. A
+                // future event bridge validates strict containment before it creates a
+                // watcher; parsing only preserves the person's declared selection.
+                config.liveSharePaths = try requireStringArray(value, key: key, line: lineNumber)
             }
         }
         return config

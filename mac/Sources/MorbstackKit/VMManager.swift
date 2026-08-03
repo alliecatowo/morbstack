@@ -319,6 +319,11 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
     /// `none`.
     private var _guestBinfmtAmd64: String?
 
+    /// Last `share_event_bridge` capability reported by the guest. `nil` means an
+    /// older/stopped guest did not answer; `"unavailable"` is the current guest's
+    /// explicit statement that it cannot inject host file notifications into inotify.
+    private var _guestShareEventBridge: String?
+
     /// Whether the running guest has Rosetta working, or `nil` if no guest has
     /// said (not booted, or an initramfs older than the field).
     ///
@@ -340,6 +345,14 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
         stateLock.lock()
         defer { stateLock.unlock() }
         return _guestBinfmtAmd64
+    }
+
+    /// The current guest's future file-event delivery capability, when it has reported
+    /// one. This is diagnostic only and never creates an FSEvents subscription.
+    public var guestShareEventBridge: String? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _guestShareEventBridge
     }
 
     /// The VirtioFS shares handed to the current (or most recent) configuration.
@@ -424,6 +437,7 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
             _guestShareStates = [:]
             _guestRosetta = nil
             _guestBinfmtAmd64 = nil
+            _guestShareEventBridge = nil
         }
         stateLock.unlock()
     }
@@ -450,6 +464,16 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
         stateLock.lock()
         if let rosetta { _guestRosetta = rosetta }
         if let binfmtAmd64 { _guestBinfmtAmd64 = binfmtAmd64 }
+        stateLock.unlock()
+    }
+
+    /// Records the guest's additive event-delivery capability. Absence from an older
+    /// guest intentionally leaves the prior observation untouched for this boot, just
+    /// as the other additive `info` fields do.
+    private func noteGuestShareEventBridge(_ capability: String?) {
+        guard let capability else { return }
+        stateLock.lock()
+        _guestShareEventBridge = capability
         stateLock.unlock()
     }
 
@@ -1377,6 +1401,7 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
                 // ~220ms, dockerd ready at ~730ms), so `morb rosetta` should be able
                 // to answer during that window instead of reporting "unknown".
                 noteGuestRosetta(rosetta: info.rosetta, binfmtAmd64: info.binfmtAmd64)
+                noteGuestShareEventBridge(info.shareEventBridge)
                 // A guest too old to report the field cannot tell us dockerd is up;
                 // treating "absent" as ready keeps this compatible rather than
                 // hanging for the whole boot budget against an older initramfs.

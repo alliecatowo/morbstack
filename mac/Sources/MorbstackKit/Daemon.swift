@@ -503,6 +503,7 @@ public final class Daemon {
             markBusyIfActive()
             let forwards = forwarder.activeForwards
             let failedForwards = forwarder.failedForwards
+            let liveShareBridge = liveShareBridgeDiagnostic()
             return .success([
                 "failed_port_forwards": .array(failedForwards.map { AnyCodableValue.string($0) }),
                 "state": .string(vm.state.token),
@@ -534,6 +535,10 @@ public final class Daemon {
                 // guest has not reported: "nothing is wrong" and "nothing is known"
                 // must not render the same.
                 "shares_degraded": sharesDegradedCount().map { AnyCodableValue.int($0) } ?? .null,
+                // This is deliberately a negative capability/status report until a
+                // guest endpoint can receive the bounded contract. It never starts an
+                // FSEvents watcher merely because `status` was read.
+                "live_share_bridge": .object(liveShareBridge.ipcFields),
             ])
 
         case "shares":
@@ -543,7 +548,11 @@ public final class Daemon {
             // empty. `markBusyIfActive` is not called for the same reason `status`
             // does not count as activity — asking a question must not postpone an
             // idle suspend.
-            return .success(["shares": MorbShareSurface.encode(liveShares())])
+            let liveShareBridge = liveShareBridgeDiagnostic()
+            return .success([
+                "shares": MorbShareSurface.encode(liveShares()),
+                "live_share_bridge": .object(liveShareBridge.ipcFields),
+            ])
 
         case "k8s-status", "k8s-diagnose", "k8s-enable", "k8s-disable", "k8s-kubeconfig":
             return handleK8s(request)
@@ -717,6 +726,20 @@ public final class Daemon {
                         : shareError(for: state)))
         }
         return rows
+    }
+
+    /// The preparatory FSEvents/inotify bridge state. It consumes only config and
+    /// facts already observed from the current VM; in particular it does not create a
+    /// broad host watcher or ask the guest to start anything while answering status.
+    private func liveShareBridgeDiagnostic() -> MorbLiveShareBridge.Diagnostic {
+        var planned = vm.shares
+        if planned.isEmpty { planned = (try? vm.sharePlan())?.shares ?? [] }
+        return MorbLiveShareBridge.diagnose(
+            paths: config.liveSharePaths,
+            shares: planned,
+            guestShareStates: vm.guestShareStates,
+            guestCapability: MorbLiveShareBridge.GuestCapability(
+                wireValue: vm.guestShareEventBridge))
     }
 
     /// The one-line reason a share is not usable, or `nil` when it is.

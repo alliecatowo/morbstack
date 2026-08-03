@@ -28,6 +28,16 @@ const MAGIC: &[u8; 4] = b"MRB0";
 /// can't be used to force a huge allocation.
 const MAX_PAYLOAD: u32 = 1 << 20;
 
+/// Guest capability for the future host FSEvents delivery contract.
+///
+/// This is intentionally a negative, additive capability rather than a fake control
+/// request. Linux inotify queues are owned by the kernel and there is no userspace API
+/// for injecting host-originated events into arbitrary watcher descriptors. Until the
+/// guest has an explicit kernel/filesystem endpoint *and* a bounded event transport,
+/// `morbinit` must report `unavailable` rather than implying VirtioFS supports hot
+/// reload. See docs/protocol.md §5.4.
+pub const SHARE_EVENT_BRIDGE_CAPABILITY: &str = "unavailable";
+
 /// Read one MRB0 frame from `r`, returning its JSON payload bytes.
 pub fn read_frame<R: Read>(r: &mut R) -> io::Result<Vec<u8>> {
     let mut magic = [0u8; 4];
@@ -390,6 +400,10 @@ pub fn handle_request(payload: &[u8], ctx: &ControlContext) -> (Vec<u8>, bool) {
                     Value::Str(ctx.binfmt.amd64.as_str().to_string()),
                 ),
                 ("shares", Value::Str(ctx.shares.clone())),
+                (
+                    "share_event_bridge",
+                    Value::Str(SHARE_EVENT_BRIDGE_CAPABILITY.to_string()),
+                ),
             ]);
             (body.into_bytes(), false)
         }
@@ -764,6 +778,10 @@ mod tests {
             Some(&Value::Bool(false))
         );
         assert_eq!(fields.get("userland_proxy"), Some(&Value::Bool(true)));
+        assert_eq!(
+            fields.get("share_event_bridge"),
+            Some(&Value::Str("unavailable".to_string()))
+        );
     }
 
     #[test]

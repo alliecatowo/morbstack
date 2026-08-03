@@ -663,6 +663,36 @@ case "shares":
         live: (sharesReply?.ok == true) ? MorbShareSurface.decodeShares(sharesReply?.data) : nil)
     let shares = sharesReport.shares
     let sharesAreLive = sharesReport.source == .daemon
+    let localLiveShareBridge: AnyCodableValue = {
+        let config = (try? MorbConfig.load(from: MorbPaths.configFile)) ?? MorbConfig()
+        let planned = (try? config.sharePlan())?.shares ?? []
+        var guestStates: [String: MorbShares.GuestMountState] = [:]
+        if sharesAreLive {
+            for share in shares {
+                guestStates[share.path] = share.mounted ? .mounted : .failed
+            }
+        }
+        let diagnostic = MorbLiveShareBridge.diagnose(
+            paths: config.liveSharePaths,
+            shares: planned,
+            guestShareStates: guestStates,
+            guestCapability: .unknown)
+        return .object(diagnostic.ipcFields)
+    }()
+    let liveShareBridge: AnyCodableValue = {
+        guard let data = sharesReply?.data,
+              case .object(let fields)? = data["live_share_bridge"]
+        else { return localLiveShareBridge }
+        return .object(fields)
+    }()
+    func printLiveShareBridgeDiagnostic() {
+        guard case .object(let fields) = liveShareBridge else { return }
+        let state = fields["state"]?.displayString ?? "unknown"
+        let detail = fields["detail"]?.displayString ?? "No diagnostic detail was returned."
+        out("")
+        out("  live-share event bridge: \(state)")
+        out("    \(detail)")
+    }
 
     finish(.success([
         "shares": MorbShareSurface.encode(shares),
@@ -673,6 +703,7 @@ case "shares":
         "source": .string(sharesReport.source.rawValue),
         "daemon_running": .bool(sharesAreLive),
         "config_error": sharesReport.configError.map { AnyCodableValue.string($0) } ?? .null,
+        "live_share_bridge": liveShareBridge,
     ])) { _ in
         if let configError = sharesReport.configError {
             out("[!!] \(configError)")
@@ -683,6 +714,7 @@ case "shares":
             out("[--] no shared paths configured")
             out("    Every bind mount will be empty inside the container. Add paths with")
             out("    `shared_paths = [\"/Users\"]` in \(MorbPaths.configFile.path).")
+            printLiveShareBridgeDiagnostic()
             return
         }
 
@@ -730,6 +762,7 @@ case "shares":
         out("  Shared paths are mounted at the same absolute path inside the guest, so")
         out("  `-v /Users/you/project:/app` needs no translation. A bind mount whose host")
         out("  path is not under one of these roots will be empty in the container.")
+        printLiveShareBridgeDiagnostic()
         if !sharesAreLive {
             out("")
             out("  Run `morb start` to find out which of them the guest actually has.")

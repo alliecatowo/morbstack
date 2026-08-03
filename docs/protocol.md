@@ -726,3 +726,58 @@ report on its shares" rather than as a failure.
 The host decodes it with `MorbShares.parseGuestShares`, surfaces it through
 the daemon's `shares` command and the `shares_degraded` count in `status`,
 and renders it in `morb shares`, `morb doctor` and the app.
+
+### 5.4 Future scoped file-event contract
+
+VirtioFS gives the guest coherent host bytes but does not generate a Linux inotify
+notification when a Mac editor changes a shared file. This is not something the host
+can solve by inventing an inotify mask: inotify queues are kernel-owned, and Linux has
+no userspace operation that inserts an event into an arbitrary watcher. The present
+guest reports this explicit additive `info` capability:
+
+```text
+share_event_bridge: "unavailable"
+```
+
+`"unavailable"` means there is no guest filesystem/kernel injection endpoint. An
+absent field means an older guest did not report a capability. Neither value authorizes
+the host to start FSEvents or claim hot reload.
+
+`MorbLiveShareBridge` defines the preparatory host contract. It is deliberately
+opt-in through `live_share_paths = []`, separate from broad `shared_paths` defaults.
+Each selected root must be a strict descendant of an actually configured VirtioFS
+root: `/Users/you/project` under `/Users` is valid; `/Users` itself is rejected. This
+keeps a future subscription scoped to the named project rather than watching a whole
+home directory or mounted-volume tree.
+
+The eventual source adapter hands the bounded queue one flat record at a time:
+
+```text
+contract_version: 1
+source_event_id: uint64       # FSEvent ID; monotonic, not consecutive
+root_path: string             # selected live_share_paths root
+path: string                  # invalidated path, or root_path for rescan
+kind: "invalidated" | "rescan"
+rescan_reason: string?        # required when kind = rescan
+```
+
+This shape remains compatible with MRB0's flat JSON subset, but **is not sent over
+MRB0 today**. The M0 control client is single-flight request/reply and has no
+long-lived event receiver; a later transport must provide explicit bounded delivery
+and acknowledgement semantics rather than making `info` polling pretend to be a
+stream.
+
+The queue contains at most 1,024 records and never drops silently. A normal FSEvents
+callback becomes `invalidated`, deliberately not a fake create/write/delete inotify
+mask because FSEvents is directory-granular and coalescing. The following conditions
+replace incremental records with a `rescan` for the affected root: a
+`MustScanSubDirs` callback, root change, an overlong path, or host queue overflow.
+`UserDropped`, `KernelDropped`, and FSEvent-ID wrap replace the queue with one rescan
+for **every** selected root, matching Apple's full-rescan requirement for a
+multi-root stream. A future receiver must recursively rebuild its state for each
+`rescan`; it must never continue incrementally past one.
+
+No FSEvent stream is constructed while the guest capability is unavailable. That
+avoids watching user paths with no consumer, keeps `morb shares` and `status`
+observational, and makes the current acceptance boundary unambiguous: the contract
+and diagnostics are present; host-originated inotify and hot reload are not.
