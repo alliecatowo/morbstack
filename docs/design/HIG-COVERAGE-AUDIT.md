@@ -293,10 +293,11 @@ defunct containers aren't restartable Docker targets, so the command is accurate
 start doesn't run `docker compose up`, create/recreate services, read source, or build/pull;
 stop retains containers, images, networks, and named volumes; restart touches only running
 members. Individual service lifecycle actions and the existing **View Logs** handoff to
-Containers remain record-scoped native commands. Compose `up/down/build`, source-driven
-recreate, and interactive `exec` remain unavailable here until the app has an explicit
-selected-source and terminal/session safety contract; they are not simulated with inferred
-labels or a decorative UI control.
+Containers remain record-scoped native commands. Compose `up/down/build` remain unavailable
+from this browser and its inferred labels; the later selected-source workflow records the
+separate reviewed document contract for those commands. Source-driven recreate and
+interactive `exec` remain unavailable rather than being simulated with a decorative UI
+control.
 
 Consulted: Apple’s [menus](https://developer.apple.com/design/human-interface-guidelines/menus),
 [toolbars](https://developer.apple.com/design/human-interface-guidelines/toolbars), and
@@ -307,6 +308,54 @@ No project mutation was performed. Full-window menu/toolbar, keyboard, VoiceOver
 confirmation, individual lifecycle, logs, light/dark, and real-engine acceptance remain
 pending; this source-only correction performed no build, test, Docker/VM action, or
 live-app launch.
+
+### 2026-08-03 Reviewed Compose source execution
+
+The next Compose task is source-driven command execution, not stack browsing. The only
+entry point is the source editor's standard overflow `Menu` after a person has explicitly
+opened a saved Compose YAML file. Project labels, inspector metadata, selection, and
+ordinary browsing cannot run `docker compose`. The menu opens a document-modal standard
+sheet with a `Form` for selected-file provenance, exact project root, command, effects,
+trust boundary, and cancellation behavior. Its toolbar has the system confirmation and
+cancellation positions; **Stop and Remove** is destructive. A running command uses the
+standard `ProgressView`, and its bounded result is shown in a selectable AppKit text view
+inside the same sheet rather than a custom terminal or dashboard card.
+
+Before the user can confirm, the editor requires a saved, unchanged Compose source. The
+runner then repeats the exact-byte snapshot, regular-file/non-symlink source check, and
+the exact source-parent project root check immediately before launch. The root itself may
+not resolve through a symbolic link, preventing a path substitution from changing Compose
+relative-path semantics after review. The command runs the bundled Compose client directly
+with `--project-directory <source parent> -f <selected source>` and a 0700 temporary,
+otherwise-empty Docker configuration against Morbstack's local socket. It inherits no host
+Docker context, credential helper, default `.env`, proxy environment, Git configuration,
+or SSH agent. Explicit source references (includes, `extends`, configs, secrets, build
+contexts, and providers) remain Compose's trusted-input boundary and are named in the
+review; this isolation is not represented as a credential or source-security guarantee.
+
+The selected commands are deliberately narrow: **Build Project Images** is `build`;
+**Bring Up Project** is `up --detach --no-build --pull never`; and **Stop and Remove
+Project** is default `down`, without `--volumes`, `--rmi`, or `--remove-orphans`.
+Output and launch errors are retained only in memory, bounded to 256 KiB, then subjected
+to best-effort common key/value and URL-credential redaction before they are shown in the
+sheet. This is a presentation guard, not a full data-loss-prevention claim. Cancellation
+terminates the direct Compose client and escalates to SIGKILL after a short grace period;
+it cannot roll back daemon work already accepted or guarantee termination of helpers a
+trusted source starts. The Stacks data refreshes after every result, including failure or
+cancellation, because those commands can leave partial Docker state.
+
+Consulted: Apple’s [sheets](https://developer.apple.com/design/human-interface-guidelines/sheets),
+[menus](https://developer.apple.com/design/human-interface-guidelines/menus),
+[alerts](https://developer.apple.com/design/human-interface-guidelines/alerts), and
+[progress indicators](https://developer.apple.com/design/human-interface-guidelines/progress-indicators),
+plus SwiftUI [`Form`](https://developer.apple.com/documentation/swiftui/form),
+[`Menu`](https://developer.apple.com/documentation/swiftui/menu),
+[`ProgressView`](https://developer.apple.com/documentation/swiftui/progressview), and
+[`View.sheet`](https://developer.apple.com/documentation/swiftui/view/sheet(isPresented:ondismiss:content:)).
+
+No Compose command, Docker/VM action, build, test, or app launch was performed for this
+source-only implementation. Full-window visual acceptance, light/dark, narrow-toolbar,
+keyboard, VoiceOver, and a fixture-backed review/cancellation/result pass remain required.
 
 ## Charts audit: current concrete rule
 

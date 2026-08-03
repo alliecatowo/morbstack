@@ -146,6 +146,27 @@ final class ComposeFileEditor {
         return ComposeSourceValidationRequest(sourceURL: fileURL, expectedData: originalData)
     }
 
+    /// Source-driven project work has the same strict saved-document boundary as
+    /// validation. It never writes an unsaved editor buffer, infers a source path from
+    /// Docker labels, or treats merely browsing a stack as approval to run Compose.
+    func projectOperationRequest(_ operation: ComposeProjectOperation) throws -> ComposeProjectOperationRequest {
+        guard sourceKind == .composeYAML, let fileURL else {
+            throw ComposeFileEditorError("Choose a Compose YAML file before running a project command.")
+        }
+        guard !isDirty else {
+            throw ComposeFileEditorError("Save or discard source edits before running a project command. Morbstack runs only the explicit file on disk.")
+        }
+        try Self.validateSourceFile(fileURL, as: .composeYAML)
+        let currentData = try Self.coordinatedRead(fileURL)
+        guard currentData == originalData else {
+            throw ComposeFileEditorError("This Compose YAML file changed on disk after Morbstack opened it. Reopen it to review the current version before running a project command.")
+        }
+        return try ComposeProjectOperationRequest(
+            operation: operation,
+            sourceURL: fileURL,
+            expectedData: originalData)
+    }
+
     var commandActions: ComposeFileEditorCommandActions? {
         guard isPresented else { return nil }
         return ComposeFileEditorCommandActions(
@@ -360,6 +381,8 @@ private struct ComposeFileEditorError: LocalizedError {
 struct ComposeFileEditorSheet: View {
     @Bindable var editor: ComposeFileEditor
     @Bindable var validation: ComposeSourceValidationModel
+    @Bindable var projectOperations: ComposeProjectOperationModel
+    let refreshStacks: @MainActor () async -> Void
     @State private var environmentValuesAreRevealed = false
     // A declaration list can be large. Keep it as requested metadata so the document
     // sheet first communicates source provenance and the redaction boundary instead
@@ -437,7 +460,7 @@ struct ComposeFileEditorSheet: View {
                     }
                     .accessibilityLabel("Close source file")
                     .help("Close source file")
-                    .disabled(validation.isRunning)
+                    .disabled(validation.isRunning || projectOperations.isRunning)
                 }
                 if editor.isEnvironmentFile {
                     ToolbarItem(placement: .secondaryAction) {
@@ -459,12 +482,37 @@ struct ComposeFileEditorSheet: View {
                         } label: {
                             Image(systemName: "checkmark.seal")
                         }
-                        .disabled(!validation.canRequestValidation || editor.isDirty)
+                        .disabled(!validation.canRequestValidation || editor.isDirty || projectOperations.isPresented)
                         .accessibilityLabel("Validate Compose source")
                         .help(
                             editor.isDirty
                                 ? "Save or discard edits before validating Compose source"
                                 : "Validate saved Compose source")
+                    }
+                    ToolbarItem(placement: .secondaryAction) {
+                        Menu {
+                            Button("Build Project Images…") {
+                                projectOperations.request(.build, using: editor)
+                            }
+                            Button("Bring Up Project…") {
+                                projectOperations.request(.up, using: editor)
+                            }
+                            Divider()
+                            Button("Stop and Remove Project…", role: .destructive) {
+                                projectOperations.request(.down, using: editor)
+                            }
+                        } label: {
+                            Image(systemName: "play.square.stack")
+                        }
+                        .disabled(
+                            !projectOperations.canRequestOperation
+                                || editor.isDirty
+                                || validation.isPresented)
+                        .accessibilityLabel("Reviewed Compose project commands")
+                        .help(
+                            editor.isDirty
+                                ? "Save or discard edits before reviewing a Compose project command"
+                                : "Review Compose project commands for this saved source")
                     }
                 }
                 ToolbarItem(placement: .secondaryAction) {
@@ -486,7 +534,7 @@ struct ComposeFileEditorSheet: View {
             }
         }
         .frame(minWidth: 620, idealWidth: 820, minHeight: 480, idealHeight: 660)
-        .interactiveDismissDisabled(editor.isDirty)
+        .interactiveDismissDisabled(editor.isDirty || validation.isRunning || projectOperations.isRunning)
         .confirmationDialog(
             "Discard unsaved changes?",
             isPresented: Binding(
@@ -529,12 +577,31 @@ struct ComposeFileEditorSheet: View {
         } message: {
             Text(validation.requestError ?? "")
         }
+        .alert(
+            "Couldn’t Prepare Compose Project Command",
+            isPresented: Binding(
+                get: { projectOperations.requestError != nil },
+                set: { if !$0 { projectOperations.requestError = nil } })
+        ) {
+            Button("OK", role: .cancel) { projectOperations.requestError = nil }
+        } message: {
+            Text(projectOperations.requestError ?? "")
+        }
         .sheet(
             isPresented: Binding(
                 get: { validation.isPresented },
                 set: { if !$0 { validation.requestDismissal() } })
         ) {
             ComposeSourceValidationSheet(validation: validation)
+        }
+        .sheet(
+            isPresented: Binding(
+                get: { projectOperations.isPresented },
+                set: { if !$0 { projectOperations.requestDismissal() } })
+        ) {
+            ComposeProjectOperationSheet(
+                operations: projectOperations,
+                refreshStacks: refreshStacks)
         }
         .onChange(of: editor.fileURL) { _, _ in
             environmentValuesAreRevealed = false

@@ -127,6 +127,7 @@ struct StacksRootView: View {
     /// they never authorize Morbstack to open or write a file from the person's tree.
     @State private var composeFileEditor = ComposeFileEditor()
     @State private var composeSourceValidation = ComposeSourceValidationModel()
+    @State private var composeProjectOperations = ComposeProjectOperationModel()
 
     /// Compose projects only. Unmanaged containers belong to the Containers browser.
     private var stacks: [ComposeGroup] {
@@ -276,7 +277,9 @@ struct StacksRootView: View {
             ) {
                 ComposeFileEditorSheet(
                     editor: composeFileEditor,
-                    validation: composeSourceValidation)
+                    validation: composeSourceValidation,
+                    projectOperations: composeProjectOperations,
+                    refreshStacks: { await model.refreshAll() })
             }
             .alert(
                 composeFileEditor.openErrorTitle,
