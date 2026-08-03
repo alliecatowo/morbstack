@@ -6,8 +6,8 @@
 // The public `MigrationReadOnlyPlanner` derives an image comparison only after both
 // existing Docker engines respond to read-only requests. The separately labeled
 // images-only workflow begins with an empty selection, derives a fresh plan before a
-// scoped review, and only calls `ImageMigrationTransaction.execute` from the explicit
-// confirmation action. Named volumes have a separate eligibility comparison and an
+// scoped review, then re-prepares only those reviewed references immediately before
+// execution. Named volumes have a separate eligibility comparison and an
 // explicit selected-volume transaction. The transaction creates helpers and a new
 // destination volume only after its own scoped review and confirmation. No route path
 // starts a runtime, asks a credential helper, writes Docker configuration, or performs
@@ -547,9 +547,13 @@ struct MigrationRootView: View {
             if let prepared = imageMigration.prepared {
                 MigrationImageReviewSheet(
                     prepared: prepared,
+                    recheckNotice: imageMigration.recheckNotice,
                     onBack: imageMigration.returnToSelection,
                     onConfirm: imageMigration.executePreparedSelection)
             }
+
+        case .rechecking:
+            MigrationImageRecheckingSheet()
 
         case .transferring:
             MigrationImageProgressSheet(
@@ -791,6 +795,7 @@ private struct MigrationImageSelectionSheet: View {
 /// the selected records, endpoint, exclusions, and cancellation contract together.
 private struct MigrationImageReviewSheet: View {
     let prepared: PreparedImageMigration
+    let recheckNotice: String?
     let onBack: () -> Void
     let onConfirm: () -> Void
 
@@ -807,8 +812,15 @@ private struct MigrationImageReviewSheet: View {
                         LabeledContent("Estimated Size", value: Formatters.bytesString(prepared.totalBytes))
                         LabeledContent("Source Access", value: prepared.sourceUntouched ? "Read-only" : "Changed")
                         Text(
-                            "Before each import, Morbstack checks that the source tag still resolves to this image ID and that the destination tag has not changed.")
+                            "Morbstack refreshes this exact selection once more after confirmation. Before each import, it also checks that the source tag still resolves to this image ID and that the destination tag has not changed.")
                             .foregroundStyle(.secondary)
+                    }
+
+                    if let recheckNotice {
+                        Section("Review Required") {
+                            Text(recheckNotice)
+                                .foregroundStyle(.secondary)
+                        }
                     }
 
                     Section("Not Included") {
@@ -865,6 +877,27 @@ private struct MigrationImageReviewSheet: View {
             }
         }
         .frame(minWidth: 620, minHeight: 520)
+    }
+}
+
+/// The last confirmation repeats the read-only preparation for exactly the image
+/// references the person reviewed. It does not use the broad CLI-only all-images
+/// selection, and it makes a changed source, destination, or image plan visible
+/// before any destination image load starts.
+private struct MigrationImageRecheckingSheet: View {
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Rechecking Selected Images") {
+                    ProgressView("Checking the current image IDs and destination tags…")
+                    Text(
+                        "Morbstack is refreshing the exact selected references before import. No image archive is exported or loaded while this check runs.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("Rechecking Image Import")
+        }
+        .frame(minWidth: 480, minHeight: 220)
     }
 }
 
@@ -1447,6 +1480,7 @@ private final class ImageMigrationWorkflow {
     enum Stage {
         case selection
         case review
+        case rechecking
         case transferring
         case report
     }
@@ -1470,6 +1504,7 @@ private final class ImageMigrationWorkflow {
     var progress: ImageMigrationProgress?
     var isPreparing = false
     var cancellationRequested = false
+    var recheckNotice: String?
     var errorMessage: String?
     var latestReport: ImageMigrationTransactionReport?
 
@@ -1497,6 +1532,7 @@ private final class ImageMigrationWorkflow {
         progress = nil
         isPreparing = false
         cancellationRequested = false
+        recheckNotice = nil
         errorMessage = nil
         stage = .selection
         isPresented = true
@@ -1512,6 +1548,7 @@ private final class ImageMigrationWorkflow {
         progress = nil
         isPreparing = false
         cancellationRequested = false
+        recheckNotice = nil
         cancellation = nil
         stage = .selection
     }
@@ -1519,6 +1556,7 @@ private final class ImageMigrationWorkflow {
     func returnToSelection() {
         guard stage == .review else { return }
         prepared = nil
+        recheckNotice = nil
         stage = .selection
     }
 
@@ -1539,6 +1577,7 @@ private final class ImageMigrationWorkflow {
         }
 
         isPreparing = true
+        recheckNotice = nil
         Task { [weak self] in
             let result = await Task.detached(priority: .utility) {
                 do {
@@ -1568,7 +1607,58 @@ private final class ImageMigrationWorkflow {
             errorMessage = "Review the selected images again before importing."
             return
         }
+        let references = prepared.items.map(\.reference)
+        guard !references.isEmpty, let sourceToken = source?.transferSourceToken else {
+            errorMessage = "Review the selected images again before importing."
+            return
+        }
 
+        recheckNotice = nil
+        stage = .rechecking
+        Task { [weak self] in
+            let result = await Task.detached(priority: .userInitiated) {
+                do {
+                    return PreparationResult.prepared(
+                        try ImageMigrationTransaction.prepare(
+                            from: sourceToken,
+                            selection: .references(references)))
+                } catch {
+                    return PreparationResult.failed(String(describing: error))
+                }
+            }.value
+
+            guard let self else { return }
+            switch result {
+            case .prepared(let refreshed):
+                guard self.stage == .rechecking else { return }
+                self.prepared = refreshed
+                if Self.preparationChanged(from: prepared, to: refreshed) {
+                    self.stage = .review
+                    self.recheckNotice = "The selected image plan changed while rechecking. Review the refreshed image IDs and endpoints before importing."
+                    return
+                }
+                self.beginExecution(with: refreshed)
+            case .failed(let message):
+                self.prepared = nil
+                self.stage = .selection
+                self.errorMessage = "Could not recheck the selected images before import: \(message)"
+            }
+        }
+    }
+
+    private static func preparationChanged(
+        from previous: PreparedImageMigration,
+        to refreshed: PreparedImageMigration
+    ) -> Bool {
+        previous.source != refreshed.source
+            || previous.destination != refreshed.destination
+            || previous.items != refreshed.items
+            || previous.selectionDescription != refreshed.selectionDescription
+            || previous.sourceUntouched != refreshed.sourceUntouched
+            || previous.excludedScopes != refreshed.excludedScopes
+    }
+
+    private func beginExecution(with prepared: PreparedImageMigration) {
         let cancellation = MigrationCancellationSignal()
         self.cancellation = cancellation
         progress = nil
