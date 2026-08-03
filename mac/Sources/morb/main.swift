@@ -651,7 +651,8 @@ case "status":
         // block is the only place a user can find out why nothing answers.
         if case .array(let failed)? = data["failed_port_forwards"], !failed.isEmpty {
             out("")
-            out("  unavailable ports (\(failed.count))")
+            out("  unavailable host forwards (\(failed.count))")
+            out("  Docker may still report these as published; they are not reachable on this Mac until a retry succeeds.")
             for failure in failed {
                 out("    \(failure.displayString)")
             }

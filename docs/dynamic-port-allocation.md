@@ -105,6 +105,12 @@ No event-derived listener is represented as proof that its create/start reply ha
 matching host endpoint. Fixed TCP leases, explicit UDP's availability diagnostic,
 event reconciliation, and loopback-only address/protocol validation are unchanged.
 
+When event reconciliation cannot bind an endpoint that Docker has already reported,
+`morb status` calls it an **unavailable host forward** and explicitly says that the
+Docker CLI may still display it as published. This is a post-create diagnostic, not a
+retroactive allocation guarantee: it does not make `-P`, ranges, dynamic UDP,
+omitted-host-port, or opaque/chunked creates synchronously supported.
+
 ## Required work beyond Phase 1
 
 Further allocation work must preserve these invariants:
