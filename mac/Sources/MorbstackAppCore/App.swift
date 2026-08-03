@@ -210,7 +210,6 @@ struct MorbCommands: Commands {
         }
 
         CommandMenu("Image") {
-            Button("Export Selected Image…") {
             Button("Run Selected Local Image…") {
                 runLocalImageAction?()
             }
@@ -218,6 +217,7 @@ struct MorbCommands: Commands {
 
             Divider()
 
+            Button("Export Selected Image…") {
                 imageArchiveExportAction?()
             }
             .disabled(imageArchiveExportAction == nil)
