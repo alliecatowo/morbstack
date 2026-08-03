@@ -372,7 +372,10 @@ must preserve:
   everything already queued toward it has drained — not on first EOF. This
   is what keeps `docker build -` / `docker run -i` (client closes stdin,
   still wants the response) working; tearing down both halves on the first
-  EOF truncates in-flight response bytes on either end.
+  EOF truncates in-flight response bytes on either end. A terminal I/O error
+  is deliberately different: the guest shuts down both endpoints so a
+  cancelled BuildKit or hijacked Engine session wakes its opposite copy
+  worker and releases its connection slot.
 - **Backpressured, bounded copying.** Each direction uses one fixed 64 KiB
   buffer and does not read another chunk until that chunk has reached its
   sink. A paused `docker cp` receiver or `docker logs --follow` consumer is

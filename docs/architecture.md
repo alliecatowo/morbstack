@@ -64,7 +64,8 @@ on purpose (see "The load-bearing decision" below).
                            │     - supervises services below                 │
                            │                                                  │
                            │   containerd ── dockerd                         │
-                           │   (buildkitd: not yet supervised, M1+)          │
+                           │   (Engine BuildKit via dockerd; no standalone   │
+                           │    buildkitd supervisor is needed)               │
                            │                                                  │
                            │   /var/lib/docker on /dev/vda (ext4, or btrfs   │
                            │   when the kernel supports it) — overlay2;      │
@@ -129,15 +130,20 @@ retrying a restore known to fail — see "VM lifecycle" below),
   exercised). Responsible for: early guest bring-up (mount `/proc` `/sys`
   `/dev` `/run` `/tmp` cgroup2, opportunistically mount `/dev/vda`),
   bringing up `eth0` + DHCP, starting and supervising `containerd` and
-  `dockerd` (not `buildkitd` — see below), and serving the vsock control
+  `dockerd` (not a separately supervised `buildkitd` — see below), and serving the vsock control
   channel (MRB0 framing in M0; see `docs/protocol.md`).
 - **containerd + dockerd** — unmodified upstream binaries (static Docker
   29.7.1 aarch64 release). Morbstack does not fork or patch the Docker
-  Engine. **`buildkitd` is not part of M0** — `supervisor.rs`'s service
-  table (`default_services`) starts exactly two services, `containerd` and
-  `dockerd`; `docker build` today goes through dockerd's classic builder,
-  not a supervised standalone buildkitd. Bundling buildkitd/buildx is an
-  M1 item per `docs/roadmap.md`.
+  Engine. `supervisor.rs`'s service table (`default_services`) starts exactly
+  two services, `containerd` and `dockerd`; it intentionally does not
+  supervise a separate `buildkitd` daemon. That is not a classic-builder
+  fallback: the selected upstream dockerd exposes the Engine BuildKit path,
+  which the recorded live parity run exercised through `docker buildx` with
+  cache mounts and a multi-platform `--load` build. The signed app bundles
+  the matching upstream Buildx client plugin. A user-selected Buildx
+  `docker-container`, remote, or Kubernetes builder is still an ordinary
+  Engine workload/client connection and must be validated separately before
+  it is claimed as release evidence.
 - **Guest data root.** `/dev/vda` (backed by `disk.img` on the host) is
   formatted the first time it's seen blank and mounted at
   `/var/lib/docker` before dockerd starts (`disk.rs`, called from

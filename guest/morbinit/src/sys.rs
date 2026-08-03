@@ -71,6 +71,10 @@ pub const VMADDR_CID_ANY: u32 = 0xffffffff;
 
 pub const SHUT_RD: c_int = 0;
 pub const SHUT_WR: c_int = 1;
+/// Disable both halves of a stream after a terminal relay error. Unlike a
+/// directional EOF, this wakes the peer copy worker so the connection cannot
+/// remain pinned behind an abandoned BuildKit/Engine session.
+pub const SHUT_RDWR: c_int = 2;
 
 // ---- signals we send to supervised services --------------------------------
 

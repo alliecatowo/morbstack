@@ -19,6 +19,9 @@
 //!     the *other* endpoint rather than tearing the whole connection down,
 //!     so `docker build -` / `docker run -i` style "client closed stdin,
 //!     still wants the response" flows work.
+//!   * A terminal read/write error is different from EOF: it shuts down both
+//!     endpoints, waking the opposite copy worker. This releases the bounded
+//!     connection slot when a client cancels a streamed BuildKit session.
 //!   * Bounded concurrency (`MAX_CONNECTIONS`), because each connection
 //!     costs two threads and PID 1 must not be DoS-able into thread
 //!     exhaustion.
@@ -97,7 +100,7 @@ mod imp {
     use crate::sys;
     use std::io;
     use std::net::Shutdown;
-    use std::os::fd::AsRawFd;
+    use std::os::fd::{AsRawFd, RawFd};
     use std::os::unix::net::UnixStream;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -196,6 +199,21 @@ mod imp {
         }
     }
 
+    /// Abort both halves of a relay after a terminal I/O error.
+    ///
+    /// A clean EOF is directional and must remain a half-close: a client can
+    /// finish sending a Dockerfile or BuildKit session request while still
+    /// waiting for the build result. A read/write *error* means its peer is
+    /// no longer usable, though. Leaving the other copy worker blocked in
+    /// that case makes `handle_connection` wait forever in `join`, consuming
+    /// one of the proxy's bounded slots after a cancelled build or session.
+    /// `shutdown` operates on the underlying socket, so either duplicated fd
+    /// safely wakes the reader and writer clones owned by the two workers.
+    fn abort_relay(vsock_fd: RawFd, dockerd_fd: RawFd) {
+        let _ = sys::shutdown(vsock_fd, sys::SHUT_RDWR);
+        let _ = sys::shutdown(dockerd_fd, sys::SHUT_RDWR);
+    }
+
     /// Splice one accepted vsock connection to a fresh dockerd connection.
     fn handle_connection(vsock: std::fs::File) -> io::Result<()> {
         let unix = connect_dockerd(DOCKERD_CONNECT_TIMEOUT).map_err(|e| {
@@ -212,13 +230,21 @@ mod imp {
         let mut unix_read = unix;
         let mut unix_write = unix_read.try_clone()?;
         let vsock_write_fd = vsock_write.as_raw_fd();
+        let vsock_abort_fd = vsock_read.as_raw_fd();
+        let dockerd_abort_fd = unix_read.as_raw_fd();
+        let aborted = Arc::new(AtomicBool::new(false));
 
         // host -> dockerd
+        let up_aborted = Arc::clone(&aborted);
         let up = thread::Builder::new()
             .name("docker-proxy-up".to_string())
             .spawn(move || {
                 if let Err(e) = copy_stream(&mut vsock_read, &mut unix_write) {
                     log::log(&format!("docker proxy host->dockerd copy error: {}", e));
+                    if !up_aborted.swap(true, Ordering::SeqCst) {
+                        abort_relay(vsock_abort_fd, dockerd_abort_fd);
+                    }
+                    return;
                 }
                 // EOF from the host: tell dockerd no more request bytes are
                 // coming, but leave its response direction open.
@@ -228,10 +254,14 @@ mod imp {
         // dockerd -> host
         if let Err(e) = copy_stream(&mut unix_read, &mut vsock_write) {
             log::log(&format!("docker proxy dockerd->host copy error: {}", e));
+            if !aborted.swap(true, Ordering::SeqCst) {
+                abort_relay(vsock_abort_fd, dockerd_abort_fd);
+            }
+        } else {
+            // dockerd finished responding: half-close the vsock so the host's
+            // HTTP client sees a clean end-of-response instead of hanging.
+            let _ = sys::shutdown_write(vsock_write_fd);
         }
-        // dockerd finished responding: half-close the vsock so the host's
-        // HTTP client sees a clean end-of-response instead of hanging.
-        let _ = sys::shutdown_write(vsock_write_fd);
 
         let _ = up.join();
         Ok(())
