@@ -46,10 +46,11 @@ public struct MorbConfig: Equatable, Codable, Sendable {
     /// `0.0.0.0`, while people who need local-only development can opt out.
     public var allowLANPortPublishing: Bool
 
-    /// Whether an explicit `-p HOST:CONTAINER` on a `--network host` container may
-    /// create a Mac listener. Host networking is guest-local under
-    /// Virtualization.framework, so this opt-in asks Morbstack's vsock bridge to
-    /// forward the declared host endpoint to the process's guest-local port.
+    /// Whether a Docker-declared port on a `--network host` container may create a
+    /// Mac listener. Explicit `-p HOST:CONTAINER` uses its declared Mac endpoint;
+    /// an otherwise-unpublished Docker `EXPOSE` port is bridged at the same port only
+    /// after the guest confirms a loopback-reachable listener. Host networking is
+    /// guest-local under Virtualization.framework, so this remains opt-in.
     public var allowHostNetworkPortPublishing: Bool
 
     /// Host directories exposed to the guest over VirtioFS, each mounted inside the
@@ -537,8 +538,8 @@ public struct MorbConfig: Equatable, Codable, Sendable {
         out += "# Set false to keep container ports on loopback only.\n"
         out += "allow_lan_port_publishing = \(allowLANPortPublishing)\n"
         out += "\n"
-        out += "# Forward explicit -p mappings from guest host-network containers to this Mac.\n"
-        out += "# Set true only when those containers should be reachable from the Mac.\n"
+        out += "# Make Docker-declared ports from guest host-network containers reachable on this Mac.\n"
+        out += "# Explicit -p uses its requested Mac port; exposed listeners use the same port.\n"
         out += "allow_host_network_port_publishing = \(allowHostNetworkPortPublishing)\n"
         out += "\n"
         out += "# Host directories exposed to the guest over VirtioFS. Each one is mounted\n"

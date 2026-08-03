@@ -5,7 +5,7 @@ speaks in milestone M0. The eventual gRPC contract for the guest control
 plane is sketched in `proto/morbstack/v1/control.proto`, but M0 does not
 implement it — everything described below is what actually ships.
 
-There are four distinct protocols in play, over two transport families:
+The principal protocol families are below, over two transport families:
 
 1. **MRB0 framed JSON**, host morbstackd <-> guest morbinit, over vsock
    port 1024.
@@ -15,12 +15,16 @@ There are four distinct protocols in play, over two transport families:
 3. **Datagram-dial**, host morbstackd <-> guest morbinit, over vsock port
    2378 — a one-line handshake followed by bounded framed UDP datagrams for
    published UDP container ports from the Mac.
-4. **Daemon control IPC**, CLI `morb` <-> host `morbstackd`, over a Unix
+4. **Guest listener probe**, host morbstackd <-> guest morbinit, over vsock
+   port 2380 — a closed request/reply check for Docker-exposed host-network
+   ports.
+5. **Daemon control IPC**, CLI `morb` <-> host `morbstackd`, over a Unix
    domain socket, newline-delimited JSON.
 
 They are unrelated to each other and must not be confused: MRB0, stream-dial,
-and datagram-dial all cross the host/guest boundary over vsock, on different
-ports and with different framing; daemon control IPC never leaves the host.
+datagram-dial, and the listener probe all cross the host/guest boundary over
+vsock, on different ports and with different framing; daemon control IPC never
+leaves the host.
 
 ---
 
@@ -315,6 +319,8 @@ Failure:
 | 2376 | Stream-dial: host requests a connection to an arbitrary guest-local TCP port (used for published container ports) |
 | 2377 | Bulk payload install: host streams large files into the guest (used for the Kubernetes payload) |
 | 2378 | Datagram-dial: framed UDP relay for published container ports |
+| 2379 | Publish-all allocator: patched Moby asks the host to reserve `docker -P` endpoints |
+| 2380 | Listener probe: host verifies a Docker-exposed guest host-network TCP/UDP listener |
 
 Port 2375 is the conventional plaintext Docker Engine API port; it is used
 here only on the host<->guest vsock link, which is not reachable from the
@@ -335,10 +341,10 @@ RAM-resident rootfs, so anything in the image is paid for in guest memory on
 every boot, including the overwhelming majority of boots where Kubernetes is
 off. Streaming it once, on the first `morb k8s enable`, and landing it on the
 persistent ext4 disk keeps the cost proportional to the feature's use. See
-§3.4.
+§3.5.
 
 New ports must be added to this table before use. Do not reuse 1024, 2375,
-2376, 2377, or 2378 for anything else.
+2376, 2377, 2378, 2379, or 2380 for anything else.
 
 ### 3.1 The vsock 2375 <-> `docker.sock` relay, end to end
 
@@ -567,10 +573,12 @@ recognized bounded TCP or IPv4/default UDP create whose `HostPort` is omitted, e
 that planned entry before the guest sees it, associates the full ID from the complete
 `201`, and only then exposes the `201`. The ordinary `MSG_PEEK` path still does not
 remove bytes, and unrecognized responses release a provisional lease rather than
-guessing. `-P`, raw dynamic host-port ranges, SCTP/IPv6 UDP, unsupported addresses,
-every other dynamic spelling or opaque create, start by name, and nonstandard start
-framing have no synchronous create/start lease guarantee. The exact normal-`-p`
-matrix, including the remaining paired
+guessing. `-P` is deliberately outside that bounded proxy transform: its separate
+source-level, version-pinned Moby/guest/host allocation handshake resolves the
+effective port set at Engine start and needs guest-image and live acceptance evidence.
+Raw dynamic host-port ranges, SCTP/IPv6 UDP, unsupported addresses, every other
+dynamic spelling or opaque create, start by name, and nonstandard start framing have
+no synchronous create/start lease guarantee. The exact normal-`-p` matrix, including the remaining paired
 dual-family gap, is in [`dynamic-port-allocation.md`](dynamic-port-allocation.md#normal--p-compatibility-matrix).
 An event-driven running-container snapshot can still promote an already-associated
 lease after an opaque or name-based start, but that happens after the Engine reply and
@@ -615,7 +623,29 @@ both directions: [u32 big-endian payload length][exactly that many payload bytes
 
 ---
 
-### 3.4 The vsock 2377 payload install protocol
+### 3.4 The vsock 2380 listener-presence probe
+
+The host uses this read-only protocol only after Docker's inspect document
+proves all of the following: the container is running, its `NetworkMode` is
+`host`, it has no explicit `PortBindings` or `PublishAllPorts`, and its
+`Config.ExposedPorts` lists the candidate. It never asks the guest to enumerate
+ports, so an arbitrary undeclared guest service cannot become Mac-reachable.
+
+Transport: vsock, port 2380. One request and one reply per connection:
+
+```text
+host -> guest:  "LISTEN <tcp|udp> <port>\n"
+guest -> host:  "YES\n" | "NO\n" | "ERR <reason>\n"
+```
+
+`<port>` is decimal `1...65535`. The guest reads the matching Linux proc table
+(`tcp`/`tcp6` for TCP, `udp`/`udp6` for UDP), accepting only a listening socket
+bound to loopback or the wildcard address. TCP must be in `LISTEN`; UDP must be
+an unconnected bound socket. `YES` is therefore sufficient for the existing
+guest-local stream/datagram dialers to reach the service at `127.0.0.1:<port>`.
+`NO` is normal while a container is starting and produces no Mac listener.
+
+### 3.5 The vsock 2377 payload install protocol
 
 A line-oriented request/reply preamble followed, for a transfer, by a raw
 byte body. Text for the control words so a human tailing the guest console

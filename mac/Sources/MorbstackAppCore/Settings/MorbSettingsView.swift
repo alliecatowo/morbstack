@@ -319,7 +319,7 @@ private struct TrackDResourceSettings: View {
 
             Section("Host Networking") {
                 Toggle(
-                    "Forward ports requested by host-network containers",
+                    "Make exposed ports from host-network containers reachable on this Mac",
                     isOn: Binding(
                         get: { store.draft.allowHostNetworkPortPublishing },
                         set: {
@@ -329,7 +329,7 @@ private struct TrackDResourceSettings: View {
                     )
                 )
                 Text(
-                    "When enabled, an explicit --network host -p HOST:CONTAINER mapping forwards the requested Mac port to CONTAINER in the guest. The service must listen on the guest loopback address or all guest interfaces. Restart the engine to apply this change."
+                    "When enabled, a host-network container's Docker-exposed port is reachable at the same Mac port after its service listens on the guest loopback address or all guest interfaces. An explicit --network host -p HOST:CONTAINER mapping instead uses the requested Mac port. Restart the engine to apply this change."
                 )
                 .font(.footnote)
                 .foregroundStyle(.secondary)

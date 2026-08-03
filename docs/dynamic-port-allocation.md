@@ -1,9 +1,11 @@
 # Dynamic published-port allocation
 
-Status: Phase 1 TCP/UDP implementation complete; live Docker/VM acceptance evidence
-pending. This document distinguishes the implemented bounded request-visible `-p`
-transaction from the Engine-owned `-P` work that remains. It is not a release claim
-until the live matrix at the end passes.
+Status: bounded request-visible `-p` and the separate Engine-owned `-P` allocator
+have source implementations; live Docker/VM acceptance evidence is pending. `-P` is
+implemented by the version-pinned Moby patch plus the guest and host allocators, not
+by the bounded request rewrite. This document retains the design reasoning for why
+those paths must remain separate; it is not a release claim until the live matrix at
+the end passes.
 
 ## Decision
 
@@ -75,19 +77,14 @@ semantics: upstream may release its allocated ports when a container stops and c
 new ones on a later start. Materializing fixed `PortBindings` and clearing
 `PublishAllPorts` would instead make those endpoints persistent.
 
-A future `-P` implementation therefore needs an atomic guest-Engine integration that
-uses the same immutable image/config resolution as the create operation, asks the host
-allocator to hold the whole supported resolved loopback TCP/UDP endpoint set before
-the Engine persists it, and defines the corresponding stop/start/restart reallocation
-protocol. In pinned Moby 29.7.1, the hook has to be **after**
-`mergeAndVerifyConfig` during create and **before** `initializeNetworking` makes the
-start-time mapping ([`start.go`](https://github.com/moby/moby/blob/docker-v29.7.1/daemon/start.go#L122-L125)).
-It must atomically reject the complete operation before guest side effects when the
-resolved set contains SCTP, a non-loopback address, or any ambiguous/unsupported form.
-A proxy-only
-request rewriter may support a clearly labeled direct-API subset whose complete
-`ExposedPorts` set is already in the body, but that is not compatible support for the
-standard Docker CLI `-P image` path and must not be advertised as such.
+The source implementation now provides that atomic guest-Engine integration through
+`guest/moby-patches/0001-morbstack-publish-all-host-allocator.patch`: after Moby has
+expanded its effective port map and before it programs networking, it asks the guest
+broker and host allocator to hold the complete supported TCP/UDP set. The host keeps
+`PublishAllPorts` dynamic and releases the start-local lease on stop so Moby allocates
+again on restart. The implementation rejects unsupported protocols/forms before
+networking proceeds. A proxy-only request rewriter remains insufficient for the normal
+Docker CLI `-P image` path. Guest-image inclusion and the live matrix remain pending.
 
 ## Implemented Phase 1 transaction
 
@@ -178,7 +175,7 @@ body does not completely identify.
 | `-p 8080-8081:80-81` (TCP or supported UDP) | Docker CLI validates equal spans, then emits concrete bindings | The fixed-port path preflights, reserves, associates, activates, and recovers the complete concrete set as one atomic lease. | The recognized create window is 256 KiB and the held lease rejects more than 128 distinct concrete transport endpoints before guest create; this is source-level evidence, not live Docker/VM acceptance. |
 | A recognized (within the 256 KiB preflight) fixed equal-length range with more than 128 concrete transport endpoints | Docker CLI-normalized concrete bindings | Rejected before guest create. | Holding listeners occurs under one ledger lock; the explicit cap prevents an oversized set from becoming a partial host lease. |
 | `-p 8080-8081:80` | One container port with a host-port allocation range | Rejected before guest create as a raw dynamic host-port range. | Docker's parser deliberately preserves this as a range string for Engine-side selection; Morbstack must not partially reserve it. |
-| `-P` / `--publish-all` | `HostConfig.PublishAllPorts: true` | Rejected before a guest create for the bounded dynamic path. | It is not another spelling of `-p <container-port>`; see the source audit above. |
+| `-P` / `--publish-all` | `HostConfig.PublishAllPorts: true` | The bounded proxy path declines it, while patched Moby asks the guest/host allocator for the complete effective TCP/UDP set at start. | Source implementation only; guest-image inclusion and the full live matrix are pending. It is not another spelling of `-p <container-port>`. |
 
 The concrete implementation evidence is `DockerPortPublicationPreflight` for
 classification/rewrite, `DockerProxy` for the bounded request/response hand-off, and
@@ -223,9 +220,10 @@ The following remain unsupported or explicitly outside this transaction:
   `"0"`, and any opaque/slow/oversized create that does not enter the bounded
   preflight. They retain the raw Engine relay and therefore make **no** Phase 1
   synchronous allocation claim.
-- `HostConfig.PublishAllPorts` (`docker run -P`). The standard CLI body omits image
-  `EXPOSE` entries; an allocation contract needs atomic guest image/config resolution
-  and separate stop/start/restart semantics, as documented in the source audit above.
+- `HostConfig.PublishAllPorts` (`docker run -P`) is outside this **bounded proxy**
+  transaction. Its separate source implementation uses Moby's effective image/config
+  resolution plus a guest/host allocator; it still needs guest-image inclusion and
+  live lifecycle/compatibility evidence.
 - Raw dynamic host-port ranges (for example `-p 8080-8081:80`), which Docker keeps
   as one Engine-side allocation range rather than a fixed one-to-one mapping. The
   ordinary equal-length fixed range has already been normalized by the Docker CLI and
@@ -308,13 +306,13 @@ for all non-dynamic calls:
    coverage. Verify that a competing Mac bind fails before
    guest create, then verify the created container's reported port equals the still
    held Mac listener and is reachable immediately after a successful start response.
-2. Add `PublishAllPorts` only after its guest image-resolution, held-allocation, and
-   stop/start/restart contract exists; cover image-tag replacement, image-provided
-   TCP/UDP/SCTP exposure, explicit `-p` precedence, `--expose`, conflict, destroy, and
-   restart reallocation. Treat raw dynamic host-port ranges as a separate allocation
-   protocol with dedicated collision, lifecycle, and recovery coverage; do not infer
-   it from string splitting. Ordinary equal-length fixed CLI ranges
-   already use the fixed-port lease path.
+2. **Implemented, pending guest-image and live execution:** `PublishAllPorts` uses
+   the Moby effective-port hook, held host allocation, and start-local release/rebind
+   contract. Cover image-tag replacement, image-provided TCP/UDP/SCTP exposure,
+   explicit `-p` precedence, `--expose`, conflict, destroy, and restart reallocation.
+   Treat raw dynamic host-port ranges as a separate allocation protocol with dedicated
+   collision, lifecycle, and recovery coverage; do not infer it from string splitting.
+   Ordinary equal-length fixed CLI ranges already use the fixed-port lease path.
 
 The integration matrix must cover direct Docker API clients as well as Docker CLI,
 create without start, start retry, create/start failure, client disconnect, destroy,

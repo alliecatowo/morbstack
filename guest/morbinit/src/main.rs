@@ -16,6 +16,7 @@
 //!        * the Docker API relay on vsock 2375 (`proxy.rs`),
 //!        * the stream dialer on vsock 2376 (`dial.rs`),
 //!        * the datagram dialer on vsock 2378 (`datagram.rs`),
+//!        * the listener-presence probe on vsock 2380 (`listen_probe.rs`),
 //!        * the dockerd readiness monitor (`proxy.rs`), which also triggers
 //!          the one-shot offline image load.
 //!
@@ -57,6 +58,7 @@ mod netaddr;
 mod publish_all;
 mod k8s;
 mod live_share;
+mod listen_probe;
 mod proxy;
 mod sha256;
 mod shares;
@@ -367,6 +369,16 @@ fn real_init() {
             "FATAL: could not bind vsock datagram-dial port {}: published UDP \
              container ports will not be reachable from the host ({})",
             datagram::VSOCK_DATAGRAM_DIAL_PORT,
+            e
+        ));
+    }
+
+    // Read-only listener verification for opt-in host-network discovery. It never
+    // publishes a port by itself; the host supplies an Engine-exposed candidate.
+    if let Err(e) = listen_probe::spawn_listener_probe() {
+        log::log(&format!(
+            "FATAL: could not bind vsock listener probe port {}: host-network auto-discovery will be unavailable ({})",
+            listen_probe::VSOCK_LISTEN_PROBE_PORT,
             e
         ));
     }

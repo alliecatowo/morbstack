@@ -60,7 +60,8 @@ on purpose (see "The load-bearing decision" below).
                            │   morbinit (PID 1, static Rust, boots as /init  │
                            │   from an initramfs — see "M0 boot path" below) │
                            │     - vsock control server (MRB0, port 1024)    │
-                           │     - vsock stream-dial server (port 2376)      │
+                           │     - vsock stream/datagram dialers (2376/2378) │
+                           │     - vsock listener probe (port 2380)          │
                            │     - supervises services below                 │
                            │                                                  │
                            │   containerd ── dockerd                         │
@@ -103,7 +104,10 @@ retrying a restore known to fail — see "VM lifecycle" below),
   relaying `~/.morbstack/run/docker.sock` traffic to the guest's `dockerd`
   over the vsock Docker API port (2375), and mirroring published container
   ports onto `127.0.0.1` via `PortForwarder`, which dials the guest over
-  vsock port 2376 per accepted connection (see `docs/protocol.md` §3.2). In
+  vsock port 2376 per accepted connection (see `docs/protocol.md` §3.2). When
+  the durable host-network policy is enabled, it also probes Docker-effective
+  exposed host-network listeners over port 2380 before opening a same-port Mac
+  bridge (see `docs/protocol.md` §3.4). In
   later milestones this same process grows `morbnet` (userspace network
   stack), `morbdns`, and the FSEvents -> inotify bridge.
 - **morb** — the CLI. Talks to `morbstackd` exclusively over the daemon
@@ -316,7 +320,7 @@ pins of its own any more.
 
 ### Control plane
 
-- **vsock** — the only channel between host and guest. Three ports in use:
+- **vsock** — the only channel between host and guest. The principal ports are:
   1024 (guest control, MRB0 framed), 2375 (Docker Engine API relay,
   unframed HTTP — see `docs/protocol.md` §3.1 for the relay's own design:
   one vsock connection per dockerd connection, half-close aware, no
@@ -324,7 +328,9 @@ pins of its own any more.
   guest-local TCP port, then a raw splice — see `docs/protocol.md` §3.2;
   this is what makes published container ports reachable from the Mac,
   since unlike the Engine API there is no single well-known guest port to
-  relay). See `docs/protocol.md` §3 for the full port registry.
+  relay), 2378 (framed UDP datagram dial), 2379 (publish-all allocator), and
+  2380 (read-only Docker-exposed host-network listener probe). See
+  `docs/protocol.md` §3 for the full port registry.
 - **MRB0 framed JSON** — the M0 guest control wire format (`ping`, `info`,
   `clock_sync`, `shutdown`). Deliberately simple and dependency-free so it
   can be implemented in Swift Foundation and Rust std with zero external

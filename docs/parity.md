@@ -144,10 +144,12 @@ without changing ordinary fixed Docker request/response bytes. The claim is
 intentionally narrower than complete Docker Desktop parity: a bounded Phase 1
 transforms a recognized omitted, empty, or exact-zero TCP/UDP `HostPort` into a held
 Mac endpoint before the guest sees it, but it still needs a live VM run before it can
-count as verified parity. Raw dynamic host-port range allocation, `-P`, opaque/chunked
+count as verified parity. Raw dynamic host-port range allocation, opaque/chunked
 framing, name-based/nonstandard start handoff, and lease survival across VM/daemon
-shutdown still need their own allocation or lifecycle contract. The exact dynamic
-transaction and unsupported boundary are in
+shutdown still need their own allocation or lifecycle contract. `-P` has a separate
+source-level, version-pinned Moby/guest/host allocator path that still requires guest
+image inclusion and live acceptance; it is not counted as verified parity. The exact
+dynamic transaction and unsupported boundary are in
 [`dynamic-port-allocation.md`](dynamic-port-allocation.md); no event-derived endpoint
 is counted as synchronous support.
 

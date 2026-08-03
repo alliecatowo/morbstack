@@ -97,6 +97,68 @@ final class PortForwardingTests: XCTestCase {
         XCTAssertTrue(PortForwardPlan.desiredListeners(bindings, exposure: .localNetwork).isEmpty)
     }
 
+    func testHostNetworkDiscoveryRequiresDockerEffectiveExposedPorts() throws {
+        let containerID = String(repeating: "a", count: 64)
+        let containers = Data(
+            """
+            [
+              {"Id":"\(containerID)","Names":["/hosted"],"State":"running"},
+              {"Id":"stopped","Names":["/stopped"],"State":"exited"}
+            ]
+            """.utf8)
+        XCTAssertEqual(
+            try DockerAPIDecoding.runningContainers(containersJSON: containers),
+            [DockerRunningContainer(id: containerID, name: "hosted")])
+
+        let inspect = Data(
+            """
+            {
+              "Id":"\(containerID)",
+              "State":{"Running":true},
+              "Config":{"ExposedPorts":{"80/tcp":{},"5353/udp":{},"5000/sctp":{},"0/tcp":{}}},
+              "HostConfig":{"NetworkMode":"host","PublishAllPorts":false,"PortBindings":{}}
+            }
+            """.utf8)
+        XCTAssertEqual(
+            DockerAPIDecoding.hostNetworkExposedPorts(
+                inspectJSON: inspect,
+                expectedContainerID: containerID,
+                containerName: "hosted"),
+            [
+                DockerHostNetworkExposedPort(
+                    transport: .tcp, port: 80, containerID: containerID, containerName: "hosted"),
+                DockerHostNetworkExposedPort(
+                    transport: .udp, port: 5353, containerID: containerID, containerName: "hosted")
+            ])
+    }
+
+    func testHostNetworkDiscoveryNeverDuplicatesExplicitPublishing() {
+        let containerID = String(repeating: "b", count: 64)
+        let inspect = Data(
+            """
+            {
+              "Id":"\(containerID)",
+              "State":{"Running":true},
+              "Config":{"ExposedPorts":{"80/tcp":{}}},
+              "HostConfig":{"NetworkMode":"host","PortBindings":{"80/tcp":[{"HostPort":"8080"}]}}
+            }
+            """.utf8)
+        XCTAssertTrue(
+            DockerAPIDecoding.hostNetworkExposedPorts(
+                inspectJSON: inspect,
+                expectedContainerID: containerID,
+                containerName: "hosted").isEmpty)
+    }
+
+    func testGuestListenerProbeHasOneClosedRequestGrammar() {
+        XCTAssertEqual(
+            GuestListenerProbe.preamble(transport: .tcp, guestPort: 8080),
+            Data("LISTEN tcp 8080\n".utf8))
+        XCTAssertEqual(
+            GuestListenerProbe.preamble(transport: .udp, guestPort: 53),
+            Data("LISTEN udp 53\n".utf8))
+    }
+
     // MARK: - Fixed TCP create leases
 
     func testExplicitTCPCreateBindingsCollapseAddressFamiliesForOneMacLease() {

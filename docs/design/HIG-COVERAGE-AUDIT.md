@@ -428,8 +428,12 @@ For each route, record a compact review card before calling it complete:
 - **Data/action behavior:** the value persists as
   `allow_host_network_port_publishing`; after the required engine restart it permits
   explicit `--network host -p HOST:CONTAINER` TCP and UDP mappings to bridge from
-  the Mac listener to the guest-local `CONTAINER` port. It is default-off because
-  guest host networking is otherwise not Mac-reachable through VZNAT.
+  the requested Mac listener to the guest-local `CONTAINER` port. It also discovers
+  a running host-network container's Docker-effective `Config.ExposedPorts` only
+  after a guest read-only probe proves its TCP or UDP listener is reachable on
+  loopback or every guest interface; that no-`-p` path uses the same port on the Mac.
+  It is default-off because guest host networking is otherwise not Mac-reachable
+  through VZNAT.
 - **Evidence:** source-only implementation and focused model tests were added in
   this change. Per the serialized validation constraint, no build, XCUITest, app
   launch, or Computer Use inspection was run; light/dark, narrow width,

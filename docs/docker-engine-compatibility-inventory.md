@@ -61,7 +61,7 @@ copy and diagnostics:
 | `POST /containers/create` | Intercepted only when the bounded preflight can read a fixed-length JSON create request. Bind-source policy and published-port policy can reject it before forwarding; all other create framing stays raw relay. | Container, bind-mount, port, and malformed/request-framing scenarios below. |
 | `POST /containers/{id}/start` and `/restart` | A bodyless request may be observed to activate a held fixed-port TCP/UDP lease, or an exact full-ID stopped container may have a bounded inspect recovery before relay. Name/prefix identifiers, bodies, and unsupported forms remain raw relay. | Start/restart, failed start, restart, VM-stop recovery, name/prefix, and keep-alive scenarios. |
 | `-p` published ports | Phase 1 has source-level support for compatible fixed TCP/UDP and bounded dynamic TCP/IPv4-UDP create shapes. It reserves the complete real Mac loopback listener/socket set before a successful create can be returned. Docker CLI `create -p` and `run -p` share that create shape; `create` retains an inactive held lease until a later start. Exact coverage and gaps are in [dynamic-port-allocation.md](dynamic-port-allocation.md). | The `-p` matrix in that document plus clean-profile CP-04 and CP-06. Until then it is **implemented pending live acceptance**, not established drop-in parity. |
-| `-P` / `PublishAllPorts` | Explicitly rejected from the bounded dynamic-create path. It is not silently reinterpreted as a subset of `-p`. | Guest-Engine allocator design and the full `-P` acceptance matrix in [the design boundary](#publish-all--p-engine-side-design-boundary). |
+| `-P` / `PublishAllPorts` | Kept outside the bounded request-rewrite path, but source-implemented through the version-pinned Moby patch, guest broker, and host allocator. The patched Engine resolves its own effective exposed-port set at start and asks the host to hold the complete supported TCP/UDP set. | Guest image/bundle inclusion and the full `-P` acceptance matrix in [the source-level contract](#publish-all--p-source-level-contract). Until then this is **implemented pending live acceptance**, not established drop-in parity. |
 | Host bind mounts on create | An interceptable request is checked against the running VM's declared/attached shared paths. An unshared, escaping, unmounted, nonabsolute, or required-missing bind source gets a Docker-style pre-create error. Exact guest Docker-socket sources (`/var/run/docker.sock` and `/run/docker.sock`) are intentionally passed to the guest without a Mac share check for Docker-outside-of-Docker/Dev Containers. Engine-owned malformed/unknown grammar remains with `dockerd`. | Valid `-v` and `--mount`, missing source, symlink escape, unshared source, share remount, Compose, Dev Containers workspace, and Docker-socket fixtures. |
 
 The fixed-length dynamic create transaction is intentionally narrow: it rejects
@@ -152,7 +152,7 @@ not a syntactic alias for a request-visible `-p <container-port>` binding. See t
 [port publishing guide](https://docs.docker.com/engine/network/port-publishing/) and
 [Docker run reference](https://docs.docker.com/reference/cli/docker/container/run/#publish-all-exposed-ports--p---publish-all).
 
-### Publish-all (`-P`) Engine-side design boundary
+### Publish-all (`-P`) source-level contract
 
 The normal `docker run -P image` create body sets `HostConfig.PublishAllPorts`, but
 does not necessarily contain the image's final `EXPOSE` set. The daemon resolves the
@@ -163,7 +163,16 @@ must be reviewed at the exact Moby tag bundled in the candidate, not only at `ma
 [Moby create/image resolution](https://github.com/moby/moby/blob/master/daemon/create.go),
 and [Moby network port-map expansion](https://github.com/moby/moby/blob/master/daemon/network.go).
 
-Therefore a correct normal-CLI `-P` implementation has this non-negotiable boundary:
+The version-pinned source implementation follows this boundary: the patch at
+`guest/moby-patches/0001-morbstack-publish-all-host-allocator.patch` runs after
+Moby has expanded the effective port map; `guest/morbinit/src/publish_all.rs` brokers
+the per-container request on vsock 2379; and the host
+`PublishAllPortAllocator`/`PortForwarder` holds and releases the full TCP/UDP set.
+It deliberately leaves `HostConfig.PublishAllPorts` intact so Moby can reallocate on a
+later start. This is source-level integration only: the guest image and signed bundle
+have not been verified to include it, and no live Docker/VM acceptance has run.
+
+A correct normal-CLI `-P` implementation has this non-negotiable boundary:
 
 1. **Resolve where the Engine resolves.** The guest Engine integration must use the
    exact immutable image/config result that its create operation will persist. A
@@ -193,8 +202,8 @@ UDP, and SCTP exposures; explicit `--expose`; explicit `-p` precedence; multiple
 ports; mutable-tag replacement race; preoccupied host port; create and start failure;
 client disconnect; stop/start/restart; destroy; Engine/VM restart; `docker port` and
 inspect agreement; real TCP and UDP reachability where supported; and cleanup. Until
-that Engine-side integration and matrix pass, `-P` must stay an explicit unsupported
-diagnosis rather than a misleading partial success.
+the guest-image/bundle integration and that matrix pass, `-P` is **implemented pending
+live acceptance**, not an established compatibility claim.
 
 ## Evidence register and promotion rule
 

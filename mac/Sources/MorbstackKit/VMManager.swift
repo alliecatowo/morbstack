@@ -1825,4 +1825,7 @@ public enum MorbVsockPorts {
     public static let datagramDial: UInt32 = 2378
     /// Per-container host allocator sessions used by patched Moby for `docker -P`.
     public static let publishAllAllocator: UInt32 = 2379
+    /// Read-only presence probe for guest-local TCP/UDP listeners discovered from
+    /// an opted-in host-network container's effective Docker `ExposedPorts`.
+    public static let listenerProbe: UInt32 = 2380
 }
