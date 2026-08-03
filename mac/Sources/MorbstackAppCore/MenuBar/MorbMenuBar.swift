@@ -1,16 +1,13 @@
 // Copyright 2026 The Morbstack Authors.
 // Licensed under the Apache License, Version 2.0 (the "License").
 //
-// The menu bar extra: the part of Morbstack that is always on screen.
+// The menu-bar extra: the part of Morbstack that is always on screen.
 //
-// Design brief for this surface, since it is easy to get wrong: it is a *status*
-// object first and a launcher second. It shows the engine, the handful of containers
-// that are actually running, and the ports you can click — and then gets out of the
-// way. Everything destructive or open-ended lives in the main window; this popover
-// only ever navigates to it.
-//
-// Track A wires `MorbMenuBarLabel(model:)` and `MorbMenuBarContent(model:)` into a
-// `MenuBarExtra` with `.menuBarExtraStyle(.window)`.
+// A menu-bar extra is a status object first and a launcher second. It shows the engine,
+// a bounded amount of live context, and paths out to the document window. The
+// MenuBarExtra window owns its material and dismissal behavior; this file intentionally
+// contains no panel material, fake menu-row selection, hover chrome, or hand-drawn
+// status glyphs.
 
 import AppKit
 import Observation
@@ -18,101 +15,23 @@ import SwiftUI
 
 // MARK: - Label
 
-/// The status-item glyph: a small crate with a state dot.
-///
-/// Redrawn whenever the engine state or the system appearance changes — the glyph body
-/// is stroked in `labelColor`, so it has to be regenerated when the menu bar flips
-/// between light and dark, and `colorScheme` is what tells SwiftUI to do that.
+/// A monochrome template symbol for the status bar. State is described in the popover
+/// and accessibility label rather than competing with other system status-item colours.
 struct MorbMenuBarLabel: View {
     let model: AppModel
 
-    @Environment(\.colorScheme) private var colorScheme
-
     var body: some View {
-        Image(nsImage: MorbMenuBarGlyph.image(for: model.engine, scheme: colorScheme))
+        Image(systemName: "shippingbox")
+            .symbolRenderingMode(.hierarchical)
             .accessibilityLabel("Morbstack — \(model.engine.headline)")
             .help("Morbstack — \(model.engine.headline)")
     }
 }
 
-/// Draws the status-item image.
-///
-/// Hand-drawn rather than an SF Symbol: at 16pt the stock box symbols are noticeably
-/// heavier than the rest of the menu bar, and none of them leave a clean corner for the
-/// state dot. The body is stroked in `NSColor.labelColor` so it inverts with the menu
-/// bar the way a template image would, while the dot keeps its colour.
-enum MorbMenuBarGlyph {
-
-    static func image(for status: EngineStatus, scheme: ColorScheme) -> NSImage {
-        let tone = TrackDTone.engine(status)
-        let dotColor = nsColor(for: tone)
-        let size = NSSize(width: 18, height: 16)
-
-        let image = NSImage(size: size, flipped: false) { _ in
-            let ink = NSColor.labelColor
-
-            // Crate body.
-            let body = NSRect(x: 1.6, y: 2.6, width: 11.6, height: 11.0)
-            let outline = NSBezierPath(roundedRect: body, xRadius: 2.6, yRadius: 2.6)
-            outline.lineWidth = 1.4
-            ink.setStroke()
-            outline.stroke()
-
-            // Lid seam plus the little centre tab: two strokes are all it takes for the
-            // shape to read as a box rather than as an empty rounded square.
-            let seamY = body.maxY - 3.3
-            let seam = NSBezierPath()
-            seam.move(to: NSPoint(x: body.minX + 0.7, y: seamY))
-            seam.line(to: NSPoint(x: body.maxX - 0.7, y: seamY))
-            seam.lineWidth = 1.3
-            ink.withAlphaComponent(0.85).setStroke()
-            seam.stroke()
-
-            let tab = NSBezierPath()
-            tab.move(to: NSPoint(x: body.midX, y: seamY))
-            tab.line(to: NSPoint(x: body.midX, y: seamY - 2.4))
-            tab.lineWidth = 1.3
-            ink.withAlphaComponent(0.55).setStroke()
-            tab.stroke()
-
-            // State dot, punched out of the body so it never touches the stroke.
-            let dotCentre = NSPoint(x: 14.0, y: 3.9)
-            if let context = NSGraphicsContext.current {
-                context.saveGraphicsState()
-                context.compositingOperation = .clear
-                NSBezierPath(ovalIn: circle(at: dotCentre, radius: 3.5)).fill()
-                context.restoreGraphicsState()
-            }
-            dotColor.setFill()
-            NSBezierPath(ovalIn: circle(at: dotCentre, radius: 2.4)).fill()
-
-            return true
-        }
-        // The dot carries colour, so this cannot be a template image; the body is drawn
-        // in a dynamic colour instead, which gets us the same light/dark behaviour.
-        image.isTemplate = false
-        image.accessibilityDescription = "Morbstack"
-        return image
-    }
-
-    private static func circle(at centre: NSPoint, radius: CGFloat) -> NSRect {
-        NSRect(x: centre.x - radius, y: centre.y - radius, width: radius * 2, height: radius * 2)
-    }
-
-    /// The dot colour.
-    ///
-    /// The same `Theme` pairs the sidebar's engine pill uses, so the two dots on screen
-    /// at once are the same green — and slightly softened, because a saturated traffic
-    /// light in the menu bar is louder than a background utility has any right to be.
-    private static func nsColor(for tone: TrackDTone) -> NSColor {
-        if tone == .neutral { return NSColor.tertiaryLabelColor }
-        return NSColor(tone.color).withAlphaComponent(0.95)
-    }
-}
-
 // MARK: - Focus
 
-/// Every keyboard stop in the popover, in visual order.
+/// Keyboard stops in the popover, in visual order. The system still draws the focus
+/// treatment; this enum only lets Up/Down move through a mixed group of controls.
 enum TrackDMenuFocus: Hashable {
     case engine(String)
     case container(String)
@@ -125,11 +44,10 @@ enum TrackDMenuFocus: Hashable {
 
 // MARK: - Live CPU
 
-/// Streams `/stats` for the containers the popover is currently showing.
+/// Streams `/stats` for the containers visible while the extra is open.
 ///
-/// Scoped to the popover's lifetime on purpose: each stream is a held-open connection
-/// to the engine, and eight of them running behind a closed popover would be a
-/// background cost nobody asked for.
+/// The work is scoped to the extra's lifetime. A closed status item must not leave a
+/// background stream running merely to paint data nobody can see.
 @MainActor
 @Observable
 final class TrackDMenuBarStats {
@@ -138,7 +56,6 @@ final class TrackDMenuBarStats {
 
     @ObservationIgnored private var tasks: [String: Task<Void, Never>] = [:]
 
-    /// Starts streams for `ids`, cancelling any that are no longer wanted.
     func sync(ids: [String], client: DockerClient) {
         let wanted = Set(ids)
         for (id, task) in tasks where !wanted.contains(id) {
@@ -154,8 +71,7 @@ final class TrackDMenuBarStats {
                         self?.cpu[id] = sample.cpuPercent
                     }
                 } catch {
-                    // A container that exits mid-stream is the common case here, and the
-                    // list is about to drop the row anyway. Nothing to report.
+                    // An exiting container is normal; the next model refresh removes it.
                 }
             }
         }
@@ -170,54 +86,46 @@ final class TrackDMenuBarStats {
 
 // MARK: - Content
 
-/// The menu bar popover.
+/// A compact, system-control-only status popover.
 struct MorbMenuBarContent: View {
 
     let model: AppModel
 
-    /// How many running containers the popover will list before it gives up and points
-    /// at the main window. Eight is roughly one screenful of stack.
+    /// A menu-bar extra is deliberately a glanceable surface, not a second resource
+    /// browser. More entries always lead to the main window.
     private static let containerLimit = 8
-    /// Published ports are the same story, and duplicate more heavily.
     private static let portLimit = 6
 
     @State private var stats = TrackDMenuBarStats()
-    @State private var hoveredRow: String?
     @State private var busy: Set<String> = []
     @FocusState private var focus: TrackDMenuFocus?
 
     @Environment(\.openSettings) private var openSettings
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .leading, spacing: 12) {
             engineHeader
-            Divider().padding(.vertical, Theme.space2)
+            Divider()
             containersSection
             if !ports.isEmpty {
-                Divider().padding(.vertical, Theme.space2)
+                Divider()
                 portsSection
             }
-            Divider().padding(.vertical, Theme.space2)
+            Divider()
             footer
         }
-        .padding(Theme.space3)
-        .frame(width: 300)
-        .morbGlassPanel()
-        .buttonStyle(TrackDRowButtonStyle())
-        // Focusable, but with no default focus: the popover opens with nothing
-        // selected, so a stray Return cannot suspend the engine. The first arrow key
-        // is what starts the walk (see `moveFocus`).
-        .focusable()
-        .focusEffectDisabled()
+        .padding()
+        .frame(width: 320)
         .task {
-            // The popover is the one place a stale list is immediately obvious, so pay
-            // for one refresh on open rather than trusting whatever the last poll saw.
+            // The status extra is uniquely sensitive to stale state: refresh once on
+            // open, then retain the ordinary model polling cadence.
             await model.refreshAll()
         }
         .task(id: runningIDs) {
             stats.sync(ids: runningIDs, client: model.client)
         }
         .onDisappear { stats.stopAll() }
+        .focusable()
         .onKeyPress(.downArrow) { moveFocus(by: 1); return .handled }
         .onKeyPress(.upArrow) { moveFocus(by: -1); return .handled }
     }
@@ -225,37 +133,37 @@ struct MorbMenuBarContent: View {
     // MARK: Engine
 
     private var engineHeader: some View {
-        HStack(alignment: .center, spacing: Theme.space3) {
-            MorbStatusDot(
-                tone: StatusTone.forEngine(model.engine),
-                size: 8,
-                pulsing: model.engine.isTransitional)
+        HStack(alignment: .center, spacing: 8) {
+            Label {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(model.engine.headline)
+                        .font(.headline)
+                    Text(engineSubtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            } icon: {
+                Image(systemName: engineStatusSymbol)
+                    .symbolRenderingMode(.hierarchical)
+                    .accessibilityHidden(true)
+            }
+            .accessibilityLabel("Engine: \(model.engine.headline). \(engineSubtitle)")
 
-            VStack(alignment: .leading, spacing: 1) {
-                Text(model.engine.headline)
-                    .font(.callout.weight(.semibold))
-                Text(engineSubtitle)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+            Spacer()
+
+            if model.engine.isTransitional {
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityLabel("Engine state is changing")
             }
 
-            Spacer(minLength: Theme.space2)
-
-            HStack(spacing: Theme.space2) {
-                if model.engine.isTransitional {
-                    ProgressView()
-                        .controlSize(.small)
-                        .padding(.trailing, Theme.space1)
-                }
+            ControlGroup {
                 ForEach(engineActions, id: \.self) { action in
                     engineButton(action)
                 }
             }
         }
-        .padding(.horizontal, Theme.space2)
-        .padding(.top, Theme.space1)
-        .animation(.spring(response: 0.32, dampingFraction: 0.85), value: model.engine)
     }
 
     private var engineSubtitle: String {
@@ -263,7 +171,10 @@ struct MorbMenuBarContent: View {
         return "\(version) · VM \(model.engine.vmState)"
     }
 
-    /// Which engine buttons make sense right now.
+    private var engineStatusSymbol: String {
+        OperationalState.engine(model.engine).symbol
+    }
+
     private var engineActions: [EngineAction] {
         guard model.engine.reachable else { return [.start] }
         switch model.engine.state {
@@ -280,14 +191,12 @@ struct MorbMenuBarContent: View {
         } label: {
             Label(engineTitle(action), systemImage: engineSymbol(action))
                 .labelStyle(.iconOnly)
-                .font(.system(size: 11, weight: .semibold))
-                .frame(width: 22, height: 20)
         }
         .buttonStyle(.borderless)
-        .focusable()
         .focused($focus, equals: .engine(action.rawValue))
         .disabled(busy.contains("engine"))
         .help(engineTitle(action))
+        .accessibilityLabel(engineTitle(action))
     }
 
     private func engineTitle(_ action: EngineAction) -> String {
@@ -317,30 +226,23 @@ struct MorbMenuBarContent: View {
     private var runningIDs: [String] { running.prefix(Self.containerLimit).map(\.id) }
 
     private var containersSection: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            MorbSectionHeader("Running", count: running.isEmpty ? nil : running.count)
-                .padding(.horizontal, Theme.space2)
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Running")
+                .font(.headline)
 
             if running.isEmpty {
-                Text(model.engine.isRunning ? "No containers running." : "Start the engine to see containers.")
-                    .font(.caption)
+                Text(model.engine.isRunning ? "No containers are running." : "Start the engine to see containers.")
+                    .font(.subheadline)
                     .foregroundStyle(.secondary)
-                    .padding(.horizontal, Theme.space3)
-                    .padding(.vertical, Theme.space2)
             } else {
                 ForEach(running.prefix(Self.containerLimit)) { container in
                     containerRow(container)
                 }
                 if running.count > Self.containerLimit {
-                    Button {
+                    Button("\(running.count - Self.containerLimit) more in Morbstack…") {
                         TrackDAppBridge.reveal(.containers, in: model)
-                    } label: {
-                        Text("\(running.count - Self.containerLimit) more…")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
                     }
-                    .frame(height: Theme.rowCompact, alignment: .leading)
-                    .focusable()
+                    .buttonStyle(.link)
                     .focused($focus, equals: .openApp)
                 }
             }
@@ -348,50 +250,49 @@ struct MorbMenuBarContent: View {
     }
 
     private func containerRow(_ container: ContainerSummary) -> some View {
-        let showAction = hoveredRow == container.id || focus == .container(container.id)
-        return Button {
-            TrackDAppBridge.reveal(containerID: container.id, in: model)
-        } label: {
-            HStack(spacing: Theme.space2) {
-                MorbStatusDot(
-                    tone: StatusTone.forContainer(state: container.state, unhealthy: container.isUnhealthy),
-                    size: 6,
-                    pulsing: container.state == "restarting")
-                Text(container.displayName)
-                    .font(.callout)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer(minLength: Theme.space2)
-                // `.secondary`, not `.tertiary`. This is the only number in the popover
-                // and the reason half the people who open it opened it; at tertiary on a
-                // vibrant background it sat around 2.5:1 and read as disabled.
-                MorbNumber(cpuText(container), width: 40, font: .caption2)
-                    .opacity(showAction ? 0 : 1)
+        HStack(spacing: 6) {
+            Button {
+                TrackDAppBridge.reveal(containerID: container.id, in: model)
+            } label: {
+                Label {
+                    HStack {
+                        Text(container.displayName)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer()
+                        Text(cpuText(container))
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                } icon: {
+                    Image(systemName: containerStatusSymbol(container))
+                        .symbolRenderingMode(.hierarchical)
+                        .accessibilityHidden(true)
+                }
             }
-            .frame(height: Theme.rowCompact)
-        }
-        .focusable()
-        .focused($focus, equals: .container(container.id))
-        .help(rowTooltip(container))
-        .overlay(alignment: .trailing) {
-            if showAction {
-                MorbIconButton("stop.fill", help: "Stop \(container.displayName)", role: .destructive) {
+            .buttonStyle(.plain)
+            .focused($focus, equals: .container(container.id))
+            .help(rowTooltip(container))
+            .accessibilityLabel("Open \(container.displayName), \(container.status), CPU \(cpuText(container))")
+
+            Menu {
+                Button("Stop \(container.displayName)", systemImage: "stop.fill") {
                     run(container: .stop, id: container.id)
                 }
-                .padding(.trailing, Theme.space1)
-                .transition(.opacity)
+            } label: {
+                Label("Actions for \(container.displayName)", systemImage: "ellipsis.circle")
+                    .labelStyle(.iconOnly)
             }
+            .menuStyle(.borderlessButton)
+            .disabled(busy.contains(container.id))
         }
         .opacity(busy.contains(container.id) ? 0.5 : 1)
-        .onHover { inside in
-            if inside { hoveredRow = container.id } else if hoveredRow == container.id { hoveredRow = nil }
-        }
-        .morbAnimation(.fade, value: showAction)
     }
 
-    /// The compose origin that used to be a permanent second line now lives in the
-    /// tooltip instead — a 24pt compact row has no room for it, and the status text
-    /// underneath was the least useful half of that line anyway.
+    private func containerStatusSymbol(_ container: ContainerSummary) -> String {
+        OperationalState.container(state: container.state, unhealthy: container.isUnhealthy).symbol
+    }
+
     private func rowTooltip(_ container: ContainerSummary) -> String {
         if let service = container.composeService, let project = container.composeProject {
             return "\(project) · \(service) — \(container.status)"
@@ -406,22 +307,14 @@ struct MorbMenuBarContent: View {
 
     // MARK: Ports
 
-    /// One clickable published port.
     private struct PortEntry: Identifiable {
         let id: String
         let url: URL
         let hostPort: Int
         let containerPort: Int
         let owner: String
-        let created: Date
     }
 
-    /// Published, browser-openable ports across the running containers.
-    ///
-    /// Newest container first — the port you just published is the one you want to
-    /// click — and deduplicated by host port, since two containers cannot both own one
-    /// and a stale list showing both would be a lie.
-    /// Every distinct published port, newest container first.
     private var allPorts: [PortEntry] {
         var seen = Set<Int>()
         var out: [PortEntry] = []
@@ -430,14 +323,12 @@ struct MorbMenuBarContent: View {
             for mapping in container.ports {
                 guard let hostPort = mapping.hostPort, let url = mapping.url else { continue }
                 guard seen.insert(hostPort).inserted else { continue }
-                out.append(
-                    PortEntry(
-                        id: "\(container.id):\(hostPort)",
-                        url: url,
-                        hostPort: hostPort,
-                        containerPort: mapping.containerPort,
-                        owner: container.displayName,
-                        created: container.createdAt))
+                out.append(PortEntry(
+                    id: "\(container.id):\(hostPort)",
+                    url: url,
+                    hostPort: hostPort,
+                    containerPort: mapping.containerPort,
+                    owner: container.displayName))
             }
         }
         return out
@@ -446,58 +337,38 @@ struct MorbMenuBarContent: View {
     private var ports: [PortEntry] { Array(allPorts.prefix(Self.portLimit)) }
 
     private var portsSection: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            MorbSectionHeader("Published ports", count: ports.count)
-                .padding(.horizontal, Theme.space2)
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Published Ports")
+                .font(.headline)
 
             ForEach(ports) { port in
-                Button {
-                    trackDOpen(port.url)
-                } label: {
-                    HStack(spacing: Theme.space2) {
+                Link(destination: port.url) {
+                    Label {
+                        HStack {
+                            Text("127.0.0.1:\(String(port.hostPort))")
+                                .font(.body.monospacedDigit())
+                            Spacer()
+                            Text(port.owner)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                    } icon: {
                         Image(systemName: "arrow.up.forward.app")
-                            .font(.system(size: 10))
-                            .foregroundStyle(Theme.accent)
-                            .frame(width: 9)
-                        // The address is the link; the container is the label for it.
-                        // Bold monospaced address against tertiary owner had the
-                        // hierarchy the wrong way round — the port number shouted louder
-                        // than the container names in the list above it.
-                        Text("127.0.0.1:\(String(port.hostPort))")
-                            .font(.system(size: 12, design: .monospaced))
-                            .monospacedDigit()
-                            .foregroundStyle(Theme.accent)
-                        Spacer(minLength: Theme.space2)
-                        Text(port.owner)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .frame(maxWidth: 120, alignment: .trailing)
+                            .accessibilityHidden(true)
                     }
-                    .frame(height: Theme.rowCompact)
                 }
-                .focusable()
+                .buttonStyle(.plain)
                 .focused($focus, equals: .port(port.id))
                 .help("Open http://127.0.0.1:\(port.hostPort) — container port \(port.containerPort)")
+                .accessibilityLabel("Open port \(port.hostPort) for \(port.owner)")
             }
 
-            // A list that stops at six without saying so is a list that lies. The count
-            // is the whole point: "six ports" and "six of eleven ports" are different
-            // facts about your machine, and only one of them was on screen. It is now a
-            // real button, not text that looks clickable and is not — the main window
-            // is one click away from here.
             if allPorts.count > ports.count {
-                Button {
+                Button("\(allPorts.count - ports.count) more in Morbstack…") {
                     TrackDAppBridge.reveal(.containers, in: model)
-                } label: {
-                    Text("+\(allPorts.count - ports.count) more in the main window")
-                        .font(.caption)
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
                 }
-                .frame(height: Theme.rowCompact, alignment: .leading)
-                .focusable()
+                .buttonStyle(.link)
                 .focused($focus, equals: .openApp)
             }
         }
@@ -506,72 +377,38 @@ struct MorbMenuBarContent: View {
     // MARK: Footer
 
     private var footer: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Button {
+        VStack(alignment: .leading, spacing: 6) {
+            Button("Open Morbstack", systemImage: "macwindow") {
                 TrackDAppBridge.revealMainWindow()
-            } label: {
-                // The one row that keeps its shortcut hint: `.keyboardShortcut` below
-                // makes it true, unlike Settings and Quit, which only *look* bound —
-                // see the note on those two.
-                footerLabel("Open Morbstack", symbol: "macwindow", shortcut: "⌘O")
             }
-            .focusable()
+            .buttonStyle(.plain)
             .focused($focus, equals: .openApp)
             .keyboardShortcut("o", modifiers: .command)
 
-            Button {
+            Button("Review Disk Cleanup…", systemImage: "trash") {
                 TrackDAppBridge.reveal(.disk, in: model)
-            } label: {
-                footerLabel("Prune…", symbol: "trash", shortcut: nil)
             }
-            .focusable()
+            .buttonStyle(.plain)
             .focused($focus, equals: .prune)
             .help("Review reclaimable disk in the main window")
 
-            Button {
+            Button("Settings…", systemImage: "gearshape") {
                 NSApp.activate()
                 openSettings()
-            } label: {
-                // No shortcut hint here or on Quit below: ⌘, and ⌘Q are the app's main
-                // menu's, and a `.window`-style popover does not hold the key focus
-                // those need to fire from inside it — a hint that does not work is
-                // worse than no hint.
-                footerLabel("Settings…", symbol: "gearshape", shortcut: nil)
             }
-            .focusable()
+            .buttonStyle(.plain)
             .focused($focus, equals: .settings)
 
-            Button {
+            Button("Quit Morbstack", systemImage: "power") {
                 NSApp.terminate(nil)
-            } label: {
-                footerLabel("Quit Morbstack", symbol: "power", shortcut: nil)
             }
-            .focusable()
+            .buttonStyle(.plain)
             .focused($focus, equals: .quit)
         }
     }
 
-    private func footerLabel(_ title: String, symbol: String, shortcut: String?) -> some View {
-        HStack(spacing: Theme.space2) {
-            Image(systemName: symbol)
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .frame(width: 14)
-            Text(title)
-                .font(.callout)
-            Spacer(minLength: Theme.space2)
-            if let shortcut {
-                Text(shortcut)
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-            }
-        }
-        .frame(height: Theme.rowCompact)
-    }
-
     // MARK: Keyboard
 
-    /// Every focusable stop, in the order they appear on screen.
     private var focusOrder: [TrackDMenuFocus] {
         var order: [TrackDMenuFocus] = engineActions.map { TrackDMenuFocus.engine($0.rawValue) }
         order += running.prefix(Self.containerLimit).map { TrackDMenuFocus.container($0.id) }
@@ -587,8 +424,7 @@ struct MorbMenuBarContent: View {
             focus = delta > 0 ? order.first : order.last
             return
         }
-        let next = (index + delta + order.count) % order.count
-        focus = order[next]
+        focus = order[(index + delta + order.count) % order.count]
     }
 
     // MARK: Actions

@@ -114,14 +114,6 @@ enum TrackCImageArch {
             }
         }
 
-        var tone: TrackCTone {
-            switch self {
-            case .native: return .neutral
-            case .translated: return .warn
-            case .foreign: return .bad
-            }
-        }
-
         var symbol: String? {
             switch self {
             case .native: return nil

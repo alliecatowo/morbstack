@@ -1,4 +1,11 @@
-# REWRITE-PLAN.md — sequencing three parallel agents with disjoint file ownership
+# REWRITE-PLAN — archived second-pass execution plan
+
+> **Archived — do not execute.** This plan assigned agents to build the custom
+> Theme/`Design/**`/`Morb*` system and synthetic screenshot process that the native-macOS
+> migration has retired. Its parallel-work lessons are historical only; its component,
+> wrapper, screenshot, and visual-token instructions are superseded by the binding
+> [native macOS playbook](../NATIVE-MACOS-PLAYBOOK.md) and
+> [HIG coverage audit](../HIG-COVERAGE-AUDIT.md).
 
 ## 0. Where the work actually stands
 

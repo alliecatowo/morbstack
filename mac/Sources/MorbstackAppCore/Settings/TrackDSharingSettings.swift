@@ -1,26 +1,10 @@
 // Copyright 2026 The Morbstack Authors.
 // Licensed under the Apache License, Version 2.0 (the "License").
 //
-// Settings › File Sharing — the shared folders, and Rosetta.
-//
-// Read-only, deliberately. Every other Settings pane edits `config.toml` behind a Save
-// button; this one shows what the file says and offers to open it. Three reasons, in
-// increasing order of how much they matter:
-//
-//   1. The list is an array of paths, and the config file's supported value grammar is
-//      scalars — the writer cannot round-trip it yet without losing the user's comments.
-//   2. Sharing a folder is a security decision. A folder added here is readable and
-//      writable by every container the user ever runs, including one pulled from a
-//      registry five minutes ago. A path field that takes effect on the next VM start is
-//      a large gun to leave lying in a preferences window; sending people to the file
-//      makes the decision deliberate.
-//   3. It is the one pane whose whole job is diagnosis. What somebody needs here is
-//      "which of these did the VM actually mount", and that answer has to be visibly
-//      distinct from the wish list — which is exactly what an editable list of text
-//      fields would blur.
-//
-// Both sections read live state from `AppModel` rather than from the settings store,
-// because both are answers only the guest can give.
+// Settings › File Sharing presents the configuration and the guest's observed mount
+// state. It is intentionally read-only: the writer cannot safely round-trip the shared
+// paths array yet, and sharing a host folder is a security decision. The config file is
+// therefore the deliberate editing surface.
 
 import AppKit
 import MorbstackKit
@@ -35,28 +19,33 @@ struct TrackDSharingSettings: View {
 
     var body: some View {
         Form {
-            if let chip = model.fileSharingChip {
-                Section {
-                    TrackDInlineNotice(
-                        symbol: "exclamationmark.triangle.fill",
-                        tone: .warn,
-                        title: chip.text,
-                        message: chip.detail
-                    ) {
-                        Button("Restart engine") { restartEngine() }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.small)
-                            .tint(Theme.accent)
+            if let warning = model.fileSharingChip {
+                Section("Sharing Status") {
+                    Label(warning.text, systemImage: warning.symbol)
+                    Text(warning.detail)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                    Button("Restart Engine", systemImage: "arrow.clockwise") {
+                        restartEngine()
                     }
                 }
             }
 
             Section {
                 if status.shares.isEmpty {
-                    Text("No folders are shared. Containers cannot bind-mount anything on this Mac.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    ContentUnavailableView(
+                        label: {
+                            Label("No Shared Folders", systemImage: "folder.badge.plus")
+                        },
+                        description: {
+                            Text("Add only folders you want every container to be able to access.")
+                        },
+                        actions: {
+                            Button("Open Configuration", systemImage: "doc.text") {
+                                openConfiguration()
+                            }
+                        })
                 } else {
                     ForEach(status.shares, id: \.path) { share in
                         TrackDShareRow(
@@ -64,15 +53,30 @@ struct TrackDSharingSettings: View {
                             source: status.source,
                             engineRunning: model.engine.isRunning)
                     }
+
+                    LabeledContent("Configuration") {
+                        Button("Open config.toml", systemImage: "doc.text") {
+                            openConfiguration()
+                        }
+                    }
+                    Button("Reload Sharing Status", systemImage: "arrow.clockwise") {
+                        Task { await model.refreshFileSharing() }
+                    }
                 }
             } header: {
-                Text("Shared folders")
+                Text("Shared Folders")
             } footer: {
-                sharingExplanation
+                Text(
+                    "Shared folders appear in the virtual machine at the same path as on your Mac. Edit shared_paths in config.toml, then restart the engine to apply changes."
+                )
             }
 
             Section {
-                rosettaRow
+                LabeledContent("amd64 container images") {
+                    Label(model.rosetta.summary, systemImage: rosettaSymbol)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.trailing)
+                }
             } header: {
                 Text("Rosetta")
             } footer: {
@@ -80,136 +84,43 @@ struct TrackDSharingSettings: View {
             }
         }
         .formStyle(.grouped)
-        .scrollContentBackground(.hidden)
-        // Neither answer can change without a VM restart or a config edit, so this is a
-        // refresh on open rather than anything resembling a poll.
+        // The guest's mount state changes only after a restart or a configuration edit.
+        // Refreshing on open is enough; the pane deliberately does not poll.
         .task { await model.refreshFileSharing() }
     }
 
-    // MARK: Explanations
-
-    // The tier-1 semantics, in the fewest words that leave no wrong impression.
-    //
-    // Held as stored properties rather than written inline in the `VStack`. Not a style
-    // preference: as one expression — several `Text`s, a markdown-bearing
-    // `LocalizedStringKey`, a nested `HStack` and two modifiers — the type checker gives
-    // up ("unable to type-check this expression in reasonable time"). Note also that
-    // `samePathText` is a *single* literal: building a `LocalizedStringKey` out of `+`
-    // concatenation reintroduces the same explosion on its own.
-
-    private static let sharingScopeText =
-        "These folders are visible inside the virtual machine, so containers can "
-        + "bind-mount them. Everything else on this Mac is invisible to the VM."
-
-    /// The sentence that has to survive editing.
-    ///
-    /// People arrive here with a Docker Desktop model in their head, where "file sharing"
-    /// is a list of folders and the mapping is an implementation detail. Morbstack's
-    /// mapping is the identity, and knowing that is the difference between `-v $(pwd):/app`
-    /// being obviously fine and being something you have to test.
-    private static let samePathText: LocalizedStringKey =
-        "A shared folder appears in the VM at **exactly the same path** it has here — `/Users/you/project` is `/Users/you/project` inside the guest — so `-v /Users/you/project:/app` needs no translation and compose files stay portable. Sharing is over VirtioFS, live rather than copied: a change on either side is visible immediately on the other."
-
-    private static let silentFailureText =
-        "A bind mount whose host path is not under one of these folders does not fail. "
-        + "Docker creates an empty directory in the guest and the container starts "
-        + "normally, with none of your files in it — which is why this pane exists."
-
-    private var sharingExplanation: some View {
-        VStack(alignment: .leading, spacing: Theme.space3) {
-            Text(Self.sharingScopeText)
-            Text(Self.samePathText)
-            Text(Self.silentFailureText)
-                .foregroundStyle(.orange)
-            sharingActions
-            sharingEditHint
-                .foregroundStyle(.tertiary)
-        }
-        .font(.caption)
-        .fixedSize(horizontal: false, vertical: true)
-    }
-
-    /// Built as `Text` concatenation, not a plain `String` handed to `Text(_:)` — a
-    /// plain `String` does not parse Markdown, so the backticks around the key name
-    /// rendered as literal characters. `Text + Text` is what actually gets a monospaced
-    /// run without going through `LocalizedStringKey` interpolation.
-    private var sharingEditHint: Text {
-        Text("Edit ")
-            + Text(MorbShareSurface.sharedPathsKey).font(.system(.caption, design: .monospaced))
-            + Text(" in \(store.url.path), then restart the engine: shares are attached when the VM boots.")
-    }
-
-    private var sharingActions: some View {
-        HStack(spacing: Theme.space4) {
-            Button("Edit config.toml") {
-                NSWorkspace.shared.activateFileViewerSelecting([store.url])
-            }
-            .buttonStyle(.link)
-            Button("Reload") {
-                Task { await model.refreshFileSharing() }
-            }
-            .buttonStyle(.link)
-            Spacer()
-        }
-    }
-
+    @ViewBuilder
     private var rosettaExplanation: some View {
-        // Plain `String` concatenation, deliberately: `Text` only parses Markdown —
-        // including the backticks below — when it is handed a `LocalizedStringKey`
-        // *literal*, and `+`-joining string literals resolves to plain `String` before
-        // `Text` ever sees it. Wrapping words in backticks and losing to that inference
-        // rule is exactly how a build ends up with visible backtick characters on
-        // screen, so this text carries no Markdown at all rather than pretending to.
-        VStack(alignment: .leading, spacing: Theme.space2) {
-            Text(
-                "Rosetta lets the VM run amd64 (x86-64) container images on Apple silicon by "
-                    + "translating their binaries. Images built for arm64 do not need it and "
-                    + "always run faster; Rosetta is for the ones that only ship amd64."
-            )
-            if model.rosetta.availability == .notInstalled {
-                Text(
-                    "Install it from a terminal with morb rosetta install, which explains what "
-                        + "it will do and asks first. Morbstack never accepts Apple's licence for you."
-                )
-            }
-            if model.rosetta.availability == .disabled {
-                Text("Set rosetta = true in \(store.url.path) and restart the engine.")
-            }
-            if let note = model.rosetta.note, !note.isEmpty {
-                Text(note).foregroundStyle(.tertiary)
-            }
+        Text(
+            "Rosetta lets the VM run amd64 (x86-64) images on Apple silicon. Native arm64 images don’t need it."
+        )
+        if model.rosetta.availability == .notInstalled {
+            Text("Install it from Terminal with morb rosetta install. Morbstack never accepts Apple’s license for you.")
         }
-        .font(.caption)
-        .fixedSize(horizontal: false, vertical: true)
-    }
-
-    // MARK: Rosetta row
-
-    private var rosettaRow: some View {
-        LabeledContent {
-            HStack(spacing: Theme.space2) {
-                TrackCStatusDot(tone: rosettaTone)
-                Text(model.rosetta.summary)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.trailing)
-            }
-        } label: {
-            Text("amd64 images")
+        if model.rosetta.availability == .disabled {
+            Text("Set rosetta = true in config.toml and restart the engine.")
+        }
+        if let note = model.rosetta.note, !note.isEmpty {
+            Text(note)
         }
     }
 
-    private var rosettaTone: TrackCTone {
+    private var rosettaSymbol: String {
         switch model.rosetta.availability {
-        case .active: return .good
-        case .ready: return .accent
-        case .disabled: return .neutral
-        case .notInstalled: return .warn
-        case .unsupported: return .neutral
+        case .active, .ready:
+            return "checkmark.circle"
+        case .disabled:
+            return "xmark.circle"
+        case .notInstalled:
+            return "arrow.down.circle"
+        case .unsupported:
+            return "minus.circle"
         }
     }
 
-    // MARK: Actions
+    private func openConfiguration() {
+        NSWorkspace.shared.open(store.url)
+    }
 
     private func restartEngine() {
         Task { @MainActor in
@@ -220,62 +131,47 @@ struct TrackDSharingSettings: View {
     }
 }
 
-// MARK: - One shared folder
+// MARK: - Shared folder
 
-/// A single row in the Shared folders list.
-struct TrackDShareRow: View {
+/// A native form row for one configured host folder. The row's status remains textual
+/// so the state isn't conveyed by color or a custom badge.
+private struct TrackDShareRow: View {
 
     let share: MorbShareState
-    /// Whether the row's mount state came from the guest or was reconstructed from the
-    /// config file. It decides whether "not mounted" is a fault or just the truth about
-    /// a stopped VM.
     let source: MorbShareSurface.Source
     let engineRunning: Bool
 
-    private var summary: (text: String, tone: TrackCTone) {
+    private var summary: String {
         TrackEShareStatus.rowSummary(share, source: source, engineRunning: engineRunning)
     }
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: Theme.space3) {
-            TrackCStatusDot(tone: summary.tone)
-                .padding(.top, 3)
-
-            VStack(alignment: .leading, spacing: Theme.space1) {
-                HStack(spacing: Theme.space2) {
-                    Text(share.path)
-                        .font(.callout.monospaced())
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .textSelection(.enabled)
-                    if share.readOnly {
-                        TrackCBadge(text: "read-only", symbol: "lock", tone: .neutral)
-                    }
-                }
-                Text(summary.text)
-                    .font(.caption)
+        LabeledContent {
+            VStack(alignment: .trailing) {
+                Text(summary)
                     .foregroundStyle(.secondary)
-                // The guest path is shown only when it is not the host path. Under the
-                // same-path design it never is, and a duplicated path on every row would
-                // quietly teach the wrong mental model to everyone who reads it.
+                    .multilineTextAlignment(.trailing)
+                if share.readOnly {
+                    Label("Read-only", systemImage: "lock")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
                 if !share.isSamePath {
-                    Text("in the VM: \(share.guestPath)")
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.orange)
+                    Text("VM path: \(share.guestPath)")
+                        .font(.system(.footnote, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+                Button("Reveal in Finder", systemImage: "folder") {
+                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: share.path)])
                 }
             }
-
-            Spacer(minLength: Theme.space3)
-
-            Button {
-                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: share.path)])
-            } label: {
-                Image(systemName: "arrow.up.forward.app")
-            }
-            .buttonStyle(.borderless)
-            .foregroundStyle(.secondary)
-            .help("Reveal \(share.path) in Finder")
+        } label: {
+            Text(share.path)
+                .font(.system(.body, design: .monospaced))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
         }
-        .padding(.vertical, Theme.space1)
     }
 }

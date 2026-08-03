@@ -1,7 +1,17 @@
-# REWRITE-PLAN — who owns what, and what the merge must prove
+# REWRITE-PLAN — archived pre-native migration plan
 
-Three implementation agents, strictly disjoint file lists, one shared design system that
-none of them may edit.
+> **Archived execution record — do not execute.** This was the plan for the previous
+> custom Theme/`Design/**`/`Morb*` component migration. Its ownership boundaries and
+> diagnostic observations are retained as history, but its visual API, wrapper,
+> screenshot, density-token, custom selection, and custom glass directions are
+> superseded. Current work must use the binding
+> [native macOS playbook](NATIVE-MACOS-PLAYBOOK.md) and
+> [HIG coverage audit](HIG-COVERAGE-AUDIT.md), with Computer Use on the real window for
+> visual approval. Do not reintroduce any retired component merely to satisfy a legacy
+> checklist below.
+
+Historical plan content follows. It records a past parallelization shape and a custom
+visual system that are no longer valid implementation inputs.
 
 Read `CRITIQUE.md` for what is wrong, `IDENTITY.md` for the values, `COMPONENTS.md` for the
 API, and `SDK-LIQUID-GLASS.md` before you type any macOS 26 symbol. Then read only your own
@@ -25,8 +35,10 @@ section below.
    `MorbNumber` and you get it for free.
 5. **Do not modify any file under `mac/Tests/`.** 617 tests are green at the base commit
    and must be green at every merge point.
-6. **Do not touch `Shots/**`.** The screenshot harness is the merge owner's. If your view's
-   initialiser signature changes, say so in your handoff — do not "just fix" the caller.
+6. **Do not use a synthetic image to judge a native route.** The old offscreen screenshot
+   renderer is retired. Fixture data and live-route probes belong to the merge owner; if
+   a feature changes fixture/client requirements, record it in the handoff. Full-window
+   approval uses Computer Use now and a future macOS XCUITest host.
 7. **Do not touch the model layer**: `AppModel.swift`, `DockerClient.swift`,
    `DaemonClient.swift`, `Models.swift`, `Formatters.swift`, `AppLaunchRescue.swift`. If a
    screen needs a value the model does not expose, put it in your handoff. Adding a
@@ -216,20 +228,18 @@ sidebar are here, not in a `Views/` subdirectory, which is why they are UI-3's.
 ```
 mac/Sources/MorbstackAppCore/Theme.swift          ← design system
 mac/Sources/MorbstackAppCore/Design/**            ← design system
-mac/Sources/MorbstackAppCore/Shots/ShotChrome.swift
 mac/Sources/MorbstackAppCore/Shots/ShotClients.swift
+mac/Sources/MorbstackAppCore/Shots/FixtureDiagnostics.swift
 mac/Sources/MorbstackAppCore/Shots/ShotFixtures.swift
 mac/Sources/MorbstackAppCore/Shots/ShotLogs.swift
-mac/Sources/MorbstackAppCore/Shots/ShotRenderer.swift
-mac/Sources/MorbstackAppCore/Shots/ShotScenes.swift
 mac/Sources/MorbstackAppCore/Shots/ShotsCLI.swift
-dist/shots/**
+mac/Sources/MorbstackAppCore/Shots/LiveCapture.swift
+dist/fixture-route-probe/**
 ```
 
-`ShotScenes.swift` constructs every screen in the app, so it touches all three agents'
-initialisers. If it were owned by an agent it would conflict on every merge. Agents record
-signature changes in their handoff; the merge owner applies them all at once and
-regenerates `dist/shots`.
+The fixture layer is presentation-independent. It owns deterministic data and nonvisual
+route probes only; it must not construct screens, copy a split view, or emulate any
+macOS chrome. Feature agents record changed fixture/client requirements in their handoff.
 
 ### Never touched by this redesign
 
@@ -305,21 +315,22 @@ Run in this order. Any failure blocks the merge.
    grep -rn --include='*.swift' -E "Color\(red:|Color\(white:" \
      mac/Sources/MorbstackAppCore | grep -v "/Design/\|Theme.swift\|/Shots/"
    ```
-   must return **nothing**. (`Shots/ShotChrome.swift` is excluded: its literals are the
-   fake desktop wallpaper behind a screenshot, not app UI.)
+   must return **nothing**. No screenshot fixture exemption exists because the fake
+   chrome/renderer was retired.
 10. **Monospaced digits.** Every number in the containers list, the menu-bar popover, the disk legend and the Stats tab. Verify by starting a live engine and watching for horizontal jitter over 30 s.
 11. **Hit targets.** Every icon-only button is `MorbIconButton` or carries `.frame(minWidth: Theme.minHitTarget, minHeight: Theme.minHitTarget)`.
 12. **One primary per screen.** `grep -rn "morbButton(.primary)"` — at most one per screen root.
 
 ### 6.3 Visual
 
-13. Regenerate every shot: `MorbShots` for all 36 renders, both appearances.
-14. **Side-by-side against `dist/shots` at the base commit.** For each screen, the diff must show: a real titlebar, a real toolbar, one row height, and the brand rail on the selected sidebar row.
-15. Menu-bar popover: glass, and **≤ 450 pt tall** at the standard fixture.
-16. Command palette: glass, centred, scrim visible.
-17. Log viewport: **flat background.** Zoom to 400 % and confirm no blur behind the text.
-18. Disk stacked bar: **no hatching**, and the two "Largest …" meters share a scale — confirm the 3.22 GB volume bar is longer than the 1.49 GB image bar.
-19. Icon: render at 16 / 32 / 64 / 128 / 256 / 512 / 1024 and run `IDENTITY.md` §1.7.
+13. Run `swift run MorbShots` to validate deterministic fixture invariants; it writes no images.
+14. Launch the actual fixture-backed app in light and dark at normal and narrow widths.
+    Use Computer Use to inspect the full native window: traffic lights, unified toolbar,
+    default sidebar selection/collapse, table selection/sort/context menu, inspector,
+    empty state, and toolbar overflow. Do not activate destructive commands.
+15. Record the manual result with the HIG semantics verified. Future automated approval
+    is a macOS XCUITest host with accessibility identifiers and full-window screenshot
+    attachments—not an `NSView` cache or offscreen image.
 
 ### 6.4 Accessibility
 
@@ -366,7 +377,8 @@ Each agent finishes with:
 
 1. The exact file list they touched, verified against §5.
 2. `swift build` / `swift test` output.
-3. Any changed initialiser signature, so the merge owner can update `ShotScenes.swift`.
+3. Any changed fixture/client requirement, so the merge owner can update the
+   presentation-independent fixture diagnostics or live route probe.
 4. Anything they wanted from `Design/` and did not have — **as a request, not as a local
    workaround.**
 5. Anything in `CRITIQUE.md` for their screens they consciously did *not* fix, and why.

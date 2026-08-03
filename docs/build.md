@@ -40,7 +40,7 @@ pin.
 | `sign` | `build-mac` | Ad-hoc codesigns `morbstackd` with the `com.apple.security.virtualization` entitlement. Must be the last step before starting the daemon — `swift build` strips the entitlement on every rebuild |
 | `run-daemon`\* | `sign` | Runs `morbstackd --foreground` for local development |
 | `test` | — | Runs the Swift suite (if `mac/Tests` exists) and the Rust suite |
-| `shots-live` | `build-mac` | Self-captures the real `MorbstackApp` window (light + dark) into `dist/shots-live`, using `--tour-fixtures` so no engine/VM is needed |
+| `shots-live` | `build-mac` | Runs the non-visual, fixture-backed route probe in light + dark and writes text-only execution reports. It cannot approve native window appearance; use the documented XCUITest harness plus Computer Use for full-window validation. |
 | `app-icon` | — | Renders `AppIcon.icns` from `mac/AppResources/make-icon.swift`. Skipped if that script hasn't changed since the last icon build (see "Incrementality" below) |
 | `app` | `app-icon` | Release-builds `MorbstackApp`, `morbstackd`, and `morb` (as three separate `swift build --product` invocations — combining them silently builds only the last one), assembles `dist/Morbstack.app`, stamps the version, and signs inside-out: `morb`, then `morbstackd` with entitlements, then the bundle with no `--deep`. Fails the build if `morbstackd` loses the virtualization entitlement. The three-product list is a curated bundle manifest, not derived from `Package.swift` — see the comment on `[tasks.app]` in `mise.toml` before "fixing" it to loop over the package graph |
 | `run-app`\* | `app` | Builds and `open`s `dist/Morbstack.app` |

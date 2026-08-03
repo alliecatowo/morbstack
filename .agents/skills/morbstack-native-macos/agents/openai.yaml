@@ -1,0 +1,4 @@
+interface:
+  display_name: "Morbstack Native macOS"
+  short_description: "Build native macOS operations UI"
+  default_prompt: "Use $morbstack-native-macos to implement this Morbstack app UI change."

@@ -1,4 +1,11 @@
-# IDENTITY.md — Morbstack visual identity
+# IDENTITY — archived second-pass visual identity proposal
+
+> **Archived — nonbinding.** The in-app palette, chip, status, material, radius, density,
+> and motion prescriptions below belong to the retired custom visual system. They are
+> retained only to preserve the historical design discussion; neither `Theme` nor a
+> successor token/component library may reintroduce them. For current product UI, use
+> the [native macOS playbook](../NATIVE-MACOS-PLAYBOOK.md) and
+> [HIG coverage audit](../HIG-COVERAGE-AUDIT.md).
 
 **Morbstack = "More Orb, open Stack."** The mark is a glass **orb** intersecting a **stack** of
 slats, and the orb is a *lens*: where it crosses the stack, the layers are magnified apart. That is

@@ -542,9 +542,9 @@ struct StatsStreamDecoder {
 /// Not `@MainActor`: every method blocks on socket I/O and is called with `await` from
 /// the model. Statelessness is what makes that safe — the client holds a path and
 /// nothing else, so there is no shared mutable state for concurrent calls to race on.
-/// Non-`final` so the screenshot harness can substitute a fixture engine (see
-/// `Shots/ShotClients.swift`). Nothing in the app subclasses it, and nothing should:
-/// the overridable surface is the endpoint methods, not the socket plumbing.
+/// Non-`final` so developer fixture clients can substitute a deterministic engine (see
+/// `Shots/ShotClients.swift`). Nothing in production subclasses it: the overridable
+/// surface is the endpoint methods, not the socket plumbing.
 class DockerClient: @unchecked Sendable {
 
     /// The Engine API version the app pins to. v1.43 is the floor Morbstack's daemon

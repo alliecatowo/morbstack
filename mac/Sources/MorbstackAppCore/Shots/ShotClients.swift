@@ -1,19 +1,16 @@
 // Copyright 2026 The Morbstack Authors.
 // Licensed under the Apache License, Version 2.0 (the "License").
 //
-// A fixture engine, so the real views can be rendered against something.
+// A fixture engine for real-window route probes and future UI tests.
 //
-// The harness draws the production views inside a real (offscreen) `NSHostingView`, and
-// that means the whole lifecycle runs: `bootstrap()`, `refreshAll()`, `loadInspect()`,
-// the Disk screen's `refreshDisk()`. Every one of those calls the engine, and against a
-// dead socket every one of them fails — `AppModel.fetch` reads an unreachable error as
-// "the VM went away", downgrades the engine to stopped and clears the model. The result
-// would be a directory full of pictures of the start-the-engine screen.
+// A fixture-backed application still runs normal lifecycle work: `bootstrap()`,
+// `refreshAll()`, inspect loading, disk refresh, logs, and stats all use the client.
+// Against a dead socket that would make the model report a stopped engine and erase the
+// deterministic data before a human or XCUITest can inspect the real app window.
 //
-// The fix is not to suppress the calls but to answer them. These two subclasses return
-// the fixture world instead of dialling a socket, so every code path the app would take
-// against a live engine runs for real — including the ones that would have caught a
-// mistake in the fixtures.
+// These subclasses answer from `ShotFixtures` instead of dialling a socket. They never
+// reach the user's Docker engine, and normal data paths remain exercised without an
+// invented rendering surface.
 
 import Foundation
 
@@ -50,14 +47,9 @@ final class ShotDockerClient: DockerClient, @unchecked Sendable {
         return ShotFixtures.inspectJSON(for: container)
     }
 
-    /// The base implementation calls the fake socket and throws, which leaves the
-    /// Images detail pane showing "checking…" forever — not a blank the harness can
-    /// tell apart from a slow real request, so it never resolves to a picture of the
-    /// finished state. `shopfront/api` answers `amd64`, deliberately not arm64: every
-    /// other fixture image is native and gets no badge at all (see
-    /// `TrackCImageArch.Badge.isNoteworthy`), so an all-native list would never
-    /// photograph the translated-badge and Rosetta-advice text this screen exists to
-    /// show. Everything else answers the host architecture, i.e. no badge.
+    /// Resolve architecture deterministically. `shopfront/api` deliberately answers
+    /// `amd64`; the remaining fixture images answer the host architecture. That gives
+    /// the real Images feature an honest foreign-architecture branch to exercise.
     override func imageArchitecture(id: String) async throws -> ImageArchitecture? {
         guard let image = ShotFixtures.images.first(where: { $0.id == id }) else { return nil }
         let arch = image.repoTags.first?.hasPrefix("shopfront/api") == true
@@ -71,11 +63,8 @@ final class ShotDockerClient: DockerClient, @unchecked Sendable {
 
     /// Delivers the canned scrollback and ends.
     ///
-    /// Ending rather than hanging matters: the Logs toolbar shows a green "streaming"
-    /// dot while a stream is open and "· ended" once it closes, and a screenshot of a
-    /// finished stream would undersell what the tab does. The harness therefore preloads
-    /// the store instead of relying on this — but this exists so that a scene that
-    /// forgets to preload still renders lines rather than "Waiting for output…".
+    /// The stream yields deterministic lines. A live fixture window may choose to preload
+    /// the store, but this endpoint remains useful to exercise normal log loading.
     override func logs(
         id: String, follow: Bool = true, tail: Int = 500
     ) -> AsyncThrowingStream<LogLine, Error> {
@@ -88,9 +77,9 @@ final class ShotDockerClient: DockerClient, @unchecked Sendable {
 
     /// Replays a fixture series as fast as the consumer will take it.
     ///
-    /// The hub throttles to one sample every two seconds of wall clock, so this alone
-    /// cannot fill a sixty-slot sparkline inside a render. `ShotFixtures.statsHub()`
-    /// seeds the history directly; this keeps a live subscriber from seeing an error.
+    /// The normal consumer may throttle the stream; this source only guarantees that a
+    /// deterministic nonempty series is available and that a live subscriber sees no
+    /// socket error.
     override func stats(id: String) -> AsyncThrowingStream<StatsSample, Error> {
         let samples = ShotFixtures.statsByContainer
             .first { ShotFixtures.container($0.name).id == id }?
@@ -100,16 +89,16 @@ final class ShotDockerClient: DockerClient, @unchecked Sendable {
         }
     }
 
-    /// A stream that never yields and never ends — an idle engine, which is what the
-    /// event socket looks like in the half second a render takes.
+    /// A stream that never yields and never ends — the fixture equivalent of an idle
+    /// engine event socket.
     override func events() -> AsyncThrowingStream<DockerEvent, Error> {
         AsyncThrowingStream { _ in }
     }
 
     // MARK: Mutations
 
-    // Nothing in a screenshot presses a button, but leaving these to hit the socket
-    // would make an accidental invocation slow rather than instant.
+    // Fixture automation must never mutate a user's Docker engine. Mutations are safe
+    // no-ops so a future UI test can exercise confirmation and post-action refresh paths.
     override func startContainer(id: String) async throws {}
     override func stopContainer(id: String) async throws {}
     override func restartContainer(id: String) async throws {}

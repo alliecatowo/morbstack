@@ -56,7 +56,7 @@ struct TrackBRenderedLine: Identifiable {
     /// overriding a deliberate green "OK" with red because it happened to go to stderr
     /// would be the viewer lying about what the program said.
     private static func render(spans: [TrackBAnsiSpan], stream: StdStream) -> AttributedString {
-        let stderrTint = TrackBPalette.ansi(.red)
+        let stderrTint = ContainerLogPalette.ansi(.red)
 
         guard !spans.isEmpty else { return AttributedString("") }
 
@@ -66,7 +66,7 @@ struct TrackBRenderedLine: Identifiable {
             var container = AttributeContainer()
 
             if let color = span.style.color {
-                container.foregroundColor = TrackBPalette.ansi(color)
+                container.foregroundColor = ContainerLogPalette.ansi(color)
             } else if stream == .stderr {
                 container.foregroundColor = stderrTint
             }
@@ -191,10 +191,8 @@ final class TrackBLogStore {
 
     /// Fills the scrollback from a fixed list of lines, with no engine involved.
     ///
-    /// For SwiftUI previews and for the offscreen screenshot harness, both of which
-    /// render a view exactly once and synchronously — `onAppear` and `.task` never run
-    /// there, so a store that can only be filled by `start(client:containerID:)` would
-    /// always render as "Waiting for output…". Lines go through the same
+    /// Previews and deterministic fixture runs can provide a known scrollback without
+    /// opening a Docker stream. Lines still go through the same
     /// `TrackBRenderedLine` pipeline as live output, so ANSI parsing, stderr tinting and
     /// the filter index are exercised for real rather than faked.
     func seed(_ lines: [LogLine], isStreaming: Bool = true) {

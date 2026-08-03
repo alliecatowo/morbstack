@@ -1,0 +1,287 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		E8A201102D0A000100000001 /* MorbstackFixtureUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E8A2010F2D0A000100000001 /* MorbstackFixtureUITests.swift */; };
+		E8A201202D0A000100000001 /* MorbstackUITestHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = E8A2011F2D0A000100000001 /* MorbstackUITestHost.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		E8A201222D0A000100000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = E8A201072D0A000100000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = E8A2011D2D0A000100000001;
+			remoteInfo = MorbstackUITestHost;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		E8A2010F2D0A000100000001 /* MorbstackFixtureUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MorbstackFixtureUITests.swift; sourceTree = "<group>"; };
+		E8A201142D0A000100000001 /* MorbstackFixtureUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MorbstackFixtureUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		E8A2011F2D0A000100000001 /* MorbstackUITestHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MorbstackUITestHost.swift; sourceTree = "<group>"; };
+		E8A2011E2D0A000100000001 /* MorbstackUITestHost.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MorbstackUITestHost.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		E8A201062D0A000100000001 = {
+			isa = PBXGroup;
+			children = (
+				E8A2010E2D0A000100000001 /* MorbstackFixtureUITests */,
+				E8A2011C2D0A000100000001 /* MorbstackUITestHost */,
+				E8A2010C2D0A000100000001 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		E8A2010C2D0A000100000001 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				E8A2011E2D0A000100000001 /* MorbstackUITestHost.app */,
+				E8A201142D0A000100000001 /* MorbstackFixtureUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		E8A2010E2D0A000100000001 /* MorbstackFixtureUITests */ = {
+			isa = PBXGroup;
+			children = (
+				E8A2010F2D0A000100000001 /* MorbstackFixtureUITests.swift */,
+			);
+			path = MorbstackFixtureUITests;
+			sourceTree = "<group>";
+		};
+		E8A2011C2D0A000100000001 /* MorbstackUITestHost */ = {
+			isa = PBXGroup;
+			children = (
+				E8A2011F2D0A000100000001 /* MorbstackUITestHost.swift */,
+			);
+			path = MorbstackUITestHost;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		E8A201132D0A000100000001 /* MorbstackFixtureUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E8A201182D0A000100000001 /* Build configuration list for PBXNativeTarget "MorbstackFixtureUITests" */;
+			buildPhases = (
+				E8A201122D0A000100000001 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				E8A201232D0A000100000001 /* PBXTargetDependency */,
+			);
+			name = MorbstackFixtureUITests;
+			productName = MorbstackFixtureUITests;
+			productReference = E8A201142D0A000100000001 /* MorbstackFixtureUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+		E8A2011D2D0A000100000001 /* MorbstackUITestHost */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E8A201242D0A000100000001 /* Build configuration list for PBXNativeTarget "MorbstackUITestHost" */;
+			buildPhases = (
+				E8A201212D0A000100000001 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = MorbstackUITestHost;
+			productName = MorbstackUITestHost;
+			productReference = E8A2011E2D0A000100000001 /* MorbstackUITestHost.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		E8A201072D0A000100000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastSwiftUpdateCheck = 2600;
+				LastUpgradeCheck = 2600;
+				TargetAttributes = {
+					E8A201132D0A000100000001 = {
+						CreatedOnToolsVersion = 26.0;
+						TestTargetID = E8A2011D2D0A000100000001;
+					};
+					E8A2011D2D0A000100000001 = {
+						CreatedOnToolsVersion = 26.0;
+					};
+				};
+			};
+			buildConfigurationList = E8A2010A2D0A000100000001 /* Build configuration list for PBXProject "MorbstackUITests" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = E8A201062D0A000100000001;
+			productRefGroup = E8A2010C2D0A000100000001 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				E8A2011D2D0A000100000001 /* MorbstackUITestHost */,
+				E8A201132D0A000100000001 /* MorbstackFixtureUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		E8A201122D0A000100000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E8A201102D0A000100000001 /* MorbstackFixtureUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E8A201212D0A000100000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E8A201202D0A000100000001 /* MorbstackUITestHost.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		E8A201232D0A000100000001 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = E8A2011D2D0A000100000001 /* MorbstackUITestHost */;
+			targetProxy = E8A201222D0A000100000001 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		E8A201082D0A000100000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		E8A201092D0A000100000001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		E8A201192D0A000100000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_ALLOWED = YES;
+				CODE_SIGNING_REQUIRED = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.morbstack.tests.fixtureui;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_VERSION = 5.0;
+				TEST_TARGET_NAME = MorbstackUITestHost;
+			};
+			name = Debug;
+		};
+		E8A2011A2D0A000100000001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_ALLOWED = YES;
+				CODE_SIGNING_REQUIRED = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.morbstack.tests.fixtureui;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_VERSION = 5.0;
+				TEST_TARGET_NAME = MorbstackUITestHost;
+			};
+			name = Release;
+		};
+		E8A201252D0A000100000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGNING_ALLOWED = YES;
+				CODE_SIGNING_REQUIRED = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.morbstack.tests.host;
+				PRODUCT_NAME = MorbstackUITestHost;
+				SDKROOT = macosx;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		E8A201262D0A000100000001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGNING_ALLOWED = YES;
+				CODE_SIGNING_REQUIRED = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.morbstack.tests.host;
+				PRODUCT_NAME = MorbstackUITestHost;
+				SDKROOT = macosx;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		E8A2010A2D0A000100000001 /* Build configuration list for PBXProject "MorbstackUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E8A201082D0A000100000001 /* Debug */,
+				E8A201092D0A000100000001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		E8A201182D0A000100000001 /* Build configuration list for PBXNativeTarget "MorbstackFixtureUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E8A201192D0A000100000001 /* Debug */,
+				E8A2011A2D0A000100000001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		E8A201242D0A000100000001 /* Build configuration list for PBXNativeTarget "MorbstackUITestHost" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E8A201252D0A000100000001 /* Debug */,
+				E8A201262D0A000100000001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = E8A201072D0A000100000001 /* Project object */;
+}

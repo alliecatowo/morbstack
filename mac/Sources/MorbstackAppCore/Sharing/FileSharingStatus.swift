@@ -66,7 +66,6 @@ struct TrackEStatusChip: Equatable, Sendable {
     var text: String
     var detail: String
     var symbol: String
-    var tone: TrackCTone
 }
 
 // MARK: - Derivation
@@ -118,8 +117,7 @@ enum TrackEShareStatus {
         return TrackEStatusChip(
             text: text,
             detail: lines.joined(separator: "\n"),
-            symbol: "folder.badge.questionmark",
-            tone: .warn)
+            symbol: "folder.badge.questionmark")
     }
 
     /// Whether the app knows enough to accuse a container's bind mount of being unshared.
@@ -131,7 +129,7 @@ enum TrackEShareStatus {
         report.source == .daemon
     }
 
-    /// The Settings row's summary line for one root, and the dot colour beside it.
+    /// The Settings row's summary line for one root.
     ///
     /// Deliberately different wording for "not mounted because nothing is running" and
     /// "not mounted and something is wrong". They are identical in the data and opposite
@@ -140,24 +138,24 @@ enum TrackEShareStatus {
         _ share: MorbShareState,
         source: MorbShareSurface.Source,
         engineRunning: Bool
-    ) -> (text: String, tone: TrackCTone) {
+    ) -> String {
         if !share.configured {
-            return ("mounted, but no longer listed in config.toml", .warn)
+            return "mounted, but no longer listed in config.toml"
         }
         if share.mounted {
-            return (share.readOnly ? "mounted, read-only" : "mounted", .good)
+            return share.readOnly ? "mounted, read-only" : "mounted"
         }
         if source == .config || !engineRunning {
             // Nothing is mounted in a VM that is not running. Say why, and do not colour
             // it as a fault.
             if let explanation = share.explanation {
-                return ("not shared — \(explanation)", .warn)
+                return "not shared — \(explanation)"
             }
-            return ("not mounted — the engine is not running", .neutral)
+            return "not mounted — the engine is not running"
         }
         if let explanation = share.explanation {
-            return ("not mounted — \(explanation)", .warn)
+            return "not mounted — \(explanation)"
         }
-        return ("not mounted", .warn)
+        return "not mounted"
     }
 }

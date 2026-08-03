@@ -138,9 +138,9 @@ struct MorbCommands: Commands {
     @Binding var isPalettePresented: Bool
 
     var body: some Commands {
-        // Replacing the sidebar group rather than adding to it: the stock group's
-        // "Show Sidebar" item stays available through the toolbar, and ⌘1…⌘8 read as
-        // navigation, which is what this menu is for.
+        // Keep the system's View > Show Sidebar command and add document navigation
+        // immediately after it.  That gives every toolbar/sidebar command a standard
+        // menu and keyboard equivalent without replacing a system command group.
         CommandGroup(after: .sidebar) {
             Divider()
             ForEach(Nav.allCases) { nav in
@@ -190,17 +190,11 @@ struct RootWindow: View {
     @State private var cliSetup = FirstRunCLISetupModel()
     @State private var isCLISetupPresented = false
 
-    /// How far the command palette sits from the top of the window — a Spotlight-ish
-    /// ~22% on the window sizes the app actually opens at, not dead centre. Matches the
-    /// offset the screenshot harness's `paletteScene()` uses, so the real app and
-    /// `command-palette-*.png` agree.
-    private static let paletteTopInset: CGFloat = 96
-
     var body: some View {
         NavigationSplitView {
             Sidebar(model: model)
                 .navigationSplitViewColumnWidth(
-                    min: 180, ideal: Theme.sidebarWidth, max: 280)
+                    min: 180, ideal: 220, max: 280)
         } detail: {
             DetailHost(model: model)
                 .frame(minWidth: 620, minHeight: 420)
@@ -220,16 +214,16 @@ struct RootWindow: View {
         .background(WindowConfigurator(size: options.windowSize))
         .task {
             await model.bootstrap()
-            // `--tour-capture <dir>`: self-capture the real window instead of running
-            // the app for a person. Chained after `bootstrap()` so a `--tour-fixtures`
-            // run has already populated the model before the first screen is
-            // photographed. See `Shots/LiveCapture.swift`.
+            // `--tour-capture <dir>`: exercise the real window after `bootstrap()` so
+            // a `--tour-fixtures` run has populated the model before the probe walks
+            // each screen. It rejects AppKit's incomplete view-cache route rather than
+            // pretending to photograph Tahoe window chrome. See `Shots/LiveCapture.swift`.
             if options.tourCapture != nil {
                 await LiveCaptureRunner.run(model: model, options: options)
             }
         }
-        // Capture and fixture runs must remain deterministic pictures of their target
-        // screen, not an installation prompt whose visibility depends on the host's
+        // Capture and fixture runs must remain deterministic route probes, not an
+        // installation prompt whose visibility depends on the host's
         // shell profile.  Ordinary launches calculate the plan before presenting this
         // sheet; calculating it makes no changes to the machine.
         .task {
@@ -240,20 +234,12 @@ struct RootWindow: View {
             }
         }
         .sheet(isPresented: $isPalettePresented) {
-            // `CommandPalette`'s own root is just the sized panel — the merge-owned
-            // screenshot harness composes it the same way for `paletteScene()`, so the
-            // scrim and the top anchor live here rather than inside the palette itself.
-            // `.presentationBackground(.clear)`, applied inside `CommandPalette`, is a
-            // presentation-preference modifier and reaches the sheet from here just the
-            // same, so the scrim below is the only thing behind the panel.
-            ZStack(alignment: .top) {
-                Color.black.opacity(0.18)
-                    .ignoresSafeArea()
-                    .onTapGesture { isPalettePresented = false }
-                CommandPalette(model: model, isPresented: $isPalettePresented)
-                    .padding(.top, Self.paletteTopInset)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // ⌘K is not initiated by a stable source control, so an anchored popover
+            // would be semantically false.  A document-modal sheet keeps the command
+            // surface attached to the window it operates on and lets AppKit supply the
+            // dimming, focus, Escape handling, sizing, and Tahoe material treatment.
+            CommandPalette(model: model, isPresented: $isPalettePresented)
+                .frame(minWidth: 480, idealWidth: 560, minHeight: 360, idealHeight: 520)
         }
         .sheet(isPresented: $isCLISetupPresented) {
             FirstRunCLISetupSheet(model: cliSetup, isPresented: $isCLISetupPresented)
@@ -315,6 +301,10 @@ struct Sidebar: View {
     @Bindable var model: AppModel
 
     var body: some View {
+        sidebarWithStatus
+    }
+
+    private var sidebarList: some View {
         List(selection: $model.selection) {
             ForEach(SidebarSection.allCases) { section in
                 Section(section.rawValue) {
@@ -328,10 +318,19 @@ struct Sidebar: View {
             }
         }
         .listStyle(.sidebar)
-        // `.morbBottomBar`, not `.safeAreaInset`: on macOS 26 this is what gets the
-        // footer the system's own bar treatment (glass plus the scroll-edge effect) for
-        // free, and it degrades to `safeAreaInset` below that — see `Design/MorbGlass.swift`.
-        .morbBottomBar { EngineFooter(model: model) }
+    }
+
+    @ViewBuilder
+    private var sidebarWithStatus: some View {
+        if #available(macOS 26.0, *) {
+            sidebarList.safeAreaBar(edge: .bottom, spacing: 0) {
+                EngineFooter(model: model)
+            }
+        } else {
+            sidebarList.safeAreaInset(edge: .bottom, spacing: 0) {
+                EngineFooter(model: model)
+            }
+        }
     }
 
     /// The trailing count on a row, when there is a number worth knowing.
@@ -353,107 +352,85 @@ struct Sidebar: View {
 
 // MARK: - Engine footer
 
-/// The status footer under the sidebar.
+/// The status command in the sidebar's system-owned bottom bar.
 ///
-/// The one piece of chrome that is always visible, so it carries the answer to the
-/// question the app exists to answer: is the engine up? Colour, symbol and words all
-/// say the same thing, which is what makes it readable at a glance and still readable
-/// in a greyscale screenshot.
-///
-/// Note what is deliberately absent: **no material and no divider of its own.** It is
-/// hosted by `safeAreaBar`, which on macOS 26 already gives it the system's bar
-/// treatment. Painting `.thinMaterial` underneath as well put glass on glass — the one
-/// thing Apple's Liquid Glass guidance names as an outright mistake rather than a matter
-/// of taste — and it is why the footer used to read as a paler rectangle glued to the
-/// bottom of the sidebar instead of part of it.
+/// This is deliberately a native `Menu`, not a custom status pill. The label gives the
+/// current engine state a concise, textual representation; the menu is the appropriate
+/// home for secondary lifecycle actions and the sharing warning. `safeAreaBar` supplies
+/// the Tahoe bar treatment, and `safeAreaInset` is the native fallback on older macOS.
 struct EngineFooter: View {
 
     @Bindable var model: AppModel
-    @State private var isHovering = false
-
-    private var tone: StatusTone { .forEngine(model.engine) }
 
     var body: some View {
-        HStack(spacing: Theme.space3) {
-            MorbStatusDot(
-                tone: tone, size: 9,
-                pulsing: model.engine.isTransitional || model.isEngineBusy)
+        Menu {
+            Text(subtitle)
 
-            VStack(alignment: .leading, spacing: 1) {
-                Text(model.engine.headline)
-                    .font(.callout.weight(.medium))
-                    .foregroundStyle(.primary)
-                Text(model.summaryLine == model.engine.headline ? subtitle : model.summaryLine)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-                    .contentTransition(.numericText())
-            }
-
-            Spacer(minLength: 0)
-
-            sharingWarning
-
-            if model.isEngineBusy {
-                ProgressView()
-                    .controlSize(.small)
-                    .scaleEffect(0.75)
-            } else if model.engine.isRunning {
-                Button {
-                    Task { await model.engineAction(.suspend) }
-                } label: {
-                    Image(systemName: "pause.circle")
+            if let chip = model.fileSharingChip {
+                Divider()
+                SettingsLink {
+                    Text(chip.text)
                 }
-                .buttonStyle(.borderless)
-                .foregroundStyle(.secondary)
-                .help("Suspend the engine")
-                .opacity(isHovering ? 1 : 0)
             }
+
+            if !availableActions.isEmpty {
+                Divider()
+                ForEach(availableActions, id: \.rawValue) { action in
+                    Button(engineActionTitle(action)) {
+                        Task { await model.engineAction(action) }
+                    }
+                    .disabled(model.isEngineBusy)
+                }
+            }
+        } label: {
+            Label(model.engine.headline, systemImage: statusSymbol)
+                .lineLimit(1)
+                .monospacedDigit()
         }
-        .padding(.horizontal, Theme.space3)
-        .padding(.vertical, Theme.space3)
-        .contentShape(Rectangle())
-        .onHover { isHovering = $0 }
-        .morbAnimation(.fade, value: isHovering)
-        .morbAnimation(.subtle, value: model.engine)
+        .menuStyle(.borderlessButton)
+        .controlSize(.small)
         .help(tooltip)
+        .accessibilityHint("Shows engine details and actions")
     }
 
-    /// A shared folder the user configured that the VM has not mounted.
-    ///
-    /// Sits in the one piece of chrome that is always on screen, because the failure it
-    /// reports is invisible everywhere else: a bind mount into an unmounted share does
-    /// not error, it silently reads an empty directory. Opening Settings is one click
-    /// from here, which is where the explanation and the restart button live.
-    ///
-    /// Only ever appears while the engine is running — see `TrackEShareStatus.chip`. A
-    /// chip that is lit whenever the VM is off would be lit most of the time, and a
-    /// warning that is usually on is not a warning.
-    @ViewBuilder
-    private var sharingWarning: some View {
-        if let chip = model.fileSharingChip {
-            SettingsLink {
-                Image(systemName: chip.symbol)
-                    .foregroundStyle(chip.tone.color)
-            }
-            .buttonStyle(.borderless)
-            .help("\(chip.text). \(chip.detail)")
-            .accessibilityLabel(chip.text)
-            .transition(.opacity.combined(with: .scale(scale: 0.8)))
-            .morbAnimation(.subtle, value: chip)
+    private var availableActions: [EngineAction] {
+        guard model.engine.reachable else { return [.start] }
+        switch model.engine.state {
+        case "running": return [.suspend, .stop]
+        case "suspended": return [.start, .stop]
+        case "starting", "stopping", "pausing": return []
+        default: return [.start]
+        }
+    }
+
+    private var statusSymbol: String {
+        switch model.engine.state {
+        case "running": return "checkmark.circle"
+        case "suspended": return "pause.circle"
+        case "starting", "stopping", "pausing": return "arrow.triangle.2.circlepath.circle"
+        case "error": return "exclamationmark.triangle"
+        default: return "stop.circle"
+        }
+    }
+
+    private func engineActionTitle(_ action: EngineAction) -> String {
+        switch action {
+        case .start: return "Start Engine"
+        case .suspend: return "Suspend Engine"
+        case .stop: return "Stop Engine"
         }
     }
 
     private var subtitle: String {
-        if let version = model.engine.version { return "morbstackd \(version)" }
-        return model.engine.reachable ? model.engine.vmState : "Not running"
+        var details = ["VM: \(model.engine.vmState)"]
+        if let version = model.engine.version { details.append("morbstackd \(version)") }
+        if let chip = model.fileSharingChip { details.append(chip.detail) }
+        return details.joined(separator: "\n")
     }
 
     private var tooltip: String {
-        var lines = ["VM state: \(model.engine.vmState)"]
-        if let version = model.engine.version { lines.append("Daemon: \(version)") }
-        lines.append(model.engine.reachable ? "Control socket: connected" : "Control socket: no answer")
-        return lines.joined(separator: "\n")
+        let socket = model.engine.reachable ? "Control socket: connected" : "Control socket: unavailable"
+        return "\(subtitle)\n\(socket)"
     }
 }
 
@@ -469,8 +446,8 @@ struct DetailHost: View {
 
     var body: some View {
         // No painted background. The detail column of a `NavigationSplitView` already
-        // has the system's own content background, and `Theme.contentBackground` on top
-        // of it was a second opaque surface doing the same job slightly differently.
+        // owns the content surface; adding another opaque layer makes the column read
+        // as a web panel instead of part of the window.
         Group {
             if !model.hasLoaded {
                 // Titled even here, so the window is never chrome-less for the few
@@ -485,16 +462,17 @@ struct DetailHost: View {
             } else {
                 // Each screen sets its own title, subtitle, search field and actions.
                 content
-                    .transition(.opacity)
             }
         }
-        // The one toolbar item that is true on every screen in every state. It also
-        // guarantees the window always has something in its toolbar: an `NSToolbar`
-        // with nothing but the sidebar toggle in it is what "unfinished" looks like.
+        // The one toolbar item that is true on every screen in every state. It is a
+        // standard toolbar command rather than a separately drawn control, so AppKit
+        // can collapse it with the screen's contextual actions as the window narrows.
         .toolbar { refreshItem }
-        .animation(Theme.springSubtle, value: model.engine.isRunning)
-        .animation(Theme.fade, value: model.hasLoaded)
-        .overlay(alignment: .top) { errorBanner }
+        .alert("Unable to Complete Operation", isPresented: errorIsPresented) {
+            Button("OK", role: .cancel) { model.dismissError() }
+        } message: {
+            Text(model.lastError ?? "An unknown error occurred.")
+        }
         // `refreshAll` deliberately skips `/system/df` — it can take tens of seconds on
         // a large store — so the Disk screen has to ask for its own data when it is
         // opened. Doing it here rather than inside the screen keeps the rule ("the
@@ -542,47 +520,24 @@ struct DetailHost: View {
         }
     }
 
-    @ViewBuilder
-    private var errorBanner: some View {
-        if let message = model.lastError {
-            HStack(spacing: Theme.space3) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(Theme.statusBad)
-                Text(message)
-                    .font(.callout)
-                    .lineLimit(2)
-                    .textSelection(.enabled)
-                Spacer(minLength: Theme.space3)
-                Button {
-                    model.dismissError()
-                } label: {
-                    Image(systemName: "xmark")
-                }
-                .buttonStyle(.borderless)
-                .foregroundStyle(.secondary)
-            }
-            .padding(.horizontal, Theme.space4)
-            .padding(.vertical, Theme.space3)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: Theme.cornerRadius, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: Theme.cornerRadius, style: .continuous)
-                    .strokeBorder(Theme.statusBad.opacity(0.35), lineWidth: 1)
-            }
-            .shadow(color: .black.opacity(0.18), radius: 12, y: 4)
-            .padding(Theme.pagePadding)
-            .transition(.move(edge: .top).combined(with: .opacity))
-            .animation(Theme.springSubtle, value: model.lastError)
-        }
+    private var errorIsPresented: Binding<Bool> {
+        Binding(
+            get: { model.lastError != nil },
+            set: { isPresented in
+                if !isPresented { model.dismissError() }
+            })
     }
 }
 
 /// The brief moment before the daemon has answered.
 ///
-/// No spinner: `bootstrap` normally resolves in a few milliseconds, and a spinner that
-/// flashes for one frame is worse than nothing.
+/// Bootstrap is usually quick, but waiting for a guest can be visible. A standard
+/// progress indicator communicates work without fabricating a content surface.
 private struct LoadingView: View {
     var body: some View {
-        Color.clear
+        ProgressView("Connecting…")
+            .controlSize(.small)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -601,31 +556,29 @@ struct EngineStoppedView: View {
     private var isStarting: Bool { model.isEngineBusy || model.engine.isTransitional }
 
     var body: some View {
-        // The one screen in the app that carries the mark — see the note at the bottom
-        // of `Design/MorbBrand.swift`. Everywhere else the identity is carried by symbol
-        // choice, accent discipline and copy, not by the logo.
-        MorbBrandedEmptyState(
-            title,
-            description: explanation,
-            footnote: "Morbstack runs Docker in a lightweight virtual machine."
-        ) {
-            if isStarting {
-                ProgressView()
-                    .controlSize(.small)
-            } else {
-                Button {
-                    Task { await model.engineAction(.start) }
-                } label: {
-                    Label(
-                        model.engine.state == "suspended" ? "Resume Engine" : "Start Engine",
-                        systemImage: "play.fill")
-                        .frame(minWidth: 132)
+        ContentUnavailableView(
+            label: {
+                Label(title, systemImage: "server.rack")
+            },
+            description: {
+                Text(explanation)
+            },
+            actions: {
+                if isStarting {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Button {
+                        Task { await model.engineAction(.start) }
+                    } label: {
+                        Label(
+                            model.engine.state == "suspended" ? "Resume Engine" : "Start Engine",
+                            systemImage: "play.fill")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.return, modifiers: [])
                 }
-                .morbButton(.primary)
-                .controlSize(.large)
-                .keyboardShortcut(.return, modifiers: [])
-            }
-        }
+            })
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
@@ -658,9 +611,9 @@ struct EngineStoppedView: View {
 /// Applies `--window-size` to the real `NSWindow`.
 ///
 /// SwiftUI's `.defaultSize` only applies to a window with no saved frame, which makes it
-/// useless for repeatable screenshots: the second run inherits the first run's size from
-/// the restoration store. Reaching for the `NSWindow` is the only way to get the exact
-/// pixels asked for, every time.
+/// unsuitable for repeatable review: the second run inherits the first run's size from
+/// the restoration store. Reaching for the `NSWindow` is the only way to apply the
+/// explicit size requested by developer automation.
 private struct WindowConfigurator: NSViewRepresentable {
 
     let size: CGSize?

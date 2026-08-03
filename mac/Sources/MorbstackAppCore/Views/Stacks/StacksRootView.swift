@@ -1,24 +1,11 @@
 // Copyright 2026 The Morbstack Authors.
 // Licensed under the Apache License, Version 2.0 (the "License").
 //
-// Stacks — Compose projects, derived rather than tracked.
-//
-// Morbstack does not run Compose; the standard `docker compose` CLI does, against
-// Morbstack's engine. So there is no stack registry to read: a "stack" here is a group
-// of containers that agree on their `com.docker.compose.project` label, exactly the
-// grouping the CLI itself uses. That has one real consequence worth knowing — a project
-// whose containers have all been removed simply stops existing, because nothing else
-// records that it ever did.
-//
-// The list is built on the same `MorbGroupHeader` + fixed-height rich row the Containers
-// screen uses for its compose groups — one row rhythm across the two screens that share
-// the concept — plus a summary strip of aggregate `MorbMetric`s, which is what gives this
-// screen something to justify its space instead of two thin cards on a mostly-empty
-// window (`docs/design/CRITIQUE.md`, `stacks-dark`).
-//
-// The one thing the labels on the list endpoint do *not* carry is the path to the
-// compose file. That lives on the container's full inspect payload, which is why this
-// screen makes one extra call per project and caches the answer.
+// Stacks are Docker Compose projects inferred from the standard
+// `com.docker.compose.project` container label. The resource browser follows the
+// same macOS pattern as Finder and Xcode: one native outline table with a
+// system-owned trailing inspector. A Compose project is the real parent of its
+// service rows, never a decorative card or a repeated string column.
 
 import AppKit
 import Foundation
@@ -28,19 +15,17 @@ import SwiftUI
 
 // MARK: - Compose metadata
 
-/// The compose file paths behind each project, fetched lazily from `/containers/{id}/json`.
+/// Compose metadata is absent from Docker's summary endpoint. It is loaded from one
+/// container inspect response for a selected project, then cached for the session.
 @MainActor
 @Observable
 final class TrackDComposeMetadata {
 
-    /// project → the `config_files` label, already split into paths.
     private(set) var configFiles: [String: [String]] = [:]
-    /// project → the directory `docker compose` was run from.
     private(set) var workingDirectories: [String: String] = [:]
 
     @ObservationIgnored private var inFlight: Set<String> = []
 
-    /// Fetches the compose paths for `project` once. Repeat calls are free.
     func load(project: String, containerID: String, client: DockerClient) {
         guard configFiles[project] == nil, !inFlight.contains(project) else { return }
         inFlight.insert(project)
@@ -59,14 +44,107 @@ final class TrackDComposeMetadata {
                     $0.trimmingCharacters(in: .whitespaces)
                 }
             } else {
-                // Cache the miss too, or every refresh re-asks a question already
-                // answered "no".
+                // Cache a negative response too; repeated refreshes should not make the
+                // same inspect request only to rediscover that Docker omitted the label.
                 configFiles[project] = []
             }
+
             if let directory = labels["com.docker.compose.project.working_dir"], !directory.isEmpty {
                 workingDirectories[project] = directory
             }
         }
+    }
+}
+
+// MARK: - Table sorting
+
+private enum StackOutlineID: Hashable {
+    case project(String)
+    case service(ContainerSummary.ID)
+}
+
+/// A single value type lets `Table(children:)` express the Compose outline through
+/// AppKit's native disclosure, selection, accessibility, and keyboard behavior.
+private struct StackOutlineRow: Identifiable, Hashable {
+
+    enum Kind: Hashable {
+        case project(ComposeGroup)
+        case service(ContainerSummary)
+    }
+
+    let kind: Kind
+    let children: [StackOutlineRow]?
+
+    var id: StackOutlineID {
+        switch kind {
+        case .project(let stack): .project(stack.id)
+        case .service(let service): .service(service.id)
+        }
+    }
+
+    var stack: ComposeGroup {
+        switch kind {
+        case .project(let stack): stack
+        case .service:
+            preconditionFailure("A service outline row has no project payload")
+        }
+    }
+
+    var service: ContainerSummary? {
+        guard case .service(let service) = kind else { return nil }
+        return service
+    }
+
+    var displayName: String {
+        switch kind {
+        case .project(let stack): stack.title
+        case .service(let service): service.composeService ?? service.displayName
+        }
+    }
+
+    var image: String {
+        service?.image ?? "—"
+    }
+
+    var status: String {
+        guard let service else {
+            return "\(stack.runningCount) of \(stack.containers.count) running"
+        }
+        return service.status.isEmpty ? service.state.capitalized : service.status
+    }
+
+    var ports: String {
+        service.map { $0.ports.map(\.label).joined(separator: ", ") } ?? "—"
+    }
+}
+
+private enum StackOutlineSortKey: Hashable {
+    case name, image, status, ports
+}
+
+private struct StackOutlineComparator: SortComparator {
+    typealias Compared = StackOutlineRow
+
+    var key: StackOutlineSortKey
+    var order: SortOrder = .forward
+
+    func compare(_ lhs: StackOutlineRow, _ rhs: StackOutlineRow) -> ComparisonResult {
+        let result: ComparisonResult
+        switch key {
+        case .name:
+            result = compare(lhs.displayName, rhs.displayName)
+        case .image:
+            result = compare(lhs.image, rhs.image)
+        case .status:
+            result = compare(lhs.status, rhs.status)
+        case .ports:
+            result = compare(lhs.ports, rhs.ports)
+        }
+        return order == .forward ? result : result.reversed
+    }
+
+    private func compare(_ lhs: String, _ rhs: String) -> ComparisonResult {
+        lhs.localizedStandardCompare(rhs)
     }
 }
 
@@ -78,269 +156,611 @@ struct StacksRootView: View {
 
     @State private var metadata = TrackDComposeMetadata()
     @State private var query = ""
+    @State private var sortOrder: [StackOutlineComparator] = [
+        StackOutlineComparator(key: .name)
+    ]
+    @State private var selection: StackOutlineID?
+    @State private var showsInspector = true
     @State private var busyProjects: Set<String> = []
-    @State private var toast: TrackCToast?
+    @State private var busyServices: Set<ContainerSummary.ID> = []
+    @State private var removalTarget: ContainerSummary?
 
-    /// Compose projects only — the standalone bucket belongs on the Containers screen.
+    /// Compose projects only. Unmanaged containers belong to the Containers browser.
     private var stacks: [ComposeGroup] {
         model.containers.groupedByComposeProject().filter { $0.project != nil }
     }
 
-    private var visibleStacks: [ComposeGroup] {
+    private var services: [ContainerSummary] {
+        stacks.flatMap(\.containers)
+    }
+
+    /// A searched service remains below its Compose project so the native outline
+    /// preserves the relationship that gives its lifecycle actions their meaning.
+    private var visibleRows: [StackOutlineRow] {
         let needle = query.trimmingCharacters(in: .whitespaces)
-        guard !needle.isEmpty else { return stacks }
-        return stacks.filter { group in
-            if group.title.localizedCaseInsensitiveContains(needle) { return true }
-            return group.containers.contains { container in
-                (container.composeService ?? container.displayName).localizedCaseInsensitiveContains(needle)
-                    || container.image.localizedCaseInsensitiveContains(needle)
+        return stacks.compactMap { stack in
+            let projectMatches = needle.isEmpty || stack.title.localizedCaseInsensitiveContains(needle)
+            let matchingServices = stack.containers.filter { service in
+                projectMatches || serviceMatchesQuery(service, needle: needle)
             }
+            guard !matchingServices.isEmpty else { return nil }
+
+            return StackOutlineRow(
+                kind: .project(stack),
+                children: matchingServices
+                    .map { StackOutlineRow(kind: .service($0), children: nil) }
+                    .sorted(using: sortOrder))
+        }
+        // Table sort descriptors apply independently to the root projects and to the
+        // services below each project; they never flatten the Compose hierarchy.
+        .sorted(using: sortOrder)
+    }
+
+    /// A table selection must always describe a row that is presently in the outline.
+    /// Keeping this separate from `stacks` is intentional: a search can hide a live
+    /// service without removing it from Docker, and its inspector must not continue to
+    /// describe that hidden result.
+    private var visibleRowIDs: Set<StackOutlineID> {
+        Set(visibleRows.flatMap { row in
+            [row.id] + (row.children ?? []).map(\.id)
+        })
+    }
+
+    private var selectedService: ContainerSummary? {
+        guard case .service(let id) = selection else { return nil }
+        return services.first { $0.id == id }
+    }
+
+    private var selectedStack: ComposeGroup? {
+        switch selection {
+        case .project(let id):
+            return stacks.first { $0.id == id }
+        case .service(let id):
+            return services
+                .first { $0.id == id }
+                .flatMap { service in stacks.first { $0.project == service.composeProject } }
+        case nil:
+            return nil
         }
     }
 
-    private var totalServices: Int { stacks.reduce(0) { $0 + $1.containers.count } }
-    private var runningServices: Int { stacks.reduce(0) { $0 + $1.runningCount } }
+    private var totalServices: Int { services.count }
+    private var runningServices: Int { services.filter(\.isRunning).count }
 
     private var degradedCount: Int {
         stacks.filter { $0.runningCount > 0 && $0.runningCount < $0.containers.count }.count
     }
 
-    /// Everything the deleted summary band used to say, in the one line macOS already
-    /// reserves for it. See `content` for why the band is gone.
     private var subtitle: String {
-        var parts = ["\(stacks.count) project\(stacks.count == 1 ? "" : "s")",
-                     "\(runningServices) of \(totalServices) services running"]
-        if degradedCount > 0 {
-            parts.append("\(degradedCount) degraded")
+        var parts = [
+            "\(stacks.count) project\(stacks.count == 1 ? "" : "s")",
+            "\(runningServices) of \(totalServices) services running",
+        ]
+        if degradedCount > 0 { parts.append("\(degradedCount) degraded") }
+        let visibleServiceCount = visibleRows.reduce(into: 0) { count, row in
+            count += row.children?.count ?? 0
+        }
+        if visibleServiceCount != totalServices {
+            parts.append("\(visibleServiceCount) shown")
         }
         return parts.joined(separator: " · ")
     }
 
     var body: some View {
         content
-            .morbScreen(title: "Stacks", subtitle: subtitle, edge: .hard)
+            .navigationTitle("Stacks")
+            .navigationSubtitle(subtitle)
             .searchable(text: $query, placement: .toolbar, prompt: "Project, service, image")
-            .trackCToast($toast)
+            .toolbar { toolbarContent }
+            .confirmationDialog(
+                removalTarget.map { "Remove \($0.composeService ?? $0.displayName)?" } ?? "Remove service?",
+                isPresented: Binding(
+                    get: { removalTarget != nil },
+                    set: { if !$0 { removalTarget = nil } }),
+                titleVisibility: .visible,
+                presenting: removalTarget
+            ) { service in
+                Button("Remove", role: .destructive) {
+                    removalTarget = nil
+                    perform(.remove, on: service)
+                }
+                Button("Cancel", role: .cancel) { removalTarget = nil }
+            } message: { service in
+                Text(
+                    "This deletes the service’s writable layer and any anonymous volumes. "
+                        + "Named volumes are kept.")
+            }
+            .onChange(of: selection) { _, newValue in
+                if newValue != nil { showsInspector = true }
+            }
+            .onChange(of: visibleRowIDs) { _, _ in
+                reconcileSelectionWithVisibleRows()
+            }
+    }
+
+    // MARK: Toolbar
+
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        ToolbarItem(id: "stacks.refresh", placement: .primaryAction) {
+            Button {
+                Task { await model.refreshAll() }
+            } label: {
+                Image(systemName: "arrow.clockwise")
+            }
+            .accessibilityLabel("Refresh stacks")
+            .help("Refresh Compose projects")
+        }
+
+        if !services.isEmpty {
+            ToolbarItem(id: "stacks.inspector", placement: .primaryAction) {
+                Button { showsInspector.toggle() } label: {
+                    Image(systemName: "sidebar.right")
+                }
+                .accessibilityLabel(showsInspector ? "Hide inspector" : "Show inspector")
+                .help(showsInspector ? "Hide inspector" : "Show inspector")
+            }
+        }
+
+        if let stack = selectedStack {
+            if let service = selectedService,
+                isServiceBusy(service) || isProjectBusy(for: service)
+            {
+                ToolbarItem(id: "stacks.progress", placement: .secondaryAction) {
+                    ProgressView()
+                        .controlSize(.small)
+                        .accessibilityLabel("Updating \(service.composeService ?? service.displayName)")
+                        .help("Updating \(service.composeService ?? service.displayName)")
+                }
+            } else if let service = selectedService {
+                ToolbarItem(id: "stacks.actions", placement: .secondaryAction) {
+                    selectionActionsMenu(service: service, stack: stack)
+                }
+            } else if busyProjects.contains(stack.id) {
+                ToolbarItem(id: "stacks.project-progress", placement: .secondaryAction) {
+                    ProgressView()
+                        .controlSize(.small)
+                        .accessibilityLabel("Updating \(stack.title)")
+                        .help("Updating \(stack.title)")
+                }
+            } else {
+                ToolbarItem(id: "stacks.project-actions", placement: .secondaryAction) {
+                    projectActionsMenu(for: stack)
+                }
+            }
+        }
+    }
+
+    private func selectionActionsMenu(service: ContainerSummary, stack: ComposeGroup) -> some View {
+        Menu {
+            serviceActionItems(for: service)
+            Divider()
+            Menu("Project Actions") {
+                projectActionItems(for: stack)
+            }
+            Divider()
+            Button("Open in Containers") {
+                TrackDAppBridge.reveal(containerID: service.id, in: model)
+            }
+            Button("View Logs") {
+                TrackDAppBridge.reveal(containerID: service.id, in: model, showingLogs: true)
+            }
+            Divider()
+            Button("Remove Service…", role: .destructive) { removalTarget = service }
+        } label: {
+            Image(systemName: "ellipsis")
+        }
+        .accessibilityLabel("Actions for \(service.composeService ?? service.displayName)")
+        .help("Actions for \(service.composeService ?? service.displayName)")
+    }
+
+    private func projectActionsMenu(for stack: ComposeGroup) -> some View {
+        Menu {
+            projectActionItems(for: stack)
+        } label: {
+            Image(systemName: "ellipsis")
+        }
+        .accessibilityLabel("Actions for \(stack.title)")
+        .help("Actions for \(stack.title)")
     }
 
     // MARK: Content
 
     @ViewBuilder
     private var content: some View {
-        if stacks.isEmpty {
-            emptyState
-        } else if visibleStacks.isEmpty {
-            MorbNoMatches(query: query)
+        if !model.engine.isRunning && model.containers.isEmpty {
+            engineEmptyState
+        } else if services.isEmpty {
+            noStacksEmptyState
+        } else if visibleRows.isEmpty {
+            ContentUnavailableView.search(text: query)
         } else {
-            // Just the list. The three-metric summary band that used to sit above it is
-            // gone: every number it showed — projects, services running, stacks degraded
-            // — is now in the window subtitle, which is where macOS puts a screen's
-            // aggregate line. A painted dashboard strip inside the content area was the
-            // same information in a second, non-native place.
-            list
+            table
+                .inspector(isPresented: $showsInspector) {
+                    inspector
+                        .inspectorColumnWidth(min: 300, ideal: 360, max: 520)
+                }
         }
     }
 
-    // MARK: List
+    private var table: some View {
+        Table(visibleRows, children: \.children, selection: $selection, sortOrder: $sortOrder) {
+            TableColumn("Name", sortUsing: StackOutlineComparator(key: .name)) { row in
+                Label(
+                    row.displayName,
+                    systemImage: row.service.map { stateSymbol(for: $0) } ?? "square.stack.3d.up")
+                    .help(row.service.map { $0.status.isEmpty ? $0.state : $0.status } ?? row.status)
+            }
+            .width(min: 180, ideal: 260)
 
-    private var list: some View {
-        List {
-            ForEach(visibleStacks) { stack in
-                Section {
-                    ForEach(stack.containers) { container in
-                        serviceRow(container, project: stack.title)
-                            .listRowInsets(EdgeInsets())
-                            .listRowBackground(Color.clear)
-                    }
-                } header: {
-                    groupHeader(stack)
-                        .listRowInsets(EdgeInsets())
-                }
+            TableColumn("Image", sortUsing: StackOutlineComparator(key: .image)) { row in
+                Text(row.image)
+                    .font(.system(.body, design: .monospaced))
+                    .foregroundStyle(row.service == nil ? .tertiary : .secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            .width(min: 170, ideal: 280)
+
+            TableColumn("Status", sortUsing: StackOutlineComparator(key: .status)) { row in
+                Text(row.status)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            .width(min: 140, ideal: 190)
+
+            TableColumn("Ports", sortUsing: StackOutlineComparator(key: .ports)) { row in
+                Text(row.ports.isEmpty ? "—" : row.ports)
+                    .font(.system(.body, design: .monospaced))
+                    .foregroundStyle(row.service?.ports.isEmpty == false ? .secondary : .tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            .width(min: 90, ideal: 150)
+        }
+        .contextMenu(forSelectionType: StackOutlineID.self) { ids in
+            contextMenu(for: ids)
+        } primaryAction: { ids in
+            if case .service(let id) = ids.first {
+                TrackDAppBridge.reveal(containerID: id, in: model)
             }
         }
-        .listStyle(.inset)
-        .environment(\.defaultMinListRowHeight, Theme.rowRich)
-        .scrollContentBackground(.hidden)
-        .background(.background)
+        .onDeleteCommand {
+            if let selectedService { removalTarget = selectedService }
+        }
     }
 
-    private func groupHeader(_ stack: ComposeGroup) -> some View {
-        let project = stack.title
-        let busy = busyProjects.contains(stack.id)
-        let state = MorbGroupState.from(
-            running: stack.runningCount, total: stack.containers.count,
-            transitioning: busy ? stack.containers.count : 0)
+    // MARK: Inspector
 
-        return MorbGroupHeader(
-            project, state: state, running: stack.runningCount, total: stack.containers.count,
-            symbol: "square.3.layers.3d"
-        ) {
-            if busy {
-                ProgressView().controlSize(.small).scaleEffect(0.6).frame(width: 20)
-            } else {
-                HStack(spacing: Theme.space1) {
-                    MorbIconButton("play.fill", help: "Start every stopped service in \(project)") {
-                        run(.start, on: stack)
+    @ViewBuilder
+    private var inspector: some View {
+        if let service = selectedService, let stack = selectedStack, let project = stack.project {
+            serviceInspector(service: service, stack: stack, project: project)
+        } else if let stack = selectedStack, let project = stack.project {
+            projectInspector(stack: stack, project: project)
+        } else {
+            ContentUnavailableView {
+                Label("No Service Selected", systemImage: "square.stack.3d.up")
+            } description: {
+                Text("Select a Compose service to inspect its project, configuration, and lifecycle actions.")
+            }
+        }
+    }
+
+    private func serviceInspector(
+        service: ContainerSummary,
+        stack: ComposeGroup,
+        project: String
+    ) -> some View {
+        Form {
+            Section("Service") {
+                LabeledContent("Name") {
+                    Text(service.composeService ?? service.displayName)
+                        .textSelection(.enabled)
+                }
+                LabeledContent("Project", value: project)
+                LabeledContent("Container ID") {
+                    Text(service.shortID)
+                        .font(.system(.callout, design: .monospaced))
+                        .textSelection(.enabled)
+                }
+                LabeledContent("Image") {
+                    Text(service.image)
+                        .font(.system(.callout, design: .monospaced))
+                        .textSelection(.enabled)
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                }
+                LabeledContent("Status", value: service.status.isEmpty ? service.state.capitalized : service.status)
+                LabeledContent("Created", value: Formatters.absoluteDate(service.createdAt))
+            }
+
+            composeMetadataSection(project: project)
+
+            if !service.ports.isEmpty {
+                Section("Ports") {
+                    ForEach(service.ports) { port in
+                        LabeledContent("\(port.containerPort)/\(port.proto)", value: port.hostPort.map(String.init) ?? "Not published")
                     }
-                    .disabled(stack.isFullyRunning)
-                    MorbIconButton("arrow.clockwise", help: "Restart every service in \(project)") {
-                        run(.restart, on: stack)
+                }
+            }
+
+            Section("Actions") {
+                serviceActionItems(for: service)
+
+                Menu("Project Actions") {
+                    projectActionItems(for: stack)
+                }
+
+                Button {
+                    TrackDAppBridge.reveal(containerID: service.id, in: model)
+                } label: {
+                    Label("Open in Containers", systemImage: "shippingbox")
+                }
+
+                Button {
+                    TrackDAppBridge.reveal(containerID: service.id, in: model, showingLogs: true)
+                } label: {
+                    Label("View Logs", systemImage: "text.alignleft")
+                }
+
+                if let url = service.ports.compactMap(\.url).first {
+                    Button {
+                        NSWorkspace.shared.open(url)
+                    } label: {
+                        Label("Open Published Port", systemImage: "safari")
                     }
-                    .disabled(stack.runningCount == 0)
-                    MorbIconButton("stop.fill", help: "Stop every running service in \(project)") {
-                        run(.stop, on: stack)
-                    }
-                    .disabled(stack.runningCount == 0)
-                    if let file = configFileLabel(project) {
-                        MorbIconButton("doc.text", help: "Copy the Compose file path\n\(file)") {
-                            trackCCopy(file)
+                }
+
+                Button(role: .destructive) {
+                    removalTarget = service
+                } label: {
+                    Label("Remove Service", systemImage: "trash")
+                }
+                .disabled(isServiceBusy(service) || isProjectBusy(for: service))
+            }
+        }
+        .formStyle(.columns)
+        .task(id: stack.id) {
+            metadata.load(project: project, containerID: service.id, client: model.client)
+        }
+    }
+
+    private func projectInspector(stack: ComposeGroup, project: String) -> some View {
+        Form {
+            Section("Project") {
+                LabeledContent("Name", value: project)
+                LabeledContent("Services", value: "\(stack.containers.count)")
+                LabeledContent("Running", value: "\(stack.runningCount) of \(stack.containers.count)")
+            }
+
+            composeMetadataSection(project: project)
+
+            Section("Actions") {
+                projectActionItems(for: stack)
+            }
+        }
+        .formStyle(.columns)
+        .task(id: stack.id) {
+            if let service = stack.containers.first {
+                metadata.load(project: project, containerID: service.id, client: model.client)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func composeMetadataSection(project: String) -> some View {
+        Section("Compose") {
+            if let directory = metadata.workingDirectories[project] {
+                LabeledContent("Working directory") {
+                    Text(directory)
+                        .font(.system(.callout, design: .monospaced))
+                        .textSelection(.enabled)
+                        .lineLimit(3)
+                        .truncationMode(.middle)
+                }
+            }
+            if let files = metadata.configFiles[project], !files.isEmpty {
+                LabeledContent("Compose files") {
+                    VStack(alignment: .trailing, spacing: 3) {
+                        ForEach(files, id: \.self) { file in
+                            Text(file)
+                                .font(.system(.callout, design: .monospaced))
+                                .textSelection(.enabled)
+                                .lineLimit(2)
+                                .truncationMode(.middle)
                         }
                     }
                 }
+            } else if metadata.configFiles[project] != nil {
+                LabeledContent("Compose files", value: "Not reported")
             }
-        }
-        .task(id: stack.id) {
-            guard let first = stack.containers.first else { return }
-            metadata.load(project: project, containerID: first.id, client: model.client)
         }
     }
 
-    /// The compose file, shortened to the last two path components — the full path is in
-    /// the tooltip and on the clipboard, and `…/checkout/docker-compose.yml` is what
-    /// actually tells two projects apart.
-    private func configFileLabel(_ project: String) -> String? {
-        guard let files = metadata.configFiles[project], let first = files.first else { return nil }
-        let parts = first.split(separator: "/")
-        guard parts.count > 2 else { return first }
-        return "…/" + parts.suffix(2).joined(separator: "/")
-    }
+    // MARK: Native menus and action items
 
-    // MARK: Service row
-
-    private static let trailingWidth: CGFloat = 168
-
-    private func serviceRow(_ container: ContainerSummary, project: String) -> some View {
-        MorbRichRow(
-            title: container.composeService ?? container.displayName,
-            subtitle: container.image
-        ) {
-            MorbStatusDot(
-                tone: StatusTone.forContainer(state: container.state, unhealthy: container.isUnhealthy),
-                pulsing: container.state == "restarting")
-        } trailing: {
-            serviceTrailing(container)
-        }
-        .contentShape(Rectangle())
-        .onTapGesture(count: 2) {
-            TrackDAppBridge.reveal(containerID: container.id, in: model)
-        }
-        .contextMenu {
-            Button("Open in Containers") {
-                TrackDAppBridge.reveal(containerID: container.id, in: model)
-            }
-            Button("View Logs") {
-                TrackDAppBridge.reveal(containerID: container.id, in: model, showingLogs: true)
-            }
-            Divider()
-            ForEach(container.availableActions, id: \.self) { action in
-                Button(action.title, role: action.isDestructive ? .destructive : nil) {
-                    act(action, container)
+    @ViewBuilder
+    private func contextMenu(for ids: Set<StackOutlineID>) -> some View {
+        if let selected = ids.first {
+            switch selected {
+            case .project(let id):
+                if let stack = stacks.first(where: { $0.id == id }) {
+                    projectActionItems(for: stack, hidingUnavailableActions: true)
+                }
+            case .service(let id):
+                if let service = services.first(where: { $0.id == id }),
+                    let stack = stacks.first(where: { $0.project == service.composeProject })
+                {
+                    if !isServiceBusy(service), !isProjectBusy(for: service) {
+                        serviceActionItems(for: service)
+                        Menu("Project Actions") {
+                            projectActionItems(for: stack, hidingUnavailableActions: true)
+                        }
+                        Divider()
+                    }
+                    Button("Open in Containers") {
+                        TrackDAppBridge.reveal(containerID: service.id, in: model)
+                    }
+                    Button("View Logs") {
+                        TrackDAppBridge.reveal(containerID: service.id, in: model, showingLogs: true)
+                    }
+                    if let url = service.ports.compactMap(\.url).first {
+                        Button("Open Published Port") { NSWorkspace.shared.open(url) }
+                    }
+                    Divider()
+                    if !isServiceBusy(service), !isProjectBusy(for: service) {
+                        Button("Remove Service…", role: .destructive) { removalTarget = service }
+                    }
                 }
             }
         }
     }
 
     @ViewBuilder
-    private func serviceTrailing(_ container: ContainerSummary) -> some View {
-        HStack(spacing: Theme.space1) {
-            if container.isRunning {
-                MorbIconButton("stop.fill", help: "Stop") { act(.stop, container) }
-                MorbIconButton("arrow.clockwise", help: "Restart") { act(.restart, container) }
-            } else {
-                MorbIconButton("play.fill", help: "Start") { act(.start, container) }
+    private func serviceActionItems(for service: ContainerSummary) -> some View {
+        if isServiceBusy(service) {
+            ProgressView()
+                .controlSize(.small)
+                .accessibilityLabel("Updating \(service.composeService ?? service.displayName)")
+        } else {
+            ForEach(service.availableActions.filter { !$0.isDestructive }, id: \.rawValue) { action in
+                Button(action.title) { perform(action, on: service) }
+                    .disabled(isProjectBusy(for: service))
             }
-            portsLine(container)
         }
-        .frame(width: Self.trailingWidth, alignment: .trailing)
     }
 
     @ViewBuilder
-    private func portsLine(_ container: ContainerSummary) -> some View {
-        let publishable = container.ports.filter { $0.hostPort != nil }
-        if let first = publishable.first {
-            HStack(spacing: Theme.space1 + 1) {
-                if publishable.count > 1 {
-                    MorbOverflowChip(
-                        hidden: publishable.count - 1,
-                        detail: publishable.dropFirst().map(\.label).joined(separator: ", "))
-                }
-                MorbPortChip(
-                    host: first.hostPort.map(String.init) ?? first.label,
-                    container: "\(first.containerPort)/\(first.proto)",
-                    isOpenable: first.url != nil)
+    private func projectActionItems(
+        for stack: ComposeGroup,
+        hidingUnavailableActions: Bool = false
+    ) -> some View {
+        if busyProjects.contains(stack.id) {
+            ProgressView()
+                .controlSize(.small)
+                .accessibilityLabel("Updating \(stack.title)")
+        } else {
+            if !hidingUnavailableActions || !stack.isFullyRunning {
+                Button("Start Stopped Services") { run(.start, on: stack) }
+                    .disabled(stack.isFullyRunning)
+            }
+            if !hidingUnavailableActions || stack.runningCount > 0 {
+                Button("Restart All Services") { run(.restart, on: stack) }
+                    .disabled(stack.runningCount == 0)
+                Button("Stop Running Services") { run(.stop, on: stack) }
+                    .disabled(stack.runningCount == 0)
+            }
+
+            if let project = stack.project,
+                let file = metadata.configFiles[project]?.first
+            {
+                Divider()
+                Button("Copy Compose File Path") { MorbPasteboard.copy(file) }
             }
         }
     }
 
-    // MARK: Empty state
+    // MARK: Empty states
 
-    private var emptyState: some View {
-        MorbEmptyState(
-            "No Compose stacks",
-            systemImage: "square.stack.3d.up",
-            description: "Anything started with docker compose up against the Morbstack engine shows up "
-                + "here, grouped by project. Morbstack reads the standard Compose labels, so the regular "
-                + "CLI is all you need — point it at the Morbstack socket and run it."
-        ) {
-            VStack(spacing: Theme.space3) {
-                Button {
-                    Task { await model.refreshAll() }
-                } label: {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
-                .morbButton(.standard)
+    private var engineEmptyState: some View {
+        ContentUnavailableView {
+            Label("The Engine Isn’t Running", systemImage: "bolt.horizontal")
+        } description: {
+            Text("Start the Morbstack engine to discover Compose projects and manage their services.")
+        } actions: {
+            Button("Start Engine") {
+                Task { await model.engineAction(.start) }
+            }
+            .disabled(model.engine.isTransitional)
+        }
+    }
 
-                Button {
-                    trackCCopy(TrackDLinks.dockerContextCommand(socketPath: MorbPaths.dockerSocket.path))
-                } label: {
-                    Label("Copy docker context command", systemImage: "doc.on.doc")
-                }
-                .morbButton(.standard)
-
-                Text(TrackDLinks.dockerHostExport(socketPath: MorbPaths.dockerSocket.path))
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
+    private var noStacksEmptyState: some View {
+        ContentUnavailableView {
+            Label("No Compose Stacks", systemImage: "square.stack.3d.up")
+        } description: {
+            Text("Services started with docker compose appear here automatically, grouped by their standard Compose project label.")
+        } actions: {
+            Button("Refresh") {
+                Task { await model.refreshAll() }
+            }
+            Button("Copy Docker Context Command") {
+                MorbPasteboard.copy(TrackDLinks.dockerContextCommand(socketPath: MorbPaths.dockerSocket.path))
             }
         }
     }
 
     // MARK: Actions
 
+    private func perform(_ action: ContainerAction, on service: ContainerSummary) {
+        guard !isServiceBusy(service), !isProjectBusy(for: service) else { return }
+        busyServices.insert(service.id)
+        Task { @MainActor in
+            await model.containerAction(action, id: service.id)
+            busyServices.remove(service.id)
+            if action == .remove, selection == .service(service.id) { selection = nil }
+        }
+    }
+
     private func run(_ action: ContainerAction, on stack: ComposeGroup) {
         let targets: [ContainerSummary]
         switch action {
-        case .start: targets = stack.containers.filter { !$0.isRunning }
-        case .stop: targets = stack.containers.filter(\.isRunning)
-        default: targets = stack.containers
+        case .start:
+            targets = stack.containers.filter { !$0.isRunning }
+        case .stop:
+            targets = stack.containers.filter(\.isRunning)
+        default:
+            targets = stack.containers
         }
-        guard !targets.isEmpty else { return }
+        guard !targets.isEmpty, !busyProjects.contains(stack.id) else { return }
 
         busyProjects.insert(stack.id)
         Task { @MainActor in
-            // Sequential rather than concurrent: compose services have start-order
-            // dependencies, and hammering the engine with eight simultaneous starts is
-            // how a database ends up racing the thing that connects to it.
-            for container in targets {
-                await model.containerAction(action, id: container.id)
+            // Compose services may have start-order dependencies. Keep this sequence
+            // deterministic rather than racing every request against the engine.
+            for service in targets {
+                await model.containerAction(action, id: service.id)
             }
             busyProjects.remove(stack.id)
         }
     }
 
-    private func act(_ action: ContainerAction, _ container: ContainerSummary) {
-        Task { @MainActor in
-            await model.containerAction(action, id: container.id)
+    private func isServiceBusy(_ service: ContainerSummary) -> Bool {
+        busyServices.contains(service.id)
+    }
+
+    private func isProjectBusy(for service: ContainerSummary) -> Bool {
+        guard let project = service.composeProject else { return false }
+        return busyProjects.contains(project)
+    }
+
+    private func stateSymbol(for service: ContainerSummary) -> String {
+        switch service.state {
+        case "running": "play.circle.fill"
+        case "paused": "pause.circle.fill"
+        case "restarting": "arrow.triangle.2.circlepath.circle.fill"
+        case "dead": "xmark.circle.fill"
+        default: "stop.circle.fill"
         }
+    }
+
+    private func serviceMatchesQuery(_ service: ContainerSummary, needle: String) -> Bool {
+        guard !needle.isEmpty else { return true }
+        return service.displayName.localizedCaseInsensitiveContains(needle)
+            || (service.composeService ?? "").localizedCaseInsensitiveContains(needle)
+            || service.image.localizedCaseInsensitiveContains(needle)
+            || service.status.localizedCaseInsensitiveContains(needle)
+    }
+
+    private func reconcileSelectionWithVisibleRows() {
+        guard let selection, !visibleRowIDs.contains(selection) else { return }
+        self.selection = nil
+    }
+
+    private func portDescription(for service: ContainerSummary) -> String {
+        guard !service.ports.isEmpty else { return "—" }
+        return service.ports.map(\.label).joined(separator: ", ")
     }
 }

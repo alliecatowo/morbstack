@@ -197,7 +197,7 @@ final class TrackDSettingsStore {
         } catch {
             // A malformed file is shown, not overwritten: the user's comments and their
             // typo both deserve to survive until they choose to save.
-            failure = trackDErrorText(error)
+            failure = MorbErrorMessage.text(for: error)
         }
         let clamped = TrackDConfigEditor.clamped(loaded, limits: limits)
         self.saved = clamped
@@ -229,7 +229,7 @@ final class TrackDSettingsStore {
             loadError = nil
             return true
         } catch {
-            saveError = trackDErrorText(error)
+            saveError = MorbErrorMessage.text(for: error)
             return false
         }
     }
@@ -247,7 +247,7 @@ final class TrackDSettingsStore {
             draft = loaded
             loadError = nil
         } catch {
-            loadError = trackDErrorText(error)
+            loadError = MorbErrorMessage.text(for: error)
         }
     }
 

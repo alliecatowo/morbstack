@@ -39,20 +39,20 @@ struct BuildComparator: SortComparator {
         let result: ComparisonResult
         switch key {
         case .description:
-            result = trackCCompareStrings(lhs.description, rhs.description)
+            result = MorbSort.string(lhs.description, rhs.description)
         case .type:
             result = lhs.type == rhs.type
-                ? trackCCompareStrings(lhs.description, rhs.description)
-                : trackCCompareStrings(lhs.type, rhs.type)
+                ? MorbSort.string(lhs.description, rhs.description)
+                : MorbSort.string(lhs.type, rhs.type)
         case .size:
             result = lhs.size == rhs.size
-                ? trackCCompareStrings(lhs.description, rhs.description)
+                ? MorbSort.string(lhs.description, rhs.description)
                 : (lhs.size < rhs.size ? .orderedAscending : .orderedDescending)
         case .lastUsed:
             let left = lhs.lastUsedAt ?? .distantPast, right = rhs.lastUsedAt ?? .distantPast
             result = left == right
-                ? trackCCompareStrings(lhs.description, rhs.description)
-                : trackCCompareDate(left, right)
+                ? MorbSort.string(lhs.description, rhs.description)
+                : MorbSort.date(left, right)
         }
         return order == .forward ? result : result.reversed
     }
@@ -76,6 +76,14 @@ enum BuildCacheList {
     }
 }
 
+/// An operation failure is domain state for a standard system alert; it carries no
+/// custom presentation or visual treatment.
+private struct BuildOperationFailure: Identifiable {
+    let id = UUID()
+    let title: String
+    let message: String
+}
+
 // MARK: - Root
 
 struct BuildsRootView: View {
@@ -88,9 +96,8 @@ struct BuildsRootView: View {
     @State private var showsInspector = true
     @State private var busy = false
     @State private var isRefreshing = false
-    @State private var copiedBuildCommand = false
     @State private var showsPruneConfirmation = false
-    @State private var toast: TrackCToast?
+    @State private var operationFailure: BuildOperationFailure?
 
     private var records: [BuildCacheRecord] { model.buildCache }
 
@@ -116,10 +123,10 @@ struct BuildsRootView: View {
 
     var body: some View {
         content
-            .morbScreen(title: "Builds", subtitle: subtitle, edge: .hard)
+            .navigationTitle("Builds")
+            .navigationSubtitle(subtitle)
             .searchable(text: $query, placement: .toolbar, prompt: "Description, type, ID")
             .toolbar { toolbarContent }
-            .trackCToast($toast)
             .confirmationDialog(
                 "Remove unused build cache?",
                 isPresented: $showsPruneConfirmation,
@@ -130,6 +137,17 @@ struct BuildsRootView: View {
                 }
             } message: {
                 Text("This frees about \(Formatters.bytesString(unusedBytes)). Active cache records are kept.")
+            }
+            .alert(
+                operationFailure?.title ?? "",
+                isPresented: Binding(
+                    get: { operationFailure != nil },
+                    set: { if !$0 { operationFailure = nil } }),
+                presenting: operationFailure
+            ) { _ in
+                Button("OK", role: .cancel) {}
+            } message: { failure in
+                Text(failure.message)
             }
             .task {
                 if selection == nil { selection = visible.first?.id }
@@ -149,21 +167,46 @@ struct BuildsRootView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        ToolbarItem(id: "builds.pruneUnused", placement: MorbToolbarGroup.secondary) {
-            MorbIconButton(
-                "trash",
-                help: unusedCount == 0
+        ToolbarItem(id: "builds.refresh", placement: .primaryAction) {
+            Button {
+                Task { await refreshBuildCache() }
+            } label: {
+                if isRefreshing {
+                    ProgressView()
+                        .controlSize(.small)
+                        .accessibilityLabel("Refreshing build cache")
+                } else {
+                    Image(systemName: "arrow.clockwise")
+                }
+            }
+            .accessibilityLabel("Refresh build cache")
+            .help("Refresh the BuildKit cache records")
+            .disabled(isRefreshing || busy)
+        }
+        ToolbarItem(id: "builds.pruneUnused", placement: .secondaryAction) {
+            Button(role: .destructive) {
+                showsPruneConfirmation = true
+            } label: {
+                Image(systemName: "trash")
+            }
+            .accessibilityLabel("Remove unused build cache")
+            .disabled(unusedCount == 0 || busy)
+            .help(
+                unusedCount == 0
                     ? "Every cache record is in use"
                     : "Remove \(unusedCount) unused cache record\(unusedCount == 1 ? "" : "s"), "
-                        + "freeing about \(Formatters.bytesString(unusedBytes))",
-                role: .destructive
-            ) {
-                showsPruneConfirmation = true
-            }
-            .disabled(unusedCount == 0 || busy)
+                        + "freeing about \(Formatters.bytesString(unusedBytes))")
         }
         if !records.isEmpty {
-            MorbInspectorToggle(id: "builds.inspector", isPresented: $showsInspector)
+            ToolbarItem(id: "builds.inspector", placement: .primaryAction) {
+                Button {
+                    showsInspector.toggle()
+                } label: {
+                    Image(systemName: "sidebar.right")
+                }
+                .accessibilityLabel(showsInspector ? "Hide inspector" : "Show inspector")
+                .help(showsInspector ? "Hide the inspector" : "Show the inspector")
+            }
         }
     }
 
@@ -172,36 +215,32 @@ struct BuildsRootView: View {
     @ViewBuilder
     private var content: some View {
         if records.isEmpty {
-            MorbEmptyState(
-                "No Build Cache",
-                systemImage: "hammer",
-                description: "Build an image with Morbstack, then refresh to see the BuildKit cache it created."
-            ) {
+            ContentUnavailableView {
+                Label("No Build Cache", systemImage: "hammer")
+            } description: {
+                Text("Build an image, then refresh to see the BuildKit cache it created.")
+            } actions: {
                 Button {
                     copyBuildCommand()
                 } label: {
-                    Label(
-                        copiedBuildCommand ? "Build Command Copied" : "Copy Build Command",
-                        systemImage: copiedBuildCommand ? "checkmark" : "doc.on.doc")
+                    Label("Copy Build Command", systemImage: "doc.on.doc")
                 }
-                .morbButton(.primary)
                 Button {
                     Task { await refreshBuildCache() }
                 } label: {
                     Label(isRefreshing ? "Refreshing" : "Refresh", systemImage: "arrow.clockwise")
                 }
                 .disabled(isRefreshing)
-                .morbButton(.standard)
             }
         } else if visible.isEmpty {
-            MorbNoMatches(query: query)
+            ContentUnavailableView.search(text: query)
         } else {
             table
                 .inspector(isPresented: $showsInspector) {
                     detailPane
                         .inspectorColumnWidth(
-                            min: Theme.inspectorMinWidth,
-                            ideal: Theme.inspectorWidth,
+                            min: 280,
+                            ideal: 340,
                             max: 460)
                 }
         }
@@ -211,45 +250,34 @@ struct BuildsRootView: View {
         Table(visible, selection: $selection, sortOrder: $sortOrder) {
             TableColumn("Description", sortUsing: BuildComparator(key: .description)) { record in
                 descriptionCell(record)
-                    .frame(height: Theme.rowStandard, alignment: .leading)
-                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             TableColumn("Status") { record in
                 statusCell(record)
-                    .frame(height: Theme.rowStandard, alignment: .leading)
-                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             .width(min: 78, ideal: 104, max: 132)
             TableColumn("Type", sortUsing: BuildComparator(key: .type)) { record in
                 Text(record.type)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                    .frame(height: Theme.rowStandard, alignment: .leading)
-                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             .width(min: 90, ideal: 120, max: 160)
             TableColumn("Size", sortUsing: BuildComparator(key: .size)) { record in
-                MorbNumber(Formatters.bytesString(record.size), tone: .primary, font: .callout)
-                    .frame(height: Theme.rowStandard, alignment: .trailing)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
+                Text(Formatters.bytesString(record.size))
+                    .monospacedDigit()
             }
             .width(min: 72, ideal: 88, max: 120)
             TableColumn("Last Used", sortUsing: BuildComparator(key: .lastUsed)) { record in
-                MorbNumber(
-                    record.lastUsedAt.map { Formatters.compactDuration(since: $0) } ?? "Never",
-                    font: .callout)
-                    .frame(height: Theme.rowStandard, alignment: .trailing)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
+                Text(record.lastUsedAt.map { Formatters.compactDuration(since: $0) } ?? "Never")
+                    .monospacedDigit()
                     .help(record.lastUsedAt.map(Formatters.absoluteDate) ?? "Never used")
             }
             .width(min: 72, ideal: 88, max: 120)
         }
-        .tableStyle(.inset)
-        .alternatingRowBackgrounds()
+        .tableStyle(.automatic)
         .contextMenu(forSelectionType: BuildCacheRecord.ID.self) { ids in
             if let id = ids.first, let record = records.first(where: { $0.id == id }) {
-                Button("Copy Description") { trackCCopy(record.description) }
-                Button("Copy Record ID") { trackCCopy(record.id) }
+                Button("Copy Description") { MorbPasteboard.copy(record.description) }
+                Button("Copy Record ID") { MorbPasteboard.copy(record.id) }
             }
         } primaryAction: { ids in
             if let id = ids.first { selection = id }
@@ -264,21 +292,10 @@ struct BuildsRootView: View {
     }
 
     private func statusCell(_ record: BuildCacheRecord) -> some View {
-        HStack(spacing: Theme.space2) {
-            MorbStatusDot(tone: record.inUse ? .running : .idle)
-            Text(record.inUse ? "In Use" : "Unused")
-                .font(.caption.weight(.medium))
-                .foregroundStyle(record.inUse
-                    ? AnyShapeStyle(Theme.statusRunning)
-                    : AnyShapeStyle(.secondary))
-            if record.shared {
-                Text("Shared")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-            }
-        }
-        .lineLimit(1)
-        .accessibilityElement(children: .combine)
+        Text(record.shared
+            ? (record.inUse ? "In Use · Shared" : "Unused · Shared")
+            : (record.inUse ? "In Use" : "Unused"))
+            .foregroundStyle(.secondary)
     }
 
     // MARK: Detail pane
@@ -294,13 +311,8 @@ struct BuildsRootView: View {
                             .textSelection(.enabled)
                             .lineLimit(3)
                     }
-                    LabeledContent("Status") {
-                        MorbStatusBadge(
-                            tone: record.inUse ? .running : .idle,
-                            title: record.inUse ? "In Use" : "Unused",
-                            detail: Formatters.bytesString(record.size),
-                            filled: false)
-                    }
+                    LabeledContent("Status", value: record.inUse ? "In Use" : "Unused")
+                    LabeledContent("Size", value: Formatters.bytesString(record.size))
                     LabeledContent("Type", value: record.type)
                     LabeledContent("Record ID") {
                         Text(record.id)
@@ -323,7 +335,7 @@ struct BuildsRootView: View {
                 }
                 Section("Actions") {
                     Button {
-                        trackCCopy(record.id)
+                        MorbPasteboard.copy(record.id)
                     } label: {
                         Label("Copy Record ID", systemImage: "doc.on.doc")
                     }
@@ -336,7 +348,6 @@ struct BuildsRootView: View {
                     }
                 }
             }
-            .formStyle(.grouped)
         } else {
             ContentUnavailableView(
                 "No Record Selected",
@@ -355,12 +366,7 @@ struct BuildsRootView: View {
     }
 
     private func copyBuildCommand() {
-        trackCCopy("docker build -t my-image .")
-        copiedBuildCommand = true
-        Task {
-            try? await Task.sleep(for: .seconds(1.4))
-            copiedBuildCommand = false
-        }
+        MorbPasteboard.copy("docker build -t my-image .")
     }
 
     private func selectFirstVisibleRecordIfNeeded() {
@@ -378,13 +384,12 @@ struct BuildsRootView: View {
         busy = true
         defer { busy = false }
         do {
-            let reclaimed = try await model.client.pruneBuildCache()
-            toast = reclaimed > 0
-                ? .success("Reclaimed \(Formatters.bytesString(reclaimed))", detail: "Unused cache removed")
-                : .info("Nothing to reclaim", detail: "Every record was still in use")
+            _ = try await model.client.pruneBuildCache()
             await model.refreshBuildCache()
         } catch {
-            toast = .failure("Prune failed", detail: trackCErrorText(error))
+            operationFailure = BuildOperationFailure(
+                title: "Couldn’t Remove Build Cache",
+                message: MorbErrorMessage.text(for: error))
         }
     }
 }

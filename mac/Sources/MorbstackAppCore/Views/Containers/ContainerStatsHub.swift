@@ -159,10 +159,9 @@ final class TrackBStatsHub {
 
     /// Installs a probe filled from a fixed series, opening no stream.
     ///
-    /// For SwiftUI previews and the offscreen screenshot harness: a sparkline is the one
-    /// control in the app that is meaningless without history, and history only exists
-    /// after sixty seconds of a live socket. Seeding is the only way to render a chart
-    /// that looks like the real thing.
+    /// Previews and deterministic fixture runs use this because a chart needs a history,
+    /// while live history only exists after a stats socket has streamed. Seeding makes
+    /// the chart's data and behavior inspectable without opening that stream.
     @discardableResult
     func seed(_ id: String, samples: [StatsSample]) -> TrackBStatsProbe {
         let probe = probes[id] ?? TrackBStatsProbe(containerID: id)

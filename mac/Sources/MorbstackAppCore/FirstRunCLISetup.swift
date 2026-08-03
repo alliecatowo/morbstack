@@ -146,7 +146,15 @@ struct FirstRunCLISetupSheet: View {
             .disabled(model.isInstalling)
         }
 
-        if model.plan != nil, model.result == nil, model.errorMessage == nil {
+        if model.errorMessage != nil || model.result?.contextError != nil {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Review Setup Again") {
+                    Task { await model.retry() }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(model.isInstalling)
+            }
+        } else if model.plan != nil, model.result == nil {
             ToolbarItem(placement: .confirmationAction) {
                 Button {
                     Task { await model.install() }
@@ -159,6 +167,8 @@ struct FirstRunCLISetupSheet: View {
                     }
                 }
                 .accessibilityLabel("Set Up Docker CLI")
+                .help("Apply the changes shown in this sheet")
+                .keyboardShortcut(.defaultAction)
                 .disabled(model.isInstalling)
             }
         }
@@ -173,7 +183,7 @@ struct FirstRunCLISetupSheet: View {
                 .fixedSize(horizontal: false, vertical: true)
             }
 
-            Section("Install") {
+            Section("Command-Line Tools") {
                 linkRow(plan.docker)
                 ForEach(plan.plugins, id: \.name) { item in
                     linkRow(item)
@@ -187,7 +197,7 @@ struct FirstRunCLISetupSheet: View {
 
             Section {
                 Label(
-                    "No VM starts, and no images, volumes, credentials, or named Docker contexts are changed.",
+                    "The changes above are limited to command-line links, shell configuration, and the morbstack Docker context. No VM starts, and no images, volumes, or credentials change.",
                     systemImage: "checkmark.shield"
                 )
                 .foregroundStyle(.secondary)
@@ -206,8 +216,6 @@ struct FirstRunCLISetupSheet: View {
                 )
             }
         }
-        .formStyle(.grouped)
-        .scrollContentBackground(.hidden)
         .disabled(model.isInstalling)
     }
 
@@ -226,11 +234,11 @@ struct FirstRunCLISetupSheet: View {
                     .textSelection(.enabled)
                     .multilineTextAlignment(.trailing)
                 if item.willReplace {
-                    Text("Replaces the existing file or link")
+                    Label("Replaces the existing file or link", systemImage: "exclamationmark.triangle")
                         .font(.caption)
                         .foregroundStyle(.orange)
                 } else if item.alreadyCorrect {
-                    Text("Already linked")
+                    Label("Already linked", systemImage: "checkmark")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -248,52 +256,47 @@ struct FirstRunCLISetupSheet: View {
     }
 
     private func completionView(_ result: MorbCliInstallation.InstallResult) -> some View {
-        ContentUnavailableView {
-            Label(
-                result.contextError == nil ? "Docker CLI Is Ready" : "Docker CLI Installed",
-                systemImage: "checkmark.circle"
-            )
-        } description: {
-            Text(result.completionDescription)
-        } actions: {
-            VStack(spacing: 12) {
+        Form {
+            Section {
+                Label(
+                    result.contextError == nil ? "Docker CLI Is Ready" : "Docker CLI Installed",
+                    systemImage: "checkmark.circle"
+                )
+                Text(result.completionDescription)
+                    .fixedSize(horizontal: false, vertical: true)
+
                 if let contextError = result.contextError {
                     Label(contextError, systemImage: "exclamationmark.triangle")
                         .font(.callout)
                         .foregroundStyle(.orange)
-                        .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
                     Text("The CLI links were installed. Fix the Docker configuration issue, then try setup again.")
-                        .font(.caption)
                         .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                    Button("Try Again") {
-                        Task { await model.retry() }
-                    }
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                Button("Done") { isPresented = false }
-                    .buttonStyle(.borderedProminent)
+            } header: {
+                Text("Setup Complete")
+            }
+            Section("Next Step") {
+                Text("Open a new Terminal session to use the updated command-line tools.")
             }
         }
-        .padding()
     }
 
     private func failureView(_ message: String) -> some View {
-        ContentUnavailableView {
-            Label("Could Not Set Up Docker CLI", systemImage: "exclamationmark.triangle")
-        } description: {
-            Text(message)
-                .textSelection(.enabled)
-        } actions: {
-            VStack(spacing: 12) {
-                Button("Try Again") {
-                    Task { await model.retry() }
-                }
-                .buttonStyle(.borderedProminent)
-                Button("Not Now") { isPresented = false }
+        Form {
+            Section {
+                Label("Could Not Set Up Docker CLI", systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.orange)
+                Text(message)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            } header: {
+                Text("Setup Needs Attention")
+            } footer: {
+                Text("Review the current setup before applying it again.")
             }
         }
-        .padding()
     }
 }
 
@@ -304,9 +307,9 @@ private extension MorbCliInstallation.PathRegistration {
     var firstRunDescription: String {
         switch self {
         case .alreadyReachable:
-            return "Morbstack’s bin directory is already on PATH; no shell file changes."
+            return "Morbstack’s command-line tools are already on PATH. No shell profile changes."
         case .preservesExistingDocker(let existing):
-            return "Leaves the existing docker client first: \(existing)"
+            return "Leaves \(existing) ahead of Morbstack on PATH."
         case .addToProfile(let profile):
             return "Adds one reversible Morbstack PATH block to \(profile)."
         case .profileAlreadyManaged(let profile):
@@ -326,7 +329,7 @@ private extension MorbCliInstallation.ContextRegistration {
     var firstRunDescription: String {
         switch self {
         case .willCreateAndUse:
-            return "Registers morbstack and uses it only because Docker is on its ordinary default context."
+            return "Creates the morbstack context and makes it current because Docker uses its default context."
         case .willCreateWithoutChangingCurrent(let current):
             return "Registers morbstack and leaves the named context \(current) current."
         case .alreadyCurrent:
@@ -334,7 +337,7 @@ private extension MorbCliInstallation.ContextRegistration {
         case .alreadyRegisteredWithoutChangingCurrent(let current):
             return "Morbstack is registered; the named context \(current) stays current."
         case .staleWillReplaceAndUse:
-            return "Repairs Morbstack’s stale context and uses it only because Docker is on its ordinary default context."
+            return "Repairs the stale morbstack context and makes it current because Docker uses its default context."
         case .staleWillReplaceWithoutChangingCurrent(let current):
             return "Repairs Morbstack’s stale context and leaves the named context \(current) current."
         }

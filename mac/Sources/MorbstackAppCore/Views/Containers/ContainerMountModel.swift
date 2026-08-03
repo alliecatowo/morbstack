@@ -81,16 +81,6 @@ enum TrackBMountKind: String, CaseIterable, Sendable, Hashable {
         }
     }
 
-    /// The badge tint. Only `bind` is tinted: it is the kind whose contents come from
-    /// outside the VM, and the one whose row may carry a warning. Colouring all three
-    /// would make the table a fruit salad and cost the distinction its meaning.
-    var tone: TrackCTone {
-        switch self {
-        case .bind: return .accent
-        default: return .neutral
-        }
-    }
-
     /// Whether ``TrackBMountDisplay/source`` names a directory on the user's Mac.
     var sourceIsHostPath: Bool { self == .bind }
 

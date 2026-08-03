@@ -1,4 +1,12 @@
-# CRITIQUE — what is actually wrong with the app
+# CRITIQUE — archived pre-migration evidence
+
+> **Historical record — not a current visual specification.** These findings were made
+> against synthetic inner-content renders at base commit `a0602c5`, before the native
+> macOS migration. They remain useful evidence of the failure modes to avoid, but their
+> screenshot measurements and proposed remedies cannot approve the current app. Use the
+> [native macOS playbook](NATIVE-MACOS-PLAYBOOK.md),
+> [HIG coverage audit](HIG-COVERAGE-AUDIT.md), and a real-window Computer Use review
+> instead.
 
 Written against `dist/shots/*@2x.png` at base commit `a0602c5`. Every claim below is
 something you can point at in a render. Nothing here is a matter of taste dressed up as

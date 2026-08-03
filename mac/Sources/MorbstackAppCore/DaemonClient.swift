@@ -24,9 +24,8 @@ import MorbstackKit
 /// Not `@MainActor`: every call blocks on socket I/O and is hopped onto a background
 /// queue. The class holds two paths and nothing mutable, which is what makes concurrent
 /// calls from the model safe.
-/// Non-`final` for the same reason as ``DockerClient``: the screenshot harness renders
-/// the real views in a real window, so `.task { await model.bootstrap() }` actually runs
-/// and something has to answer it. See `Shots/ShotClients.swift`.
+/// Non-`final` so deterministic fixture clients can support developer route probes
+/// without a running daemon. See `Shots/ShotClients.swift`.
 class DaemonClient: @unchecked Sendable {
 
     /// How long to wait for a reply to a cheap, non-mutating command.
@@ -37,6 +36,10 @@ class DaemonClient: @unchecked Sendable {
     /// inside this, and the nesting is load-bearing: an outer layer that gives up first
     /// leaves the guest's dirty pages outstanding.
     private static let lifecycleTimeout: TimeInterval = 120
+    /// Kubernetes enablement can include a one-time payload transfer; status and
+    /// kubeconfig commands use the same daemon-side budget so the UI does not give up
+    /// while the daemon is still honestly working.
+    private static let kubernetesTimeout: TimeInterval = 120
 
     let socketPath: String
 
@@ -131,6 +134,62 @@ class DaemonClient: @unchecked Sendable {
               response.ok, case .string(let value)? = response.data?["version"]
         else { return nil }
         return value
+    }
+
+    // MARK: - Kubernetes
+
+    /// Reads the daemon's real `k8s-status` reply. Like `status()`, this never starts
+    /// the engine: describing a cluster must not create one.
+    func kubernetesStatus() async throws -> K8s.Status {
+        try await decodeKubernetesStatus(command: "k8s-status")
+    }
+
+    /// Explicitly enables the local cluster. The app only exposes this after the
+    /// engine is running, so unlike the CLI it does not need to spawn a daemon here.
+    func enableKubernetes() async throws -> K8s.Status {
+        try await decodeKubernetesStatus(command: "k8s-enable")
+    }
+
+    /// Explicitly disables the local cluster.
+    func disableKubernetes() async throws -> K8s.Status {
+        try await decodeKubernetesStatus(command: "k8s-disable")
+    }
+
+    /// Asks the daemon to write Morbstack's own 0600 kubeconfig and returns only the
+    /// expected app-owned path. This command deliberately has no merge argument: the
+    /// UI must never edit a person's `~/.kube/config` as a side effect of browsing a
+    /// local cluster.
+    func writeKubernetesKubeconfig() async throws -> URL {
+        let fields = try await kubernetesCommand("k8s-kubeconfig")
+        guard case .string(let path)? = fields["path"], !path.isEmpty else {
+            throw MorbError.protocolViolation("morbstackd returned no kubeconfig path")
+        }
+        let received = URL(fileURLWithPath: path).standardizedFileURL
+        let expected = MorbPaths.kubeconfig.standardizedFileURL
+        guard received == expected else {
+            throw MorbError.protocolViolation(
+                "morbstackd returned an unexpected kubeconfig path `\(path)`")
+        }
+        return received
+    }
+
+    private func decodeKubernetesStatus(command: String) async throws -> K8s.Status {
+        let fields = try await kubernetesCommand(command)
+        do {
+            return try JSONDecoder().decode(K8s.Status.self, from: JSONEncoder().encode(fields))
+        } catch {
+            throw MorbError.protocolViolation(
+                "morbstackd returned an invalid Kubernetes status: \(error.localizedDescription)")
+        }
+    }
+
+    private func kubernetesCommand(_ command: String) async throws -> [String: AnyCodableValue] {
+        let response = try await roundTrip(
+            DaemonRequest(cmd: command), timeout: Self.kubernetesTimeout)
+        guard response.ok else {
+            throw MorbError.vm(response.error ?? "morbstackd rejected \(command)")
+        }
+        return response.data ?? [:]
     }
 
     // MARK: - Lifecycle

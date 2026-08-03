@@ -1,4 +1,14 @@
-# SDK-LIQUID-GLASS — the sanctioned surface, verified
+# SDK-LIQUID-GLASS — API field notes (nonbinding implementation reference)
+
+> **Read the current implementation policy first.** This file records SDK declarations
+> observed during the earlier migration; APIs and availability must be rechecked against
+> the installed SDK and current Apple documentation before use. Its older `Theme`/
+> `MorbGlass` examples are historical and must not be copied: the custom visual module
+> and availability-wrapper design have been retired. The system's standard window,
+> toolbar, sidebar, inspector, table, form, search, menu, selection, and material
+> treatment comes first. Add custom Liquid Glass only after the exception process in
+> [NATIVE-MACOS-PLAYBOOK.md](NATIVE-MACOS-PLAYBOOK.md), never in content behind dense
+> data.
 
 Every signature below was read out of the shipping `.swiftinterface` in this machine's
 SDK. Nothing is from memory, a blog post, or a WWDC transcript.
@@ -775,15 +785,18 @@ before using it.
 
 ---
 
-## 4. The five-line summary for implementers
+## 4. Current five-line implementation reminder
 
-1. Deployment target is macOS 15 → **every glass call goes through `Design/MorbGlass.swift`**,
-   never inline.
-2. Glass has exactly three variants and two decorators: `.regular` / `.clear` / `.identity`,
-   `.tint(_:)`, `.interactive(_:)`.
-3. Group glass with `GlassEffectContainer(spacing:)` + `glassEffectUnion(id:namespace:)`;
-   separate toolbar capsules with `ToolbarSpacer(_:placement:)`.
-4. Most of the "native Mac" win is **not** glass — it is `.toolbar`, `.inspector`,
-   `.searchable`, `Table`, `Form(.grouped)` and `ContentUnavailableView`, all of which are
-   available at our current deployment target with no gate at all.
-5. When in doubt, `grep` the interface. An invented API is worse than a missing one.
+1. Check `mac/Package.swift`, the installed SDK, and current Apple documentation before
+   adding an availability-limited API. Do not create a visual wrapper just to hide a gate.
+2. Most native macOS work uses no custom glass: choose `.toolbar`, `.inspector`,
+   `.searchable`, `Table`, `Form`, `LabeledContent`, `Menu`, `ContentUnavailableView`, and
+   system window surfaces first.
+3. A custom glass effect is an exception for a missing system control behavior, not a
+   way to decorate content. It belongs in the navigation/control layer and is never a
+   table, form, log, chart, or dashboard background.
+4. Use `ToolbarSpacer` or other documented toolbar structure only to express a real
+   command grouping; do not draw or manage toolbar pills/overflow yourself.
+5. Record the HIG/API source and real-window accessibility/appearance evidence in the
+   [HIG coverage audit](HIG-COVERAGE-AUDIT.md). An invented API or custom look is worse
+   than a missing effect.

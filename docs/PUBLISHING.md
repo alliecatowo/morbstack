@@ -233,11 +233,10 @@ checklist to execute, not just to read.
 
   This does find hits — all of them are fake, fixture data in
   `mac/Sources/MorbstackAppCore/Shots/ShotFixtures.swift` and
-  `ShotLogs.swift` (the offscreen screenshot/demo harness's canned
+  `ShotLogs.swift` (the deterministic fixture-data harness's canned
   Docker world — `STRIPE_API_KEY=sk_live_51Nq8fLK2mQpZ3xVb7YdT`,
-  `POSTGRES_PASSWORD=hunter2`, and similar), used to make demo
-  screenshots of a container's environment-variables panel look like a
-  real one. None of them are live credentials; `hunter2` in particular is
+  `POSTGRES_PASSWORD=hunter2`, and similar), used to exercise realistic
+  container-environment and redaction behavior. None of them are live credentials; `hunter2` in particular is
   the standard joke placeholder. Worth a second human look before
   publishing regardless, precisely because "the automated check flagged
   it and a human decided it was fine" is a better record to have than no

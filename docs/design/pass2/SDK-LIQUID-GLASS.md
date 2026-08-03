@@ -1,4 +1,11 @@
-# SDK-LIQUID-GLASS.md — what macOS 26.4 actually sanctions
+# SDK-LIQUID-GLASS — archived second-pass SDK notes
+
+> **Historical API notes — nonbinding implementation guidance.** Validate any API against
+> the installed SDK and current Apple documentation. In particular, the older examples
+> that use `Theme`, `MorbGlass`, hand-made pills, or custom visual wrappers are not
+> permitted in the system-native implementation. The binding policy is in the
+> [native macOS playbook](../NATIVE-MACOS-PLAYBOOK.md) and
+> [HIG coverage audit](../HIG-COVERAGE-AUDIT.md).
 
 Every signature below was read out of the shipping `.swiftinterface` / header on this machine.
 Nothing here is recalled from memory. Anything I could not find is in

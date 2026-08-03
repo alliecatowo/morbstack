@@ -1,19 +1,16 @@
 // Copyright 2026 The Morbstack Authors.
 // Licensed under the Apache License, Version 2.0 (the "License").
 //
-// A plausible Docker world, in code.
+// A deterministic Docker world for fixture-backed app runs and data diagnostics.
 //
-// The screenshot harness renders the real production views, so the only thing left to
-// invent is what those views are looking at. Everything here is built to the shape the
-// engine actually returns — 64-hex container ids, `sha256:`-prefixed image ids, compose
-// labels spelled `com.docker.compose.project`, inspect documents that go through the
-// same `TrackBInspectDetails(json:)` parser the app uses at runtime. Nothing takes a
-// shortcut around the view models, because a shortcut is exactly the kind of thing that
-// makes a screenshot show a layout that cannot occur.
+// Everything here is built to the shape the engine actually returns — 64-hex container
+// ids, `sha256:`-prefixed image ids, Compose labels, and inspect documents that take the
+// same Docker-client path as a live run.  The fixtures are intentionally presentation
+// independent: they support live-window review and future UI tests, but never emulate a
+// view hierarchy or macOS chrome.
 //
-// Ages are relative to "now" so the relative-date formatting in the shots reads
-// naturally whenever they are regenerated; the ids and the numbers are fixed, so two
-// runs a minute apart produce the same pictures.
+// Ages are relative to "now" so date formatting remains natural in an interactive
+// fixture window; identities and quantities stay stable enough for invariant checks.
 
 import Foundation
 
@@ -69,10 +66,9 @@ enum ShotFixtures {
 
     // MARK: - Containers
 
-    /// Eleven containers: nine across two compose projects, one standalone container in
-    /// a crash loop, and one paused. Between them they exercise every state the list can
-    /// draw — running, running-but-unhealthy, exited, restarting and paused — which is
-    /// the point of the set.
+    /// Eleven containers: nine across two Compose projects, one standalone container in
+    /// a crash loop, and one paused.  Together they cover the operational states a
+    /// caller needs to exercise: running, unhealthy, exited, restarting, and paused.
     static let containers: [ContainerSummary] = [
         make(
             name: "shopfront-web-1",
@@ -217,8 +213,8 @@ enum ShotFixtures {
     }
 
     /// Looks a container up by name. Traps rather than returning `nil`: every call site
-    /// is a literal in this file, so a miss is a typo, and a typo should stop the run
-    /// rather than quietly render the wrong screen.
+    /// is a literal in this file, so a miss is a typo and should stop fixture use
+    /// immediately rather than silently hiding inconsistent data.
     static func container(_ name: String) -> ContainerSummary {
         guard let found = containers.first(where: { $0.displayName == name }) else {
             fatalError("no fixture container named \(name)")
@@ -230,9 +226,9 @@ enum ShotFixtures {
 
     /// Every image a machine running the fixture containers would actually have.
     ///
-    /// Including the ones the containers are built from — an images list that did not
-    /// contain `shopfront/api:2.11.4` while two containers claimed to be running it would
-    /// be a screenshot of a state the engine cannot be in.
+    /// In particular, an image referenced by a container must also be present here. The
+    /// fixture diagnostics assert that relationship rather than relying on a rendered
+    /// surface to expose an inconsistent data set.
     static let images: [ImageSummary] = [
         image("postgres:16.4-alpine", size: 274_853_888, created: ago(days: 21), using: 1),
         image("clickhouse/clickhouse-server:24.8", size: 1_143_996_416, created: ago(days: 9), using: 1),
@@ -319,16 +315,12 @@ enum ShotFixtures {
 
     /// Derived from the lists above rather than typed out beside them.
     ///
-    /// Every one of these numbers is also on screen somewhere else — the Images header
-    /// says "4.2 GB", the Volumes header says "12.9 GB" — and a hand-written aggregate
-    /// that disagreed with the sum of the list under it is the single most noticeable
-    /// mistake a fixture can make, because a reader checks exactly that.
+    /// The totals derive from the individual records. A hand-written aggregate that
+    /// disagrees with its source collection is a bad fixture regardless of the consumer,
+    /// so `FixtureDiagnostics` verifies those relationships directly.
     ///
     /// The two figures that *are* invented are the ones the engine reports and no list
-    /// can reproduce: the build cache, and the share of the reclaimable total that
-    /// belongs to it. `TrackCDiskMath` derives images, volumes and containers from the
-    /// lists and gives the build cache whatever is left over, so the residual below is
-    /// what the Disk screen will show against "Build cache".
+    /// can reproduce: build-cache bytes and the cache share of reclaimable storage.
     static let disk: DiskUsage = {
         let imagesTotal = images.reduce(Int64(0)) { $0 + $1.size }
         let volumesTotal = volumes.reduce(Int64(0)) { $0 + ($1.size ?? 0) }
@@ -341,7 +333,7 @@ enum ShotFixtures {
         let unusedVolumeBytes = volumes
             .filter(\.isUnused)
             .reduce(Int64(0)) { $0 + ($1.size ?? 0) }
-        // The same count-weighted estimate `TrackCDiskMath.containerReclaimable` makes.
+        // A conservative count-weighted estimate for stopped containers.
         let stoppedShare = Double(containers.filter { !$0.isRunning }.count)
             / Double(max(1, containers.count))
         let containerBytes = Int64(Double(containersTotal) * stoppedShare)
@@ -357,16 +349,6 @@ enum ShotFixtures {
             containersTotal: containersTotal,
             reclaimable: danglingBytes + unusedVolumeBytes + containerBytes + cacheReclaimable)
     }()
-
-    /// A 64 GiB sparse image with about 18 GiB actually allocated — the shape a real
-    /// Morbstack install has, and the whole reason the footprint card exists.
-    /// The path is the fixture world's, not this machine's: everything else in these
-    /// screenshots lives under `/Users/ada`, and a screenshot that leaks whoever ran the
-    /// harness into one dim line of a footnote is a screenshot that has to be retaken.
-    static let diskFootprint = TrackCDiskMath.footprint(
-        path: "/Users/ada/.morbstack/data/disk.img",
-        apparentBytes: 68_719_476_736,
-        blocks512: 37_849_088)
 
     // MARK: - Build cache
 
@@ -426,7 +408,7 @@ enum ShotFixtures {
         memBase: Int64,
         memSwing: Int64,
         memLimit: Int64,
-        count: Int = TrackBStatsProbe.historyLimit
+        count: Int = 60
     ) -> [StatsSample] {
         var state = UInt64(truncatingIfNeeded: name.utf8.reduce(7) { $0 &* 31 &+ Int($1) })
         func next() -> Double {
@@ -457,8 +439,8 @@ enum ShotFixtures {
         return samples
     }
 
-    /// The per-container series the harness seeds the hub with, so the containers list
-    /// shows live-looking CPU and memory microtext on every running row.
+    /// The per-container time series available to fixture-backed runs.  The data is
+    /// useful to chart/accessibility tests but is not rendered by this module.
     static let statsByContainer: [(name: String, samples: [StatsSample])] = [
         ("shopfront-web-1", stats(for: "web", cpuBase: 1.2, cpuSwing: 6, memBase: 24_117_248, memSwing: 8_388_608, memLimit: 2_147_483_648)),
         ("shopfront-api-1", stats(for: "api", cpuBase: 8, cpuSwing: 34, memBase: 268_435_456, memSwing: 96_468_992, memLimit: 1_073_741_824)),
@@ -642,9 +624,8 @@ enum ShotFixtures {
         }
     }
 
-    /// Environment blocks with the mix a real container has: a couple of boring PATH
-    /// entries, some service configuration, and two or three credentials — which is what
-    /// makes the Overview tab's default redaction worth looking at in a screenshot.
+    /// Environment blocks with the mix a real container has: baseline PATH entries,
+    /// service configuration, and deliberately fake credentials for redaction behavior.
     private static func environment(for container: ContainerSummary) -> [String] {
         let base = ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"]
         switch container.composeService ?? container.displayName {
@@ -756,38 +737,11 @@ enum ShotFixtures {
         }
     }
 
-    // MARK: - Model
-
-    /// An `AppModel` populated as if a refresh had just landed against a live engine.
-    ///
-    /// The client points at a socket path that does not exist. Nothing dials it: the
-    /// harness renders synchronously, so no `.task` or `onAppear` ever runs and no view
-    /// gets the chance to open a connection. Pointing it somewhere harmless rather than
-    /// at the user's real `docker.sock` makes that guarantee belt-and-braces.
-    @MainActor
-    static func model(engine: EngineStatus = engineRunning, selection: Nav = .containers) -> AppModel {
-        let model = AppModel(
-            client: DockerClient(socketPath: "/dev/null/morbshots-no-engine.sock"),
-            daemon: DaemonClient(socketPath: "/dev/null/morbshots-no-daemon.sock"))
-        model.engine = engine
-        model.hasLoaded = true
-        model.selection = selection
-        guard engine.isRunning else { return model }
-        model.containers = displayOrdered(containers)
-        model.images = images
-        model.volumes = volumes
-        model.networks = networks
-        model.disk = disk
-        return model
-    }
-
     /// `containers`, in the order the app itself would show them after a refresh.
     static let displayOrderedContainers: [ContainerSummary] = displayOrdered(containers)
 
-    /// The same ordering `AppModel.sortForDisplay` applies after a refresh: running
-    /// first, then everything else, each alphabetically. Reproduced rather than called
-    /// because the model's copy is private, and a screenshot that showed a different
-    /// order from the app would be a lie about the app.
+    /// A predictable grouping useful to callers that need a stable fixture order:
+    /// running first, then everything else, each alphabetically.
     private static func displayOrdered(_ list: [ContainerSummary]) -> [ContainerSummary] {
         list.sorted { lhs, rhs in
             if lhs.isRunning != rhs.isRunning { return lhs.isRunning }
@@ -795,13 +749,4 @@ enum ShotFixtures {
         }
     }
 
-    /// A stats hub pre-filled for every running container.
-    @MainActor
-    static func statsHub() -> TrackBStatsHub {
-        let hub = TrackBStatsHub()
-        for entry in statsByContainer {
-            hub.seed(container(entry.name).id, samples: entry.samples)
-        }
-        return hub
-    }
 }

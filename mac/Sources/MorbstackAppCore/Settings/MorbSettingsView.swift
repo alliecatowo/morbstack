@@ -1,13 +1,10 @@
 // Copyright 2026 The Morbstack Authors.
 // Licensed under the Apache License, Version 2.0 (the "License").
 //
-// Settings.
-//
-// Three tabs, and a rule: this window edits `~/.morbstack/config.toml` and nothing
-// else. The file is the source of truth for `morb`, for `morbstackd` and for anyone who
-// prefers a text editor, so Settings is a view onto it rather than a parallel store —
-// which is why there is a Save button instead of live-applying writes, and why the
-// Advanced tab shows the path.
+// Settings is a native macOS preferences window over `~/.morbstack/config.toml`.
+// The file remains the source of truth for `morb`, `morbstackd`, and people who edit
+// it directly. This view only chooses appropriate system controls and commits the
+// existing store's safe, preserving writes.
 
 import AppKit
 import MorbstackKit
@@ -15,15 +12,9 @@ import SwiftUI
 
 // MARK: - Preferences
 
-/// `UserDefaults` keys shared with the rest of the app.
-///
-/// Track A reads ``showMenuBarIcon`` to decide whether to insert the `MenuBarExtra`:
-///
-///     @AppStorage(TrackDPreferences.showMenuBarIcon) private var showMenuBarIcon = true
-///     MenuBarExtra(isInserted: $showMenuBarIcon) { … }
 enum TrackDPreferences {
     static let showMenuBarIcon = "morb.showMenuBarIcon"
-    static let launchAtLogin = "morb.launchAtLogin"
+    static let selectedSettingsPane = "morb.selectedSettingsPane"
 }
 
 // MARK: - Root
@@ -56,47 +47,45 @@ struct MorbSettingsView: View {
 
     let model: AppModel
 
-    /// Which pane opens first. The app always opens on General; the screenshot harness
-    /// names one so it can photograph the others.
+    /// A caller can name a pane for an intentional deep link or fixture. Ordinary
+    /// Settings opens restore the last pane, as macOS users expect.
     var initialTab: Tab = .general
 
-    /// Draw the tab strip in SwiftUI instead of letting `TabView` draw it.
-    ///
-    /// `TabView`'s macOS tab strip is an AppKit control on a vibrant backing, and a
-    /// vibrant control rasterised into an offscreen bitmap comes out as a blank white
-    /// slab — no icons, no labels, glaringly wrong in dark mode. This substitutes the
-    /// equivalent segmented control, which is plain SwiftUI and draws correctly.
-    /// Only the screenshot harness sets it.
-    var drawsOwnTabStrip: Bool = false
-
+    @AppStorage(TrackDPreferences.selectedSettingsPane) private var storedTabRawValue = Tab.general.rawValue
     @State private var store = TrackDSettingsStore()
     @State private var tab: Tab
 
     init(
         model: AppModel,
         initialTab: Tab = .general,
-        drawsOwnTabStrip: Bool = false
+        // Kept as a source-compatible fixture argument. Native Settings must use the
+        // system tab toolbar, so the old hand-drawn segmented strip is intentionally
+        // ignored.
+        drawsOwnTabStrip _: Bool = false
     ) {
         self.model = model
         self.initialTab = initialTab
-        self.drawsOwnTabStrip = drawsOwnTabStrip
         _tab = State(initialValue: initialTab)
     }
 
     var body: some View {
-        Group {
-            if drawsOwnTabStrip {
-                substitutedChrome
-            } else {
-                TabView(selection: $tab) {
-                    pane(.general).tabItem { label(.general) }.tag(Tab.general)
-                    pane(.resources).tabItem { label(.resources) }.tag(Tab.resources)
-                    pane(.sharing).tabItem { label(.sharing) }.tag(Tab.sharing)
-                    pane(.advanced).tabItem { label(.advanced) }.tag(Tab.advanced)
-                }
-            }
+        TabView(selection: $tab) {
+            pane(.general).tabItem { label(.general) }.tag(Tab.general)
+            pane(.resources).tabItem { label(.resources) }.tag(Tab.resources)
+            pane(.sharing).tabItem { label(.sharing) }.tag(Tab.sharing)
+            pane(.advanced).tabItem { label(.advanced) }.tag(Tab.advanced)
         }
-        .frame(width: 560, height: 440)
+        .frame(minWidth: 560, idealWidth: 640, minHeight: 440, idealHeight: 540)
+        .navigationTitle(tab.title)
+        .onAppear {
+            guard initialTab == .general, let restoredTab = Tab(rawValue: storedTabRawValue) else {
+                return
+            }
+            tab = restoredTab
+        }
+        .onChange(of: tab) { _, selectedTab in
+            storedTabRawValue = selectedTab.rawValue
+        }
         .onChange(of: model.engine.isRunning) { _, running in
             store.engineStateChanged(running: running)
         }
@@ -118,28 +107,6 @@ struct MorbSettingsView: View {
         case .advanced: TrackDAdvancedSettings(store: store)
         }
     }
-
-    private var substitutedChrome: some View {
-        VStack(spacing: 0) {
-            Picker("", selection: $tab) {
-                ForEach(Tab.allCases) { item in
-                    Label(item.title, systemImage: item.symbol).tag(item)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .fixedSize()
-            .padding(.top, Theme.space4)
-            .padding(.bottom, Theme.space3)
-            .frame(maxWidth: .infinity)
-            .background(Color(nsColor: .windowBackgroundColor))
-
-            Divider()
-
-            pane(tab)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-    }
 }
 
 // MARK: - General
@@ -147,50 +114,21 @@ struct MorbSettingsView: View {
 private struct TrackDGeneralSettings: View {
 
     @AppStorage(TrackDPreferences.showMenuBarIcon) private var showMenuBarIcon = true
-    @AppStorage(TrackDPreferences.launchAtLogin) private var launchAtLogin = false
 
     var body: some View {
         Form {
-            Section {
-                Toggle("Launch Morbstack at login", isOn: $launchAtLogin)
-                Text(
-                    "Not active yet. The login item is registered with SMAppService.mainApp "
-                        + "once Morbstack ships as a signed bundle; this switch records the "
-                        + "preference so it takes effect the moment it does."
-                )
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            } header: {
-                Text("Startup")
-            }
-
-            Section {
+            Section("Menu Bar") {
                 Toggle("Show Morbstack in the menu bar", isOn: $showMenuBarIcon)
+                    .toggleStyle(.checkbox)
                 Text(
-                    "The menu bar item shows engine state, the containers that are running "
-                        + "and their published ports. Turning it off does not stop the engine."
+                    "Shows engine status, running containers, and published ports. Turning it off doesn’t stop the engine."
                 )
-                .font(.caption)
+                .font(.footnote)
                 .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            } header: {
-                Text("Menu bar")
             }
         }
         .formStyle(.grouped)
-        .scrollContentBackground(.hidden)
     }
-
-    // TODO(SMAppService): once the app is packaged and signed, wire the toggle to
-    //
-    //     import ServiceManagement
-    //     let service = SMAppService.mainApp
-    //     launchAtLogin ? try service.register() : try service.unregister()
-    //
-    // reading `service.status` on appear so the switch reflects reality rather than the
-    // last thing this app believed. Registering an unsigned development build throws
-    // `kSMErrorInvalidSignature`, which is why this is not live today.
 }
 
 // MARK: - Resources
@@ -203,95 +141,69 @@ private struct TrackDResourceSettings: View {
     var body: some View {
         Form {
             if let error = store.loadError {
-                Section {
-                    TrackDInlineNotice(
-                        symbol: "exclamationmark.triangle.fill",
-                        tone: .warn,
-                        title: "config.toml could not be read",
-                        message: error)
-                }
+                configurationMessage(
+                    title: "Couldn’t read config.toml",
+                    message: error,
+                    symbol: "exclamationmark.triangle"
+                )
             }
 
             if let error = store.saveError {
-                Section {
-                    TrackDInlineNotice(
-                        symbol: "exclamationmark.triangle.fill",
-                        tone: .bad,
-                        title: "Could not save",
-                        message: error)
-                }
+                configurationMessage(
+                    title: "Couldn’t save config.toml",
+                    message: error,
+                    symbol: "exclamationmark.triangle"
+                )
             }
 
             if store.needsEngineRestart && model.engine.isRunning {
-                Section {
-                    TrackDInlineNotice(
-                        symbol: "arrow.clockwise.circle.fill",
-                        tone: .accent,
-                        title: "Restart the engine to apply",
-                        message: store.restartSummary
-                    ) {
-                        Button("Restart engine") { restartEngine() }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.small)
-                            .tint(Theme.accent)
-                    }
+                Section("Apply Changes") {
+                    Label("Restart Morbstack to apply resource changes", systemImage: "arrow.clockwise")
+                    Text(store.restartSummary)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    Button("Restart Engine", systemImage: "arrow.clockwise") { restartEngine() }
                 }
             }
 
-            Section {
-                cpuRow
-            } header: {
-                Text("Processors")
+            Section("Virtual Machine") {
+                cpuSetting
+                memorySetting
+                suspendSetting
             }
 
-            Section {
-                memoryRow
-            } header: {
-                Text("Memory")
-            }
-
-            Section {
-                suspendRow
-            } header: {
-                Text("Idle behaviour")
-            }
-
-            Section {
+            Section("Storage") {
                 LabeledContent("Root disk") {
                     Text("\(store.draft.diskSizeGiB) GiB")
                         .monospacedDigit()
-                        .foregroundStyle(.secondary)
                 }
                 Text(
-                    "Applied when the sparse disk image is first created. Changing it later "
-                        + "has no effect on an existing image, so it is not editable here."
+                    "This value is used only when the sparse disk image is created. Changing it doesn’t affect an existing image."
                 )
-                .font(.caption)
+                .font(.footnote)
                 .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            } header: {
-                Text("Storage")
             }
         }
         .formStyle(.grouped)
-        .scrollContentBackground(.hidden)
     }
 
-    // MARK: Rows
+    @ViewBuilder
+    private func configurationMessage(title: String, message: String, symbol: String) -> some View {
+        Section("Configuration") {
+            Label(title, systemImage: symbol)
+            Text(message)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+        }
+    }
 
-    private var cpuRow: some View {
-        VStack(alignment: .leading, spacing: Theme.space2) {
-            HStack {
-                Text("Virtual CPUs")
-                Spacer()
+    private var cpuSetting: some View {
+        VStack(alignment: .leading) {
+            LabeledContent("Virtual CPUs") {
                 Text(cpuValueText)
                     .monospacedDigit()
-                    .foregroundStyle(.secondary)
-                    .contentTransition(.numericText())
             }
-            // macOS settings apply on change — no Save button, so the write happens
-            // when the drag ends (`onEditingChanged`) rather than on every tick, which
-            // would otherwise spam the config file dozens of times per drag.
             Slider(
                 value: Binding(
                     get: { TrackDConfigEditor.cpuSliderValue(store.draft, limits: store.limits) },
@@ -300,31 +212,30 @@ private struct TrackDResourceSettings: View {
                 in: 1...Double(max(1, store.limits.hostCores)),
                 step: 1
             ) {
-                EmptyView()
+                Text("Virtual CPUs")
             } minimumValueLabel: {
-                Text("1").font(.caption2).foregroundStyle(.tertiary)
+                Text("1")
             } maximumValueLabel: {
-                Text("\(store.limits.hostCores)").font(.caption2).foregroundStyle(.tertiary)
+                Text("\(store.limits.hostCores)")
             } onEditingChanged: { editing in
                 if !editing { store.save() }
             }
+            .labelsHidden()
+            .accessibilityLabel("Virtual CPUs")
+            .accessibilityValue(cpuValueText)
 
-            HStack(spacing: Theme.space2) {
-                Text("This Mac has \(store.limits.hostCores) cores.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                if !TrackDConfigEditor.isTrackingHostCores(store.draft) {
-                    Button("Match host") {
-                        TrackDConfigEditor.matchHostCores(&store.draft)
-                        store.save()
-                    }
-                    .buttonStyle(.link)
-                    .font(.caption)
-                    .help("Write cpus = 0, which means “every core, whatever this Mac has”")
+            Text("This Mac has \(store.limits.hostCores) cores.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+
+            if !TrackDConfigEditor.isTrackingHostCores(store.draft) {
+                Button("Use All Cores") {
+                    TrackDConfigEditor.matchHostCores(&store.draft)
+                    store.save()
                 }
+                .help("Writes cpus = 0 so the VM tracks this Mac’s available cores")
             }
         }
-        .padding(.vertical, Theme.space1)
     }
 
     private var cpuValueText: String {
@@ -334,15 +245,11 @@ private struct TrackDResourceSettings: View {
         return "\(store.draft.cpus)"
     }
 
-    private var memoryRow: some View {
-        VStack(alignment: .leading, spacing: Theme.space2) {
-            HStack {
-                Text("Memory")
-                Spacer()
+    private var memorySetting: some View {
+        VStack(alignment: .leading) {
+            LabeledContent("Memory") {
                 Text("\(store.draft.memoryMiB / 1024) GiB")
                     .monospacedDigit()
-                    .foregroundStyle(.secondary)
-                    .contentTransition(.numericText())
             }
             Slider(
                 value: Binding(
@@ -352,59 +259,46 @@ private struct TrackDResourceSettings: View {
                 in: Double(TrackDConfigEditor.minimumMemoryGiB)...Double(max(1, store.limits.hostMemoryGiB)),
                 step: 1
             ) {
-                EmptyView()
+                Text("Memory")
             } minimumValueLabel: {
-                Text("1").font(.caption2).foregroundStyle(.tertiary)
+                Text("1 GiB")
             } maximumValueLabel: {
-                Text("\(store.limits.hostMemoryGiB)").font(.caption2).foregroundStyle(.tertiary)
+                Text("\(store.limits.hostMemoryGiB) GiB")
             } onEditingChanged: { editing in
                 if !editing { store.save() }
             }
+            .labelsHidden()
+            .accessibilityLabel("Memory")
+            .accessibilityValue("\(store.draft.memoryMiB / 1024) GiB")
+
             Text(
-                "A cap, not an allocation. The VM only takes the memory the guest actually "
-                    + "touches — this is the ceiling it may grow to, out of \(store.limits.hostMemoryGiB) GiB on this Mac."
+                "A limit, not an allocation. The VM grows only as the guest needs memory, up to this value."
             )
-            .font(.caption)
+            .font(.footnote)
             .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(.vertical, Theme.space1)
     }
 
-    private var suspendRow: some View {
-        VStack(alignment: .leading, spacing: Theme.space2) {
+    private var suspendSetting: some View {
+        VStack(alignment: .leading) {
             Stepper(
+                "Suspend when idle: \(TrackDConfigEditor.describeSuspend(store.draft))",
                 value: Binding(
                     get: { store.draft.autoSuspendMinutes },
                     set: {
                         TrackDConfigEditor.applyAutoSuspend($0, to: &store.draft)
-                        // A stepper's steps are discrete clicks, not a continuous drag,
-                        // so each one is its own committed change — unlike the sliders
-                        // above, there is no "still editing" moment to wait out.
                         store.save()
                     }
                 ),
                 in: TrackDConfigEditor.autoSuspendRange,
                 step: 5
-            ) {
-                HStack {
-                    Text("Suspend when idle")
-                    Spacer()
-                    Text(TrackDConfigEditor.describeSuspend(store.draft))
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                        .contentTransition(.numericText())
-                }
-            }
-            Text(
-                "Morbstack saves the VM to disk after this long with no Docker activity, and "
-                    + "restores it on the next command. Set it to zero to keep the VM resident."
             )
-            .font(.caption)
+            Text(
+                "Morbstack saves the VM after this much Docker inactivity and restores it on the next command. Set the value to zero to keep it running."
+            )
+            .font(.footnote)
             .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(.vertical, Theme.space1)
     }
 
     private func restartEngine() {
@@ -427,113 +321,71 @@ private struct TrackDAdvancedSettings: View {
 
     var body: some View {
         Form {
-            Section {
-                TrackDPathRow(label: "MORBSTACK_HOME", path: MorbPaths.root.path)
+            Section("Locations") {
+                pathValue("MORBSTACK_HOME", path: MorbPaths.root.path)
                 if homeIsOverridden {
                     Label(
-                        "Overridden by the MORBSTACK_HOME environment variable in this process.",
-                        systemImage: "info.circle")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        "MORBSTACK_HOME is overridden for this process.",
+                        systemImage: "info.circle"
+                    )
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
                 }
-                TrackDPathRow(label: "Configuration", path: store.url.path, symbol: "doc.text")
-            } header: {
-                Text("Locations")
-            } footer: {
-                HStack(spacing: Theme.space4) {
-                    Button("Reveal in Finder") {
-                        NSWorkspace.shared.activateFileViewerSelecting([store.url])
-                    }
-                    .buttonStyle(.link)
-                    Button("Reload from disk") { store.reload() }
-                        .buttonStyle(.link)
-                    Spacer()
+                pathValue("Configuration", path: store.url.path)
+                Button("Reveal Configuration in Finder", systemImage: "folder") {
+                    NSWorkspace.shared.activateFileViewerSelecting([store.url])
                 }
-                .font(.caption)
+                Button("Reload Configuration", systemImage: "arrow.clockwise") {
+                    store.reload()
+                }
             }
 
-            Section {
-                TrackDPathRow(label: "Docker Engine API", path: MorbPaths.dockerSocket.path, symbol: "network")
-                TrackDPathRow(label: "Daemon control", path: MorbPaths.controlSocket.path, symbol: "gearshape.2")
+            Section("Sockets") {
+                pathValue("Docker Engine API", path: MorbPaths.dockerSocket.path)
+                pathValue("Daemon control", path: MorbPaths.controlSocket.path)
                 LabeledContent("Docker CLI") {
-                    Button {
-                        trackDCopy(TrackDLinks.dockerContextCommand(socketPath: MorbPaths.dockerSocket.path))
-                    } label: {
-                        Label("Copy context command", systemImage: "doc.on.doc")
+                    Button("Copy Context Command", systemImage: "doc.on.doc") {
+                        MorbPasteboard.copy(TrackDLinks.dockerContextCommand(socketPath: MorbPaths.dockerSocket.path))
                     }
-                    .buttonStyle(.borderless)
-                    .controlSize(.small)
                 }
-            } header: {
-                Text("Sockets")
             }
 
-            Section {
+            Section("Diagnostics") {
                 LabeledContent("Logs") {
-                    Button {
+                    Button("Open Folder", systemImage: "folder") {
                         NSWorkspace.shared.open(MorbPaths.logsDirectory)
-                    } label: {
-                        Label("Open folder", systemImage: "folder")
                     }
-                    .buttonStyle(.borderless)
-                    .controlSize(.small)
                 }
-                TrackDPathRow(label: "Daemon log", path: MorbPaths.daemonLog.path, symbol: "doc.text.magnifyingglass")
-                TrackDPathRow(label: "Guest console", path: MorbPaths.consoleLog.path, symbol: "terminal")
-            } header: {
-                Text("Diagnostics")
+                pathValue("Daemon log", path: MorbPaths.daemonLog.path)
+                pathValue("Guest console", path: MorbPaths.consoleLog.path)
             }
 
-            Section {
+            Section("Version") {
                 LabeledContent("Morbstack") {
                     Text(MorbVersion.string)
                         .monospacedDigit()
                         .textSelection(.enabled)
-                        .foregroundStyle(.secondary)
                 }
-            } header: {
-                Text("Version")
             }
         }
         .formStyle(.grouped)
-        .scrollContentBackground(.hidden)
     }
-}
 
-// MARK: - Notice
-
-/// The banner used for the restart prompt and for config-file errors.
-struct TrackDInlineNotice<Accessory: View>: View {
-
-    let symbol: String
-    let tone: TrackDTone
-    let title: String
-    let message: String
-    @ViewBuilder var accessory: Accessory
-
-    var body: some View {
-        HStack(alignment: .top, spacing: Theme.space3) {
-            Image(systemName: symbol)
-                .font(.callout)
-                .foregroundStyle(tone.color)
-                .symbolRenderingMode(.hierarchical)
-            VStack(alignment: .leading, spacing: Theme.space1) {
-                Text(title)
-                    .font(.callout.weight(.medium))
-                Text(message)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+    @ViewBuilder
+    private func pathValue(_ label: String, path: String) -> some View {
+        LabeledContent(label) {
+            HStack {
+                Text(path)
+                    .font(.system(.body, design: .monospaced))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+                Button("Copy \(label)", systemImage: "doc.on.doc") {
+                    MorbPasteboard.copy(path)
+                }
+                .labelStyle(.iconOnly)
+                .help("Copy \(label.lowercased())")
             }
-            Spacer(minLength: Theme.space3)
-            accessory
         }
-        .padding(.vertical, Theme.space2)
-    }
-}
-
-extension TrackDInlineNotice where Accessory == EmptyView {
-    init(symbol: String, tone: TrackDTone, title: String, message: String) {
-        self.init(symbol: symbol, tone: tone, title: title, message: message, accessory: { EmptyView() })
     }
 }

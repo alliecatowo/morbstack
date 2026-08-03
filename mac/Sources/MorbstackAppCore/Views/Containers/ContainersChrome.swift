@@ -1,23 +1,17 @@
 // Copyright 2026 The Morbstack Authors.
 // Licensed under the Apache License, Version 2.0 (the "License").
 //
-// What is left of the Containers screens' own vocabulary once the shared `Design/`
-// system covers status, chips, rows, cards and empty states: the ANSI/log palette (kept
-// exactly as it was — it is the terminal's contract with the program that wrote the
-// bytes, not a UI colour), the All/Running scope, a clipboard helper, and two small
-// legacy views (`TrackBPageHeader`, `TrackBSearchField`) that the offscreen screenshot
-// harness (`Shots/ShotScenes.swift`, owned by the merge) still constructs directly for
-// its own tab-specific compositions. They are restyled onto `Theme` tokens here so they
-// stay visually coherent with the rest of the redesign, but the *shipping* Containers
-// screen no longer uses either — see `ContainersRootView`'s real `.toolbar` +
-// `.searchable` instead.
+// Container-specific implementations that have no shared visual language: an ANSI
+// palette for terminal output, the All/Running filter, and a stock AppKit search field
+// embedded in inspector documents. The palette represents terminal data, not app
+// branding; all surrounding controls and surfaces are system-owned.
 
 import AppKit
 import SwiftUI
 
 // MARK: - Palette
 
-enum TrackBPalette {
+enum ContainerLogPalette {
 
     /// A colour that resolves differently in light and dark.
     ///
@@ -25,24 +19,11 @@ enum TrackBPalette {
     /// `colorScheme` check because it also does the right thing in the parts of the
     /// window SwiftUI does not own — menus, popovers, and the vibrancy behind a
     /// material sidebar all ask AppKit, not the environment.
-    static func adaptive(light: NSColor, dark: NSColor) -> Color {
+    private static func adaptive(light: NSColor, dark: NSColor) -> Color {
         Color(nsColor: NSColor(name: nil) { appearance in
             appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark : light
         })
     }
-
-    // MARK: Log surface
-
-    /// The log viewer's background. A touch off the window's own colour so the
-    /// monospaced block reads as a distinct surface without becoming a black box in
-    /// light mode. Flat, never a material — see `docs/design/IDENTITY.md` §5.
-    static let logSurface = adaptive(
-        light: NSColor(calibratedWhite: 0.99, alpha: 1),
-        dark: NSColor(calibratedWhite: 0.10, alpha: 1))
-
-    static let stderrWash = adaptive(
-        light: NSColor(calibratedRed: 0.85, green: 0.20, blue: 0.16, alpha: 0.07),
-        dark: NSColor(calibratedRed: 1.00, green: 0.35, blue: 0.30, alpha: 0.10))
 
     /// The sixteen ANSI foregrounds, tuned per appearance.
     ///
@@ -110,7 +91,7 @@ enum TrackBPalette {
 // MARK: - Scope
 
 /// The All / Running filter.
-enum TrackBScope: String, CaseIterable, Identifiable {
+enum ContainerScope: String, CaseIterable, Identifiable {
     case all, running
 
     var id: String { rawValue }
@@ -123,112 +104,66 @@ enum TrackBScope: String, CaseIterable, Identifiable {
     }
 }
 
-// MARK: - Legacy header (screenshot-harness compatibility only)
-
-/// The page header the screen used to draw inside its own content, before the toolbar.
+/// A real `NSSearchField` for searches scoped to a document inside the inspector.
 ///
-/// `ContainersRootView` no longer uses this — its title, subtitle, search field and
-/// scope control are real `.navigationTitle` / `.navigationSubtitle` / `.searchable` /
-/// `Picker(.segmented)` content inside a `.toolbar`, per `docs/design/COMPONENTS.md` §8.
-/// This type stays only because `Shots/ShotScenes.swift` (owned by the merge) builds a
-/// standalone copy of the containers split to photograph a specific detail tab, and
-/// constructs this directly. Restyled onto `Theme` tokens so it does not look like a
-/// regression in the screenshots that still show it.
-struct TrackBPageHeader<Trailing: View>: View {
-
-    let title: String
-    let subtitle: String?
-    @ViewBuilder var trailing: Trailing
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: Theme.space4) {
-            VStack(alignment: .leading, spacing: Theme.space1) {
-                Text(title).font(.title2.weight(.semibold))
-                if let subtitle {
-                    Text(subtitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                }
-            }
-            Spacer(minLength: Theme.space4)
-            trailing
-        }
-        .padding(.horizontal, Theme.pagePadding)
-        .padding(.top, Theme.space5)
-        .padding(.bottom, Theme.space4)
-    }
-}
-
-/// A search field that does not need a `.searchable` container.
-///
-/// Superseded in the shipping screen by `.searchable(text:placement:prompt:)`; kept for
-/// the same reason as `TrackBPageHeader` above.
-struct TrackBSearchField: View {
+/// The main container collection uses SwiftUI's toolbar `.searchable`, which is the
+/// correct window-wide search affordance. A logs, JSON, or environment search is scoped
+/// to content already selected in that window. Registering a second toolbar search with
+/// the same window would be semantically wrong and makes the system toolbar crowded, so
+/// this bridge intentionally hosts AppKit's stock search control instead of drawing one.
+struct DocumentSearchField: View {
 
     @Binding var text: String
     var prompt: String = "Search"
     var width: CGFloat = 220
     /// Optional trailing caption, e.g. a match count.
     var caption: String?
-    /// Supplied when something outside needs to focus this field — a ⌘F shortcut, say.
-    /// `@FocusState` cannot be reached through a wrapper view from the outside, so the
-    /// binding has to be handed in rather than applied on top.
-    var externalFocus: FocusState<Bool>.Binding?
-
-    @FocusState private var internalFocus: Bool
-
-    private var isFocused: Bool { externalFocus?.wrappedValue ?? internalFocus }
-
     var body: some View {
-        HStack(spacing: Theme.space3) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.secondary)
-            TextField(prompt, text: $text)
-                .textFieldStyle(.plain)
-                .font(.callout)
-                .focused(externalFocus ?? $internalFocus)
-                .onExitCommand {
-                    text = ""
-                    externalFocus?.wrappedValue = false
-                    internalFocus = false
-                }
+        HStack(spacing: 8) {
+            NativeSearchField(text: $text, prompt: prompt)
+                .frame(width: width)
             if let caption, !text.isEmpty {
                 Text(caption)
-                    .font(.caption2.monospacedDigit())
+                    .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
-            if !text.isEmpty {
-                Button {
-                    text = ""
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Clear search")
+        }
+    }
+
+    private struct NativeSearchField: NSViewRepresentable {
+        @Binding var text: String
+        let prompt: String
+
+        func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+        func makeNSView(context: Context) -> NSSearchField {
+            let field = NSSearchField()
+            field.placeholderString = prompt
+            field.sendsSearchStringImmediately = true
+            field.delegate = context.coordinator
+            return field
+        }
+
+        func updateNSView(_ field: NSSearchField, context: Context) {
+            if field.stringValue != text { field.stringValue = text }
+            if field.placeholderString != prompt { field.placeholderString = prompt }
+        }
+
+        static func dismantleNSView(_ field: NSSearchField, coordinator: Coordinator) {
+            field.delegate = nil
+        }
+
+        final class Coordinator: NSObject, NSSearchFieldDelegate {
+            private var parent: NativeSearchField
+
+            init(_ parent: NativeSearchField) {
+                self.parent = parent
+            }
+
+            func controlTextDidChange(_ notification: Notification) {
+                guard let field = notification.object as? NSSearchField else { return }
+                parent.text = field.stringValue
             }
         }
-        .padding(.horizontal, Theme.space3)
-        .padding(.vertical, Theme.space2 + 1)
-        .background(.quaternary.opacity(0.6),
-                    in: RoundedRectangle(cornerRadius: Theme.radiusControl, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: Theme.radiusControl, style: .continuous)
-                .strokeBorder(Theme.brand.opacity(isFocused ? 0.8 : 0), lineWidth: 2))
-        .frame(width: width)
-        .morbAnimation(.snappy, value: isFocused)
-    }
-}
-
-// MARK: - Utilities
-
-enum TrackBClipboard {
-    static func copy(_ string: String) {
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(string, forType: .string)
     }
 }

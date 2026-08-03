@@ -1,6 +1,21 @@
-# COMPONENTS — the shared chrome
+# COMPONENTS — archived shared chrome proposal
 
-Everything in `mac/Sources/MorbstackAppCore/Design/`, what it replaces, and how to use it.
+> **Archived — do not implement or restore.** This is the historical inventory of the
+> custom `Theme.swift` / `Design/**` / `Morb*` visual system proposed before the native
+> macOS pivot. Those source files are being removed, not made authoritative. Preserve
+> this record to explain past screenshots and migrations, but follow the binding
+> [native macOS playbook](NATIVE-MACOS-PLAYBOOK.md) and
+> [HIG coverage audit](HIG-COVERAGE-AUDIT.md) for all new work.
+>
+> The current replacements are direct system patterns: `NavigationSplitView` and a
+> sidebar `List` for frame/navigation; `ToolbarItem`/`Menu`/Commands for actions;
+> `Table`/`List` for records; `.inspector` with `Form` + `LabeledContent` for metadata;
+> `ContentUnavailableView` for empty states; native focus/selection/status text for
+> state. No compatibility wrapper, token scale, Morb card/chip/pill, custom glass, or
+> custom hover/selection treatment is sanctioned.
+
+Historical content follows. It describes a deleted component layer and is retained only
+for migration archaeology; it is not an API catalogue for product code.
 
 **These files belong to the design system. No implementation agent edits them.** If a
 component is missing something you need, say so in your handoff and it gets added here

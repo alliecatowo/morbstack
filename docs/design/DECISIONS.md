@@ -1,114 +1,94 @@
-# Design decisions (architect rulings)
+# Design decisions — current native macOS rulings
 
-## -1. BLOCKING FOR THE COHERENCE PASS: fix the screenshot harness before judging any screen
+**Status:** binding where it resolves an ambiguity in the
+[native macOS playbook](NATIVE-MACOS-PLAYBOOK.md) or the
+[HIG coverage audit](HIG-COVERAGE-AUDIT.md). Both documents remain the broader
+implementation standard.
 
-`Shots/ShotRenderer.swift` builds a **`.borderless`** offscreen `NSWindow` and rasterises it with
-`displayIgnoringOpacity`, and `ShotWindow` does not wrap content in a `NavigationSplitView`.
-Consequence, verified experimentally by UI-1: **`.toolbar { }`, `.navigationTitle`,
-`.navigationSubtitle` and `.inspector(isPresented:)` render as literally nothing** — not a degraded
-fallback, simply absent — because a borderless window has no titlebar/toolbar surface to composite
-into.
+## 1. System-native structure is the product visual language
 
-This is severe for three reasons:
-1. Adopting real toolbars is the **highest-value change in the rewrite** (see §0), and our only
-   verification loop is blind to it.
-2. Every rewritten screen will look *headerless* in `dist/shots`, i.e. WORSE than the shipping app,
-   so the screenshots misrepresent the product to reviewers.
-3. It silently pressures agents into the wrong architecture — UI-1 already declined
-   `.inspector(isPresented:)` for the containers split purely because it renders blank offscreen,
-   which is optimising the product for the test rig.
+Morbstack is a dense desktop operations tool, not a branded dashboard. Use the semantic
+macOS structure the task calls for: `WindowGroup` and the unified toolbar for the frame,
+`NavigationSplitView` plus a sidebar `List` for primary navigation, `Table` for
+multi-column records, `.inspector` for selected-record metadata, `Form`/
+`LabeledContent` for settings/details, standard menus and commands for actions, and
+`ContentUnavailableView` for unavailable content. See Apple's [Designing for macOS](https://developer.apple.com/design/human-interface-guidelines/designing-for-macos/),
+[Windows](https://developer.apple.com/design/human-interface-guidelines/windows),
+[Toolbars](https://developer.apple.com/design/human-interface-guidelines/toolbars), and
+[Lists and tables](https://developer.apple.com/design/human-interface-guidelines/lists-and-tables).
 
-**Fix it first, before re-rendering or judging anything:** give `ShotRenderer` a `.titled` window
-(add `.fullSizeContentView` / unified-toolbar style as needed) and wrap scene content in a real
-`NavigationSplitView` so toolbar and inspector surfaces exist. Then re-render everything and judge.
+This is a behavioral decision, not a cosmetic one: system controls provide keyboard
+navigation, focus, selection, toolbar overflow/customization, appearance adaptation, and
+accessibility semantics that a manually drawn equivalent cannot reliably recreate.
 
-**Then revisit UI-1's deviation:** with a working harness, reconsider `.inspector(isPresented:)`
-for the containers list→detail split per `pass2/REWRITE-PLAN.md` item 1.2. UI-1's fallback to
-`HSplitView` was a reasonable call under a broken rig and is explicitly not a criticism — but the
-rig, not the product, should have been the thing that changed.
+## 2. The custom visual system is retired
 
-## 0. Read `pass2/` too — and fix the toolbar first
+`Theme.swift` and `Design/**` may supply only narrowly-scoped, nonvisual domain helpers
+while they are being removed (for example, an operational-state label or format helper).
+They may not set colors, spacing, radii, typography, animation, content backgrounds,
+selection, hover behavior, cards, chips, status badges, toolbar composition, or glass.
+No replacement token library or compatibility wrapper is allowed.
 
-A second, independent design review is in `docs/design/pass2/`. It was written without sight of
-the first pass, so where the two agree you can be confident, and `pass2/COMPONENTS.md` §4 tables
-the divergences. Its findings, in priority order:
+In ordinary app content, respect the user's system accent and semantic system colors.
+Express exceptional operational state with words and an SF Symbol; color is supplemental
+and is never a status tile or filled chip. The asset brand palette remains for exported
+brand/marketing art only, not native application chrome.
 
-1. **There is no toolbar anywhere.** Every screen paints its own title, subtitle, search field and
-   buttons *inside the content view*, so there is no titlebar and the traffic lights sit on bare
-   background. This single fact is the main reason the app reads as Electron, and it causes a large
-   share of the other findings. Adopt real `.toolbar` / `.toolbar(id:)` with `ToolbarSpacer`; on
-   macOS 26 that also glasses every toolbar control for free. **This is the highest-value change in
-   the entire rewrite.**
-2. The sidebar is an opaque painted rectangle with grey selection and eight identical monochrome
-   symbols; a real macOS sidebar is translucent with a tinted selection capsule, and needs a
-   distinct look for "focused pane" vs merely selected.
-3. Settings breaks convention four ways: a Save/Revert pair (macOS Settings applies immediately),
-   a segmented strip instead of a toolbar, hand-built cards instead of grouped `Form`, and a window
-   smaller than its content.
-4. Seven unrelated pill treatments, and one purple carrying seven roles at once (brand, links,
-   chart series, palette selection, port chips, badges). A colour that means seven things means
-   nothing — see rule 1 below.
-5. Literal markdown backticks rendered as visible characters in the Disk screen copy. Cheapest fix
-   in the plan and the most direct evidence of carelessness.
+## 3. Liquid Glass is provided navigation/control chrome, never content texture
 
-**SDK trap worth knowing before you go looking:** `glassEffect` and `GlassEffectContainer` live in
-**SwiftUICore**, not SwiftUI — grepping `SwiftUI.swiftinterface` returns zero hits and will
-convince you they do not exist. Also `GlassButtonStyle.init(_ glass:)` is 26.1 (not 26.0), and the
-Scene modifier is `windowToolbarStyle`, not `toolbarStyle`. `pass2/SDK-LIQUID-GLASS.md` §7 lists
-what could NOT be verified — do not use anything on that list.
+Let macOS supply the unified titlebar, toolbar, sidebar, inspector, sheets, menus, and
+ordinary control treatment. Do not add a material, gradient, or glass background behind
+tables, forms, logs, charts, or dense content. Do not stack custom glass on top of
+system glass. A custom effect requires the documented exception process in the playbook
+and must be a real missing system behavior, not a way to make an ordinary control look
+different. See [Adopting Liquid Glass](https://developer.apple.com/documentation/TechnologyOverviews/adopting-liquid-glass)
+and [Materials](https://developer.apple.com/design/human-interface-guidelines/materials).
 
+## 4. Records, hierarchy, and charts follow the data—not decoration
 
-Binding decisions that resolve conflicts between the design system and the pre-rewrite views.
-Read this alongside IDENTITY.md and COMPONENTS.md. Where this file and older code disagree,
-this file wins.
+- Multi-column operational records use sortable/selectable native tables.
+- A real parent/child data model uses an outline treatment; groups are not simulated with
+  stacked cards.
+- Selecting a record reveals detail in a native inspector rather than inflating each
+  table row into a dashboard.
+- `ProgressView` represents actual in-flight or factual capacity progress only.
+- Swift Charts are allowed only when the data answers a time-series or comparison
+  question. They need an honest scale, accessible title/summary/Audio Graph treatment,
+  and an exact textual/tabular alternative; a storage bar is not a chart.
 
-## 1. Status colours: the Theme is authoritative, not the old screenshots
+The route-specific decision and its evidence belong in the HIG audit before review.
 
-`Theme.status*` is the single source of truth. The pre-rewrite views rendered `paused` as amber;
-the new Theme defines it as blue. **The Theme wins** — centralising these values is the entire
-point of the design system, and a view that hardcodes a status colour is a bug regardless of
-which hue it picks.
+## 5. Commands are discoverable and safe
 
-One requirement attached to that ruling: **status must never be conveyed by hue alone.** Paused
-and restarting are semantically different (a deliberate hold versus a transient failure loop) and
-must remain distinguishable for a colour-blind user and in a greyscale screenshot. So every status
-carries a distinct SF Symbol as well as its colour, and the transient states may animate where the
-static ones do not.
+Use symbol-only toolbar actions where the toolbar is the right home, with an accessible
+label and help text. Keep one contextual primary action; place infrequent actions in a
+native `Menu`, context menu, or `.secondaryAction` so the system manages overflow. Every
+important toolbar command has an equivalent menu-bar command/shortcut. A destructive
+action has a scoped, truthful confirmation and destructive role. An engine lifecycle
+operation is an action, not a giant decorative Toggle.
 
-**RESOLVED — paused is SLATE** (`#4A5568` light / `#94A3B8` dark). This was measured, not chosen by
-taste: against `selectionFill`, the current blue sits at ΔE 10.7 light and only **8.0 dark**, close
-enough that a paused chip misreads as a selected row. Slate moves that to 13.0 / 12.5 while keeping
-dot contrast at 7.53 / 6.50, both comfortably past 4.5:1. Teal scored marginally better but
-collides with `seriesTeal` in the categorical palette and reads wrong for "held."
+## 6. Visual evidence must be a real macOS window
 
-Note the counterintuitive part, because it will come up again: `selectionFill` is a *chromatic* pale
-violet, so moving a status colour toward neutral **increases** separation from selection rather than
-reducing it. Desaturating is the right instinct here, not the wrong one.
+The former offscreen `ShotRenderer`/`ShotWindow` path is retired. An AppKit/SwiftUI cache
+or `ImageRenderer` cannot validate WindowServer-owned traffic lights, the unified toolbar,
+sidebar/inspector material, focus, or Liquid Glass. `MorbShots` may validate deterministic
+fixture invariants, but it produces no visual acceptance evidence.
 
-Open, minor: the categorical series still has violet sitting close to indigo. `Theme.seriesRose` is
-already near where magenta should go, so adopting rose in violet's slot is likely a one-line change.
+Current signoff is Computer Use on the fixture-backed app in light/dark appearance and
+normal/narrow dimensions, exercising safe navigation, selection, sorting, search,
+inspector behavior, menus, and empty states without invoking destructive work. The durable
+automated follow-up is a macOS XCUITest host with accessibility identifiers and
+`XCUIElement.screenshot()` attachments from the real app process.
 
-Superseded by the above: `pass2/COMPONENTS.md` §4 lists `statusPaused` as "investigate" and
-`pass2/IDENTITY.md` §2.2 specifies amber. This file wins.
+## 7. Historical decisions retained for context
 
-## 2. Deployment target stays `.macOS(.v15)` — do not bump it
+The prior decisions about a Theme-authoritative color palette, custom `MorbGlass`
+availability wrapper, status chips/dots, fixed density/radius scales, custom toolbar
+groups, and synthetic screenshot acceptance are superseded—not silently deleted. Their
+original rationale remains in the archived documents named by
+[the design documentation index](README.md). They cannot override this document or
+current Apple guidance.
 
-`Package.swift` declares `.macOS(.v15)` while every Liquid Glass API is `macOS 26.0`. This is
-**correct and deliberate**, not an oversight:
-
-- `MorbGlass.swift` gates the glass path behind a single `if #available(macOS 26, *)` branch and
-  falls back to `Material` below that. The app therefore builds and runs on macOS 15 and looks
-  right on 26.
-- Raising the target to 26 would drop every user on macOS 15 to gain nothing, since the fallback
-  already exists.
-
-Do not "fix" the mismatch by bumping the platform, and do not add a second availability branch
-anywhere else — route all glass through `MorbGlass` so there is exactly one place that knows the
-version rule.
-
-## 3. Where glass belongs
-
-Sanctioned: sidebar, menu-bar popover, command palette, inspector panes, floating chrome and
-toolbars. Forbidden: behind the log viewport, behind dense tables, and behind any scrolling
-content region where legibility of small text matters more than depth. Translucency under a
-10,000-line log is the single fastest way to make a tool feel like a demo.
+The deployment target remains a release-engineering decision in `mac/Package.swift`.
+Before introducing an availability-gated API, check that target and the actual SDK; do
+not create a visual wrapper simply to centralize an API gate.

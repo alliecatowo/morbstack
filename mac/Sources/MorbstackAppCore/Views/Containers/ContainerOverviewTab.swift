@@ -1,17 +1,9 @@
 // Copyright 2026 The Morbstack Authors.
 // Licensed under the Apache License, Version 2.0 (the "License").
 //
-// OVERVIEW: everything about a container that is not a number changing over time.
-//
-// State and Configuration are one `Form(.formStyle(.grouped))` of `MorbKeyValue` rows —
-// the system's own key/value idiom, which gets the label column and the baseline right
-// for free. Ports, Mounts and Labels are real `Table`s. The environment table is the one
-// part with a real policy behind it: values are hidden by default and revealed one at a
-// time, because an environment block is where database passwords, API tokens and
-// signing keys live, and this pane is the single most screenshotted view in an app like
-// this. Redaction is not paternalism here; it is the difference between a bug report and
-// an incident. There is exactly one reveal mechanism — the per-row eye button — not the
-// per-row-eye-plus-global-toggle the previous build shipped.
+// The overview is an inspector: `Form` and `LabeledContent` describe one selected
+// container, while the variable-length operational collections use ordinary macOS
+// tables.  There are no dashboard cards, chips, or custom list rows here.
 
 import AppKit
 import MorbstackKit
@@ -23,9 +15,6 @@ struct ContainerOverviewTab: View {
     let details: TrackBInspectDetails?
     let isLoading: Bool
     let errorText: String?
-
-    /// What the app knows about shared folders, so a bind mount pointing at a folder
-    /// the VM cannot see can be called out rather than rendered as a working mount.
     var fileSharing: MorbShareSurface.Report = .empty
 
     @State private var envQuery = ""
@@ -33,92 +22,96 @@ struct ContainerOverviewTab: View {
     @State private var mountSelection: Set<TrackBMountDisplay.ID> = []
 
     var body: some View {
-        ScrollView(.vertical) {
-            VStack(alignment: .leading, spacing: Theme.space6) {
-                if let details {
-                    configurationForm(details)
-                    if !container.ports.isEmpty { portsSection }
-                    environment(details)
-                    if !details.mounts.isEmpty { mounts(details) }
-                    if !details.labels.isEmpty { labels(details) }
-                } else if isLoading {
-                    loadingPlaceholder
-                } else if let errorText {
-                    TrackBInlineError(text: errorText)
-                        .padding(.horizontal, Theme.pagePadding)
-                }
-            }
-            .padding(.vertical, Theme.space5)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .morbScrollEdge(.soft, for: .top)
-        .scrollBounceBehavior(.basedOnSize)
+        overviewContent
     }
 
-    // MARK: State + Configuration
-    //
-    // `Form(.formStyle(.grouped))`, per `docs/design/COMPONENTS.md` §6 — `LabeledContent`
-    // only shares a label column across sibling rows when it is inside a real `Form` or
-    // `List`; built by hand inside a plain `MorbCard` each row sizes its own label to its
-    // own text, and "Restart policy" no longer lines up under "Image".
-    //
-    // `Form` is a scroll view of its own, though, so nested inside this tab's outer
-    // `ScrollView` it needs a bounded height — the first version of this file guessed one
-    // from the row count and silently clipped the last row whenever a container's
-    // Configuration section was one row taller than the guess. `.fixedSize(vertical:)`
-    // asks the form for its own ideal height instead of proposing one, which is the
-    // correct fix rather than a better guess.
+    @ViewBuilder
+    private var overviewContent: some View {
+        Group {
+            if let details {
+                loadedContent(details)
+            } else if isLoading {
+                ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let errorText {
+                ContentUnavailableView {
+                    Label("Container Information Unavailable", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text(errorText)
+                }
+            }
+        }
+    }
+
+    private func loadedContent(_ details: TrackBInspectDetails) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                configurationForm(details)
+                if !container.ports.isEmpty { portsTable }
+                environment(details)
+                if !details.mounts.isEmpty { mountsTable(details) }
+                if !details.labels.isEmpty { labelsTable(details) }
+            }
+            .padding()
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
 
     private func configurationForm(_ details: TrackBInspectDetails) -> some View {
         Form {
             Section("State") {
-                MorbKeyValue("Status") {
-                    MorbStatusBadge(
-                        tone: StatusTone.forContainer(state: container.state, unhealthy: details.health == "unhealthy" || container.isUnhealthy),
-                        title: details.health.map { "\(container.state) · \($0)" },
-                        filled: false)
+                LabeledContent("Status") {
+                    Text(statusText(details))
                 }
                 if let created = details.created {
-                    MorbKeyValue("Created", Formatters.relativeDate(created))
+                    LabeledContent("Created") {
+                        Text(Formatters.relativeDate(created))
+                            .help(Formatters.absoluteDate(created))
+                    }
                 }
                 if let startedAt = details.startedAt, startedAt.timeIntervalSince1970 > 0 {
-                    MorbKeyValue("Started", Formatters.relativeDate(startedAt))
+                    LabeledContent("Started") {
+                        Text(Formatters.relativeDate(startedAt))
+                            .help(Formatters.absoluteDate(startedAt))
+                    }
                 }
                 if let finishedAt = details.finishedAt, finishedAt.timeIntervalSince1970 > 0,
-                   container.state != "running", container.state != "restarting" {
+                   container.state != "running", container.state != "restarting"
+                {
                     let code = details.exitCode.map { " (exit \($0))" } ?? ""
-                    MorbKeyValue("Exited", Formatters.relativeDate(finishedAt) + code)
+                    LabeledContent("Exited") {
+                        Text(Formatters.relativeDate(finishedAt) + code)
+                            .help(Formatters.absoluteDate(finishedAt))
+                    }
                 }
                 if details.restartCount > 0 {
-                    MorbKeyValue("Restarts", "\(details.restartCount)")
+                    LabeledContent("Restarts") { Text("\(details.restartCount)") }
                 }
             }
 
             Section("Configuration") {
-                MorbKeyValue("Image", monospaced: true) { truncating(container.image) }
+                LabeledContent("Image") { monospaced(container.image) }
                 if !details.imageID.isEmpty {
-                    MorbKeyValue("Image ID", monospaced: true) { truncating(details.imageID) }
+                    LabeledContent("Image ID") { monospaced(details.imageID) }
                 }
-                MorbKeyValue("Command", monospaced: true) {
-                    truncating(details.command.isEmpty ? "—" : details.command)
-                }
+                LabeledContent("Command") { monospaced(details.command.isEmpty ? "—" : details.command) }
                 if let entrypoint = details.entrypoint {
-                    MorbKeyValue("Entrypoint", monospaced: true) { truncating(entrypoint) }
+                    LabeledContent("Entrypoint") { monospaced(entrypoint) }
                 }
                 if let workingDir = details.workingDir {
-                    MorbKeyValue("Working dir", monospaced: true) { truncating(workingDir) }
+                    LabeledContent("Working Directory") { monospaced(workingDir) }
                 }
                 if let user = details.user {
-                    MorbKeyValue("User", monospaced: true) { truncating(user) }
+                    LabeledContent("User") { monospaced(user) }
                 }
                 if let policy = details.restartPolicy {
-                    MorbKeyValue("Restart policy", policy)
+                    LabeledContent("Restart Policy") { Text(policy) }
                 }
                 if !details.networks.isEmpty {
-                    MorbKeyValue("Networks", details.networks.joined(separator: ", "))
+                    LabeledContent("Networks") { Text(details.networks.joined(separator: ", ")) }
                 }
                 if let platform = details.platform, !platform.isEmpty {
-                    MorbKeyValue("Platform", platform)
+                    LabeledContent("Platform") { Text(platform) }
                 }
             }
         }
@@ -127,113 +120,107 @@ struct ContainerOverviewTab: View {
         .fixedSize(horizontal: false, vertical: true)
     }
 
-    private func truncating(_ text: String) -> some View {
+    private func monospaced(_ text: String) -> some View {
         Text(text)
+            .font(.system(.body, design: .monospaced))
             .lineLimit(1)
             .truncationMode(.middle)
+            .textSelection(.enabled)
             .help(text)
     }
 
-    // MARK: Ports
+    private func statusText(_ details: TrackBInspectDetails) -> String {
+        let status = details.status.isEmpty ? container.state : details.status
+        guard let health = details.health, !health.isEmpty else { return status.capitalized }
+        return "\(status.capitalized) · \(health)"
+    }
 
-    private var portsSection: some View {
-        VStack(alignment: .leading, spacing: Theme.space3) {
-            MorbSectionHeader("Ports", symbol: "point.3.connected.trianglepath.dotted",
-                              count: container.ports.count)
+    private var portsTable: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Ports")
+                .font(.headline)
+
             Table(container.ports) {
                 TableColumn("Host") { port in
-                    Text(verbatim: port.hostPort.map { "\(port.hostIP ?? "0.0.0.0"):\($0)" } ?? "not published")
-                        .font(.system(.callout, design: .monospaced))
+                    Text(port.hostPort.map { "\(port.hostIP ?? "0.0.0.0"):\($0)" } ?? "Not Published")
+                        .font(.system(.body, design: .monospaced))
                         .foregroundStyle(port.hostPort == nil ? .secondary : .primary)
                 }
                 TableColumn("Container") { port in
-                    Text(verbatim: "\(port.containerPort)")
-                        .font(.system(.callout, design: .monospaced))
-                        .monospacedDigit()
+                    Text("\(port.containerPort)")
+                        .font(.system(.body, design: .monospaced))
                 }
                 TableColumn("Protocol") { port in
                     Text(port.proto.uppercased())
-                        .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 TableColumn("") { port in
                     if let url = port.url {
-                        Button {
-                            NSWorkspace.shared.open(url)
-                        } label: {
-                            Label("Open", systemImage: "arrow.up.forward.app")
-                                .font(.caption)
+                        Button { NSWorkspace.shared.open(url) } label: {
+                            Image(systemName: "arrow.up.forward.app")
                         }
-                        .buttonStyle(.link)
-                    } else {
-                        Text("—").foregroundStyle(.tertiary).font(.caption)
+                        .accessibilityLabel("Open \(url.absoluteString)")
+                        .help("Open \(url.absoluteString)")
                     }
                 }
+                .width(28)
             }
-            .tableStyle(.inset)
-            .alternatingRowBackgrounds()
             .frame(height: tableHeight(rows: container.ports.count))
         }
-        .padding(.horizontal, Theme.pagePadding)
     }
 
-    // MARK: Environment
-
     private func environment(_ details: TrackBInspectDetails) -> some View {
-        let matches = TrackBLogFilter.filter(
+        let variables = TrackBLogFilter.filter(
             details.env,
             needle: TrackBLogFilter.normalize(envQuery),
             lowered: \.lowered)
 
-        return VStack(alignment: .leading, spacing: Theme.space3) {
-            MorbSectionHeader("Environment", symbol: "list.bullet.rectangle", count: details.env.count)
-
-            if !details.env.isEmpty {
-                TrackBSearchField(text: $envQuery, prompt: "Filter variables", width: 220,
-                                  caption: "\(matches.count)")
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Environment")
+                    .font(.headline)
+                Spacer()
+                if !details.env.isEmpty {
+                    DocumentSearchField(text: $envQuery, prompt: "Filter variables", width: 180)
+                }
             }
 
             if details.env.isEmpty {
-                TrackBQuietNote(text: "This container declares no environment variables.")
-            } else if matches.isEmpty {
-                MorbNoMatches(query: envQuery)
-                    .frame(height: Theme.rowRich * 3)
+                Text("This container declares no environment variables.")
+                    .foregroundStyle(.secondary)
+            } else if variables.isEmpty {
+                ContentUnavailableView.search(text: envQuery)
+                    .frame(height: 120)
             } else {
-                environmentTable(matches)
+                environmentTable(variables)
             }
         }
-        .padding(.horizontal, Theme.pagePadding)
     }
 
-    /// Environment variables are operational data, so they use the exact same native
-    /// `Table` rhythm as Ports, Mounts and Labels. The earlier hand-drawn rows looked
-    /// like a settings card embedded inside an inspector and did not inherit table
-    /// selection, contrast, or column resizing behaviour.
     private func environmentTable(_ variables: [TrackBInspectDetails.EnvVar]) -> some View {
         Table(variables) {
             TableColumn("Name") { variable in
-                HStack(spacing: Theme.space2) {
+                HStack(spacing: 6) {
                     if TrackBSecretHeuristic.looksSensitive(key: variable.key) {
                         Image(systemName: "key.fill")
-                            .font(.caption2)
-                            .foregroundStyle(Theme.statusDegraded)
-                            .help("The name suggests this is a secret")
+                            .foregroundStyle(.orange)
+                            .help("The variable name suggests this value may be sensitive")
                     }
                     Text(variable.key)
-                        .font(.system(.callout, design: .monospaced).weight(.medium))
+                        .font(.system(.body, design: .monospaced))
                         .lineLimit(1)
                         .truncationMode(.tail)
                         .textSelection(.enabled)
                 }
             }
-            .width(min: 180, ideal: 220)
+            .width(min: 120, ideal: 170)
 
             TableColumn("Value") { variable in
                 environmentValue(variable)
             }
 
             TableColumn("") { variable in
-                HStack(spacing: Theme.space1) {
+                HStack(spacing: 4) {
                     Button {
                         if revealed.contains(variable.id) {
                             revealed.remove(variable.id)
@@ -241,57 +228,40 @@ struct ContainerOverviewTab: View {
                             revealed.insert(variable.id)
                         }
                     } label: {
-                        Label(
-                            revealed.contains(variable.id) ? "Hide value" : "Reveal value",
-                            systemImage: revealed.contains(variable.id) ? "eye.slash" : "eye")
+                        Image(systemName: revealed.contains(variable.id) ? "eye.slash" : "eye")
                     }
-                    .labelStyle(.iconOnly)
-                    .buttonStyle(.borderless)
+                    .accessibilityLabel(revealed.contains(variable.id) ? "Hide value" : "Reveal value")
                     .help(revealed.contains(variable.id) ? "Hide value" : "Reveal value")
 
                     Button {
-                        TrackBClipboard.copy(variable.value)
+                        MorbPasteboard.copy(variable.value)
                     } label: {
-                        Label("Copy value", systemImage: "doc.on.doc")
+                        Image(systemName: "doc.on.doc")
                     }
-                    .labelStyle(.iconOnly)
-                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Copy value")
                     .help("Copy value")
                 }
             }
-            .width(56)
+            .width(54)
         }
-        .tableStyle(.inset)
-        .alternatingRowBackgrounds()
         .frame(height: tableHeight(rows: variables.count))
     }
 
-    /// `TextSelectability` uses distinct generic marker types for enabled and disabled,
-    /// so a ternary cannot select between them. Keep the masking decision explicit while
-    /// preserving the value column's identical layout in each state.
     @ViewBuilder
     private func environmentValue(_ variable: TrackBInspectDetails.EnvVar) -> some View {
-        let isRevealed = revealed.contains(variable.id)
-        let value = isRevealed ? (variable.value.isEmpty ? "—" : variable.value) : TrackBSecretHeuristic.mask
-
-        if isRevealed {
-            Text(value)
-                .font(.system(.callout, design: .monospaced))
-                .foregroundStyle(.primary)
+        if revealed.contains(variable.id) {
+            Text(variable.value.isEmpty ? "—" : variable.value)
+                .font(.system(.body, design: .monospaced))
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .textSelection(.enabled)
         } else {
-            Text(value)
-                .font(.system(.callout, design: .monospaced))
+            Text(TrackBSecretHeuristic.mask)
+                .font(.system(.body, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
-                .truncationMode(.middle)
-                .textSelection(.disabled)
         }
     }
-
-    // MARK: Mounts
 
     private func mountRows(_ details: TrackBInspectDetails) -> [TrackBMountDisplay] {
         TrackBMountModel.rows(
@@ -300,98 +270,102 @@ struct ContainerOverviewTab: View {
             sharesAreKnown: TrackEShareStatus.canJudgeBindMounts(fileSharing))
     }
 
-    private func mounts(_ details: TrackBInspectDetails) -> some View {
+    private func mountsTable(_ details: TrackBInspectDetails) -> some View {
         let rows = mountRows(details)
-
-        return VStack(alignment: .leading, spacing: Theme.space3) {
-            MorbSectionHeader("Mounts", symbol: "externaldrive.connected.to.line.below", count: rows.count)
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("Mounts")
+                .font(.headline)
 
             Table(rows, selection: $mountSelection) {
                 TableColumn("Kind") { row in
-                    MorbChip(row.kindLabel, symbol: row.kind.symbol,
-                            rank: row.kind == .bind ? .actionable : .quiet)
+                    Label(row.kindLabel.capitalized, systemImage: row.kind.symbol)
                         .help(row.kind.explanation)
                 }
+                .width(min: 86, ideal: 104)
                 TableColumn("Source") { row in
-                    HStack(spacing: Theme.space2) {
-                        if row.warning != nil {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .font(.system(size: 9))
-                                .foregroundStyle(Theme.statusDegraded)
-                        }
-                        Text(row.source)
-                            .font(.system(.callout, design: .monospaced))
-                            .foregroundStyle(row.warning == nil ? .primary : Theme.statusDegraded)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-                    .help(row.warning ?? row.source)
+                    mountSource(row)
                 }
-                TableColumn("In container") { row in
+                TableColumn("Container Path") { row in
                     Text(row.destination)
-                        .font(.system(.callout, design: .monospaced))
+                        .font(.system(.body, design: .monospaced))
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
                 TableColumn("Access") { row in
                     Text(row.accessDescription)
-                        .font(.caption)
-                        .foregroundStyle(row.readOnly ? .secondary : .primary)
+                        .foregroundStyle(.secondary)
                 }
                 TableColumn("") { row in
                     if let hostPath = row.hostPath {
-                        MorbIconButton("arrow.up.forward.app", help: "Reveal \(hostPath) in Finder") {
-                            TrackBFinder.reveal(hostPath)
+                        Button { TrackBFinder.reveal(hostPath) } label: {
+                            Image(systemName: "arrow.up.forward.app")
                         }
+                        .accessibilityLabel("Reveal \(hostPath) in Finder")
+                        .help("Reveal in Finder")
                     }
                 }
+                .width(28)
             }
-            .tableStyle(.inset)
-            .alternatingRowBackgrounds()
             .frame(height: tableHeight(rows: rows.count))
             .contextMenu(forSelectionType: TrackBMountDisplay.ID.self) { ids in
-                mountsContextMenu(ids: ids, rows: rows)
+                mountContextMenu(ids: ids, rows: rows)
             }
 
-            let bindCount = rows.filter { $0.kind == .bind }.count
-            if bindCount > 0, rows.contains(where: { $0.warning == nil && $0.kind == .bind }) {
-                Text(
-                    "Bind mounts are folders on this Mac, visible to the VM at the same path. "
-                        + "Only folders under a shared root can be mounted; manage them in "
-                        + "Settings › File Sharing."
-                )
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-                .fixedSize(horizontal: false, vertical: true)
+            if rows.contains(where: { $0.kind == .bind && $0.warning == nil }) {
+                Text("Bind mounts are folders on this Mac shared into the VM at the same path. Manage shared folders in Settings › File Sharing.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
-        .padding(.horizontal, Theme.pagePadding)
+    }
+
+    private func mountSource(_ row: TrackBMountDisplay) -> some View {
+        HStack(spacing: 6) {
+            if row.warning != nil {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .accessibilityHidden(true)
+            }
+            if row.warning == nil {
+                Text(row.source)
+                    .font(.system(.body, design: .monospaced))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            } else {
+                Text(row.source)
+                    .font(.system(.body, design: .monospaced))
+                    .foregroundStyle(.orange)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        }
+        .help(row.warning ?? row.source)
     }
 
     @ViewBuilder
-    private func mountsContextMenu(ids: Set<TrackBMountDisplay.ID>, rows: [TrackBMountDisplay]) -> some View {
+    private func mountContextMenu(ids: Set<TrackBMountDisplay.ID>, rows: [TrackBMountDisplay]) -> some View {
         if let id = ids.first, let row = rows.first(where: { $0.id == id }) {
             if let hostPath = row.hostPath {
                 Button("Reveal in Finder") { TrackBFinder.reveal(hostPath) }
-                Button("Copy Host Path") { TrackBClipboard.copy(hostPath) }
+                Button("Copy Host Path") { MorbPasteboard.copy(hostPath) }
             } else if row.source != "—" {
                 Button(row.kind == .volume ? "Copy Volume Name" : "Copy Source") {
-                    TrackBClipboard.copy(row.source)
+                    MorbPasteboard.copy(row.source)
                 }
             }
-            Button("Copy Container Path") { TrackBClipboard.copy(row.destination) }
+            Button("Copy Container Path") { MorbPasteboard.copy(row.destination) }
         }
     }
 
-    // MARK: Labels
-
-    private func labels(_ details: TrackBInspectDetails) -> some View {
-        VStack(alignment: .leading, spacing: Theme.space3) {
-            MorbSectionHeader("Labels", symbol: "tag", count: details.labels.count)
+    private func labelsTable(_ details: TrackBInspectDetails) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Labels")
+                .font(.headline)
             Table(details.labels) {
                 TableColumn("Key") { label in
                     Text(label.key)
-                        .font(.system(.callout, design: .monospaced))
+                        .font(.system(.body, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -399,63 +373,36 @@ struct ContainerOverviewTab: View {
                 }
                 TableColumn("Value") { label in
                     Text(label.value.isEmpty ? "—" : label.value)
-                        .font(.system(.callout, design: .monospaced))
+                        .font(.system(.body, design: .monospaced))
                         .lineLimit(1)
                         .truncationMode(.tail)
                         .textSelection(.enabled)
                 }
             }
-            .tableStyle(.inset)
-            .alternatingRowBackgrounds()
             .frame(height: tableHeight(rows: details.labels.count))
         }
-        .padding(.horizontal, Theme.pagePadding)
     }
 
-    // MARK: Table sizing
-
-    /// `Table` has no intrinsic height inside a `ScrollView` — it is a scroll view of its
-    /// own — so every table here is given a fixed height that fits its rows exactly,
-    /// capped so a container with forty labels does not push the rest of the tab off the
-    /// bottom of the window.
     private func tableHeight(rows: Int) -> CGFloat {
-        let header: CGFloat = 28
-        let capped = min(max(rows, 1), 8)
-        return header + CGFloat(capped) * Theme.rowStandard
-    }
-
-    // MARK: Placeholder
-
-    private var loadingPlaceholder: some View {
-        MorbLoading(label: "Loading container configuration…")
-            .frame(height: 180)
+        28 + CGFloat(min(max(rows, 1), 8)) * 26
     }
 }
 
-// MARK: - Small pieces
-
 struct TrackBQuietNote: View {
     let text: String
+
     var body: some View {
         Text(text)
-            .font(.callout)
             .foregroundStyle(.secondary)
-            .padding(.vertical, Theme.space3)
     }
 }
 
 struct TrackBInlineError: View {
     let text: String
+
     var body: some View {
-        HStack(alignment: .top, spacing: Theme.space3) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(Theme.statusDegraded)
-            Text(text)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
-        }
-        .padding(.vertical, Theme.space3)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        Label(text, systemImage: "exclamationmark.triangle")
+            .foregroundStyle(.secondary)
+            .textSelection(.enabled)
     }
 }

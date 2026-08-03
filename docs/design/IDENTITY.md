@@ -1,4 +1,17 @@
-# IDENTITY — the Morbstack design system
+# IDENTITY — brand-asset record and archived UI proposal
+
+> **Scope split.** The mark geometry and asset-production guidance in §1 remain the
+> source for `brand/` assets that cite this document. They do **not** authorize an
+> in-app `MorbMark`, sidebar header treatment, or custom control. The in-app Theme,
+> palette, spacing/radius, status-chip, card, toolbar, motion, row, and selection rules
+> in §2 onward are archived historical material from the retired custom visual system.
+> Product UI must follow the [native macOS playbook](NATIVE-MACOS-PLAYBOOK.md) and
+> [HIG coverage audit](HIG-COVERAGE-AUDIT.md): system accent and semantic colors,
+> standard controls, system surfaces, and no bespoke dashboard chrome.
+>
+> Brand colors may remain in exported artwork and marketing assets. They must not be
+> repurposed to tint normal macOS chrome, selection, tables, toolbar actions, status
+> chips, or content backgrounds.
 
 Morbstack is **More Orb, open Stack**. The mark is an **orb** — a lens, a sphere, the one
 machine that holds everything — **intersecting a stack** of layers. The character is a

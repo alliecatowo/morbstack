@@ -62,9 +62,8 @@ struct PaletteContext {
 /// One row in the palette.
 struct PaletteCommand: Identifiable {
 
-    /// The kind of thing this command acts on. Shown as a trailing tag rather than as
-    /// a section header: ranking is global, so grouped sections would either fight the
-    /// ranking or hide the best match below a fold.
+    /// The kind of thing this command acts on. It guides default ranking when the query
+    /// is empty; results remain globally ranked instead of being visually badged.
     enum Kind: String {
         case container = "Container"
         case stack = "Stack"
@@ -81,7 +80,6 @@ struct PaletteCommand: Identifiable {
     var subtitle: String?
     var symbol: String
     var kind: Kind
-    var tone: TrackDTone = .neutral
     /// Extra text that participates in matching but is not highlighted, for the
     /// synonyms nobody should have to guess ("rm" for remove, "ps" for containers).
     var keywords: String = ""
@@ -115,7 +113,6 @@ enum PaletteCommandBuilder {
         var out: [PaletteCommand] = []
         for container in model.containers {
             let name = container.displayName
-            let tone = TrackDTone.container(state: container.state, unhealthy: container.isUnhealthy)
             let origin = container.composeProject.map { "\($0) · " } ?? ""
 
             out.append(
@@ -125,7 +122,6 @@ enum PaletteCommandBuilder {
                     subtitle: "\(origin)\(container.image)",
                     symbol: "shippingbox",
                     kind: .container,
-                    tone: tone,
                     keywords: "\(name) \(container.image) \(container.shortID) inspect show reveal"
                 ) { context in
                     TrackDAppBridge.reveal(containerID: container.id, in: context.model)
@@ -139,7 +135,6 @@ enum PaletteCommandBuilder {
                     subtitle: container.status,
                     symbol: "text.alignleft",
                     kind: .container,
-                    tone: tone,
                     keywords: "\(name) logs tail output stdout stderr"
                 ) { context in
                     TrackDAppBridge.reveal(containerID: container.id, in: context.model, showingLogs: true)
@@ -158,7 +153,6 @@ enum PaletteCommandBuilder {
                         subtitle: container.status,
                         symbol: action.symbol,
                         kind: .container,
-                        tone: tone,
                         keywords: "\(name) \(action.rawValue) \(container.shortID)"
                     ) { context in
                         context.activity.post("\(action.title) \(name)…")
@@ -202,7 +196,6 @@ enum PaletteCommandBuilder {
                         : "Frees \(size)",
                     symbol: "trash",
                     kind: .image,
-                    tone: .bad,
                     keywords: "\(reference) remove delete rmi \(image.shortID)",
                     isDestructive: true
                 ) { context in
@@ -213,7 +206,7 @@ enum PaletteCommandBuilder {
                             context.activity.finish("Removed \(reference)")
                             await context.model.refreshAll()
                         } catch {
-                            context.activity.finish("Could not remove \(reference): \(trackDErrorText(error))")
+                            context.activity.finish("Could not remove \(reference): \(MorbErrorMessage.text(for: error))")
                         }
                     }
                 })
@@ -238,7 +231,6 @@ enum PaletteCommandBuilder {
                 subtitle: "From the registry",
                 symbol: "arrow.down.circle.dotted",
                 kind: .image,
-                tone: .accent,
                 keywords: "pull \(reference)"
             ) { context in
                 pull(reference, context: context)
@@ -263,7 +255,7 @@ enum PaletteCommandBuilder {
                 activity.finish("Pulled \(reference)")
                 await model.refreshAll()
             } catch {
-                activity.finish("Pull failed: \(trackDErrorText(error))")
+                activity.finish("Pull failed: \(MorbErrorMessage.text(for: error))")
             }
         }
     }
@@ -313,7 +305,6 @@ enum PaletteCommandBuilder {
                 subtitle: model.engine.headline,
                 symbol: symbol,
                 kind: .engine,
-                tone: action == .stop ? .warn : .accent,
                 keywords: keywords
             ) { context in
                 context.activity.post("\(title)…")
@@ -340,7 +331,7 @@ enum PaletteCommandBuilder {
                 kind: .general,
                 keywords: "docker context cli terminal shell copy socket"
             ) { context in
-                trackDCopy(TrackDLinks.dockerContextCommand(socketPath: socket))
+                MorbPasteboard.copy(TrackDLinks.dockerContextCommand(socketPath: socket))
                 context.activity.finish("Copied — paste it into a terminal")
                 context.dismiss()
             },
@@ -353,7 +344,7 @@ enum PaletteCommandBuilder {
                 kind: .general,
                 keywords: "docker host env environment variable export shell copy"
             ) { context in
-                trackDCopy(TrackDLinks.dockerHostExport(socketPath: socket))
+                MorbPasteboard.copy(TrackDLinks.dockerHostExport(socketPath: socket))
                 context.activity.finish("Copied")
                 context.dismiss()
             },
@@ -366,7 +357,7 @@ enum PaletteCommandBuilder {
                 kind: .general,
                 keywords: "socket path unix docker.sock copy"
             ) { context in
-                trackDCopy(socket)
+                MorbPasteboard.copy(socket)
                 context.activity.finish("Copied")
                 context.dismiss()
             },

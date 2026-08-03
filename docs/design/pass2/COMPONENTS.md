@@ -1,4 +1,10 @@
-# COMPONENTS.md — shared chrome, and the per-screen plan
+# COMPONENTS — archived second-pass proposal
+
+> **Archived — nonbinding.** This file captures the second pre-migration proposal for a
+> custom Theme/`Morb*` component library. It must not guide implementation now that the
+> app is converging on system-native Tahoe/macOS surfaces. Read
+> [the native macOS playbook](../NATIVE-MACOS-PLAYBOOK.md) and
+> [the HIG coverage audit](../HIG-COVERAGE-AUDIT.md) instead.
 
 ## 0. Read this first: the layer already exists
 

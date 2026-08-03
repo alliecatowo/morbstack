@@ -1,15 +1,11 @@
 // Copyright 2026 The Morbstack Authors.
 // Licensed under the Apache License, Version 2.0 (the "License").
 //
-// The screenshot harness's entry point.
+// Fixture diagnostics entry point.
 //
-// Deliberately three lines: everything it does lives in `MorbstackAppCore/Shots`,
-// next to the views it photographs, because the harness needs internal access to the
-// app's own view types and model. Exposing all of those publicly just to drive them
-// from here would be a much larger change than moving one `main` across a target
-// boundary.
-//
-//     swift run MorbShots --out ../dist/shots
+// The diagnostics and fixture data live in `MorbstackAppCore/Shots` so this small
+// compatibility target can validate the deterministic `--tour-fixtures` world without
+// reproducing an AppKit window or producing misleading screenshots.
 
 import Foundation
 import MorbstackAppCore

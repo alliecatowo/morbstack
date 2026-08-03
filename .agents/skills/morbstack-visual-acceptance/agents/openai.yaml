@@ -1,0 +1,4 @@
+interface:
+  display_name: "Morbstack Visual Acceptance"
+  short_description: "Validate real-window macOS UX"
+  default_prompt: "Use $morbstack-visual-acceptance to validate this Morbstack UI change."

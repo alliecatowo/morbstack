@@ -30,12 +30,9 @@ import SwiftUI
 
 // MARK: - Launch options
 
-/// The `--tour-*` and appearance switches, parsed from `CommandLine`.
-///
-/// These exist so the screenshot tooling can put the app into an exact state without a
-/// human driving it. They are real features rather than test scaffolding: `--tour-select
-/// images --appearance dark --window-size 1280x800` has to produce the same pixels every
-/// time or the resulting screenshots are worthless.
+/// Developer fixture, route, appearance, and window-size switches parsed from
+/// `CommandLine`. They make manual Computer Use review and future UI automation
+/// repeatable without exposing fake visual evidence from an offscreen renderer.
 struct LaunchOptions: Sendable, Equatable {
 
     /// `--tour-select <nav>` — the sidebar item to select at launch.
@@ -60,24 +57,18 @@ struct LaunchOptions: Sendable, Equatable {
     /// leave its evidence. `MORB_TOUR_DUMP_FILE` does the same job for a direct exec.
     var dumpFile: String?
 
-    /// `--tour-capture <dir>` — self-capture the *real* running window (titlebar,
-    /// toolbar, sidebar material, Liquid Glass and all) to PNGs in this directory, one
-    /// per screen, then exit.
+    /// `--tour-capture <dir>` — exercise the real running window against fixtures and
+    /// probe whether a trustworthy full-window capture is available, then exit.
     ///
-    /// This is the answer to what `MorbShots`' offscreen harness structurally cannot do:
-    /// an offscreen `.borderless` window has no titlebar and no `NSToolbar` to draw in
-    /// the first place, and switching it to `.titled` blanks every `List`-backed screen
-    /// instead. Driving the shipping window for real sidesteps both — see
-    /// `Shots/LiveCapture.swift`.
+    /// This is deliberately *not* a PNG source. `MorbShots` cannot represent window
+    /// chrome, and an AppKit view cache cannot represent WindowServer-composited Tahoe
+    /// materials. `LiveCapture` therefore records the unsupported route and fails
+    /// rather than publishing a misleading image; see `Shots/LiveCapture.swift`.
     var tourCapture: String?
 
-    /// `--tour-fixtures` — serve `ShotFixtures`' canned Docker world instead of dialling
-    /// the real engine.
-    ///
-    /// Exists so `--tour-capture` can populate every screen without a running
-    /// `morbstackd`: the same fixtures `MorbShots` renders offscreen, wired through the
-    /// same `ShotDockerClient`/`ShotDaemonClient` pair, so a live capture and an
-    /// offscreen one are pictures of the same data.
+    /// `--tour-fixtures` — serve deterministic Docker data instead of dialing the real
+    /// engine. This lets a real app window reach every review route without a running
+    /// `morbstackd`.
     var tourFixtures = false
 
     static let none = LaunchOptions()
@@ -196,6 +187,9 @@ final class AppModel {
 
     @ObservationIgnored var client: DockerClient
     @ObservationIgnored var daemon: DaemonClient
+    /// Kubernetes is a real daemon/API-backed client in ordinary launches. The only
+    /// fixture instance is supplied by `forLaunch` for the explicit developer tour.
+    @ObservationIgnored let kubernetes: any K8sClusterProviding
     @ObservationIgnored let launchOptions: LaunchOptions
 
     // MARK: Private
@@ -211,10 +205,12 @@ final class AppModel {
     init(
         client: DockerClient = DockerClient(),
         daemon: DaemonClient = DaemonClient(),
+        kubernetes: (any K8sClusterProviding)? = nil,
         launchOptions: LaunchOptions = LaunchOptions()
     ) {
         self.client = client
         self.daemon = daemon
+        self.kubernetes = kubernetes ?? K8sDaemonClient(daemon: daemon)
         self.launchOptions = launchOptions
         if let select = launchOptions.select { selection = select }
         pendingTourContainer = launchOptions.container
@@ -231,15 +227,15 @@ final class AppModel {
     ///
     /// Kept here rather than inline in `App.swift`'s `init()` so that file only ever
     /// needs this one call, regardless of which fixture types `--tour-fixtures` ends up
-    /// wiring in. `ShotDockerClient`/`ShotDaemonClient`/`ShotFixtures`/`ShotLogs` are the
-    /// same fixture stack `MorbShots` renders offscreen — see `Shots/ShotClients.swift`
-    /// and `Shots/ShotFixtures.swift` — so a `--tour-capture` run and an offscreen
-    /// `MorbShots` run are pictures of the same data.
+    /// wiring in. `ShotDockerClient`, `ShotDaemonClient`, `ShotFixtures`, and `ShotLogs`
+    /// provide deterministic developer data to the real app window; see
+    /// `Shots/ShotClients.swift` and `Shots/ShotFixtures.swift`.
     static func forLaunch(_ options: LaunchOptions) -> AppModel {
         guard options.tourFixtures else { return AppModel(launchOptions: options) }
         return AppModel(
             client: ShotDockerClient(logLines: ShotLogs.apiLog()),
             daemon: ShotDaemonClient(reporting: ShotFixtures.engineRunning),
+            kubernetes: K8sFixtureClient(),
             launchOptions: options)
     }
 
@@ -471,7 +467,7 @@ final class AppModel {
             return
         }
 
-        withAnimation(Theme.fade) { applyOptimisticPatch(action, id: id) }
+        applyOptimisticPatch(action, id: id)
         scheduleReconcile()
     }
 
@@ -512,12 +508,10 @@ final class AppModel {
         // Reflect the intent immediately. `daemon.start()` can legitimately take the
         // better part of a minute — VM boot plus dockerd — and a button that looks
         // inert for that long reads as broken.
-        withAnimation(Theme.springSubtle) {
-            switch action {
-            case .start: engine = EngineStatus(state: "starting", vmState: "starting", version: engine.version, reachable: true)
-            case .stop: engine.state = "stopping"
-            case .suspend: engine.state = "pausing"
-            }
+        switch action {
+        case .start: engine = EngineStatus(state: "starting", vmState: "starting", version: engine.version, reachable: true)
+        case .stop: engine.state = "stopping"
+        case .suspend: engine.state = "pausing"
         }
 
         do {
@@ -612,33 +606,31 @@ final class AppModel {
         }
 
         let action = event.action
-        withAnimation(Theme.fade) {
-            switch action {
-            case "start", "unpause", "restart":
-                containers[index].state = "running"
-            case "die", "stop", "kill":
-                containers[index].state = "exited"
-                if let code = event.attributes["exitCode"] {
-                    containers[index].status = "Exited (\(code)) just now"
-                }
-                containers[index].ports = []
-            case "pause":
-                containers[index].state = "paused"
-            case "destroy":
-                containers.remove(at: index)
-                if selectedContainerID == id { selectedContainerID = nil }
-            case "rename":
-                if let name = event.attributes["name"] {
-                    containers[index].displayName = name
-                    containers[index].names = [name]
-                }
-            default:
-                // `health_status: unhealthy` and friends: the status prose carries the
-                // health, and that is what `ContainerSummary.isUnhealthy` reads.
-                if action.hasPrefix("health_status") {
-                    let verdict = action.contains("unhealthy") ? "unhealthy" : "healthy"
-                    containers[index].status = "Up (\(verdict))"
-                }
+        switch action {
+        case "start", "unpause", "restart":
+            containers[index].state = "running"
+        case "die", "stop", "kill":
+            containers[index].state = "exited"
+            if let code = event.attributes["exitCode"] {
+                containers[index].status = "Exited (\(code)) just now"
+            }
+            containers[index].ports = []
+        case "pause":
+            containers[index].state = "paused"
+        case "destroy":
+            containers.remove(at: index)
+            if selectedContainerID == id { selectedContainerID = nil }
+        case "rename":
+            if let name = event.attributes["name"] {
+                containers[index].displayName = name
+                containers[index].names = [name]
+            }
+        default:
+            // `health_status: unhealthy` and friends: the status prose carries the
+            // health, and that is what `ContainerSummary.isUnhealthy` reads.
+            if action.hasPrefix("health_status") {
+                let verdict = action.contains("unhealthy") ? "unhealthy" : "healthy"
+                containers[index].status = "Up (\(verdict))"
             }
         }
         return true

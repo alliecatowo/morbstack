@@ -1,18 +1,15 @@
 // Copyright 2026 The Morbstack Authors.
 // Licensed under the Apache License, Version 2.0 (the "License").
 //
-// STATS: two sparklines and the numbers behind them.
-//
-// The charts are drawn with `Canvas` rather than assembled from views. Sixty samples
-// times two charts is a hundred and twenty shapes, and at that count a `Path` per sample
-// costs more in view identity and diffing than the drawing itself ever will. `Canvas`
-// hands the whole series to one draw call.
-//
-// The samples arrive through the same `TrackBStatsHub` the list rows use, so opening
-// this tab for a container already visible in the list joins its existing stream instead
-// of opening a second one — and the sparkline starts with whatever history the row has
-// already collected rather than from an empty chart.
+// Container statistics are a time-series question — "how has this resource changed
+// while the container runs?" — so this is the one place in the inspector where a
+// chart is more useful than a table alone.  All other information stays in ordinary
+// native controls: `LabeledContent` for the current reading, `Form` for limits, and
+// a `Table` as the precise textual alternative to every plotted sample.
 
+import Accessibility
+import Charts
+import Foundation
 import SwiftUI
 
 struct ContainerStatsTab: View {
@@ -20,35 +17,33 @@ struct ContainerStatsTab: View {
     let container: ContainerSummary
     let hub: TrackBStatsHub
     let client: DockerClient
-    /// The detail pane owns lifecycle operations, so the empty state asks it to start
-    /// the container instead of inventing a second action path here.
     let onStart: () -> Void
     let isActionInProgress: Bool
 
     @State private var probe: TrackBStatsProbe?
-    /// The pane's height, fed back so the charts can divide it between them.
-    @State private var viewportHeight: CGFloat = 0
 
-    /// Falls back to whatever the hub already knows about this container.
-    ///
-    /// Two payoffs. In the app, a container whose row has been streaming draws its
-    /// sparkline on the very first frame of the tab instead of after `.task` has run.
-    /// Offscreen — previews, the screenshot harness — `.task` never runs at all, so a
-    /// hub seeded with `TrackBStatsHub.seed(_:samples:)` is the only thing there is.
-    private var activeProbe: TrackBStatsProbe? { probe ?? hub.existingProbe(container.id) }
+    private var activeProbe: TrackBStatsProbe? {
+        probe ?? hub.existingProbe(container.id)
+    }
 
     var body: some View {
         Group {
             if !container.isRunning {
-                notRunning
+                ContentUnavailableView {
+                    Label("No Live Statistics", systemImage: "waveform.path.ecg")
+                } description: {
+                    Text("Start this container to monitor CPU and memory.")
+                } actions: {
+                    Button("Start Container", action: onStart)
+                        .disabled(isActionInProgress)
+                }
             } else if let probe = activeProbe {
-                content(probe: probe)
+                content(probe)
             } else {
-                Color.clear
+                ProgressView("Connecting to statistics")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Theme.contentBackground)
         .task(id: container.id) { subscribe() }
         .onDisappear { unsubscribe() }
         .onChange(of: container.isRunning) { _, running in
@@ -56,175 +51,129 @@ struct ContainerStatsTab: View {
         }
     }
 
-    // MARK: - Content
-
-    @ViewBuilder
-    private func content(probe: TrackBStatsProbe) -> some View {
+    private func content(_ probe: TrackBStatsProbe) -> some View {
         ScrollView {
-            // The two charts share whatever vertical room is left over instead of
-            // sitting at a fixed 64pt each with a third of the pane empty underneath
-            // them. A sparkline is one of the few things in the app that is strictly
-            // better larger: the same series over twice the height resolves detail that
-            // a 64pt strip flattens into a ruled line.
-            VStack(alignment: .leading, spacing: Theme.space5) {
+            VStack(alignment: .leading, spacing: 0) {
                 if let failure = probe.failure {
-                    TrackBInlineError(text: "Stats stream stopped: \(failure)")
+                    ContentUnavailableView {
+                        Label("Statistics Stream Stopped", systemImage: "exclamationmark.triangle")
+                    } description: {
+                        Text(failure)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical)
                 } else if !probe.isLive {
-                    waiting
+                    ProgressView("Waiting for the first statistic")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical)
                 }
 
-                charts(probe)
+                let samples = probe.history.enumerated().map { index, sample in
+                    StatsChartSample(index: index, timestamp: sample.ts, value: sample.cpuPercent)
+                }
+                StatsChartSection(
+                    title: "CPU Usage",
+                    symbol: "cpu",
+                    currentValue: Formatters.percent(probe.latest?.cpuPercent ?? 0),
+                    samples: samples,
+                    yAxisTitle: "CPU (%)",
+                    yAxisRange: 0...cpuUpperBound(probe),
+                    valueLabel: Formatters.percent,
+                    spokenValueLabel: { "\(Formatters.percent($0)) CPU usage" })
+
+                Divider()
+
+                let memorySamples = probe.history.enumerated().map { index, sample in
+                    StatsChartSample(index: index, timestamp: sample.ts, value: Double(sample.memBytes))
+                }
+                let memoryLimit = probe.latest?.memLimit ?? 0
+                StatsChartSection(
+                    title: "Memory Usage",
+                    symbol: "memorychip",
+                    currentValue: memoryValueLabel(Double(probe.latest?.memBytes ?? 0)),
+                    samples: memorySamples,
+                    yAxisTitle: "Memory",
+                    yAxisRange: 0...memoryUpperBound(probe),
+                    valueLabel: memoryValueLabel,
+                    spokenValueLabel: spokenMemoryValueLabel,
+                    reference: memoryLimit > 0
+                        ? StatsChartReference(value: Double(memoryLimit), label: "Memory limit")
+                        : nil)
 
                 if let sample = probe.latest, sample.memLimit > 0 {
-                    memoryGauge(sample)
+                    Divider()
+
+                    Form {
+                        Section("Memory Limit") {
+                            LabeledContent("In Use") {
+                                Text(memoryValueLabel(Double(sample.memBytes)))
+                                    .monospacedDigit()
+                            }
+                            LabeledContent("Limit") {
+                                Text(memoryValueLabel(Double(sample.memLimit)))
+                                    .monospacedDigit()
+                            }
+                            LabeledContent("Percent") {
+                                Text(Formatters.percent(sample.memFraction * 100))
+                                    .monospacedDigit()
+                            }
+                        }
+                    }
+                    .formStyle(.grouped)
+                    .scrollDisabled(true)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.vertical)
                 }
 
-                footnote(probe)
-            }
-            .padding(Theme.space5)
-            .frame(
-                maxWidth: .infinity,
-                minHeight: viewportHeight > 0 ? viewportHeight : nil,
-                alignment: .topLeading)
-        }
-        .morbScrollEdge(.soft, for: .top)
-        .onScrollGeometryChange(for: CGFloat.self) { $0.containerSize.height } action: { _, height in
-            if abs(height - viewportHeight) > 0.5 { viewportHeight = height }
-        }
-    }
-
-    private var waiting: some View {
-        HStack(spacing: Theme.space3) {
-            ProgressView().controlSize(.small)
-            Text("Waiting for the first sample…")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    private var notRunning: some View {
-        ContentUnavailableView {
-            Label("No Live Statistics", systemImage: "waveform.path.ecg")
-        } description: {
-            Text("Start this container to monitor CPU and memory.")
-        } actions: {
-            Button("Start Container", action: onStart)
-                .morbButton(.primary)
-                .disabled(isActionInProgress)
-        }
-    }
-
-    /// Operational data belongs on the window background, not in a pair of floating
-    /// dashboard cards. The divider preserves a clear reading order while allowing the
-    /// charts to use the full width of the detail pane.
-    private func charts(_ probe: TrackBStatsProbe) -> some View {
-        VStack(spacing: 0) {
-            TrackBChartSection(
-                title: "CPU",
-                symbol: "cpu",
-                reading: Formatters.percent(probe.latest?.cpuPercent ?? 0),
-                caption: cpuCaption(probe),
-                tint: cpuTint(probe.latest?.cpuPercent ?? 0),
-                values: probe.cpuSeries,
-                // A CPU chart pinned to 100% makes a 3% idle container look flat and
-                // a 30% one look identical. The axis grows to fit instead, with a
-                // floor so small numbers do not fill the frame.
-                upperBound: max(10, (probe.cpuSeries.max() ?? 0) * 1.2),
-                axisLabel: { Formatters.percent($0) })
-                .padding(.vertical, Theme.space4)
-
-            Divider()
-
-            TrackBChartSection(
-                title: "Memory",
-                symbol: "memorychip",
-                reading: Formatters.bytesString(probe.latest?.memBytes ?? 0),
-                caption: memoryCaption(probe),
-                tint: memoryTint(probe.latest),
-                values: probe.memorySeries,
-                upperBound: memoryUpperBound(probe),
-                axisLabel: { Formatters.bytesString(Int64($0)) })
-                .padding(.vertical, Theme.space4)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func memoryGauge(_ sample: StatsSample) -> some View {
-        VStack(alignment: .leading, spacing: Theme.space3) {
-            HStack {
-                Text("Of limit")
+                Text(sampleCadenceDescription(probe))
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Spacer()
-                MorbNumber(Formatters.memoryString(used: sample.memBytes, limit: sample.memLimit))
+                    .padding(.top, 12)
             }
-            MorbMeter(value: Double(sample.memBytes), total: Double(sample.memLimit),
-                     tone: memoryTint(sample), height: 6)
+            .padding()
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
-    private func footnote(_ probe: TrackBStatsProbe) -> some View {
-        Text(probe.history.count < 2
-             ? "Sampled every \(Int(hub.minimumInterval)) seconds."
-             : "Last \(probe.history.count) samples, one every \(Int(hub.minimumInterval)) seconds.")
-            .font(.caption2)
-            .foregroundStyle(.tertiary)
+    /// CPU is a magnitude: a zero baseline makes relative usage legible.  Docker can
+    /// report more than 100% when a container uses more than one logical CPU, so this
+    /// uses a dynamic, rounded upper bound instead of pretending CPU is capped at 100.
+    private func cpuUpperBound(_ probe: TrackBStatsProbe) -> Double {
+        roundedUpperBound(max(10, (probe.cpuSeries.max() ?? 0) * 1.2))
     }
 
-    // MARK: - Derived
-
-    private func cpuCaption(_ probe: TrackBStatsProbe) -> String {
-        let series = probe.cpuSeries
-        guard !series.isEmpty else { return "—" }
-        let peak = series.max() ?? 0
-        let mean = series.reduce(0, +) / Double(series.count)
-        return "avg \(Formatters.percent(mean))  ·  peak \(Formatters.percent(peak))"
-    }
-
-    private func memoryCaption(_ probe: TrackBStatsProbe) -> String {
-        guard let sample = probe.latest else { return "—" }
-        guard sample.memLimit > 0 else { return "no limit set" }
-        return "\(Formatters.percent(sample.memFraction * 100)) of "
-            + Formatters.bytesString(sample.memLimit)
-    }
-
-    /// Status hues past the point where a container is the reason the fan is on. Below
-    /// the warning threshold this is `seriesIndigo`, a plain data colour — CPU is not a
-    /// status until it is close to a problem.
-    private func cpuTint(_ value: Double) -> Color {
-        switch value {
-        case ..<60: return Theme.seriesIndigo
-        case ..<85: return Theme.statusDegraded
-        default: return Theme.statusBad
-        }
-    }
-
-    private func memoryTint(_ sample: StatsSample?) -> Color {
-        guard let sample, sample.memLimit > 0 else { return Theme.seriesTeal }
-        switch sample.memFraction {
-        case ..<0.75: return Theme.seriesTeal
-        case ..<0.92: return Theme.statusDegraded
-        // Past ninety-something percent of the limit the kernel is about to OOM-kill
-        // this container, which is worth shouting about.
-        default: return Theme.statusBad
-        }
-    }
-
-    /// The memory axis tracks the limit when there is a meaningful one, so the curve
-    /// reads as "how close to being killed am I" rather than as an abstract shape.
+    /// A memory limit is semantically meaningful, so it anchors the scale whenever
+    /// Docker reports one.  The scale expands only if Docker reports usage above its
+    /// own limit, keeping the anomalous reading visible rather than clipping it.
     private func memoryUpperBound(_ probe: TrackBStatsProbe) -> Double {
         let peak = probe.memorySeries.max() ?? 0
-        guard let limit = probe.latest?.memLimit, limit > 0 else {
-            return max(peak * 1.2, 1024 * 1024)
+        if let limit = probe.latest?.memLimit, limit > 0 {
+            return max(Double(limit), roundedUpperBound(peak * 1.1, minimum: 1))
         }
-        let limitValue = Double(limit)
-        // A limit orders of magnitude above actual use (the common "limit is the whole
-        // VM" case) would flatten the curve to nothing, so it is only used as the axis
-        // when the container is actually working within sight of it.
-        return peak > limitValue * 0.2 ? limitValue : max(peak * 1.25, 1024 * 1024)
+        return roundedUpperBound(peak * 1.2, minimum: 1_024 * 1_024)
     }
 
-    // MARK: - Subscription
+    private func roundedUpperBound(_ value: Double, minimum: Double = 10) -> Double {
+        let target = max(value, minimum)
+        let magnitude = pow(10, floor(log10(target)))
+        let normalized = target / magnitude
+        let step: Double
+        switch normalized {
+        case ...1: step = 1
+        case ...2: step = 2
+        case ...5: step = 5
+        default: step = 10
+        }
+        return step * magnitude
+    }
+
+    private func sampleCadenceDescription(_ probe: TrackBStatsProbe) -> String {
+        let seconds = Int(hub.minimumInterval)
+        if probe.history.count < 2 {
+            return "Statistics update about every \(seconds) seconds."
+        }
+        return "Showing \(probe.history.count) readings, sampled about every \(seconds) seconds."
+    }
 
     private func subscribe() {
         guard container.isRunning, probe == nil else { return }
@@ -238,130 +187,225 @@ struct ContainerStatsTab: View {
     }
 }
 
-// MARK: - Chart section
+private struct StatsChartSample: Identifiable {
+    let index: Int
+    let timestamp: Date
+    let value: Double
+    var id: Int { index }
+}
 
-/// A titled sparkline with its current reading. This deliberately remains flat: its
-/// parent detail pane already provides the content surface, so a GroupBox/card around
-/// every chart would make an operational screen read as a dashboard.
-struct TrackBChartSection: View {
+private struct StatsChartReference {
+    let value: Double
+    let label: String
+}
 
+private struct StatsChartSection: View {
     let title: String
     let symbol: String
-    let reading: String
-    let caption: String
-    let tint: Color
-    let values: [Double]
-    let upperBound: Double
-    let axisLabel: (Double) -> String
+    let currentValue: String
+    let samples: [StatsChartSample]
+    let yAxisTitle: String
+    let yAxisRange: ClosedRange<Double>
+    let valueLabel: (Double) -> String
+    let spokenValueLabel: (Double) -> String
+    var reference: StatsChartReference?
+
+    private var hasTrend: Bool { samples.count >= 2 }
+
+    private var windowDescription: String {
+        guard let first = samples.first, let last = samples.last else {
+            return "Waiting for enough readings to show a time trend."
+        }
+        let duration = max(0, Int(last.timestamp.timeIntervalSince(first.timestamp).rounded()))
+        return "\(samples.count) readings over \(durationDescription(duration))."
+    }
+
+    private var chartSummary: String {
+        guard let first = samples.first, let last = samples.last else {
+            return "No statistics have arrived yet."
+        }
+        let minimum = samples.map(\.value).min() ?? 0
+        let maximum = samples.map(\.value).max() ?? 0
+        return "\(samples.count) readings from \(spokenTimestamp(first.timestamp)) to \(spokenTimestamp(last.timestamp)). "
+            + "The current value is \(spokenValueLabel(last.value)). "
+            + "Values range from \(spokenValueLabel(minimum)) to \(spokenValueLabel(maximum))."
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Theme.space3) {
-            HStack(alignment: .firstTextBaseline, spacing: Theme.space2) {
+        VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
                 Label(title, systemImage: symbol)
-                    .font(.subheadline.weight(.medium))
+                    .font(.headline)
+                    .accessibilityHeading(.h2)
+                Text(windowDescription)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
-
-                Spacer()
-
-                Text(reading)
-                    .font(.title3.weight(.semibold))
-                    .monospacedDigit()
-                    .contentTransition(.numericText())
-                    .foregroundStyle(.primary)
-                    .morbAnimation(.fade, value: reading)
             }
 
-            TrackBSparkline(values: values, upperBound: upperBound, tint: tint)
-                .frame(minHeight: 96, maxHeight: .infinity)
+            LabeledContent("Current") {
+                Text(currentValue)
+                    .monospacedDigit()
+                    .textSelection(.enabled)
+            }
 
-            HStack {
-                Text(caption)
-                    .font(.caption)
-                    .monospacedDigit()
-                    .foregroundStyle(.tertiary)
-                Spacer()
-                Text(axisLabel(upperBound))
-                    .font(.caption)
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
+            if hasTrend {
+                // There is a single, explicitly named series, so a legend would only
+                // repeat the title.  Position encodes the data; colour carries no
+                // additional meaning and relies on the system chart appearance.
+                Chart {
+                    ForEach(samples) { sample in
+                        LineMark(
+                            x: .value("Time", sample.timestamp),
+                            y: .value(yAxisTitle, sample.value))
+                            .interpolationMethod(.linear)
+                    }
+
+                    if let reference {
+                        RuleMark(y: .value(reference.label, reference.value))
+                            .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                            .foregroundStyle(.secondary)
+                            .annotation(position: .trailing, alignment: .bottom) {
+                                Text(reference.label)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                    }
+                }
+                .chartLegend(.hidden)
+                .chartXScale(domain: samples.first!.timestamp...samples.last!.timestamp)
+                .chartYScale(domain: yAxisRange)
+                .chartXAxis {
+                    AxisMarks(values: .automatic(desiredCount: 4)) { _ in
+                        AxisGridLine()
+                        AxisTick()
+                        AxisValueLabel(format: .dateTime.hour().minute())
+                    }
+                }
+                .chartYAxis {
+                    AxisMarks(position: .leading, values: .automatic(desiredCount: 4)) { value in
+                        AxisGridLine()
+                        AxisTick()
+                        AxisValueLabel {
+                            if let number = value.as(Double.self) {
+                                Text(valueLabel(number))
+                            }
+                        }
+                    }
+                }
+                .frame(height: 180)
+                // Swift Charts supplies default accessible elements for its marks.
+                // This descriptor adds the chart's purpose, a factual summary, axes,
+                // and one precisely labeled data point per real Docker sample for
+                // Audio Graphs and VoiceOver exploration.
+                .accessibilityChartDescriptor(
+                    StatsChartAccessibilityDescriptor(
+                        title: title,
+                        summary: chartSummary,
+                        samples: samples,
+                        yAxisTitle: yAxisTitle,
+                        yAxisRange: yAxisRange,
+                        spokenValueLabel: spokenValueLabel))
+            } else {
+                ProgressView("Collecting another reading")
+                    .controlSize(.small)
+            }
+
+            if !samples.isEmpty {
+                DisclosureGroup("Sample Values") {
+                    // This is not a hand-built data card: it is the same system Table
+                    // used elsewhere for operational data.  It preserves exact values
+                    // for sighted, keyboard, and assistive-technology users alike.
+                    Table(samples) {
+                        TableColumn("Time") { sample in
+                            Text(sample.timestamp, format: .dateTime.hour().minute().second())
+                                .monospacedDigit()
+                        }
+                        TableColumn(yAxisTitle) { sample in
+                            Text(valueLabel(sample.value))
+                                .monospacedDigit()
+                        }
+                    }
+                    .frame(height: min(max(CGFloat(samples.count) * 24 + 28, 96), 220))
+                    .accessibilityLabel("\(title) sample values")
+                }
             }
         }
+        .padding(.vertical)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func durationDescription(_ seconds: Int) -> String {
+        switch seconds {
+        case 0...1:
+            return "1 second"
+        case ..<60:
+            return "\(seconds) seconds"
+        case ..<120:
+            return "1 minute"
+        default:
+            return "\(seconds / 60) minutes"
+        }
+    }
+
+    private func spokenTimestamp(_ date: Date) -> String {
+        date.formatted(.dateTime.hour().minute().second())
     }
 }
 
-// MARK: - Sparkline
+/// A SwiftUI bridge to the Accessibility framework's chart descriptor.  Swift Charts
+/// already exposes its marks, while this object gives VoiceOver an Audio Graph with
+/// explicitly named units and a neutral, data-derived summary.
+private struct StatsChartAccessibilityDescriptor: AXChartDescriptorRepresentable {
+    let title: String
+    let summary: String
+    let samples: [StatsChartSample]
+    let yAxisTitle: String
+    let yAxisRange: ClosedRange<Double>
+    let spokenValueLabel: (Double) -> String
 
-/// A filled line chart over a fixed-width window of samples.
-///
-/// The series is always plotted against `TrackBStatsProbe.historyLimit` slots rather
-/// than against its own count, so a chart that is still filling up grows from the right
-/// instead of stretching two points across the whole card and then squashing them as
-/// more arrive.
-struct TrackBSparkline: View {
+    func makeChartDescriptor() -> AXChartDescriptor {
+        let first = samples.first?.timestamp ?? .now
+        let last = samples.last?.timestamp ?? first.addingTimeInterval(1)
+        let xLowerBound = first.timeIntervalSinceReferenceDate
+        let xUpperBound = max(last.timeIntervalSinceReferenceDate, xLowerBound + 1)
 
-    let values: [Double]
-    let upperBound: Double
-    let tint: Color
-
-    private var slots: Int { TrackBStatsProbe.historyLimit }
-
-    var body: some View {
-        Canvas(opaque: false, rendersAsynchronously: false) { context, size in
-            guard values.count >= 2, upperBound > 0 else {
-                drawBaseline(context: context, size: size)
-                return
-            }
-
-            let step = size.width / CGFloat(max(1, slots - 1))
-            // Right-align: the newest sample is always at the right edge.
-            let firstIndex = slots - values.count
-
-            func point(_ index: Int) -> CGPoint {
-                let clamped = min(max(values[index] / upperBound, 0), 1)
-                return CGPoint(
-                    x: CGFloat(firstIndex + index) * step,
-                    y: size.height - (CGFloat(clamped) * (size.height - 2)) - 1)
-            }
-
-            var line = Path()
-            line.move(to: point(0))
-            for index in 1..<values.count { line.addLine(to: point(index)) }
-
-            var fill = line
-            fill.addLine(to: CGPoint(x: point(values.count - 1).x, y: size.height))
-            fill.addLine(to: CGPoint(x: point(0).x, y: size.height))
-            fill.closeSubpath()
-
-            context.fill(
-                fill,
-                with: .linearGradient(
-                    Gradient(colors: [tint.opacity(0.34), tint.opacity(0.02)]),
-                    startPoint: CGPoint(x: 0, y: 0),
-                    endPoint: CGPoint(x: 0, y: size.height)))
-
-            context.stroke(
-                line,
-                with: .color(tint),
-                style: StrokeStyle(lineWidth: 1.6, lineCap: .round, lineJoin: .round))
-
-            // A dot on the newest sample; the eye needs somewhere to land.
-            let head = point(values.count - 1)
-            context.fill(
-                Path(ellipseIn: CGRect(x: head.x - 2.5, y: head.y - 2.5, width: 5, height: 5)),
-                with: .color(tint))
+        let xAxis = AXNumericDataAxisDescriptor(
+            title: "Time",
+            range: xLowerBound...xUpperBound,
+            gridlinePositions: [],
+            valueDescriptionProvider: { value in
+                Date(timeIntervalSinceReferenceDate: value)
+                    .formatted(.dateTime.hour().minute().second())
+            })
+        let yAxis = AXNumericDataAxisDescriptor(
+            title: yAxisTitle,
+            range: yAxisRange,
+            gridlinePositions: [],
+            valueDescriptionProvider: spokenValueLabel)
+        let points = samples.map { sample in
+            AXDataPoint(
+                x: sample.timestamp.timeIntervalSinceReferenceDate,
+                y: sample.value,
+                label: "\(sample.timestamp.formatted(.dateTime.hour().minute().second())): \(spokenValueLabel(sample.value))")
         }
-        .drawingGroup()
-        .accessibilityLabel("\(values.count) samples")
-    }
+        let series = AXDataSeriesDescriptor(name: title, isContinuous: true, dataPoints: points)
 
-    private func drawBaseline(context: GraphicsContext, size: CGSize) {
-        var path = Path()
-        path.move(to: CGPoint(x: 0, y: size.height - 1))
-        path.addLine(to: CGPoint(x: size.width, y: size.height - 1))
-        context.stroke(
-            path,
-            with: .color(.secondary.opacity(0.3)),
-            style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+        let descriptor = AXChartDescriptor(
+            title: title,
+            summary: summary,
+            xAxis: xAxis,
+            yAxis: yAxis,
+            series: [series])
+        descriptor.contentDirection = .leftToRight
+        return descriptor
     }
+}
+
+private func memoryValueLabel(_ value: Double) -> String {
+    Formatters.bytesString(Int64(value.rounded()))
+}
+
+private func spokenMemoryValueLabel(_ value: Double) -> String {
+    let bytes = Int64(value.rounded())
+    return "\(Formatters.bytesString(bytes)), \(bytes.formatted()) bytes"
 }

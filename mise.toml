@@ -121,33 +121,31 @@ if [ -d mac/Tests ]; then (cd mac && swift test); fi
 """
 
 # ---------------------------------------------------------------------------
-# Live shots
+# Live-window probe
 # ---------------------------------------------------------------------------
 
-# Self-capture the *real* MorbstackApp window — titlebar, toolbar, sidebar
-# material and Liquid Glass and all — instead of MorbShots' offscreen
-# approximation (dist/shots), which cannot render any of those. See
-# Sources/MorbstackAppCore/Shots/LiveCapture.swift for why an offscreen
-# bitmap structurally can't and this can.
+# Exercise real MorbstackApp routes against fixtures. This is deliberately **not** a
+# screenshot task: it writes only a text route-probe record and never samples a view
+# cache. See Sources/MorbstackAppCore/Shots/LiveCapture.swift. Use Computer Use or a
+# future XCUITest host to review the actual titlebar, toolbar, sidebar, and Liquid Glass.
 #
-# `--tour-fixtures` serves the same canned Docker world MorbShots renders
-# offscreen, so no morbstackd and no VM are needed — this never starts the
-# engine. Only build-mac, not sign: nothing here touches the daemon, so
-# morbstackd's virtualization entitlement is irrelevant to this target.
+# `--tour-fixtures` serves the deterministic Docker world checked by `MorbShots`, so no
+# morbstackd and no VM are needed — this never starts the engine. Only build-mac, not
+# sign: nothing here touches the daemon, so morbstackd's virtualization entitlement is
+# irrelevant to this target.
 #
 # Two full launches, not one: SwiftUI's `.preferredColorScheme` is applied
 # when the window is created, so light and dark each need their own process.
 # The app briefly takes focus and shows real windows on screen while each
-# run captures — that is the whole mechanism, not a side effect to suppress.
+# run probes — that is necessary to exercise real navigation in a genuine window.
 [tasks.shots-live]
-description = "Self-capture the real MorbstackApp window in light and dark (dist/shots-live)"
+description = "Run non-visual fixture route probes in real light and dark app windows"
 depends = ["build-mac"]
 run = """
-rm -rf dist/shots-live
-mkdir -p dist/shots-live
-mac/.build/debug/MorbstackApp --tour-fixtures --tour-capture dist/shots-live \
+mkdir -p dist/fixture-route-probe
+mac/.build/debug/MorbstackApp --tour-fixtures --tour-capture dist/fixture-route-probe \
 	--window-size 1440x900 --appearance light
-mac/.build/debug/MorbstackApp --tour-fixtures --tour-capture dist/shots-live \
+mac/.build/debug/MorbstackApp --tour-fixtures --tour-capture dist/fixture-route-probe \
 	--window-size 1440x900 --appearance dark
 """
 

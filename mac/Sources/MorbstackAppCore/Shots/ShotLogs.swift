@@ -3,16 +3,13 @@
 //
 // Four hundred lines of container output, with the escape sequences left in.
 //
-// The Logs tab's whole reason for existing is that it parses ANSI instead of either
-// printing the escapes or stripping the colour out, and a screenshot of it against
-// plain text would show none of that. So this generates the sort of thing a Node
-// service actually emits: a bold magenta build banner, cyan structured prefixes,
-// green/yellow/red status codes in the access log, dim debug chatter, and — the bit
-// worth having — a red stack trace on stderr, which the viewer also washes with its
-// stderr tint without overriding the colours the program chose.
+// Logs must parse ANSI instead of printing escapes or stripping semantics. This fixture
+// therefore generates the sort of output a Node service emits: a build banner,
+// structured prefixes, varied access status codes, debug chatter, and a stderr trace.
+// It is test data only; it does not create or approve any rendered representation.
 //
 // Deterministic. The paths, statuses and timings come from a fixed pseudo-random walk
-// so the same picture comes out of every run.
+// so parser and fixture-data checks see the same sequence on every run.
 
 import Foundation
 
@@ -218,9 +215,8 @@ enum ShotLogs {
 
         /// A structured event line.
         ///
-        /// The identifiers and amounts vary per line. They did not at first, and a
-        /// filtered view of the log came out as twelve byte-identical rows — which reads
-        /// as a rendering bug rather than as a busy service.
+        /// The identifiers and amounts vary per line, so log filtering and copy/search
+        /// consumers exercise realistic, nonrepeating records.
         mutating func appendStructuredLine() {
             let order = String(format: "ord_%04x%02x", Int(random() * 65_535), Int(random() * 255))
             let amount = Int(random() * 24_000) + 900
@@ -306,11 +302,9 @@ enum ShotLogs {
         // One clock, printed once.
         //
         // The fixture used to open every line with its own `HH:MM:SS.mmm`, run off a
-        // hardcoded 04:02:11, while the viewer's gutter counted back from the moment the
-        // screenshot was taken. The picture showed `08:31:03` beside `04:02:47` on the
-        // same line, which reads as a timezone bug in the product. Winding the body
-        // clock to match only made it worse: the same string twice, and the `Times`
-        // toggle looked like it did nothing.
+        // hardcoded 04:02:11, while a consumer's timestamp column counted back from the
+        // moment the fixture was generated. Winding the body clock to match made the
+        // same timestamp appear twice and reduced the value of a separate time column.
         //
         // So the body clock is gone and the lines lead with their level — `INFO`,
         // `WARN`, `READY` — the way a service that knows its output is being collected

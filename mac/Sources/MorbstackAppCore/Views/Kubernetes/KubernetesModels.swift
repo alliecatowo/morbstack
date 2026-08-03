@@ -3,15 +3,11 @@
 //
 // What the Kubernetes screen needs, and where it comes from.
 //
-// `MorbstackKit.K8s` already carries the wire types for the guest's control channel —
-// `K8s.Status` is exactly the cluster summary this screen wants (phase, node/pod
-// counts, the enable/disable verbs) — but it has no notion of *which* nodes or pods
-// exist, because the guest answers that over the Kubernetes API, not the vsock control
-// channel `K8s` speaks. `AppModel` has no k3s client to ask either (see
-// `docs/design/REWRITE-PLAN.md` — the model layer is out of scope for this pass), so
-// this screen is built against a small protocol instead of a concrete client. A real
-// implementation — a thin `kubectl`-shaped client over the forwarded API server —
-// slots in later by conforming to ``K8sClusterProviding``; nothing in the view changes.
+// `MorbstackKit.K8s` carries the wire types for the guest's control channel and the
+// daemon exposes those verbs to the app. Nodes and pods come from the *forwarded,
+// TLS-authenticated Kubernetes API* instead: their data is deliberately never
+// synthesized from the summary counts. The tour fixture is the sole in-memory
+// implementation and is injected by `AppModel.forLaunch` only for `--tour-fixtures`.
 
 import Foundation
 import MorbstackKit
@@ -26,23 +22,34 @@ struct K8sNodeInfo: Identifiable, Equatable, Sendable {
     var roles: [String]
     var ready: Bool
     var version: String
-    var cpuPercent: Double
-    var memoryBytes: Int64
-    var age: Date
+    var age: Date?
 
     var id: String { name }
 
-    var roleLabel: String { roles.isEmpty ? "worker" : roles.joined(separator: ", ") }
+    var roleLabel: String { roles.isEmpty ? "—" : roles.joined(separator: ", ") }
 }
 
 /// One pod.
 struct K8sPodInfo: Identifiable, Equatable, Sendable {
 
-    enum Phase: String, Sendable {
-        case running = "Running"
-        case pending = "Pending"
-        case crashLoop = "CrashLoopBackOff"
-        case completed = "Completed"
+    enum Phase: Sendable, Hashable {
+        case running
+        case pending
+        case crashLoop
+        case completed
+        case failed
+        case unknown(String)
+
+        var label: String {
+            switch self {
+            case .running: "Running"
+            case .pending: "Pending"
+            case .crashLoop: "CrashLoopBackOff"
+            case .completed: "Completed"
+            case .failed: "Failed"
+            case .unknown(let value): value
+            }
+        }
     }
 
     var name: String
@@ -52,40 +59,103 @@ struct K8sPodInfo: Identifiable, Equatable, Sendable {
     var totalContainers: Int
     var restarts: Int
     var node: String
-    var age: Date
+    var age: Date?
 
     var id: String { "\(namespace)/\(name)" }
 
+    var nodeLabel: String { node.isEmpty ? "—" : node }
+
     var isReady: Bool { phase == .running && readyContainers == totalContainers }
 
-    /// The colour and symbol this pod's status carries. `StatusTone` already has the
-    /// four buckets a workload needs — running, transitional, paused, bad — so a pod
-    /// is classified onto the same tones the Containers screen uses rather than
-    /// inventing a fifth palette for Kubernetes specifically.
-    var tone: StatusTone {
+    /// The operational state this pod carries. The table or inspector decides how the
+    /// native system control presents that information; this model supplies no visual
+    /// policy of its own.
+    var operationalState: OperationalState {
         switch phase {
-        case .running: return isReady ? .running : .busy
-        case .pending: return .busy
-        case .crashLoop: return .bad
-        case .completed: return .idle
+        case .running: return isReady ? .running : .changing
+        case .pending: return .changing
+        case .crashLoop, .failed: return .failed
+        case .completed: return .stopped
+        case .unknown: return .changing
         }
     }
 }
 
 // MARK: - Provider
 
-/// Everything the Kubernetes screen reads and drives.
+/// A coherent read of both resource endpoints. Keeping the pair together means a
+/// refresh cannot publish nodes from one kubeconfig generation and pods from another.
+struct K8sClusterResources: Sendable {
+    var nodes: [K8sNodeInfo]
+    var pods: [K8sPodInfo]
+}
+
+/// A truthful reason the app cannot list resources yet.
 ///
-/// A real implementation talks to the forwarded API server (`K8sAPIServerForward`,
-/// already in `MorbstackKit`) for `nodes()`/`pods()` and to `K8sManager` for
-/// `currentStatus()`/`setEnabled(_:)`. Until that client exists, ``K8sFixtureClient``
-/// stands in so the screen has something real to render.
+/// The local kubeconfig contains an administrator client credential. The app only
+/// reads it after the user generated Morbstack's own config, and never falls back to
+/// a user's unrelated `~/.kube/config`.
+enum K8sResourceAccessError: LocalizedError, Sendable {
+    case kubeconfigRequired
+    case malformedKubeconfig
+    case unavailable(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .kubeconfigRequired:
+            "Generate Morbstack’s kubeconfig to connect to the local API server."
+        case .malformedKubeconfig:
+            "Morbstack’s kubeconfig is incomplete or cannot be used for a TLS-authenticated connection. Generate it again."
+        case .unavailable(let message): message
+        }
+    }
+}
+
+/// Everything the Kubernetes screen reads and drives. Production calls the daemon's
+/// real `k8s-*` protocol and the forwarded API server. Fixtures exist only for the
+/// explicit developer tour.
 @MainActor
 protocol K8sClusterProviding: AnyObject {
-    func currentStatus() async -> K8s.Status
-    func setEnabled(_ enabled: Bool) async -> K8s.Status
-    func nodes() async -> [K8sNodeInfo]
-    func pods() async -> [K8sPodInfo]
+    func currentStatus() async throws -> K8s.Status
+    func setEnabled(_ enabled: Bool) async throws -> K8s.Status
+    func resources() async throws -> K8sClusterResources
+    /// Writes only Morbstack's private, app-owned kubeconfig. It never edits
+    /// `~/.kube/config`; that remains the CLI's separately confirmed merge action.
+    func generateKubeconfig() async throws -> URL
+}
+
+// MARK: - Production provider
+
+/// The app's production Kubernetes client.
+///
+/// Lifecycle and kubeconfig operations go through the daemon rather than reaching the
+/// guest directly. Resource reads use `KubernetesAPIClient`, which accepts only the
+/// loopback endpoint and CA/client credentials written by that explicit kubeconfig
+/// action. There is no fabricated fallback when the API is unavailable.
+@MainActor
+final class K8sDaemonClient: K8sClusterProviding {
+    private let daemon: DaemonClient
+
+    init(daemon: DaemonClient) {
+        self.daemon = daemon
+    }
+
+    func currentStatus() async throws -> K8s.Status {
+        try await daemon.kubernetesStatus()
+    }
+
+    func setEnabled(_ enabled: Bool) async throws -> K8s.Status {
+        try await (enabled ? daemon.enableKubernetes() : daemon.disableKubernetes())
+    }
+
+    func resources() async throws -> K8sClusterResources {
+        let client = try KubernetesAPIClient(kubeconfigURL: K8s.defaultKubeconfigURL)
+        return try await client.resources()
+    }
+
+    func generateKubeconfig() async throws -> URL {
+        try await daemon.writeKubernetesKubeconfig()
+    }
 }
 
 // MARK: - Fixture
@@ -123,9 +193,9 @@ final class K8sFixtureClient: K8sClusterProviding {
             podsReady: startsEnabled ? readyPods : 0)
     }
 
-    func currentStatus() async -> K8s.Status { status }
+    func currentStatus() async throws -> K8s.Status { status }
 
-    func setEnabled(_ enabled: Bool) async -> K8s.Status {
+    func setEnabled(_ enabled: Bool) async throws -> K8s.Status {
         guard enabled != status.enabled else { return status }
         if enabled {
             status = K8s.Status(installed: true, enabled: true, persistent: true, phase: .starting)
@@ -145,8 +215,15 @@ final class K8sFixtureClient: K8sClusterProviding {
         return status
     }
 
-    func nodes() async -> [K8sNodeInfo] { status.phase == .ready ? allNodes : [] }
-    func pods() async -> [K8sPodInfo] { status.phase == .ready ? allPods : [] }
+    func resources() async throws -> K8sClusterResources {
+        guard status.phase == .ready else { return K8sClusterResources(nodes: [], pods: []) }
+        return K8sClusterResources(nodes: allNodes, pods: allPods)
+    }
+
+    func generateKubeconfig() async throws -> URL {
+        throw K8sResourceAccessError.unavailable(
+            "Kubeconfig generation is unavailable in the deterministic tour fixture.")
+    }
 }
 
 // MARK: - Fixture data
@@ -158,8 +235,6 @@ extension [K8sNodeInfo] {
             roles: ["control-plane", "master"],
             ready: true,
             version: "v1.30.4+k3s1",
-            cpuPercent: 11.8,
-            memoryBytes: Int64(1.86 * 1_073_741_824),
             age: Date(timeIntervalSinceNow: -6 * 86_400 - 3 * 3600)),
     ]
 }

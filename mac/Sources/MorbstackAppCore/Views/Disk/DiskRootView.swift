@@ -9,18 +9,9 @@
 
 import SwiftUI
 
-// MARK: - Category colour
+// MARK: - Prune targets
 
 extension TrackCDiskCategory {
-    var color: Color {
-        switch self {
-        case .images: return TrackCPalette.images
-        case .containers: return TrackCPalette.containers
-        case .volumes: return TrackCPalette.volumes
-        case .buildCache: return TrackCPalette.buildCache
-        }
-    }
-
     var pruneTarget: TrackCPruneTarget {
         switch self {
         case .images: return .images
@@ -31,13 +22,14 @@ extension TrackCDiskCategory {
     }
 }
 
-// MARK: - Largest items
+// MARK: - Table rows
 
 /// A named resource in the disk screen's single, size-ordered list.
 ///
-/// Keeping images and volumes in one table avoids the dashboard-like pair of miniature
-/// tables that used to compete for attention below the usage bar. The source stays
-/// visible, but the one question here is simply "what is largest?".
+/// Images and volumes deliberately share the same table as the storage categories. The
+/// screen has one operational surface: select a category or resource, then inspect the
+/// facts in the standard trailing inspector. It is not a dashboard assembled from a
+/// collection of miniature tables and cards.
 private struct TrackCDiskLargestItem: Identifiable {
 
     enum Kind: String {
@@ -54,6 +46,152 @@ private struct TrackCDiskLargestItem: Identifiable {
     var id: String { "\(kind.rawValue):\(item.id)" }
 }
 
+private struct TrackCDiskRow: Identifiable {
+
+    enum Content {
+        case category(TrackCDiskSegment)
+        case resource(TrackCDiskLargestItem)
+    }
+
+    let content: Content
+
+    var id: String {
+        switch content {
+        case .category(let segment): return "category:\(segment.id)"
+        case .resource(let resource): return resource.id
+        }
+    }
+
+    var title: String {
+        switch content {
+        case .category(let segment): return segment.category.title
+        case .resource(let resource): return resource.item.label
+        }
+    }
+
+    var symbol: String {
+        switch content {
+        case .category(let segment): return segment.category.symbol
+        case .resource(let resource): return resource.kind.symbol
+        }
+    }
+
+    var type: String {
+        switch content {
+        case .category: return "Storage category"
+        case .resource(let resource): return resource.kind.title
+        }
+    }
+
+    var bytes: Int64 {
+        switch content {
+        case .category(let segment): return segment.bytes
+        case .resource(let resource): return resource.item.bytes
+        }
+    }
+
+    var reclaimable: (bytes: Int64, estimated: Bool)? {
+        guard case .category(let segment) = content else { return nil }
+        return (segment.reclaimableBytes, segment.isEstimate)
+    }
+
+    var category: TrackCDiskCategory? {
+        guard case .category(let segment) = content else { return nil }
+        return segment.category
+    }
+
+    var detail: String? {
+        guard case .resource(let resource) = content else { return nil }
+        return resource.item.detail
+    }
+}
+
+private struct DiskPruneConfirmation: View {
+
+    let target: TrackCPruneTarget
+    let preview: TrackCPrunePreview
+    let onConfirm: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    private var reclaimedSpaceLabel: String {
+        if preview.knownBytes == 0, preview.hasUnknownSizes {
+            return "The engine does not report reclaimable space in advance."
+        }
+        let amount = Formatters.bytesString(preview.knownBytes)
+        return preview.hasUnknownSizes ? "Frees at least \(amount)." : "Frees \(amount)."
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    Label(target.category.pruneSummary, systemImage: target.category.symbol)
+                }
+
+                if preview.items.isEmpty {
+                    ContentUnavailableView(
+                        "Nothing to Prune",
+                        systemImage: "trash.slash",
+                        description: Text("There are no eligible \(target.category.title.lowercased()) to remove."))
+                } else {
+                    Section("Will Be Removed") {
+                        ForEach(preview.items) { item in
+                            pruneItem(item)
+                        }
+                    }
+                }
+
+                if !preview.kept.isEmpty {
+                    Section("Kept") {
+                        ForEach(preview.kept) { item in
+                            pruneItem(item)
+                        }
+                    }
+                }
+
+                Section {
+                    Text(reclaimedSpaceLabel)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("Prune \(target.category.title)")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Prune \(preview.countLabel)", role: .destructive) {
+                        dismiss()
+                        onConfirm()
+                    }
+                    .disabled(preview.items.isEmpty)
+                }
+            }
+        }
+        .frame(minWidth: 460, minHeight: 340)
+    }
+
+    private func pruneItem(_ item: TrackCPruneItem) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading) {
+                Text(item.title)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(item.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+            }
+            Spacer()
+            Text(item.bytes.map(Formatters.bytesString) ?? "—")
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
 // MARK: - Root
 
 struct DiskRootView: View {
@@ -63,7 +201,9 @@ struct DiskRootView: View {
     @State private var pruning: TrackCPruneTarget?
     @State private var footprint: TrackCDiskImageFootprint?
     @State private var busy = false
-    @State private var toast: TrackCToast?
+    @State private var selection: TrackCDiskRow.ID?
+    @State private var showsInspector = true
+    @State private var operationError: String?
 
     /// Whether the footprint was handed in, in which case this view does not go and
     /// `stat` the real disk image over the top of it.
@@ -71,9 +211,8 @@ struct DiskRootView: View {
 
     /// - Parameter initialFootprint: the VM disk image's `stat` figures, when the caller
     ///   already has them. The app leaves this `nil` and reads them in `.task`; previews
-    ///   and the offscreen screenshot harness pass a value, because a hosted view *does*
-    ///   run `.task` and the real `~/.morbstack/data/disk.img` on the machine taking the
-    ///   screenshot is not the one the screenshot is meant to describe.
+    ///   and deterministic fixture runs inject a known value so they do not report the
+    ///   host machine's `~/.morbstack/data/disk.img`.
     init(model: AppModel, initialFootprint: TrackCDiskImageFootprint? = nil) {
         self.model = model
         self.footprintIsInjected = initialFootprint != nil
@@ -92,49 +231,24 @@ struct DiskRootView: View {
 
     private var subtitle: String {
         guard model.disk != nil else {
-            return model.engine.isRunning ? "Calculating usage…" : "Engine isn't running"
+            if model.engine.isRunning {
+                return busy ? "Calculating usage…" : "Usage unavailable"
+            }
+            return "Engine isn't running"
         }
         return "\(Formatters.bytesString(usage.total)) in use · \(Formatters.bytesString(usage.reclaimable)) reclaimable"
     }
 
     var body: some View {
-        Group {
-            if model.disk == nil, model.engine.isRunning {
-                MorbEmptyState(
-                    "Calculating disk usage",
-                    systemImage: "internaldrive",
-                    description: "Morbstack is reading the engine's storage records. This can take a little longer on a large image store.",
-                    actionTitle: "Try Again"
-                ) {
-                    Task { await model.refreshDisk() }
-                }
-            } else if model.disk == nil {
-                MorbEmptyState(
-                    "The engine isn't running",
-                    systemImage: "internaldrive",
-                    description: "Start the engine to see Docker images, containers, volumes and build cache on disk.",
-                    actionTitle: model.engine.state == "suspended" ? "Resume Engine" : "Start Engine"
-                ) {
-                    Task { await model.engineAction(.start) }
-                }
-            } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: Theme.space6) {
-                        usageSummary
-                        categorySection
-                        biggestSection
-                        diskImageSection
-                    }
-                    .padding(.horizontal, Theme.pagePadding)
-                    .padding(.top, Theme.space5)
-                    .padding(.bottom, Theme.space6)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
-        }
-        .morbScreen(title: "Disk", subtitle: subtitle, edge: .soft)
+        content
+        .navigationTitle("Disk")
+        .navigationSubtitle(subtitle)
         .toolbar { toolbarContent }
-        .trackCToast($toast)
+        .alert("Disk Operation Failed", isPresented: operationErrorBinding) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(operationError ?? "An unknown error occurred.")
+        }
         .sheet(item: $pruning) { target in
             let preview = TrackCDiskMath.prunePreview(
                 target: target,
@@ -142,20 +256,74 @@ struct DiskRootView: View {
                 containers: model.containers,
                 images: model.images,
                 volumes: model.volumes)
-            TrackCConfirmSheet(
-                title: "Prune \(target.category.title.lowercased())",
-                symbol: target.category.symbol,
-                explanation: target.category.pruneSummary,
-                items: preview.items,
-                kept: preview.kept,
-                knownBytes: preview.knownBytes,
-                hasUnknownSizes: preview.hasUnknownSizes,
-                confirmTitle: "Prune \(preview.countLabel)",
-                onConfirm: { Task { await prune(target) } })
+            DiskPruneConfirmation(target: target, preview: preview) {
+                Task { await prune(target) }
+            }
         }
         .task {
-            guard !footprintIsInjected else { return }
-            await loadFootprint()
+            if !footprintIsInjected {
+                await loadFootprint()
+            }
+            selectFirstRowIfNeeded()
+        }
+    }
+
+    // MARK: Content
+
+    /// The platform owns persistent content surfaces: one standard table for storage
+    /// data and, when useful, a system inspector. Empty states use the platform's
+    /// purpose-built view instead of leaving a homemade placeholder in the table area.
+    @ViewBuilder
+    private var content: some View {
+        if model.disk == nil, model.engine.isRunning {
+            ContentUnavailableView(
+                label: {
+                    Label("Disk Usage Is Unavailable", systemImage: "internaldrive")
+                },
+                description: {
+                    Text("The engine is running, but has not reported its storage figures yet.")
+                },
+                actions: {
+                    if busy {
+                        ProgressView("Calculating Disk Usage")
+                    } else {
+                        Button("Calculate Disk Usage", systemImage: "arrow.triangle.2.circlepath") {
+                            Task { await refreshDiskUsage() }
+                        }
+                    }
+                })
+        } else if model.disk == nil {
+            ContentUnavailableView(
+                label: {
+                    Label("The Engine Is Not Running", systemImage: "internaldrive")
+                },
+                description: {
+                    Text("Start the engine to view Docker images, containers, volumes, and build cache on disk.")
+                },
+                actions: {
+                    if busy {
+                        ProgressView("Starting Engine")
+                    } else {
+                        Button(
+                            model.engine.state == "suspended" ? "Resume Engine" : "Start Engine",
+                            systemImage: "play.fill"
+                        ) {
+                            Task { await startEngine() }
+                        }
+                    }
+                })
+        } else {
+            diskTable
+                .inspector(isPresented: $showsInspector) {
+                    inspector
+                        .inspectorColumnWidth(min: 280, ideal: 340, max: 460)
+                }
+                .onChange(of: model.disk) { _, disk in
+                    if disk != nil { selectFirstRowIfNeeded() }
+                }
+                .onChange(of: selection) { _, selectedID in
+                    if selectedID != nil { showsInspector = true }
+                }
         }
     }
 
@@ -163,11 +331,7 @@ struct DiskRootView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        // Deliberately *not* called "Refresh" and deliberately not `arrow.clockwise`:
-        // the window already carries a shared Refresh, and two identical circular arrows
-        // sitting next to each other would be two buttons that look like one mistake.
-        // This one is a different, much more expensive operation and says so.
-        ToolbarItem(id: "disk.recalculate", placement: MorbToolbarGroup.actions) {
+        ToolbarItem(id: "disk.recalculate", placement: .primaryAction) {
             Button {
                 Task { await refresh() }
             } label: {
@@ -177,114 +341,85 @@ struct DiskRootView: View {
             .disabled(busy)
             .help("Recalculate disk usage — the engine walks every layer, so this is not instant")
         }
-    }
-
-    // MARK: Usage summary
-    //
-    // The previous full-width, multi-colour canvas read as a dashboard hero rather than
-    // an operational fact. The category table below already has the useful breakdown;
-    // a compact native key/value summary lets that table carry the visual hierarchy.
-
-    private var usageSummary: some View {
-        VStack(alignment: .leading, spacing: Theme.space4) {
-            MorbSectionHeader("Storage", symbol: "internaldrive")
-            LabeledContent("Shared image layers") {
-                MorbNumber(Formatters.bytesString(usage.layersSize))
-            }
-            LabeledContent("Used by Docker") {
-                MorbNumber(Formatters.bytesString(usage.total), tone: .primary, font: .body)
-            }
-            if usage.reclaimable > 0 {
-                LabeledContent("Reclaimable") {
-                    MorbNumber(Formatters.bytesString(usage.reclaimable), tone: Theme.statusBusy, font: .body)
+        if model.disk != nil {
+            ToolbarItem(id: "disk.inspector", placement: .primaryAction) {
+                Button {
+                    showsInspector.toggle()
+                } label: {
+                    Image(systemName: "sidebar.right")
                 }
+                .accessibilityLabel(showsInspector ? "Hide inspector" : "Show inspector")
+                .help(showsInspector ? "Hide the inspector" : "Show the inspector")
             }
-            Text("Shared base layers are counted once, so their total can be smaller than the sum of image sizes.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
     }
 
-    // MARK: Category breakdown
+    // MARK: Primary table
 
-    private var categorySection: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            MorbSectionHeader("By Category", symbol: "chart.pie")
-                .padding(.bottom, Theme.space2)
-            Table(segments) {
-                TableColumn("Category") { segment in
-                    categoryCell(segment)
-                        .frame(height: Theme.rowStandard, alignment: .leading)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                TableColumn("Size") { segment in
-                    MorbNumber(Formatters.bytesString(segment.bytes), tone: .primary, font: .callout)
-                        .frame(height: Theme.rowStandard, alignment: .trailing)
-                        .frame(maxWidth: .infinity, alignment: .trailing)
-                }
-                .width(min: 76, ideal: 96, max: 130)
-                TableColumn("Reclaimable") { segment in
-                    reclaimableCell(segment)
-                        .frame(height: Theme.rowStandard, alignment: .trailing)
-                        .frame(maxWidth: .infinity, alignment: .trailing)
-                }
-                .width(min: 96, ideal: 130, max: 180)
-                TableColumn("") { segment in
-                    Button(role: .destructive) {
-                        pruning = segment.category.pruneTarget
-                    } label: {
-                        Image(systemName: "trash")
-                    }
-                    .buttonStyle(.borderless)
-                    .controlSize(.small)
-                    .accessibilityLabel("Prune \(segment.category.title)")
-                    .disabled(busy)
-                    .help(segment.category.pruneSummary)
-                    .frame(height: Theme.rowStandard, alignment: .trailing)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-                }
-                .width(min: 50, ideal: 60, max: 70)
-            }
-            .tableStyle(.automatic)
-            .frame(height: Theme.rowGroupHeader + CGFloat(segments.count) * Theme.rowStandard)
-        }
+    private var diskRows: [TrackCDiskRow] {
+        segments.map { TrackCDiskRow(content: .category($0)) }
+            + largestItems.map { TrackCDiskRow(content: .resource($0)) }
     }
 
-    private func categoryCell(_ segment: TrackCDiskSegment) -> some View {
-        HStack(spacing: Theme.space3) {
-            Circle()
-                .fill(segment.category.color)
-                .frame(width: Theme.dotSize, height: Theme.dotSize)
-            Text(segment.category.title)
-            Text(shareText(segment))
-                .font(.caption2)
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
+    private var selectedRow: TrackCDiskRow? {
+        guard let selection else { return nil }
+        return diskRows.first { $0.id == selection }
+    }
+
+    private var diskTable: some View {
+        Table(diskRows, selection: $selection) {
+            TableColumn("Item") { (row: TrackCDiskRow) in
+                Label(row.title, systemImage: row.symbol)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(row.detail ?? row.title)
+            }
+            TableColumn("Type") { (row: TrackCDiskRow) in
+                Text(row.type)
+                    .foregroundStyle(.secondary)
+            }
+            .width(min: 110, ideal: 128, max: 160)
+            TableColumn("Size") { (row: TrackCDiskRow) in
+                Text(Formatters.bytesString(row.bytes))
+                    .monospacedDigit()
+            }
+            .width(min: 80, ideal: 96, max: 120)
+            .alignment(.numeric)
+            TableColumn("Reclaimable") { (row: TrackCDiskRow) in
+                reclaimableCell(for: row)
+            }
+            .width(min: 112, ideal: 132, max: 168)
+            .alignment(.numeric)
         }
     }
 
     @ViewBuilder
-    private func reclaimableCell(_ segment: TrackCDiskSegment) -> some View {
-        if segment.reclaimableBytes > 0 {
-            Text(Formatters.bytesString(segment.reclaimableBytes) + (segment.isEstimate ? " (approx.)" : ""))
-                .font(.callout)
+    private func reclaimableCell(for row: TrackCDiskRow) -> some View {
+        if let reclaimable = row.reclaimable {
+            Text(reclaimableText(bytes: reclaimable.bytes, estimated: reclaimable.estimated))
                 .monospacedDigit()
-                .foregroundStyle(.secondary)
         } else {
-            Text("—").foregroundStyle(.tertiary)
+            Text("—")
+                .foregroundStyle(.tertiary)
         }
     }
 
-    private func shareText(_ segment: TrackCDiskSegment) -> String {
-        guard usage.total > 0 else { return "0%" }
-        return Formatters.percent(segment.fraction(of: usage.total) * 100)
+    private func reclaimableText(bytes: Int64, estimated: Bool) -> String {
+        guard bytes > 0 else { return "None" }
+        let text = Formatters.bytesString(bytes)
+        return estimated ? "\(text) (estimated)" : text
     }
 
-    // MARK: Largest items
-    //
-    // The category table answers where the bytes went; this one answers what is actually
-    // large enough to investigate. A single `Table` gives the content hierarchy of a Mac
-    // utility rather than a two-card dashboard.
+    private func canPrune(_ target: TrackCPruneTarget) -> Bool {
+        !TrackCDiskMath.prunePreview(
+            target: target,
+            usage: model.disk,
+            containers: model.containers,
+            images: model.images,
+            volumes: model.volumes).items.isEmpty
+    }
+
+    // MARK: Largest resources
 
     /// How many image and volume candidates to consider for the combined table.
     private static let biggestRows = 5
@@ -299,111 +434,116 @@ struct DiskRootView: View {
         }
     }
 
-    @ViewBuilder
-    private var biggestSection: some View {
-        let items = largestItems
-        if !items.isEmpty {
-            largestTable(items)
-        }
-    }
-
-    private func largestTable(_ items: [TrackCDiskLargestItem]) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            MorbSectionHeader("Largest Items", symbol: "arrow.up.right")
-                .padding(.bottom, Theme.space2)
-            Table(items) {
-                TableColumn("Name") { entry in
-                    Text(entry.item.label)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .help(entry.item.detail ?? entry.item.label)
-                        .frame(height: Theme.rowStandard, alignment: .leading)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                TableColumn("Kind") { entry in
-                    Label(entry.kind.title, systemImage: entry.kind.symbol)
-                        .foregroundStyle(.secondary)
-                        .frame(height: Theme.rowStandard, alignment: .leading)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .width(min: 84, ideal: 102, max: 128)
-                TableColumn("Size") { entry in
-                    MorbNumber(Formatters.bytesString(entry.item.bytes), tone: .primary, font: .callout)
-                        .frame(height: Theme.rowStandard, alignment: .trailing)
-                        .frame(maxWidth: .infinity, alignment: .trailing)
-                }
-                .width(min: 76, ideal: 92, max: 120)
-            }
-            .tableStyle(.automatic)
-            .frame(height: Theme.rowGroupHeader + CGFloat(items.count) * Theme.rowStandard)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    // MARK: VM disk image
-    //
-    // `LabeledContent` keeps these facts legible without a second rounded, material-like
-    // panel inside the already-scrolling content area. The disk file is a detail, not a
-    // dashboard card.
+    // MARK: Inspector
 
     @ViewBuilder
-    private var diskImageSection: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            MorbSectionHeader("VM Disk Image", symbol: "internaldrive")
-                .padding(.bottom, Theme.space2)
-            if let footprint {
-                VStack(alignment: .leading, spacing: Theme.space3) {
-                    LabeledContent("Apparent", value: Formatters.bytesString(footprint.apparentBytes))
-                    LabeledContent("Actual on APFS", value: Formatters.bytesString(footprint.actualBytes))
-                    LabeledContent("Allocated", value: Formatters.percent(footprint.occupancy * 100))
-                    LabeledContent("Path") {
-                        Text(footprint.path)
-                            .font(.system(.callout, design: .monospaced))
-                            .textSelection(.enabled)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
+    private var inspector: some View {
+        if let selectedRow {
+            Form {
+                Section {
+                    LabeledContent("Type", value: selectedRow.type)
+                    LabeledContent("Size", value: Formatters.bytesString(selectedRow.bytes))
+                    if let reclaimable = selectedRow.reclaimable {
+                        LabeledContent(
+                            "Reclaimable",
+                            value: reclaimableText(bytes: reclaimable.bytes, estimated: reclaimable.estimated))
                     }
-                    Divider()
-                    footnoteExplanation(footprint)
-                        .fixedSize(horizontal: false, vertical: true)
+                    if let detail = selectedRow.detail {
+                        LabeledContent("Details") {
+                            Text(detail)
+                                .textSelection(.enabled)
+                                .lineLimit(2)
+                                .truncationMode(.middle)
+                        }
+                    }
+                } header: {
+                    Label(selectedRow.title, systemImage: selectedRow.symbol)
+                } footer: {
+                    if selectedRow.category != nil {
+                        Text("Shared image layers are counted once, so category totals can differ from the sum of individual image sizes.")
+                    }
                 }
-                .padding(.vertical, Theme.space2)
-            } else {
-                Text("No VM disk image yet. Morbstack creates one when the engine starts.")
+
+                if let category = selectedRow.category {
+                    Section {
+                        Button("Prune \(category.title)…", role: .destructive) {
+                            pruning = category.pruneTarget
+                        }
+                        .disabled(busy || !canPrune(category.pruneTarget))
+                        .help(category.pruneSummary)
+                    } footer: {
+                        Text(category.pruneSummary)
+                    }
+                }
+
+                diskImageFacts
+            }
+        } else {
+            ContentUnavailableView(
+                label: {
+                    Label("Select a Storage Item", systemImage: "internaldrive")
+                },
+                description: {
+                    Text("Choose a category or resource to inspect its details.")
+                })
+        }
+    }
+
+    @ViewBuilder
+    private var diskImageFacts: some View {
+        if let footprint {
+            Section {
+                LabeledContent("Apparent", value: Formatters.bytesString(footprint.apparentBytes))
+                LabeledContent("Actual on APFS", value: Formatters.bytesString(footprint.actualBytes))
+                ProgressView(value: footprint.occupancy) {
+                    Text("Allocated")
+                } currentValueLabel: {
+                    Text(Formatters.percent(footprint.occupancy * 100))
+                        .monospacedDigit()
+                }
+                LabeledContent("Path") {
+                    Text(footprint.path)
+                        .font(.system(.body, design: .monospaced))
+                        .textSelection(.enabled)
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                }
+            } header: {
+                Text("Virtual Machine Disk")
+            } footer: {
+                Text(footprintExplanation(footprint))
+            }
+        } else {
+            Section {
+                Text("No disk image yet.")
                     .foregroundStyle(.secondary)
-                    .padding(.vertical, Theme.space2)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            } header: {
+                Text("Virtual Machine Disk")
+            } footer: {
+                Text("Morbstack creates the VM disk image when the engine starts.")
             }
         }
     }
 
-    /// Inline code rendered as a monospaced run rather than as literal backtick
-    /// characters — see `docs/design/IDENTITY.md` §3.3. Built as one `Text`
-    /// concatenation so the whole paragraph still wraps as a single block.
-    private func footnoteExplanation(_ footprint: TrackCDiskImageFootprint) -> Text {
-        func plain(_ string: String) -> Text {
-            Text(string).font(.caption).foregroundColor(.secondary)
+    private func footprintExplanation(_ footprint: TrackCDiskImageFootprint) -> String {
+        if footprint.isSparse {
+            return "This sparse file reserves \(Formatters.bytesString(footprint.apparentBytes)) but currently uses \(Formatters.bytesString(footprint.actualBytes)) on APFS."
         }
-        func code(_ string: String) -> Text {
-            Text(string).font(.system(.caption, design: .monospaced)).foregroundColor(.primary)
-        }
-        guard footprint.isSparse else {
-            return plain(
-                "This image is close to fully allocated, so the apparent and actual figures agree. "
-                + "Space freed inside the guest is not automatically returned to APFS — the file keeps "
-                + "its blocks until it is trimmed or recreated.")
-        }
-        return plain("The image is a sparse file: it is created at its full size but only consumes blocks "
-                      + "the guest has written. Finder, ")
-            + code("ls -l")
-            + plain(" and ")
-            + code("du --apparent-size")
-            + plain(" all report the apparent figure — the actual one is ")
-            + code("st_blocks × 512")
-            + plain(", and it is \(Formatters.bytesString(footprint.savedBytes)) smaller right now.")
+        return "This image is close to fully allocated. Space freed inside the guest remains allocated on APFS until the file is trimmed or recreated."
     }
 
     // MARK: Operations
+
+    private var operationErrorBinding: Binding<Bool> {
+        Binding(
+            get: { operationError != nil },
+            set: { if !$0 { operationError = nil } })
+    }
+
+    private func selectFirstRowIfNeeded() {
+        guard selection == nil else { return }
+        selection = diskRows.first?.id
+    }
 
     @MainActor
     private func refresh() async {
@@ -411,6 +551,23 @@ struct DiskRootView: View {
         defer { busy = false }
         await model.refreshAll()
         await loadFootprint()
+        selectFirstRowIfNeeded()
+    }
+
+    @MainActor
+    private func refreshDiskUsage() async {
+        busy = true
+        defer { busy = false }
+        await model.refreshDisk()
+        await loadFootprint()
+        selectFirstRowIfNeeded()
+    }
+
+    @MainActor
+    private func startEngine() async {
+        busy = true
+        defer { busy = false }
+        await model.engineAction(.start)
     }
 
     /// Reads `disk.img`'s real footprint off the main actor.
@@ -430,22 +587,17 @@ struct DiskRootView: View {
         busy = true
         defer { busy = false }
         do {
-            let reclaimed: Int64
             switch target {
-            case .containers: reclaimed = try await model.client.pruneContainers()
-            case .images: reclaimed = try await model.client.pruneImages()
-            case .volumes: reclaimed = try await model.client.pruneVolumes()
-            case .buildCache: reclaimed = try await model.client.pruneBuildCache()
+            case .containers: _ = try await model.client.pruneContainers()
+            case .images: _ = try await model.client.pruneImages()
+            case .volumes: _ = try await model.client.pruneVolumes()
+            case .buildCache: _ = try await model.client.pruneBuildCache()
             }
-            toast = reclaimed > 0
-                ? .success(
-                    "Reclaimed \(Formatters.bytesString(reclaimed))",
-                    detail: "\(target.category.title) pruned")
-                : .info("Nothing to reclaim", detail: "\(target.category.title) were already clean")
             await model.refreshAll()
             await loadFootprint()
+            selectFirstRowIfNeeded()
         } catch {
-            toast = .failure("Prune failed", detail: trackCErrorText(error))
+            operationError = MorbErrorMessage.text(for: error)
         }
     }
 }

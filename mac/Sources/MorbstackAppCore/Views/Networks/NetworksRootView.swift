@@ -9,11 +9,9 @@
 // the list looking like ordinary rows with a broken delete button, they are pushed to
 // their own section, drawn at reduced emphasis, and carry a lock instead of a trash can.
 //
-// A real `Table` replaces the hand-rolled grid, grouped into the two sections `Table`
-// itself supports, and a detail pane gives the screen something to show besides a thin
-// row of five short strings — see `docs/design/CRITIQUE.md` on the empty Networks window.
-// The pane is a real `.inspector(isPresented:)` trailing column — see the note in
-// `VolumesRootView` about why the old `HSplitView` was the screenshot harness talking.
+// A standard `Table` presents the two operational groups, while selection reveals the
+// chosen network's facts in the system inspector. This keeps inventory, selection, and
+// detail as distinct macOS interactions instead of a hand-built split layout.
 
 import AppKit
 import SwiftUI
@@ -98,19 +96,25 @@ struct TrackCNetworkComparator: SortComparator {
     func compare(_ lhs: NetworkSummary, _ rhs: NetworkSummary) -> ComparisonResult {
         let result: ComparisonResult
         switch key {
-        case .name: result = trackCCompareStrings(lhs.name, rhs.name)
+        case .name: result = MorbSort.string(lhs.name, rhs.name)
         case .driver:
             result = lhs.driver == rhs.driver
-                ? trackCCompareStrings(lhs.name, rhs.name)
-                : trackCCompareStrings(lhs.driver, rhs.driver)
+                ? MorbSort.string(lhs.name, rhs.name)
+                : MorbSort.string(lhs.driver, rhs.driver)
         case .scope:
             result = lhs.scope == rhs.scope
-                ? trackCCompareStrings(lhs.name, rhs.name)
-                : trackCCompareStrings(lhs.scope, rhs.scope)
-        case .containers: result = trackCCompareInt(lhs.containers, rhs.containers)
+                ? MorbSort.string(lhs.name, rhs.name)
+                : MorbSort.string(lhs.scope, rhs.scope)
+        case .containers: result = MorbSort.int(lhs.containers, rhs.containers)
         }
         return order == .forward ? result : result.reversed
     }
+}
+
+private struct NetworkOperationAlert {
+    var title: String
+    var message: String
+    var focusID: NetworkSummary.ID?
 }
 
 // MARK: - Root
@@ -124,9 +128,9 @@ struct NetworksRootView: View {
     @State private var selection: NetworkSummary.ID?
 
     @State private var removal: NetworkSummary?
-    @State private var showingPruneSheet = false
+    @State private var showingPruneConfirmation = false
     @State private var busy = false
-    @State private var toast: TrackCToast?
+    @State private var operationAlert: NetworkOperationAlert?
     /// Whether the trailing inspector column is open. SwiftUI restores this across
     /// launches for a trailing-column inspector, so it is not persisted here.
     @State private var showsInspector = true
@@ -155,25 +159,27 @@ struct NetworksRootView: View {
 
     var body: some View {
         content
-            .morbScreen(title: "Networks", subtitle: subtitle, edge: .hard)
+            .navigationTitle("Networks")
+            .navigationSubtitle(subtitle)
             .searchable(text: $query, placement: .toolbar, prompt: "Name, driver, ID")
             .toolbar { toolbarContent }
-            .trackCToast($toast)
-            .sheet(isPresented: $showingPruneSheet) {
+            .confirmationDialog(
+                "Remove unused networks?",
+                isPresented: $showingPruneConfirmation,
+                titleVisibility: .visible
+            ) {
                 let unused = TrackCNetworkList.unused(model.networks)
-                TrackCConfirmSheet(
-                    title: "Remove unused networks",
-                    symbol: "network.badge.shield.half.filled",
-                    explanation:
-                        "These user-defined networks have no containers attached. Removing one is cheap — "
-                        + "a compose stack recreates its network the next time it comes up.",
-                    items: unused.map {
-                        TrackCPruneItem(id: $0.id, title: $0.name, detail: "\($0.driver) · \($0.scope)", bytes: nil)
-                    },
-                    knownBytes: 0,
-                    hasUnknownSizes: false,
-                    confirmTitle: "Remove \(unused.count)",
-                    onConfirm: { Task { await pruneUnused() } })
+                Button(
+                    "Remove \(unused.count) Unused Network\(unused.count == 1 ? "" : "s")",
+                    role: .destructive
+                ) {
+                    Task { await pruneUnused() }
+                }
+            } message: {
+                let unused = TrackCNetworkList.unused(model.networks)
+                Text(
+                    "These \(unused.count) user-defined network\(unused.count == 1 ? "" : "s") have no "
+                        + "attached containers. Compose recreates a network the next time its stack starts.")
             }
             .alert(
                 removal.map { "Remove \($0.name)?" } ?? "",
@@ -191,12 +197,39 @@ struct NetworksRootView: View {
                     Text("Containers created on this network later will need it recreated.")
                 }
             }
+            .alert(
+                operationAlert?.title ?? "",
+                isPresented: Binding(
+                    get: { operationAlert != nil },
+                    set: { if !$0 { operationAlert = nil } }
+                ),
+                presenting: operationAlert
+            ) { alert in
+                if let id = alert.focusID {
+                    Button("Show Network") {
+                        selection = id
+                        showsInspector = true
+                    }
+                }
+                Button("OK", role: .cancel) {}
+            } message: { alert in
+                Text(alert.message)
+            }
             .onDeleteCommand {
-                guard let selection,
+                guard !busy,
+                      let selection,
                       let network = model.networks.first(where: { $0.id == selection }),
                       !network.isBuiltIn
                 else { return }
                 removal = network
+            }
+            .onChange(of: query) { _, _ in
+                let split = sections
+                let visible = split.custom + split.builtIn
+                if let selection,
+                   !visible.contains(where: { $0.id == selection }) {
+                    self.selection = visible.first?.id
+                }
             }
             // Selects the first row so the inspector opens with something to show — see
             // the identical note in `VolumesRootView`.
@@ -209,19 +242,36 @@ struct NetworksRootView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        ToolbarItem(id: "networks.removeUnused", placement: MorbToolbarGroup.secondary) {
-            Button {
-                showingPruneSheet = true
-            } label: {
-                Label("Remove Unused", systemImage: "trash")
+        ToolbarItem(id: "networks.removeUnused", placement: .secondaryAction) {
+            if busy {
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityLabel("Removing networks")
+            } else {
+                Button(role: .destructive) {
+                    showingPruneConfirmation = true
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .disabled(unusedCount == 0)
+                .accessibilityLabel("Remove unused networks")
+                .help(
+                    unusedCount == 0
+                        ? "Every user-defined network has containers attached"
+                        : "Review and remove \(unusedCount) unused network\(unusedCount == 1 ? "" : "s")")
             }
-            .disabled(unusedCount == 0 || busy)
-            .help(
-                unusedCount == 0
-                    ? "Every user-defined network has containers attached"
-                    : "Review and remove \(unusedCount) unused network\(unusedCount == 1 ? "" : "s")")
         }
-        MorbInspectorToggle(id: "networks.inspector", isPresented: $showsInspector)
+        if !model.networks.isEmpty {
+            ToolbarItem(id: "networks.inspector", placement: .primaryAction) {
+                Button {
+                    showsInspector.toggle()
+                } label: {
+                    Image(systemName: "sidebar.right")
+                }
+                .accessibilityLabel(showsInspector ? "Hide inspector" : "Show inspector")
+                .help(showsInspector ? "Hide the inspector" : "Show the inspector")
+            }
+        }
     }
 
     // MARK: Content
@@ -230,28 +280,23 @@ struct NetworksRootView: View {
     private var content: some View {
         let split = sections
         if model.networks.isEmpty {
-            MorbEmptyState(
-                "No networks",
-                systemImage: "network",
-                description: "Docker's three built-in networks appear here once the engine has fully come up."
-            ) {
+            ContentUnavailableView {
+                Label("No Networks", systemImage: "network")
+            } description: {
+                Text("Docker's built-in networks appear here once the engine has started.")
+            } actions: {
                 Button {
                     Task { await model.refreshAll() }
                 } label: {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
-                .morbButton(.standard)
             }
         } else if split.custom.isEmpty && split.builtIn.isEmpty {
-            MorbNoMatches(query: query)
+            ContentUnavailableView.search(text: query)
         } else {
             table(split)
                 .inspector(isPresented: $showsInspector) {
                     detailPane
-                        .inspectorColumnWidth(
-                            min: Theme.inspectorMinWidth,
-                            ideal: Theme.inspectorWidth,
-                            max: 460)
                 }
         }
     }
@@ -260,29 +305,19 @@ struct NetworksRootView: View {
         Table(of: NetworkSummary.self, selection: $selection, sortOrder: $sortOrder) {
             TableColumn("Name", sortUsing: TrackCNetworkComparator(key: .name)) { network in
                 nameCell(network)
-                    .frame(height: Theme.rowStandard, alignment: .leading)
-                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             TableColumn("Driver", sortUsing: TrackCNetworkComparator(key: .driver)) { network in
                 Text(network.driver)
                     .foregroundStyle(.secondary)
-                    .frame(height: Theme.rowStandard, alignment: .leading)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .opacity(network.isBuiltIn ? 0.8 : 1)
             }
             .width(min: 84, ideal: 100, max: 140)
             TableColumn("Scope", sortUsing: TrackCNetworkComparator(key: .scope)) { network in
                 Text(network.scope)
                     .foregroundStyle(.secondary)
-                    .frame(height: Theme.rowStandard, alignment: .leading)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .opacity(network.isBuiltIn ? 0.8 : 1)
             }
             .width(min: 64, ideal: 78, max: 110)
             TableColumn("Containers", sortUsing: TrackCNetworkComparator(key: .containers)) { network in
                 containersCell(network)
-                    .frame(height: Theme.rowStandard, alignment: .trailing)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
             }
             .width(min: 76, ideal: 92, max: 120)
         } rows: {
@@ -292,34 +327,20 @@ struct NetworksRootView: View {
                 }
             }
             if !split.builtIn.isEmpty {
-                Section("Built in") {
+                Section("Built-in") {
                     ForEach(split.builtIn) { TableRow($0) }
                 }
             }
         }
-        .tableStyle(.inset)
-        .alternatingRowBackgrounds()
         .contextMenu(forSelectionType: NetworkSummary.ID.self) { ids in
             contextMenu(for: ids)
-        } primaryAction: { ids in
-            if let id = ids.first { selection = id }
         }
     }
 
     private func nameCell(_ network: NetworkSummary) -> some View {
-        HStack(spacing: Theme.space2) {
-            MorbStatusDot(tone: network.isBuiltIn ? .idle : (network.containers > 0 ? .running : .idle))
-            Text(network.name)
-                .lineLimit(1)
-                .truncationMode(.middle)
-            if network.isBuiltIn {
-                Image(systemName: "lock.fill")
-                    .font(.system(size: 8))
-                    .foregroundStyle(.tertiary)
-                    .help("Built-in network — Docker will not let this be removed")
-            }
-        }
-        .opacity(network.isBuiltIn ? 0.8 : 1)
+        Text(network.name)
+            .lineLimit(1)
+            .truncationMode(.middle)
     }
 
     @ViewBuilder
@@ -328,20 +349,19 @@ struct NetworksRootView: View {
             Text(network.containers, format: .number)
                 .monospacedDigit()
         } else {
-            Text("none")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
+            Text("None")
         }
     }
 
     @ViewBuilder
     private func contextMenu(for ids: Set<NetworkSummary.ID>) -> some View {
         if let id = ids.first, let network = model.networks.first(where: { $0.id == id }) {
-            Button("Copy Name") { trackCCopy(network.name) }
-            Button("Copy Network ID") { trackCCopy(network.id) }
+            Button("Copy Name") { MorbPasteboard.copy(network.name) }
+            Button("Copy Network ID") { MorbPasteboard.copy(network.id) }
             if !network.isBuiltIn {
                 Divider()
                 Button("Remove…", role: .destructive) { removal = network }
+                    .disabled(busy)
             }
         }
     }
@@ -392,7 +412,7 @@ struct NetworksRootView: View {
                         } label: {
                             Label("Remove Network", systemImage: "trash")
                         }
-                        .disabled(network.containers > 0)
+                        .disabled(network.containers > 0 || busy)
                         .help(
                             network.containers > 0
                                 ? "Disconnect every attached container first"
@@ -412,36 +432,36 @@ struct NetworksRootView: View {
 
     @MainActor
     private func remove(_ network: NetworkSummary) async {
-        guard !network.isBuiltIn else { return }
+        guard !network.isBuiltIn, !busy else { return }
         busy = true
         defer { busy = false }
         do {
             try await model.client.removeNetwork(id: network.id)
-            toast = .success("Removed \(network.name)")
             if selection == network.id { selection = nil }
             await model.refreshAll()
         } catch {
-            toast = .failure("Could not remove \(network.name)", detail: trackCErrorText(error))
+            operationAlert = NetworkOperationAlert(
+                title: "Could not remove \(network.name)",
+                message: MorbErrorMessage.text(for: error),
+                focusID: network.id)
         }
     }
 
     @MainActor
     private func pruneUnused() async {
+        guard !busy else { return }
         busy = true
         defer { busy = false }
-        let before = unusedCount
         do {
             // `/networks/prune` reclaims no bytes worth reporting, so the toast counts
             // networks instead of pretending a disk saving happened.
             _ = try await model.client.pruneNetworks()
             await model.refreshAll()
-            let after = TrackCNetworkList.unused(model.networks).count
-            let removed = max(0, before - after)
-            toast = removed > 0
-                ? .success("Removed \(removed) network\(removed == 1 ? "" : "s")")
-                : .info("Nothing was removed", detail: "The engine kept every unused network.")
         } catch {
-            toast = .failure("Prune failed", detail: trackCErrorText(error))
+            operationAlert = NetworkOperationAlert(
+                title: "Could not remove unused networks",
+                message: MorbErrorMessage.text(for: error),
+                focusID: TrackCNetworkList.unused(model.networks).first?.id)
         }
     }
 }

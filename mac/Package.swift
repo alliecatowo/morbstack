@@ -22,9 +22,8 @@ let package = Package(
     ],
     products: [
         .library(name: "MorbstackKit", targets: ["MorbstackKit"]),
-        // The app, as a library. Both the `.app` executable and the offscreen
-        // screenshot harness link this, which is what keeps the screenshots pictures
-        // of the shipping views rather than of a parallel copy of them.
+        // The app core is a library so the bundle executable, deterministic tour
+        // fixtures, and fixture diagnostics share the shipping models and views.
         .library(name: "MorbstackAppCore", targets: ["MorbstackAppCore"]),
         .executable(name: "morbstackd", targets: ["morbstackd"]),
         .executable(name: "morb", targets: ["morb"]),
@@ -86,9 +85,9 @@ let package = Package(
         // The SwiftUI app. Same zero-dependency rule as everything else: SwiftUI +
         // Foundation + MorbstackKit, no web views, no packages to resolve.
         //
-        // A library rather than the executable itself: `MorbShots` renders these exact
-        // views offscreen, and SwiftPM cannot link an executable target into another
-        // target. The executable below is a three-line shim over it.
+        // A library rather than the executable itself lets the small bundle entry point
+        // and fixture-diagnostics executable share one implementation. The app target
+        // below remains a three-line shim over it.
         .target(
             name: "MorbstackAppCore",
             dependencies: ["MorbstackKit"],
@@ -99,9 +98,9 @@ let package = Package(
             dependencies: ["MorbstackAppCore"],
             swiftSettings: commonSwiftSettings
         ),
-        // The offscreen screenshot harness. Renders the production views through
-        // `ImageRenderer`, which needs no window, no display and no screen-recording
-        // permission — see Sources/MorbstackAppCore/Shots.
+        // Deterministic fixture diagnostics. `MorbShots` is a compatibility product
+        // name; it checks fixture invariants and produces no visual evidence. Native
+        // window validation belongs to XCUITest and Computer Use.
         .executableTarget(
             name: "MorbShots",
             dependencies: ["MorbstackAppCore"],

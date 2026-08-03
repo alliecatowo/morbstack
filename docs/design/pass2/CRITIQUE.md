@@ -1,4 +1,10 @@
-# CRITIQUE — Morbstack visual state, 2026-08
+# CRITIQUE — archived second-pass visual evidence
+
+> **Historical record — nonbinding.** These notes describe the pre-migration app from
+> synthetic renders. They explain the custom-web-dashboard failure modes but cannot
+> prescribe a replacement or accept a native route. Current review follows the
+> [native macOS playbook](../NATIVE-MACOS-PLAYBOOK.md), the
+> [HIG coverage audit](../HIG-COVERAGE-AUDIT.md), and real-window inspection.
 
 Source: the ten 2× production renders in `/Users/allie/Develop/morbstack/dist/shots/` plus
 `REPORT.md`. Everything below is something visible in those files. Where `REPORT.md` already

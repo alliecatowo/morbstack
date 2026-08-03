@@ -27,8 +27,8 @@ glue.
   feature.
 - **No telemetry.** Verified by grepping `mac/Sources` for any
   analytics/telemetry SDK: there isn't one. (The only hits for words like
-  "analytics" or "sentry" in that tree are fixture strings the demo
-  screenshot harness uses to fake a realistic container list — not code
+  "analytics" or "sentry" in that tree are deterministic fixture strings used for
+  local app/UI-test data — not code
   that runs, and not data that goes anywhere.)
 - **Unmodified upstream `dockerd`.** Morbstack doesn't fork or patch
   Docker Engine — it fetches the real static Docker release binaries and
@@ -101,22 +101,18 @@ from real Docker that pass every manual test and then break exactly one
 person's CI script (a `docker run -p` against an already-bound host port
 succeeds where Docker Desktop fails synchronously, for example).
 
-## Screenshots
+## Native-window validation
 
-Real offscreen renders of the shipping SwiftUI views (not mockups — the
-capture harness links the same `MorbstackAppCore` target the app ships),
-shown with demo fixture data, not a live engine.
+The repository deliberately does not publish synthetic inner-content screenshots as
+evidence of the native UI. A headless SwiftUI/AppKit image cannot represent the macOS
+window frame, traffic lights, unified toolbar, sidebar material, inspector, focus, or
+Liquid Glass composition that WindowServer owns.
 
-<table>
-<tr>
-<td><img src="docs/img/containers-light.png" alt="Containers list, light mode" width="400"></td>
-<td><img src="docs/img/container-logs-dark.png" alt="Container logs, dark mode" width="400"></td>
-</tr>
-<tr>
-<td><img src="docs/img/kubernetes-dark.png" alt="Kubernetes cluster view, dark mode" width="400"></td>
-<td><img src="docs/img/disk-light.png" alt="Disk usage, light mode" width="400"></td>
-</tr>
-</table>
+`swift run MorbShots` validates deterministic fixture data only; it writes no images.
+For a visual review, launch the fixture-backed app in a real window and inspect it with
+Computer Use in both appearances and at normal/narrow widths. A future macOS XCUITest
+host will add repeatable accessibility and full-window screenshot assertions. See
+[`docs/design/NATIVE-MACOS-PLAYBOOK.md`](docs/design/NATIVE-MACOS-PLAYBOOK.md).
 
 ## Requirements
 
