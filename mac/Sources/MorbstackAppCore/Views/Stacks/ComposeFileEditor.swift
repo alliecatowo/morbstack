@@ -99,7 +99,7 @@ final class ComposeFileEditor {
         case revert
     }
 
-    static let yamlContentTypes = ["yaml", "yml"].compactMap(UTType.init(filenameExtension:))
+    static let yamlContentTypes = ["yaml", "yml"].compactMap { UTType(filenameExtension: $0) }
 
     private static let utf8BOM = Data([0xEF, 0xBB, 0xBF])
 
@@ -244,7 +244,7 @@ final class ComposeFileEditor {
         saveError = nil
     }
 
-    nonisolated fileprivate static func validateSourceFile(_ url: URL, as sourceKind: ComposeProjectSourceKind) throws {
+    nonisolated static func validateSourceFile(_ url: URL, as sourceKind: ComposeProjectSourceKind) throws {
         try sourceKind.validateSelectedFileName(url)
         let fileManager = FileManager.default
         var isDirectory = ObjCBool(false)
@@ -260,7 +260,7 @@ final class ComposeFileEditor {
         }
     }
 
-    nonisolated fileprivate static func coordinatedRead(_ url: URL) throws -> Data {
+    nonisolated static func coordinatedRead(_ url: URL) throws -> Data {
         let coordinator = NSFileCoordinator()
         var coordinationError: NSError?
         var result: Result<Data, Error>?

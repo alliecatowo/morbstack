@@ -163,11 +163,12 @@ final class ComposeSourceValidationModel {
         liveDiagnostics = ""
         isCancellationRequested = false
         phase = .running(request)
-        task = Task { [weak self] in
+        let diagnostics = ComposeSourceValidationDiagnosticsRelay { [weak self] chunk in
+            self?.append(chunk)
+        }
+        task = Task { [weak self, diagnostics] in
             let result = await ComposeSourceValidationRunner.run(request) { chunk in
-                Task { @MainActor [weak self] in
-                    self?.append(chunk)
-                }
+                diagnostics.send(chunk)
             }
             guard let self else { return }
             phase = .result(request, result)
@@ -200,6 +201,24 @@ final class ComposeSourceValidationModel {
     private func append(_ chunk: String) {
         guard isRunning else { return }
         liveDiagnostics += chunk
+    }
+}
+
+/// Bridges a worker's Sendable output callback to the validation model's main-actor
+/// state. The immutable closure can only be invoked on the main actor, so the relay
+/// has no mutable state shared with the Compose process worker.
+private final class ComposeSourceValidationDiagnosticsRelay: Sendable {
+    private let append: @MainActor @Sendable (String) -> Void
+
+    init(append: @escaping @MainActor @Sendable (String) -> Void) {
+        self.append = append
+    }
+
+    func send(_ chunk: String) {
+        let handler = append
+        Task { @MainActor in
+            handler(chunk)
+        }
     }
 }
 
