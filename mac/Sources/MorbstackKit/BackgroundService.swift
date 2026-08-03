@@ -271,7 +271,12 @@ public enum MorbBackgroundService {
             }
             return "registered but disabled in Login Items; run `morb service settings` and enable Morbstack"
         case .notFound:
-            return "macOS could not find the service; run `morb service enable` from the installed app bundle"
+            // A complete bundle with no existing registration commonly presents as
+            // `notFound` on a development-signed app. Treat it as actionable setup,
+            // while still explaining the other benign cause: a moved app after an
+            // earlier registration. Neither case warrants implying that Docker data
+            // or another runtime is damaged.
+            return "not enabled (or this app was moved after an earlier registration); run `morb service enable` from the installed app bundle"
         case .unknown:
             return "macOS returned an unrecognized background-service state; inspect Login Items"
         }
