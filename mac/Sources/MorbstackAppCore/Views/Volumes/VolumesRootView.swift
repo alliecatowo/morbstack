@@ -17,6 +17,7 @@
 
 import AppKit
 import Foundation
+import MorbFeatures
 import MorbstackKit
 import SwiftUI
 
@@ -240,6 +241,9 @@ struct VolumesRootView: View {
     @State private var removal: VolumeSummary?
     @State private var busy = false
     @State private var operationAlert: VolumeOperationAlert?
+    @State private var volumeArchiveExport: VolumeArchiveExportOperation?
+    @State private var volumeArchiveExportCancellation: VolumeArchiveExportCancellation?
+    @State private var volumeArchiveExportNotice: VolumeArchiveExportNotice?
     /// Whether the trailing inspector column is open. SwiftUI restores this across
     /// launches for a trailing-column inspector, so it is not persisted here.
     @State private var showsInspector = true
@@ -265,6 +269,25 @@ struct VolumesRootView: View {
         return model.volumes.first { $0.id == selection }
     }
 
+    private var isPerformingVolumeOperation: Bool {
+        busy || volumeArchiveExport != nil
+    }
+
+    private var canExportSelectedVolume: Bool {
+        guard let selectedVolume else { return false }
+        return selectedVolume.driver == "local" && !isPerformingVolumeOperation
+    }
+
+    private var volumeArchiveExportHelp: String {
+        guard let selectedVolume else { return "Select a local volume to export" }
+        guard selectedVolume.driver == "local" else {
+            return "Only Docker local-driver volumes can be exported"
+        }
+        if volumeArchiveExport != nil { return "A volume archive export is already in progress" }
+        if busy { return "Wait for the current volume operation to finish" }
+        return "Export the selected volume as a tar archive"
+    }
+
     var body: some View {
         lifecycleContent
     }
@@ -282,8 +305,34 @@ struct VolumesRootView: View {
             }
     }
 
-    private var removalConfirmationContent: some View {
+    private var volumeArchiveExportSheetContent: some View {
         routeContent
+            .sheet(item: $volumeArchiveExport) { operation in
+                VolumeArchiveExportSheet(operation: operation, cancel: cancelVolumeArchiveExport)
+                    .interactiveDismissDisabled()
+            }
+    }
+
+    private var volumeArchiveExportNoticeContent: some View {
+        volumeArchiveExportSheetContent
+            .alert(
+                volumeArchiveExportNotice?.title ?? "",
+                isPresented: volumeArchiveExportNoticePresented,
+                presenting: volumeArchiveExportNotice
+            ) { notice in
+                if let destination = notice.destination {
+                    Button("Show in Finder") {
+                        NSWorkspace.shared.activateFileViewerSelecting([destination])
+                    }
+                }
+                Button("OK", role: .cancel) {}
+            } message: { notice in
+                Text(notice.message)
+            }
+    }
+
+    private var removalConfirmationContent: some View {
+        volumeArchiveExportNoticeContent
             .alert(
                 removal.map { "Remove \($0.name)?" } ?? "",
                 isPresented: Binding(get: { removal != nil }, set: { if !$0 { removal = nil } }),
@@ -324,10 +373,16 @@ struct VolumesRootView: View {
             }
     }
 
+    private var volumeArchiveExportNoticePresented: Binding<Bool> {
+        Binding(
+            get: { volumeArchiveExportNotice != nil },
+            set: { if !$0 { volumeArchiveExportNotice = nil } })
+    }
+
     private var lifecycleContent: some View {
         operationAlertContent
             .onDeleteCommand {
-                guard !busy,
+                guard !isPerformingVolumeOperation,
                       let selection,
                       let volume = model.volumes.first(where: { $0.id == selection })
                 else { return }
@@ -362,13 +417,23 @@ struct VolumesRootView: View {
                 } label: {
                     Image(systemName: "trash")
                 }
-                .disabled(unusedCount == 0)
+                .disabled(unusedCount == 0 || isPerformingVolumeOperation)
                 .accessibilityLabel("Remove unused volumes")
                 .help(
                     unusedCount == 0
                         ? "Every volume is attached to a container"
                         : "Review and remove \(unusedCount) unused volume\(unusedCount == 1 ? "" : "s")")
             }
+        }
+        ToolbarItem(id: "volumes.export", placement: .secondaryAction) {
+            Button {
+                chooseVolumeArchiveDestination()
+            } label: {
+                Image(systemName: "square.and.arrow.down")
+            }
+            .accessibilityLabel("Export selected volume")
+            .help(volumeArchiveExportHelp)
+            .disabled(!canExportSelectedVolume)
         }
         if !model.volumes.isEmpty {
             ToolbarItem(id: "volumes.inspector", placement: .primaryAction) {
@@ -463,8 +528,13 @@ struct VolumesRootView: View {
                 Button("Copy Mount Point") { MorbPasteboard.copy(volume.mountpoint) }
             }
             Divider()
+            Button("Export Volume Archive…") {
+                chooseVolumeArchiveDestination(for: volume)
+            }
+            .disabled(volume.driver != "local" || isPerformingVolumeOperation)
+            Divider()
             Button("Remove…", role: .destructive) { removal = volume }
-                .disabled(busy)
+                .disabled(isPerformingVolumeOperation)
         }
     }
 
@@ -511,6 +581,13 @@ struct VolumesRootView: View {
 
                 Section {
                     Button {
+                        chooseVolumeArchiveDestination(for: volume)
+                    } label: {
+                        Label("Export Volume Archive…", systemImage: "square.and.arrow.down")
+                    }
+                    .disabled(volume.driver != "local" || isPerformingVolumeOperation)
+
+                    Button {
                         revealInFinder(volume)
                     } label: {
                         Label("Reveal in Finder", systemImage: "folder")
@@ -522,7 +599,7 @@ struct VolumesRootView: View {
                     } label: {
                         Label("Remove Volume", systemImage: "trash")
                     }
-                    .disabled(busy)
+                    .disabled(isPerformingVolumeOperation)
                 }
             }
         } else {
@@ -540,6 +617,99 @@ struct VolumesRootView: View {
 
     // MARK: Operations
 
+    /// Uses the system save panel for the explicit selected-volume command. The panel
+    /// owns destination choice and replacement confirmation; the service repeats the
+    /// output safety checks before it ever publishes an archive.
+    @MainActor
+    private func chooseVolumeArchiveDestination() {
+        guard let selectedVolume else { return }
+        chooseVolumeArchiveDestination(for: selectedVolume)
+    }
+
+    @MainActor
+    private func chooseVolumeArchiveDestination(for volume: VolumeSummary) {
+        guard volume.driver == "local", !isPerformingVolumeOperation else { return }
+
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.tarArchive]
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.nameFieldStringValue = "morbstack-volume-\(volume.name).tar"
+        panel.message = "Save an archive of the selected local Docker volume. The volume remains unchanged."
+        panel.prompt = "Export"
+
+        guard panel.runModal() == .OK, let outputURL = panel.url else { return }
+
+        // NSSavePanel owns the system replacement confirmation. The service validates
+        // this again and publishes only after its temporary stopped helper is removed.
+        let replaceExisting = FileManager.default.fileExists(atPath: outputURL.path)
+        let cancellation = VolumeArchiveExportCancellation()
+        let operation = VolumeArchiveExportOperation(volumeName: volume.name, outputURL: outputURL)
+        volumeArchiveExport = operation
+        volumeArchiveExportCancellation = cancellation
+
+        let operationID = operation.id
+        let volumeName = volume.name
+        let progressRelay = VolumeArchiveExportProgressRelay { progress in
+            self.recordVolumeArchiveExportProgress(progress, for: operationID)
+        }
+        Task.detached(priority: .userInitiated) {
+            do {
+                let result = try VolumeArchiveExporter.export(
+                    volumeName: volumeName,
+                    to: outputURL,
+                    replaceExisting: replaceExisting,
+                    onProgress: { progress in
+                        guard !cancellation.isRequested else { return false }
+                        progressRelay.send(progress)
+                        return true
+                    })
+                await self.finishVolumeArchiveExport(.success(result), for: operationID)
+            } catch {
+                await self.finishVolumeArchiveExport(.failure(error), for: operationID)
+            }
+        }
+    }
+
+    @MainActor
+    private func cancelVolumeArchiveExport() {
+        guard var operation = volumeArchiveExport, !operation.isCancellationRequested else { return }
+        operation.isCancellationRequested = true
+        volumeArchiveExport = operation
+        volumeArchiveExportCancellation?.request()
+    }
+
+    @MainActor
+    private func recordVolumeArchiveExportProgress(
+        _ progress: VolumeArchiveExportProgress,
+        for operationID: UUID
+    ) {
+        guard var operation = volumeArchiveExport, operation.id == operationID else { return }
+        operation.record(progress)
+        volumeArchiveExport = operation
+    }
+
+    @MainActor
+    private func finishVolumeArchiveExport(
+        _ result: Result<VolumeArchiveExportResult, Error>,
+        for operationID: UUID
+    ) {
+        guard volumeArchiveExport?.id == operationID else { return }
+        volumeArchiveExport = nil
+        volumeArchiveExportCancellation = nil
+
+        switch result {
+        case .success(let export):
+            volumeArchiveExportNotice = .success(result: export)
+        case .failure(let error):
+            if let exportError = error as? VolumeArchiveExportError, exportError == .cancelled {
+                volumeArchiveExportNotice = .cancelled()
+            } else {
+                volumeArchiveExportNotice = .failure(error)
+            }
+        }
+    }
+
     private func reviewUnusedVolumes() {
         let plan = VolumeUnusedRemovalPlan(volumes: model.volumes)
         guard !plan.items.isEmpty else { return }
@@ -548,7 +718,7 @@ struct VolumesRootView: View {
 
     @MainActor
     private func remove(_ volume: VolumeSummary) async {
-        guard !busy else { return }
+        guard !isPerformingVolumeOperation else { return }
         busy = true
         defer { busy = false }
         do {
@@ -565,7 +735,7 @@ struct VolumesRootView: View {
 
     @MainActor
     private func removeUnused(_ names: [String]) async {
-        guard !names.isEmpty, !busy else { return }
+        guard !names.isEmpty, !isPerformingVolumeOperation else { return }
         busy = true
         defer { busy = false }
 
