@@ -275,6 +275,39 @@ sheet only. Public discovery, this handoff, pull success/failure, keyboard, Voic
 and light/dark acceptance remain pending; no build, test, Docker/VM action, or live-app
 launch was performed for this source change.
 
+### 2026-08-03 Compose project lifecycle review
+
+The Stacks route can truthfully manage the existing Docker containers bearing one Compose
+project label; it is not yet a general Compose command runner. A selected project, or a
+service's **Project Actions** submenu, provides native `Menu` commands for the bounded
+operations the Docker API already supports: start the currently startable members, stop
+the currently running members, or restart the currently running members. Each command
+now opens a system `confirmationDialog` that names the exact target count and holds the
+captured container IDs as the reviewed scope. On confirmation, the route rechecks the
+current project and applies the action serially only to those still-eligible reviewed
+containers. A newly observed project member is never folded into a pending operation.
+
+This corrects the former false **Restart All Services** promise: stopped, paused, and
+defunct containers aren't restartable Docker targets, so the command is accurately named
+**Restart N Running Services**. The dialog explains the distinct Docker-only boundary:
+start doesn't run `docker compose up`, create/recreate services, read source, or build/pull;
+stop retains containers, images, networks, and named volumes; restart touches only running
+members. Individual service lifecycle actions and the existing **View Logs** handoff to
+Containers remain record-scoped native commands. Compose `up/down/build`, source-driven
+recreate, and interactive `exec` remain unavailable here until the app has an explicit
+selected-source and terminal/session safety contract; they are not simulated with inferred
+labels or a decorative UI control.
+
+Consulted: Apple’s [menus](https://developer.apple.com/design/human-interface-guidelines/menus),
+[toolbars](https://developer.apple.com/design/human-interface-guidelines/toolbars), and
+[alerts](https://developer.apple.com/design/human-interface-guidelines/alerts), plus SwiftUI
+[`confirmationDialog`](https://developer.apple.com/documentation/swiftui/view/confirmationdialog(_:ispresented:titlevisibility:actions:message:)).
+
+No project mutation was performed. Full-window menu/toolbar, keyboard, VoiceOver,
+confirmation, individual lifecycle, logs, light/dark, and real-engine acceptance remain
+pending; this source-only correction performed no build, test, Docker/VM action, or
+live-app launch.
+
 ## Charts audit: current concrete rule
 
 `ContainerStatsTab` currently contains the only real time-series visualization. It is

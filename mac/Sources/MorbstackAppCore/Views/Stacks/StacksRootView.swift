@@ -93,6 +93,19 @@ private struct StackOutlineRow: Identifiable, Hashable {
     }
 }
 
+/// A reviewed operation on the existing Docker containers that currently make up one
+/// Compose-labelled project. The captured IDs make the confirmation's scope stable:
+/// a new service that appears while the dialog is open cannot be acted on implicitly.
+private struct ProjectLifecycleReview: Identifiable {
+    let action: ContainerAction
+    let projectID: String
+    let projectName: String
+    let targetIDs: Set<ContainerSummary.ID>
+
+    var id: String { "\(projectID):\(action.rawValue)" }
+    var targetCount: Int { targetIDs.count }
+}
+
 // MARK: - Root
 
 struct StacksRootView: View {
@@ -108,6 +121,7 @@ struct StacksRootView: View {
     @State private var busyProjects: Set<String> = []
     @State private var busyServices: Set<ContainerSummary.ID> = []
     @State private var removalTarget: ContainerSummary?
+    @State private var projectLifecycleReview: ProjectLifecycleReview?
     /// A user-selected project source document is intentionally separate from Compose
     /// metadata inferred from running containers. Labels can describe a project, but
     /// they never authorize Morbstack to open or write a file from the person's tree.
@@ -229,6 +243,22 @@ struct StacksRootView: View {
                 Text(
                     "This deletes the service’s writable layer and any anonymous volumes. "
                         + "Named volumes are kept.")
+            }
+            .confirmationDialog(
+                projectLifecycleReview.map { projectLifecycleReviewTitle($0) } ?? "Update Project?",
+                isPresented: Binding(
+                    get: { projectLifecycleReview != nil },
+                    set: { if !$0 { projectLifecycleReview = nil } }),
+                titleVisibility: .visible,
+                presenting: projectLifecycleReview
+            ) { review in
+                Button(review.action.title) {
+                    projectLifecycleReview = nil
+                    confirmProjectLifecycleAction(review)
+                }
+                Button("Cancel", role: .cancel) { projectLifecycleReview = nil }
+            } message: { review in
+                Text(projectLifecycleReviewMessage(review))
             }
             .onChange(of: selection) { _, newValue in
                 composeFilesExpanded = false
@@ -633,16 +663,23 @@ struct StacksRootView: View {
                 .controlSize(.small)
                 .accessibilityLabel("Updating \(stack.title)")
         } else {
-            let hasStartableService = stack.containers.contains { $0.availableActions.contains(.start) }
-            if !hidingUnavailableActions || hasStartableService {
-                Button("Start Stopped Services") { run(.start, on: stack) }
-                    .disabled(!hasStartableService)
+            let startTargets = projectLifecycleTargets(.start, in: stack)
+            let runningTargets = projectLifecycleTargets(.stop, in: stack)
+            if !hidingUnavailableActions || !startTargets.isEmpty {
+                Button(projectLifecycleMenuTitle(.start, count: startTargets.count)) {
+                    requestProjectLifecycleAction(.start, on: stack)
+                }
+                .disabled(startTargets.isEmpty)
             }
-            if !hidingUnavailableActions || stack.runningCount > 0 {
-                Button("Restart All Services") { run(.restart, on: stack) }
-                    .disabled(stack.runningCount == 0)
-                Button("Stop Running Services") { run(.stop, on: stack) }
-                    .disabled(stack.runningCount == 0)
+            if !hidingUnavailableActions || !runningTargets.isEmpty {
+                Button(projectLifecycleMenuTitle(.restart, count: runningTargets.count)) {
+                    requestProjectLifecycleAction(.restart, on: stack)
+                }
+                .disabled(runningTargets.isEmpty)
+                Button(projectLifecycleMenuTitle(.stop, count: runningTargets.count)) {
+                    requestProjectLifecycleAction(.stop, on: stack)
+                }
+                .disabled(runningTargets.isEmpty)
             }
 
             if let project = stack.project,
@@ -712,19 +749,77 @@ struct StacksRootView: View {
         }
     }
 
-    private func run(_ action: ContainerAction, on stack: ComposeGroup) {
-        let targets: [ContainerSummary]
+    private func projectLifecycleTargets(
+        _ action: ContainerAction,
+        in stack: ComposeGroup
+    ) -> [ContainerSummary] {
         switch action {
         case .start:
             // `dead`, `paused`, and `restarting` are not stopped services Docker can
             // start.  Selecting by the single-container contract prevents one
             // defunct member from failing a project recovery after earlier members
             // have already started.
-            targets = stack.containers.filter { $0.availableActions.contains(.start) }
-        case .stop:
-            targets = stack.containers.filter(\.isRunning)
+            return stack.containers.filter { $0.availableActions.contains(.start) }
+        case .stop, .restart:
+            // Docker's restart endpoint applies only to a currently running
+            // container. Treating stopped services as restart targets produced a
+            // misleading partial project operation.
+            return stack.containers.filter(\.isRunning)
         default:
-            targets = stack.containers
+            return []
+        }
+    }
+
+    private func projectLifecycleMenuTitle(_ action: ContainerAction, count: Int) -> String {
+        let service = count == 1 ? "Service" : "Services"
+        switch action {
+        case .start: return "Start \(count) Stopped \(service)"
+        case .stop: return "Stop \(count) Running \(service)"
+        case .restart: return "Restart \(count) Running \(service)"
+        default: return action.title
+        }
+    }
+
+    private func requestProjectLifecycleAction(_ action: ContainerAction, on stack: ComposeGroup) {
+        let targets = projectLifecycleTargets(action, in: stack)
+        guard !targets.isEmpty, !busyProjects.contains(stack.id) else { return }
+        projectLifecycleReview = ProjectLifecycleReview(
+            action: action,
+            projectID: stack.id,
+            projectName: stack.title,
+            targetIDs: Set(targets.map(\.id)))
+    }
+
+    private func projectLifecycleReviewTitle(_ review: ProjectLifecycleReview) -> String {
+        projectLifecycleMenuTitle(review.action, count: review.targetCount) + "?"
+    }
+
+    private func projectLifecycleReviewMessage(_ review: ProjectLifecycleReview) -> String {
+        let service = review.targetCount == 1 ? "service" : "services"
+        switch review.action {
+        case .start:
+            return "This starts \(review.targetCount) existing stopped \(service) in \(review.projectName). It does not run docker compose, read source files, build or pull images, or create and recreate services."
+        case .stop:
+            return "This stops \(review.targetCount) currently running \(service) in \(review.projectName). Their containers, images, networks, and named volumes are kept."
+        case .restart:
+            return "This restarts \(review.targetCount) currently running \(service) in \(review.projectName). Stopped, paused, and defunct services are not included."
+        default:
+            return "This updates the reviewed services in \(review.projectName)."
+        }
+    }
+
+    private func confirmProjectLifecycleAction(_ review: ProjectLifecycleReview) {
+        guard let stack = stacks.first(where: { $0.id == review.projectID }) else { return }
+        run(review.action, on: stack, limitingTo: review.targetIDs)
+    }
+
+    private func run(
+        _ action: ContainerAction,
+        on stack: ComposeGroup,
+        limitingTo targetIDs: Set<ContainerSummary.ID>? = nil
+    ) {
+        let targets = projectLifecycleTargets(action, in: stack).filter { service in
+            targetIDs?.contains(service.id) ?? true
         }
         guard !targets.isEmpty, !busyProjects.contains(stack.id) else { return }
 
