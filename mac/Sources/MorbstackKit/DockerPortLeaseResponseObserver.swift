@@ -1,7 +1,7 @@
 // Copyright 2026 The Morbstack Authors.
 // Licensed under the Apache License, Version 2.0 (the "License").
 //
-// Bounded passive interpretation of the two Docker replies a fixed TCP lease needs.
+// Bounded passive interpretation of the two Docker replies a fixed-port lease needs.
 //
 // DockerProxy still relays every byte through FDRelay. This helper only watches a
 // normal response already headed to the client, and gives up rather than pretending a

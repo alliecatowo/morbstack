@@ -68,8 +68,10 @@ public final class UDPListener {
     public let port: Int
 
     /// Called on `queue` for every complete datagram. A received `Data()` is valid:
-    /// UDP permits zero-length datagrams and the bridge preserves them.
-    public var onDatagram: ((Data, Client) -> Void)?
+    /// UDP permits zero-length datagrams and the bridge preserves them. Access stays
+    /// private so a held lease can safely switch from drain-only to forwarding without
+    /// racing the listener's read queue.
+    private var onDatagram: ((Data, Client) -> Void)?
 
     private let queue: DispatchQueue
     private let lock = NSLock()
@@ -88,6 +90,19 @@ public final class UDPListener {
         lock.lock()
         defer { lock.unlock() }
         return running
+    }
+
+    /// Atomically installs or clears the datagram delivery handler.
+    ///
+    /// A fixed UDP lease starts with no handler: the exclusive socket drains and
+    /// discards datagrams until Docker's exact successful start handoff proves a
+    /// guest endpoint. The same lock serializes the handler transition with receive;
+    /// a callback already in flight is still checked against the forwarder's locked
+    /// active-forward map before it can create or use a guest flow.
+    public func setDatagramHandler(_ handler: ((Data, Client) -> Void)?) {
+        lock.lock()
+        onDatagram = handler
+        lock.unlock()
     }
 
     /// Binds `127.0.0.1:port` and begins draining datagrams.

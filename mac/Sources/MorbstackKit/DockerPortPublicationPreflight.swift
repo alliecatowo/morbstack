@@ -3,11 +3,10 @@
 //
 // Admission parsing for explicit `HostConfig.PortBindings` in a Docker
 // container-create request. The parser admits only fixed loopback TCP/UDP bindings
-// it can inspect without consuming bytes. `DockerProxy` turns concrete fixed TCP
-// bindings into held listener leases. The Docker CLI expands a fixed equal-length
-// `-p` range into just such bindings before it sends the Engine request. UDP is
-// event-confirmed after Docker has assigned a concrete endpoint, so dynamic host-port
-// ranges remain outside the synchronous contract.
+// it can inspect without consuming bytes. `DockerProxy` turns the complete concrete
+// fixed TCP/UDP set into one held listener lease. The Docker CLI expands a fixed
+// equal-length `-p` range into just such bindings before it sends the Engine request.
+// Dynamic host-port ranges remain outside the synchronous contract.
 
 import Foundation
 
@@ -26,6 +25,42 @@ public struct DockerExplicitTCPPortBinding: Hashable, Sendable {
         self.hostPort = hostPort
         self.containerPort = containerPort
     }
+}
+
+/// One fixed IPv4/default UDP publication that is safe to retain on the Mac's
+/// loopback. UDP has its own socket namespace, so it deliberately remains a distinct
+/// value from ``DockerExplicitTCPPortBinding`` even when the numeric host port is the
+/// same.
+public struct DockerExplicitUDPPortBinding: Hashable, Sendable {
+    public let hostIP: String
+    public let hostPort: Int
+    public let containerPort: Int
+
+    public init(hostIP: String, hostPort: Int, containerPort: Int) {
+        self.hostIP = hostIP
+        self.hostPort = hostPort
+        self.containerPort = containerPort
+    }
+}
+
+/// The complete fixed publication set that one Docker create/start lifecycle owns.
+///
+/// The plan deliberately has separate transport collections. Docker may publish TCP
+/// and UDP through the same numerical host port, but the host must bind, activate,
+/// pause, recover, and retire those two sockets as one container lifecycle unit.
+public struct DockerFixedPortLeasePlan: Hashable, Sendable {
+    public let tcp: [DockerExplicitTCPPortBinding]
+    public let udp: [DockerExplicitUDPPortBinding]
+
+    public init(
+        tcp: [DockerExplicitTCPPortBinding],
+        udp: [DockerExplicitUDPPortBinding]
+    ) {
+        self.tcp = tcp
+        self.udp = udp
+    }
+
+    public var isEmpty: Bool { tcp.isEmpty && udp.isEmpty }
 }
 
 /// A bounded dynamic-host-port TCP create document that can be transformed before it
@@ -143,15 +178,20 @@ struct DockerDynamicTCPCreatePlan {
 /// verify before it relays the request to the guest Engine.
 public enum DockerPortPublicationPreflight {
 
-    /// Maximum number of distinct concrete TCP host endpoints one recognized create
-    /// may reserve.
+    /// Maximum number of distinct concrete fixed host endpoints one recognized create
+    /// may reserve across TCP and UDP.
     ///
     /// Docker CLI normalizes a fixed equal-length range into a collection of ordinary
     /// bindings, so this is intentionally a lease-size limit rather than a second
     /// range parser. Holding listeners runs under the forwarder's ledger lock before
     /// a guest create; beyond this bounded amount, refusing the request is safer than
     /// creating a container while only some of its requested endpoints are held.
-    public static let maximumSynchronousFixedTCPBindings = 128
+    public static let maximumSynchronousFixedPortBindings = 128
+
+    /// Compatibility spelling for the original TCP-only boundary. New code must use
+    /// ``maximumSynchronousFixedPortBindings`` so a mixed TCP+UDP request cannot grow
+    /// beyond the same bounded lease transaction.
+    public static let maximumSynchronousFixedTCPBindings = maximumSynchronousFixedPortBindings
 
     public enum Verdict: Equatable, Sendable {
         case allowed
@@ -183,7 +223,7 @@ public enum DockerPortPublicationPreflight {
         }
 
         var examined: Set<String> = []
-        var fixedTCPHostPorts: Set<Int> = []
+        var fixedHostEndpoints: Set<String> = []
         // Morbstack has exactly one safe loopback listener per transport/host-port
         // pair. Docker can describe its dual-stack representation more than once,
         // but two different container targets cannot both be delivered through that
@@ -233,11 +273,10 @@ public enum DockerPortPublicationPreflight {
                         message: "published \(protocolName.uppercased()) host port \(hostPort) is not a concrete port; dynamic host-port ranges are not supported")
                 }
 
-                if protocolName == "tcp",
-                   fixedTCPHostPorts.insert(port).inserted,
-                   fixedTCPHostPorts.count > maximumSynchronousFixedTCPBindings {
+                if fixedHostEndpoints.insert("\(protocolName)|\(port)").inserted,
+                   fixedHostEndpoints.count > maximumSynchronousFixedPortBindings {
                     return .rejected(
-                        message: "published TCP mapping has more than \(maximumSynchronousFixedTCPBindings) concrete host ports; Morbstack refuses a partial port lease")
+                        message: "published mapping has more than \(maximumSynchronousFixedPortBindings) concrete fixed host endpoints; Morbstack refuses a partial port lease")
                 }
 
                 if let targetPort = Self.containerPort(in: containerPort) {
@@ -338,6 +377,157 @@ public enum DockerPortPublicationPreflight {
         return byHostPort.values.sorted { $0.hostPort < $1.hostPort }
     }
 
+    /// Returns the fixed UDP publications that can be retained by the IPv4 loopback
+    /// UDP data plane. This is intentionally separate from the TCP extractor: the
+    /// same numeric port is legal once for each transport, but one UDP socket cannot
+    /// represent two different guest UDP targets.
+    public static func explicitUDPBindings(in body: Data) -> [DockerExplicitUDPPortBinding] {
+        guard
+            let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+            let hostConfig = object["HostConfig"] as? [String: Any],
+            let portBindings = hostConfig["PortBindings"] as? [String: Any]
+        else {
+            return []
+        }
+
+        var byHostPort: [Int: DockerExplicitUDPPortBinding] = [:]
+        var ambiguousHostPorts: Set<Int> = []
+        for containerPortKey in portBindings.keys.sorted() {
+            guard networkProtocol(in: containerPortKey) == "udp",
+                  let containerPort = containerPort(in: containerPortKey),
+                  (1...65535).contains(containerPort),
+                  let entries = portBindings[containerPortKey] as? [Any]
+            else {
+                continue
+            }
+
+            for entry in entries {
+                guard let entry = entry as? [String: Any] else { continue }
+                let rawHostPort = string(entry["HostPort"])?.trimmingCharacters(in: .whitespaces) ?? ""
+                guard let hostPort = Int(rawHostPort), (1...65535).contains(hostPort) else {
+                    continue
+                }
+                let hostIP = string(entry["HostIp"])?.trimmingCharacters(in: .whitespaces) ?? ""
+                guard PortForwardPlan.forwardableUDPHostAddresses.contains(hostIP) else { continue }
+
+                let candidate = DockerExplicitUDPPortBinding(
+                    hostIP: hostIP, hostPort: hostPort, containerPort: containerPort)
+                guard !ambiguousHostPorts.contains(hostPort) else { continue }
+                if let existing = byHostPort[hostPort] {
+                    guard existing.containerPort == candidate.containerPort else {
+                        byHostPort.removeValue(forKey: hostPort)
+                        ambiguousHostPorts.insert(hostPort)
+                        continue
+                    }
+                } else {
+                    byHostPort[hostPort] = candidate
+                }
+            }
+        }
+        return byHostPort.values.sorted { $0.hostPort < $1.hostPort }
+    }
+
+    /// Returns the complete fixed transport-indexed publication set from a create
+    /// body, or `nil` if any sibling is absent, dynamic, opaque, unsupported, or
+    /// ambiguous. This prevents a known fixed TCP/UDP endpoint from becoming a
+    /// partial lease beside a shape Morbstack cannot own transactionally.
+    public static func fixedPortLeasePlan(in body: Data) -> DockerFixedPortLeasePlan? {
+        guard
+            let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+            let hostConfig = object["HostConfig"] as? [String: Any],
+            let portBindings = hostConfig["PortBindings"] as? [String: Any],
+            !portBindings.isEmpty
+        else {
+            return nil
+        }
+        guard (hostConfig["PublishAllPorts"] as? Bool) != true else {
+            // The proxy rejects -P before it reaches this parser. Keep the plan
+            // independently strict as well: an explicit sibling cannot be held
+            // while the Engine owns another publication selected from image config.
+            return nil
+        }
+
+        var tcpByHostPort: [Int: DockerExplicitTCPPortBinding] = [:]
+        var udpByHostPort: [Int: DockerExplicitUDPPortBinding] = [:]
+        var ambiguousTCPHostPorts: Set<Int> = []
+        var ambiguousUDPHostPorts: Set<Int> = []
+
+        for containerPortKey in portBindings.keys.sorted() {
+            let protocolName = networkProtocol(in: containerPortKey)
+            guard protocolName == "tcp" || protocolName == "udp",
+                  let containerPort = containerPort(in: containerPortKey),
+                  (1...65535).contains(containerPort),
+                  let entries = portBindings[containerPortKey] as? [Any],
+                  !entries.isEmpty
+            else {
+                return nil
+            }
+            for rawEntry in entries {
+                guard let entry = rawEntry as? [String: Any],
+                      let rawHostPort = string(entry["HostPort"])?.trimmingCharacters(in: .whitespaces),
+                      let hostPort = Int(rawHostPort),
+                      (1...65535).contains(hostPort)
+                else {
+                    return nil
+                }
+                let hostIP = string(entry["HostIp"])?.trimmingCharacters(in: .whitespaces) ?? ""
+
+                switch protocolName {
+                case "tcp":
+                    guard PortForwardPlan.forwardableHostAddresses.contains(hostIP) else {
+                        return nil
+                    }
+                    let candidate = DockerExplicitTCPPortBinding(
+                        hostIP: hostIP, hostPort: hostPort, containerPort: containerPort)
+                    guard !ambiguousTCPHostPorts.contains(hostPort) else { continue }
+                    if let existing = tcpByHostPort[hostPort] {
+                        guard existing.containerPort == candidate.containerPort else {
+                            tcpByHostPort.removeValue(forKey: hostPort)
+                            ambiguousTCPHostPorts.insert(hostPort)
+                            continue
+                        }
+                        if existing.hostIP.contains(":"), !candidate.hostIP.contains(":") {
+                            tcpByHostPort[hostPort] = candidate
+                        }
+                    } else {
+                        tcpByHostPort[hostPort] = candidate
+                    }
+
+                case "udp":
+                    guard PortForwardPlan.forwardableUDPHostAddresses.contains(hostIP) else {
+                        return nil
+                    }
+                    let candidate = DockerExplicitUDPPortBinding(
+                        hostIP: hostIP, hostPort: hostPort, containerPort: containerPort)
+                    guard !ambiguousUDPHostPorts.contains(hostPort) else { continue }
+                    if let existing = udpByHostPort[hostPort] {
+                        guard existing.containerPort == candidate.containerPort else {
+                            udpByHostPort.removeValue(forKey: hostPort)
+                            ambiguousUDPHostPorts.insert(hostPort)
+                            continue
+                        }
+                    } else {
+                        udpByHostPort[hostPort] = candidate
+                    }
+
+                default:
+                    return nil
+                }
+            }
+        }
+
+        let tcp = tcpByHostPort.values.sorted { $0.hostPort < $1.hostPort }
+        let udp = udpByHostPort.values.sorted { $0.hostPort < $1.hostPort }
+        guard ambiguousTCPHostPorts.isEmpty,
+              ambiguousUDPHostPorts.isEmpty,
+              !tcp.isEmpty || !udp.isEmpty,
+              tcp.count + udp.count <= maximumSynchronousFixedPortBindings
+        else {
+            return nil
+        }
+        return DockerFixedPortLeasePlan(tcp: tcp, udp: udp)
+    }
+
     /// Whether `identifier` is an immutable Docker container ID rather than a name
     /// or an accepted unique prefix.
     ///
@@ -354,7 +544,7 @@ public enum DockerPortPublicationPreflight {
         }
     }
 
-    /// Returns the fully understood fixed TCP publications in a stopped-container
+    /// Returns the fully understood fixed TCP/UDP publications in a stopped-container
     /// inspect document, or `nil` when this document cannot safely support a
     /// synchronous start-time host lease.
     ///
@@ -367,6 +557,111 @@ public enum DockerPortPublicationPreflight {
     /// The caller supplies the full ID from the request path. Matching it to the
     /// inspect document is the identity proof that lets the proxy preserve the
     /// original start bytes without a name/prefix reuse race.
+    static func stoppedContainerFixedPortLeasePlan(
+        in inspectBody: Data,
+        expectedContainerID: String
+    ) -> DockerFixedPortLeasePlan? {
+        guard isFullContainerID(expectedContainerID),
+              let object = try? JSONSerialization.jsonObject(with: inspectBody) as? [String: Any],
+              let containerID = object["Id"] as? String,
+              containerID == expectedContainerID,
+              let state = object["State"] as? [String: Any],
+              let isRunning = state["Running"] as? Bool,
+              !isRunning,
+              let hostConfig = object["HostConfig"] as? [String: Any],
+              let portBindings = hostConfig["PortBindings"] as? [String: Any],
+              !portBindings.isEmpty
+        else {
+            return nil
+        }
+        guard (hostConfig["PublishAllPorts"] as? Bool) != true else {
+            return nil
+        }
+
+        var tcpByHostPort: [Int: DockerExplicitTCPPortBinding] = [:]
+        var udpByHostPort: [Int: DockerExplicitUDPPortBinding] = [:]
+        var ambiguousTCPHostPorts: Set<Int> = []
+        var ambiguousUDPHostPorts: Set<Int> = []
+
+        for containerPortKey in portBindings.keys.sorted() {
+            let protocolName = networkProtocol(in: containerPortKey)
+            guard protocolName == "tcp" || protocolName == "udp",
+                  let containerPort = containerPort(in: containerPortKey),
+                  (1...65535).contains(containerPort),
+                  let entries = portBindings[containerPortKey] as? [Any],
+                  !entries.isEmpty
+            else {
+                return nil
+            }
+
+            for rawEntry in entries {
+                guard let entry = rawEntry as? [String: Any],
+                      let rawHostPort = string(entry["HostPort"])?.trimmingCharacters(in: .whitespaces),
+                      let hostPort = Int(rawHostPort),
+                      (1...65535).contains(hostPort)
+                else {
+                    // Empty, zero, missing, and raw host-port ranges are Engine-owned
+                    // allocation forms. Recovery may not reserve only their siblings.
+                    return nil
+                }
+                let hostIP = string(entry["HostIp"])?.trimmingCharacters(in: .whitespaces) ?? ""
+
+                switch protocolName {
+                case "tcp":
+                    guard PortForwardPlan.forwardableHostAddresses.contains(hostIP) else {
+                        return nil
+                    }
+                    let candidate = DockerExplicitTCPPortBinding(
+                        hostIP: hostIP, hostPort: hostPort, containerPort: containerPort)
+                    guard !ambiguousTCPHostPorts.contains(hostPort) else { continue }
+                    if let existing = tcpByHostPort[hostPort] {
+                        guard existing.containerPort == candidate.containerPort else {
+                            tcpByHostPort.removeValue(forKey: hostPort)
+                            ambiguousTCPHostPorts.insert(hostPort)
+                            continue
+                        }
+                        if existing.hostIP.contains(":"), !candidate.hostIP.contains(":") {
+                            tcpByHostPort[hostPort] = candidate
+                        }
+                    } else {
+                        tcpByHostPort[hostPort] = candidate
+                    }
+
+                case "udp":
+                    guard PortForwardPlan.forwardableUDPHostAddresses.contains(hostIP) else {
+                        return nil
+                    }
+                    let candidate = DockerExplicitUDPPortBinding(
+                        hostIP: hostIP, hostPort: hostPort, containerPort: containerPort)
+                    guard !ambiguousUDPHostPorts.contains(hostPort) else { continue }
+                    if let existing = udpByHostPort[hostPort] {
+                        guard existing.containerPort == candidate.containerPort else {
+                            udpByHostPort.removeValue(forKey: hostPort)
+                            ambiguousUDPHostPorts.insert(hostPort)
+                            continue
+                        }
+                    } else {
+                        udpByHostPort[hostPort] = candidate
+                    }
+
+                default:
+                    return nil
+                }
+            }
+        }
+
+        let tcp = tcpByHostPort.values.sorted { $0.hostPort < $1.hostPort }
+        let udp = udpByHostPort.values.sorted { $0.hostPort < $1.hostPort }
+        guard ambiguousTCPHostPorts.isEmpty,
+              ambiguousUDPHostPorts.isEmpty,
+              !tcp.isEmpty || !udp.isEmpty,
+              tcp.count + udp.count <= maximumSynchronousFixedPortBindings
+        else {
+            return nil
+        }
+        return DockerFixedPortLeasePlan(tcp: tcp, udp: udp)
+    }
+
     static func stoppedContainerTCPBindings(
         in inspectBody: Data,
         expectedContainerID: String

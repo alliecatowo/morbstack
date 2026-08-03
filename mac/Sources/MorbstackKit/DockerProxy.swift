@@ -188,10 +188,14 @@ public final class DockerProxy {
                 // A successful snapshot is still not enough. Hold the real listeners
                 // before the create reaches dockerd; a failed bind here has the same
                 // Docker-style error, but no guest side effect to roll back.
-                let publications = DockerPortPublicationPreflight.explicitTCPBindings(in: create.body)
-                let lease: PortForwarder.TCPPortLease?
+                let plan = DockerPortPublicationPreflight.fixedPortLeasePlan(in: create.body)
+                let lease: PortForwarder.PortLease?
                 do {
-                    lease = publications.isEmpty ? nil : try forwarder.reserveExplicitTCPPorts(publications)
+                    if let plan {
+                        lease = try forwarder.reserveExplicitPorts(plan)
+                    } else {
+                        lease = nil
+                    }
                 } catch {
                     rejectContainerCreate(
                         clientFD: clientFD,
@@ -218,7 +222,7 @@ public final class DockerProxy {
             } else if DockerPortPublicationPreflight.isFullContainerID(containerIdentifier) {
                 // A VM/daemon stop intentionally closes every held listener. Before
                 // this one exact immutable-ID lifecycle request reaches dockerd, give the
-                // forwarder a bounded chance to rebuild a fixed TCP lease from the
+                // forwarder a bounded chance to rebuild a fixed-port lease from the
                 // guest's persistent HostConfig.PortBindings. Names and ID prefixes
                 // retain the raw relay: they can resolve to a different container
                 // between inspect and the lifecycle operation.
@@ -251,7 +255,7 @@ public final class DockerProxy {
     }
 
     /// The two bodyless Engine endpoints whose successful `204` means a container
-    /// has started and a held TCP listener may be activated. They share the lease
+    /// has started and a held fixed-port listener set may be activated. They share the lease
     /// protocol, but their request bytes are always relayed unchanged.
     private enum ContainerLifecycleOperation: String {
         case start
@@ -264,8 +268,8 @@ public final class DockerProxy {
     }
 
     private enum PortLeaseObservation {
-        case create(PortForwarder.TCPPortLease)
-        case start(PortForwarder.TCPPortLease)
+        case create(PortForwarder.PortLease)
+        case start(PortForwarder.PortLease)
     }
 
     /// Performs a bounded `MSG_PEEK` for only the normal fixed-length create and
@@ -382,7 +386,7 @@ public final class DockerProxy {
     }
 
     /// Performs the bounded recovery query for a stopped container whose previously
-    /// held fixed TCP lease was released with the old VM generation. It deliberately
+    /// held fixed-port lease was released with the old VM generation. It deliberately
     /// happens only after `ensureRunning` and off the VM queue: the inspect uses a
     /// fresh blocking vsock connection, while VM lifecycle work must stay responsive.
     private func bootstrapStoppedContainerStartLease(
@@ -400,7 +404,7 @@ public final class DockerProxy {
                 if self.isShuttingDown {
                     self.log.info("client arrived during shutdown; rejected cleanly (\(error))")
                 } else {
-                    self.log.error("Docker \(operation.rawValue) rejected before TCP lease recovery: \(error)")
+                    self.log.error("Docker \(operation.rawValue) rejected before fixed-port lease recovery: \(error)")
                 }
                 self.writeGatewayError(to: clientFD, message: "\(error)")
                 Darwin.close(clientFD)
@@ -552,7 +556,7 @@ public final class DockerProxy {
         clientFD: Int32,
         createBody: Data,
         rewrittenRequest: Data,
-        lease: PortForwarder.TCPPortLease,
+        lease: PortForwarder.PortLease,
         closeClientAfterResponse: Bool
     ) {
         vm.ensureRunning(timeout: DockerProxy.bootTimeout) { [weak self] result in
@@ -743,7 +747,7 @@ public final class DockerProxy {
         clientFD: Int32,
         guestFD: Int32,
         request: Data,
-        lease: PortForwarder.TCPPortLease,
+        lease: PortForwarder.PortLease,
         closeClientAfterResponse: Bool
     ) {
         let transactionQueue = DispatchQueue(
@@ -864,7 +868,7 @@ public final class DockerProxy {
     }
 
     /// Rejects a recognized start or restart before it reaches the Engine. This is
-    /// reserved for the case where an inspect-derived fixed TCP publication was
+    /// reserved for the case where an inspect-derived fixed-port publication was
     /// understood but a real Mac listener could not be retained; opaque or
     /// unsupported inspect documents intentionally use the ordinary relay instead.
     private func rejectContainerLifecycle(

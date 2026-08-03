@@ -59,8 +59,8 @@ copy and diagnostics:
 | VM unavailable or guest Docker API connection fails | The proxy returns a Docker-style JSON `502` rather than silently resetting the client connection. | Startup, suspension, and shutdown behavior in the clean-profile release run. |
 | Unclassified Engine request, including chunked and upgraded traffic | Relay-reviewed as opaque bytes after VM startup. There is no endpoint whitelist in the normal relay. | Representative HTTP, streaming, hijacked, and keep-alive cases in the family matrix below. |
 | `POST /containers/create` | Intercepted only when the bounded preflight can read a fixed-length JSON create request. Bind-source policy and published-port policy can reject it before forwarding; all other create framing stays raw relay. | Container, bind-mount, port, and malformed/request-framing scenarios below. |
-| `POST /containers/{id}/start` and `/restart` | A bodyless request may be observed to activate a held TCP forwarding lease, or an exact full-ID stopped container may have a bounded inspect recovery before relay. Name/prefix identifiers, bodies, and unsupported forms remain raw relay. | Start/restart, failed start, restart, VM-stop recovery, name/prefix, and keep-alive scenarios. |
-| `-p` published ports | Phase 1 has source-level support for compatible fixed TCP and for bounded dynamic TCP create shapes. It reserves a real Mac loopback listener before a successful create can be returned. Docker CLI `create -p` and `run -p` share that create shape; `create` retains an inactive held TCP lease until a later start. Exact coverage and gaps are in [dynamic-port-allocation.md](dynamic-port-allocation.md). | The `-p` matrix in that document plus clean-profile CP-04 and CP-06. Until then it is **implemented pending live acceptance**, not established drop-in parity. |
+| `POST /containers/{id}/start` and `/restart` | A bodyless request may be observed to activate a held fixed-port TCP/UDP lease, or an exact full-ID stopped container may have a bounded inspect recovery before relay. Name/prefix identifiers, bodies, and unsupported forms remain raw relay. | Start/restart, failed start, restart, VM-stop recovery, name/prefix, and keep-alive scenarios. |
+| `-p` published ports | Phase 1 has source-level support for compatible fixed TCP/UDP and for bounded dynamic TCP create shapes. It reserves the complete real Mac loopback listener set before a successful create can be returned. Docker CLI `create -p` and `run -p` share that create shape; `create` retains an inactive held fixed-port lease until a later start. Exact coverage and gaps are in [dynamic-port-allocation.md](dynamic-port-allocation.md). | The `-p` matrix in that document plus clean-profile CP-04 and CP-06. Until then it is **implemented pending live acceptance**, not established drop-in parity. |
 | `-P` / `PublishAllPorts` | Explicitly rejected from the bounded dynamic-create path. It is not silently reinterpreted as a subset of `-p`. | Guest-Engine allocator design and the full `-P` acceptance matrix in [the design boundary](#publish-all--p-engine-side-design-boundary). |
 | Host bind mounts on create | An interceptable request is checked against the running VM's declared/attached shared paths. An unshared, escaping, unmounted, nonabsolute, or required-missing bind source gets a Docker-style pre-create error. Engine-owned malformed/unknown grammar remains with `dockerd`. | Valid `-v` and `--mount`, missing source, symlink escape, unshared source, share remount, Compose, and Dev Containers fixtures. |
 
@@ -121,16 +121,15 @@ hand-exported `DOCKER_HOST` is a diagnosis, not a passing replacement test.
 `-p` is a required normal Docker path. The current implementation deliberately
 addresses it before Kubernetes or UI expansion. The source-level Phase 1 contract is
 documented in [dynamic-port-allocation.md](dynamic-port-allocation.md): compatible
-TCP bindings reserve a real Mac loopback listener before the Engine receives the
-create; fixed TCP and exact empty/`"0"` dynamic TCP bindings have different bounded
-paths; explicit IPv4/default UDP retains an event-confirmed path rather than a held
-dynamic lease. A normal Docker CLI equal-length fixed TCP range is normalized into
-those same individual concrete bindings, so it takes the fixed-TCP atomic lease path.
-Raw dynamic host-port ranges, broad/ambiguous shapes, dynamic UDP, and non-loopback
-external publication are not silently presented as supported. Fixed UDP has a
-separate cross-transport lease design in
-[`fixed-udp-port-publication-design.md`](fixed-udp-port-publication-design.md), but
-current source still supplies it only through event-confirmed forwarding.
+TCP and fixed IPv4/default UDP bindings reserve real Mac loopback listeners before
+the Engine receives the create; exact empty/`"0"` dynamic TCP bindings use a separate
+bounded rewrite path, while dynamic UDP remains unsupported. A normal Docker CLI
+equal-length fixed TCP or supported UDP range is normalized into those same individual
+concrete bindings, so it takes the fixed-port atomic lease path. Raw dynamic
+host-port ranges, broad/ambiguous shapes, dynamic UDP, and non-loopback external
+publication are not silently presented as supported. The cross-transport source
+boundary and pending live matrix are in
+[`fixed-udp-port-publication-design.md`](fixed-udp-port-publication-design.md).
 
 Docker documents `-P` as publishing every exposed port to a random host port; it is
 not a syntactic alias for a request-visible `-p <container-port>` binding. See the

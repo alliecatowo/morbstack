@@ -12,7 +12,7 @@ import Foundation
 /// Ordinary Engine traffic still belongs to ``FDRelay``. This transaction exists
 /// only because an empty `HostPort` cannot be made truthful by passively observing a
 /// later response: it sends a host-rewritten create document, waits for the complete
-/// bounded `201`, associates the already-held TCP lease, and only then releases any
+/// bounded `201`, associates the already-held dynamic-TCP lease, and only then releases any
 /// `201` byte to the Docker client. It consumes the create's exact known length and
 /// hands the client socket back to DockerProxy afterwards, so a following keep-alive
 /// or already-pipelined request is never forwarded before that association.

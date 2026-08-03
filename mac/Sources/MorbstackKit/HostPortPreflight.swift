@@ -14,10 +14,10 @@ import Foundation
 
 /// Checks whether the Mac loopback endpoint Morbstack would use is currently free.
 ///
-/// Morbstack forwards TCP and UDP on loopback only. TCP's fixed-create lease is held
-/// through the acknowledged start response; UDP uses its own real datagram listener
-/// after Docker reports a concrete event-confirmed publication, so this API remains a
-/// deliberately non-reserving availability snapshot for both transports.
+/// Morbstack forwards TCP and UDP on loopback only. A recognized fixed TCP/UDP
+/// create takes the real held listener after this early check and retains it through
+/// the acknowledged start response, so this API remains a deliberately non-reserving
+/// availability snapshot for both transports.
 public enum HostPortPreflight {
 
     public static let loopbackAddress = TCPListener.LoopbackAddress.ipv4.rawValue
@@ -68,8 +68,8 @@ public enum HostPortPreflight {
         tcpLoopbackAddress: TCPListener.LoopbackAddress = .ipv4
     ) -> Result {
         let publication: Publication = .loopbackOnly
-        // UDP remains the existing IPv4-only event-confirmed path. The extra
-        // parameter is solely for fixed and dynamic TCP IPv6-loopback publication.
+        // UDP remains IPv4-only. The extra parameter is solely for fixed and dynamic
+        // TCP IPv6-loopback publication.
         let loopback = transport == .tcp ? tcpLoopbackAddress : .ipv4
         guard (1...65535).contains(port) else {
             return Result(
@@ -153,20 +153,20 @@ public enum HostPortPreflight {
             publication: publication,
             detail: transport == .tcp
                 ? "available now on loopback; this check does not reserve the port"
-                : "available now on loopback; UDP forwarding begins after Docker reports the concrete publication and this check does not reserve the port")
+                : "available now on loopback; this check does not reserve the port")
     }
 
     /// The boundary of the Engine-facing create preflight.
     ///
     /// ``DockerProxy`` uses this snapshot as an early diagnostic for a recognizable,
-    /// fixed-length `POST /containers/create`, then takes a real ``TCPListener``
-    /// lease for its fixed, supported TCP publications before forwarding the request.
+    /// fixed-length `POST /containers/create`, then takes real ``TCPListener`` and
+    /// ``UDPListener`` leases for its complete fixed supported publication set before
+    /// forwarding the request.
     /// The lease is associated only with a bounded identity-bearing create response
     /// and is handed to ``PortForwarder`` without rebinding after a normal `204`
     /// start response. This API itself remains a snapshot: callers of `morb ports
     /// check`, dynamic (`-P`/omitted host port), range, malformed, chunked, and
-    /// oversized shapes must not infer a reservation from its result. Fixed UDP
-    /// creates use the snapshot only; their listener is opened from Docker's concrete
-    /// post-start port event and therefore has no TCP-style synchronous lease.
-    public static let reservationDesign = "HostPortPreflight is advisory; recognized fixed-TCP Docker creates take a continuously held listener lease before reaching the Engine, while UDP forwards only from event-confirmed concrete publications."
+    /// oversized shapes must not infer a reservation from its result. Dynamic UDP,
+    /// raw dynamic ranges, and `PublishAllPorts` remain outside the held lease.
+    public static let reservationDesign = "HostPortPreflight is advisory; recognized fixed TCP/UDP Docker creates take one continuously held transport-indexed listener lease before reaching the Engine."
 }

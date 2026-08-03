@@ -1,7 +1,8 @@
 # Fixed UDP publication transaction
 
-Status: researched design; **not implemented** and not a release claim. This is the
-P0 design boundary for ordinary fixed Docker CLI UDP publication such as
+Status: source implementation complete; **live Docker/VM acceptance is still
+required and this is not a release claim**. This records the P0 transaction for
+ordinary fixed Docker CLI UDP publication such as
 `docker run -p 5353:53/udp image`. It deliberately excludes dynamic UDP, `-P`,
 raw dynamic host-port ranges, IPv6 UDP, and arbitrary Engine API shapes.
 
@@ -29,34 +30,33 @@ fixed-TCP timing: reserve the Mac endpoint before create, retain it after a
 successful create, and enable forwarding only after the exact successful start or
 restart response. A create `201` is an identity proof, not guest UDP-bind proof.
 
-## Why the existing UDP path cannot make that guarantee
+## Source implementation
 
-Today `PortForwarder` creates `UDPListener` only from an event-confirmed
-`containers/json` endpoint. `UDPListener` is correctly an exclusive IPv4 loopback
-datagram socket: it sets neither reuse option, and one listener owns every client
-flow and reply source tuple. That is a sound data plane, but it is post-start and
-can lose the Mac host-port race.
+`PortForwarder.PortLease` is now the one transport-indexed ledger record: it carries
+separate TCP and UDP publication lists and listener dictionaries under one container
+identity. `DockerProxy` reserves the whole strict fixed plan before it forwards the
+create, and a bind failure rolls both transport sets back before the guest observes
+any create bytes. TCP and UDP may use the same numeric host port because their socket
+spaces remain separate.
 
-The fixed-TCP ledger is a different ownership system: one `TCPPortLease` has one
-container identity, held listeners, a create-response association, and an exact-204
-start handoff. A second independent UDP lease would be wrong: a fixed TCP+UDP create
-can legally use the same numeric port in separate transport spaces, but association,
-rollback, event promotion, destroy, restart, and VM-stop recovery must succeed or
-retire for the **whole create**. Two records could partially activate or release the
-same container transaction.
+`UDPListener` now has a lock-protected `setDatagramHandler(_:)` transition. A held
+UDP listener starts in drain-only mode; after the exact successful start or restart
+response, the forwarder installs its handler and active `UDPForward` record while its
+ledger is locked. A callback that was already in flight after a stop is rejected by
+that active-forward ledger before it can open or keep a guest flow.
 
-The current `UDPListener.onDatagram` property is also installed before `start()` and
-read on the listener queue. A held UDP socket needs an explicit synchronized handler
-transition, not a mutation of that property from the proxy/lifecycle queue while a
-datagram drain is reading it.
+The normal event reconciler retains its role for opaque/name-based lifecycle calls,
+but it may promote a held lease only after `containers/json` proves the complete
+retained TCP+UDP set belongs to the one associated container. Stop clears both active
+maps and UDP flows while retaining sockets; destroy/failed create/daemon stop releases
+both sets. Full-ID stopped-container recovery uses a strict inspect plan for the
+complete transport set before it relays start or restart.
 
-## Required implementation shape
+The source boundary is one transport-indexed `PortLease`, not a second UDP ledger.
+It retains distinct listener objects and maps for TCP and UDP and never shares a
+socket, flow, or numeric-port dictionary across transports.
 
-Implement this only as one transport-indexed `PortLease` replacement for the
-TCP-only record. It must retain separate listener objects and maps for TCP and UDP;
-it must not share sockets, flows, or numeric-port dictionaries across transports.
-
-1. **Admission.** Parse only fixed UDP `HostPort` values `1...65535`, protocol
+1. **Admission.** The parser accepts only fixed UDP `HostPort` values `1...65535`, protocol
    `udp`, and host addresses `""`, `"0.0.0.0"`, or `"127.0.0.1"`. Reject raw
    dynamic host-port ranges, omitted/empty/zero UDP host ports, `-P`, IPv6 UDP,
    unsupported protocols/addresses, ambiguous same-UDP-port targets, and opaque
@@ -94,7 +94,7 @@ it must not share sockets, flows, or numeric-port dictionaries across transports
    the unchanged lifecycle request. Names, prefixes, dynamic forms, partial inspect
    documents, and unsupported shapes remain raw relay with no synchronous promise.
 
-## Acceptance matrix required before promotion
+## Pending acceptance matrix
 
 | Case | Required outcome |
 | --- | --- |
@@ -110,6 +110,6 @@ it must not share sockets, flows, or numeric-port dictionaries across transports
 | VM/daemon stop then exact full-ID start | All sockets release while guest is absent; inspect-backed recovery reserves all supported fixed mappings before guest start. |
 | Conflict/replacement/destroy | Competing target is withheld, replacement cannot steal the pre-bound socket, and destroy releases all resources. |
 
-Until this design is implemented and this matrix passes against a signed candidate,
-fixed UDP remains event-confirmed forwarding only. The existing UDP relay is real,
-but it is not the fixed-TCP-style create/start reservation contract.
+The source now implements the fixed UDP create/start reservation contract above.
+Until this matrix passes against a signed candidate, it remains **implemented pending
+live acceptance**, not a release compatibility claim.
