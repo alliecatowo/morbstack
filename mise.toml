@@ -235,9 +235,9 @@ verify_host_toolchain() {
 		echo "error: unsupported Docker CLI toolchain manifest: $TOOLCHAIN_MANIFEST" >&2
 		exit 1
 	fi
-	while IFS='|' read -r INDEX ID PATH VERSION SHA256; do
+	while IFS='|' read -r INDEX ID TOOL_RELATIVE_PATH VERSION SHA256; do
 		if [ "$(/usr/bin/plutil -extract "tools.$INDEX.id" raw "$TOOLCHAIN_MANIFEST")" != "$ID" ] \
-			|| [ "$(/usr/bin/plutil -extract "tools.$INDEX.path" raw "$TOOLCHAIN_MANIFEST")" != "$PATH" ] \
+			|| [ "$(/usr/bin/plutil -extract "tools.$INDEX.path" raw "$TOOLCHAIN_MANIFEST")" != "$TOOL_RELATIVE_PATH" ] \
 			|| [ "$(/usr/bin/plutil -extract "tools.$INDEX.version" raw "$TOOLCHAIN_MANIFEST")" != "$VERSION" ] \
 			|| [ "$(/usr/bin/plutil -extract "tools.$INDEX.source_sha256" raw "$TOOLCHAIN_MANIFEST")" != "$SHA256" ]; then
 			echo "error: Docker CLI toolchain manifest does not match pinned $ID metadata" >&2
@@ -248,7 +248,7 @@ verify_host_toolchain() {
 			echo "error: source Docker CLI toolchain manifest does not pin $ID bytes" >&2
 			exit 1
 		fi
-		TOOL="$TOOLCHAIN_ROOT/$PATH"
+		TOOL="$TOOLCHAIN_ROOT/$TOOL_RELATIVE_PATH"
 		if [ ! -f "$TOOL" ] || [ -L "$TOOL" ] || [ ! -x "$TOOL" ]; then
 			echo "error: required bundled Docker CLI asset is missing/unsafe: $TOOL" >&2
 			echo "       run scripts/fetch-guest-assets.sh --host-cli first" >&2
@@ -272,8 +272,8 @@ EOF
 seal_host_toolchain() {
 	TOOLCHAIN_ROOT="$1"
 	TOOLCHAIN_MANIFEST="$TOOLCHAIN_ROOT/TOOLCHAIN.plist"
-	while IFS='|' read -r INDEX PATH; do
-		TOOL="$TOOLCHAIN_ROOT/$PATH"
+	while IFS='|' read -r INDEX TOOL_RELATIVE_PATH; do
+		TOOL="$TOOLCHAIN_ROOT/$TOOL_RELATIVE_PATH"
 		GOT_SHA256=$(/usr/bin/shasum -a 256 "$TOOL" | /usr/bin/awk '{print $1}')
 		/usr/bin/plutil -replace "tools.$INDEX.sha256" -string "$GOT_SHA256" "$TOOLCHAIN_MANIFEST" \
 			|| { echo "error: could not seal Docker CLI toolchain manifest" >&2; exit 1; }
