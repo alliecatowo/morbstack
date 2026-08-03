@@ -191,7 +191,7 @@ struct MigrationRootView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        ToolbarItem(id: "migration.refresh", placement: .primaryAction) {
+        ToolbarItem(id: "migration.refresh", placement: .secondaryAction) {
             Button {
                 Task { await inspect() }
             } label: {
@@ -208,7 +208,7 @@ struct MigrationRootView: View {
         }
 
         if !runtimes.isEmpty {
-            ToolbarItem(id: "migration.inspector", placement: .primaryAction) {
+            ToolbarItem(id: "migration.inspector", placement: .secondaryAction) {
                 Button {
                     showsInspector.toggle()
                 } label: {
