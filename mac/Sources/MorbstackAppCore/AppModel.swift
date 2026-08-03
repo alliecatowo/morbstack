@@ -524,6 +524,70 @@ final class AppModel {
         }
     }
 
+    // MARK: - Local image run
+
+    /// Creates and starts exactly one container from an image already present in this
+    /// model's local Engine inventory. The selected immutable image ID—not a mutable
+    /// tag—is the only image input. No pull or image inspect happens here.
+    ///
+    /// A create or start reply can race a client disconnect, and Docker's documented
+    /// start statuses include cases such as "already started" that must not be treated
+    /// as a disposable failed container. Once create returns an ID, Morbstack never
+    /// deletes it automatically; the result directs the person to Containers instead.
+    func runLocalImage(
+        imageID: String,
+        requestedName: String?,
+        progress: (LocalImageRunProgress) -> Void
+    ) async throws -> LocalImageRunResult {
+        guard engine.isRunning else {
+            throw DockerClientError.engineUnreachable("the engine is not running")
+        }
+        guard images.contains(where: { $0.id == imageID }) else {
+            throw LocalImageRunError.imageIsNoLongerLocal
+        }
+
+        let name = requestedName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedName = (name?.isEmpty == false) ? name : nil
+
+        progress(.creating)
+        let containerID: String
+        do {
+            containerID = try await client.createLocalImageContainer(
+                imageID: imageID,
+                requestedName: normalizedName)
+        } catch let createError as DockerClientError {
+            // A non-2xx response means Docker rejected this create. A transport or
+            // reachability failure has no returned ID and may have crossed the socket
+            // boundary, so it must be reported as unknown without a destructive follow-up.
+            if case .http = createError { throw createError }
+            throw LocalImageRunError.createOutcomeUnknown(message: createError.localizedDescription)
+        } catch {
+            throw LocalImageRunError.createOutcomeUnknown(message: MorbErrorMessage.text(for: error))
+        }
+
+        progress(.starting)
+        do {
+            try await client.startContainer(id: containerID)
+        } catch {
+            throw LocalImageRunError.startNotConfirmed(
+                containerID: containerID,
+                message: MorbErrorMessage.text(for: error))
+        }
+
+        // The start response is the source of truth for this result. Refreshing is a
+        // convenience for the surrounding tables; its independent failure must not
+        // change a successful start into a false failure result.
+        await refreshAll()
+        return LocalImageRunResult(containerID: containerID, requestedName: normalizedName)
+    }
+
+    /// Navigates to a container whose identity was returned by a successful Engine
+    /// create/start result. The caller never guesses a name or a status.
+    func showContainer(id: String) {
+        selection = .containers
+        selectedContainerID = id
+    }
+
     // MARK: - Engine actions
 
     /// Starts, stops or suspends the VM.

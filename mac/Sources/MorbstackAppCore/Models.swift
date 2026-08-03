@@ -101,6 +101,48 @@ enum ContainerAction: String, Sendable, CaseIterable {
     var isDestructive: Bool { self == .remove }
 }
 
+/// The honest phases of the deliberately narrow "Run Local Image" operation.
+///
+/// The app creates exactly one container from an already-listed local image, then
+/// starts it. It does not expose a general container-configuration surface.
+enum LocalImageRunProgress: Sendable {
+    case creating
+    case starting
+
+    var title: String {
+        switch self {
+        case .creating: return "Creating Container…"
+        case .starting: return "Starting Container…"
+        }
+    }
+}
+
+/// The Engine identity of one container created and started by the local-image flow.
+struct LocalImageRunResult: Sendable, Equatable {
+    let containerID: String
+    /// A requested name, not an asserted final Engine name. Docker remains the
+    /// authority for validating and assigning it.
+    let requestedName: String?
+}
+
+/// A result that preserves whether Docker confirmed the bounded create/start request.
+enum LocalImageRunError: LocalizedError {
+    case imageIsNoLongerLocal
+    case createOutcomeUnknown(message: String)
+    case startNotConfirmed(containerID: String, message: String)
+
+    var errorDescription: String? {
+        switch self {
+        case .imageIsNoLongerLocal:
+            return "The selected image is no longer available locally. Refresh Images and choose it again."
+        case .createOutcomeUnknown(let message):
+            return "Morbstack could not confirm whether Docker created the container: \(message). A new container may exist; inspect Containers before retrying."
+        case .startNotConfirmed(let containerID, let message):
+            return "Docker did not confirm this start request for \(containerID): \(message). The container was left in place; inspect it in Containers before retrying."
+        }
+    }
+}
+
 /// A lifecycle operation on the engine VM itself.
 enum EngineAction: String, Sendable {
     case start, stop, suspend

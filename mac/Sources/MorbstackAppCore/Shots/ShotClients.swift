@@ -97,8 +97,15 @@ final class ShotDockerClient: DockerClient, @unchecked Sendable {
 
     // MARK: Mutations
 
-    // Fixture automation must never mutate a user's Docker engine. Mutations are safe
-    // no-ops so a future UI test can exercise confirmation and post-action refresh paths.
+    // Fixture automation must never mutate a user's Docker engine. Existing lifecycle
+    // calls are safe no-ops for future confirmation tests; a new container creation
+    // instead fails explicitly so a fixture review cannot mistake an invented result
+    // for a real Engine action.
+    override func createLocalImageContainer(imageID: String, requestedName: String?) async throws -> String {
+        throw DockerClientError.http(
+            status: 503,
+            message: "Run Local Image is unavailable in fixture mode; no Docker action was performed.")
+    }
     override func startContainer(id: String) async throws {}
     override func stopContainer(id: String) async throws {}
     override func restartContainer(id: String) async throws {}

@@ -91,6 +91,8 @@ struct ImagesRootView: View {
     @State private var imageArchiveExport: ImageArchiveExportOperation?
     @State private var imageArchiveExportCancellation: ImageArchiveExportCancellation?
     @State private var imageArchiveExportNotice: ImageArchiveExportNotice?
+    /// The selected local image snapshot for the one bounded create/start flow.
+    @State private var localImageRun: ImageSummary?
 
     private var sections: (tagged: [ImageSummary], dangling: [ImageSummary]) {
         let key = sortOrder.first?.key ?? .created
@@ -221,6 +223,9 @@ struct ImagesRootView: View {
             .sheet(isPresented: $showingPublicImageDiscovery) {
                 PublicImageDiscoverySheet()
             }
+            .sheet(item: $localImageRun) { image in
+                LocalImageRunSheet(image: image, model: model)
+            }
             .sheet(item: $imageArchiveExport) { operation in
                 ImageArchiveExportSheet(operation: operation, cancel: cancelImageArchiveExport)
                     .interactiveDismissDisabled()
@@ -236,11 +241,21 @@ struct ImagesRootView: View {
             .focusedSceneValue(
                 \.imageArchiveExportAction,
                 imageArchiveExportAction)
+            .focusedSceneValue(
+                \.runLocalImageAction,
+                runLocalImageAction)
     }
 
     private var imageArchiveExportAction: (() -> Void)? {
         guard selectedImage != nil, imageArchiveExport == nil else { return nil }
         return chooseImageArchiveDestination
+    }
+
+    private var runLocalImageAction: (() -> Void)? {
+        guard let selectedImage, model.engine.isRunning, imageArchiveExport == nil, localImageRun == nil else {
+            return nil
+        }
+        return { localImageRun = selectedImage }
     }
 
     private var removalAlertTitle: String {
@@ -322,6 +337,19 @@ struct ImagesRootView: View {
                     ? "Select an image to export"
                     : "Export selected image as a Docker archive")
             .disabled(selectedImage == nil || imageArchiveExport != nil)
+        }
+        ToolbarItem(id: "images.runLocal", placement: .secondaryAction) {
+            Button {
+                runLocalImageAction?()
+            } label: {
+                Image(systemName: "play")
+            }
+            .accessibilityLabel("Run selected local image")
+            .help(
+                runLocalImageAction == nil
+                    ? "Select a local image while the engine is running"
+                    : "Create and start one container using the selected local image")
+            .disabled(runLocalImageAction == nil)
         }
         if !model.images.isEmpty {
             ToolbarItem(id: "images.inspector", placement: .automatic) {
@@ -503,7 +531,10 @@ struct ImagesRootView: View {
                 }
             }
         }
-        .tableStyle(.automatic)
+        // Native `BorderedTableStyle` is the narrow system-style hypothesis for the
+        // repeated rounded empty-row bands seen in the current automatic appearance.
+        // It requires current-bundle Computer Use review before visual acceptance.
+        .tableStyle(.bordered)
         .contextMenu(forSelectionType: ImageSummary.ID.self) { ids in
             contextMenu(for: ids)
         }
@@ -574,6 +605,11 @@ struct ImagesRootView: View {
                 Button("Copy Reference") { MorbPasteboard.copy(reference) }
             }
             Divider()
+            Button("Run Local Image…") {
+                localImageRun = image
+            }
+            .disabled(!model.engine.isRunning || imageArchiveExport != nil)
+            Divider()
             Button("Export Image Archive…") {
                 chooseImageArchiveDestination(for: image)
             }
@@ -632,6 +668,15 @@ struct ImagesRootView: View {
                         Label("Export Image Archive…", systemImage: "square.and.arrow.down")
                     }
                     .disabled(imageArchiveExport != nil)
+                }
+
+                Section("Container") {
+                    Button {
+                        localImageRun = image
+                    } label: {
+                        Label("Run Local Image…", systemImage: "play")
+                    }
+                    .disabled(!model.engine.isRunning || imageArchiveExport != nil)
                 }
 
                 Section {

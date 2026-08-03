@@ -594,11 +594,20 @@ class DockerClient: @unchecked Sendable {
     // MARK: One-shot requests
 
     /// Sends a request and returns the whole body.
-    private func send(method: String, path: String, timeout: TimeInterval = 20) throws -> Data {
+    private func send(
+        method: String,
+        path: String,
+        requestBody: Data? = nil,
+        timeout: TimeInterval = 20
+    ) throws -> Data {
         let connection = try DockerConnection(socketPath: socketPath, timeout: 5)
         defer { connection.close() }
 
-        try connection.write(MinimalHTTP.request(method: method, path: path, closeWhenDone: true))
+        if let requestBody {
+            try connection.write(Self.jsonRequest(method: method, path: path, body: requestBody))
+        } else {
+            try connection.write(MinimalHTTP.request(method: method, path: path, closeWhenDone: true))
+        }
 
         var raw = Data()
         var head: HTTPResponseHead?
@@ -656,12 +665,38 @@ class DockerClient: @unchecked Sendable {
         try await run { try self.send(method: "POST", path: self.url(path), timeout: timeout) }
     }
 
+    /// Sends one bounded JSON document. This is intentionally private to the narrow
+    /// local-image create operation; it is not a generic UI-to-Docker request editor.
+    @discardableResult
+    private func postJSON(_ path: String, body: Data, timeout: TimeInterval = 60) async throws -> Data {
+        try await run {
+            try self.send(method: "POST", path: self.url(path), requestBody: body, timeout: timeout)
+        }
+    }
+
     @discardableResult
     private func delete(_ path: String, timeout: TimeInterval = 60) async throws -> Data {
         try await run { try self.send(method: "DELETE", path: self.url(path), timeout: timeout) }
     }
 
     private func url(_ path: String) -> String { "/\(Self.apiVersion)\(path)" }
+
+    /// The JSON request shape needed by `POST /containers/create`. `MinimalHTTP` owns
+    /// the shared bodyless request vocabulary; keeping this complete-body shape here
+    /// makes its content type and byte-count ownership explicit.
+    private static func jsonRequest(method: String, path: String, body: Data) -> Data {
+        let head = """
+            \(method) \(path) HTTP/1.1\r
+            Host: morbstack\r
+            Accept: application/json\r
+            Content-Type: application/json\r
+            Content-Length: \(body.count)\r
+            User-Agent: morbstack/\(MorbVersion.string)\r
+            Connection: close\r
+            \r
+            """
+        return Data(head.utf8) + body
+    }
 
     /// Runs a blocking body off the cooperative pool.
     ///
@@ -926,6 +961,35 @@ class DockerClient: @unchecked Sendable {
     }
 
     // MARK: Container lifecycle
+
+    /// Creates one container from the immutable ID of an image that the Images route
+    /// has already listed locally. The JSON has *only* `Image`: Docker therefore uses
+    /// the image's own entrypoint, command, user, working directory, and environment.
+    /// It does not request a pull, mounts, ports, a custom network, privilege, or host
+    /// configuration. An optional user name is carried only in Docker's normal query
+    /// parameter and remains Engine-validated.
+    func createLocalImageContainer(imageID: String, requestedName: String?) async throws -> String {
+        let name = requestedName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let path: String
+        if let name, !name.isEmpty {
+            path = "/containers/create?name=\(MinimalHTTP.percentEncodeQueryValue(name))"
+        } else {
+            path = "/containers/create"
+        }
+
+        let body = try JSONEncoder().encode(LocalImageCreateRequest(Image: imageID))
+        let data = try await postJSON(path, body: body)
+        let response: LocalImageCreateResponse
+        do {
+            response = try Self.decoder.decode(LocalImageCreateResponse.self, from: data)
+        } catch {
+            throw DockerClientError.decoding("could not decode Docker's create response: \(error)")
+        }
+        guard let id = response.Id, !id.isEmpty else {
+            throw DockerClientError.decoding("Docker created a container without returning its ID")
+        }
+        return id
+    }
 
     func startContainer(id: String) async throws { try await post("/containers/\(id)/start") }
     func stopContainer(id: String) async throws { try await post("/containers/\(id)/stop?t=10", timeout: 45) }
@@ -1196,6 +1260,18 @@ class DockerClient: @unchecked Sendable {
         if afterColon.isEmpty { return (String(trimmed[trimmed.startIndex..<colon]), "latest") }
         return (String(trimmed[trimmed.startIndex..<colon]), String(afterColon))
     }
+}
+
+/// The whole request document for the local-image run flow. Keeping this next to the
+/// client rather than a view makes the authority boundary reviewable: no host config
+/// or user-configurable Docker field can enter the request.
+private struct LocalImageCreateRequest: Encodable {
+    let Image: String
+}
+
+/// Docker's successful container-create response contains the new immutable ID.
+private struct LocalImageCreateResponse: Decodable {
+    let Id: String?
 }
 
 // MARK: - Stream plumbing
