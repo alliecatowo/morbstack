@@ -123,6 +123,15 @@ separately confirmed transfer still needs live engines, a usable helper image,
 temporary host disk, and archive-copy preflight. The native Migration route does
 not yet execute volume transfers.
 
+Before a selected transfer reaches review, the helper re-inspects every exact
+source volume. A `local` volume with nonempty, missing, or malformed `Options`
+is refused: those options can define NFS, CIFS, tmpfs, block-device, or named-bind
+storage. The archive helper must not create a default destination volume by silently
+dropping `type`/`device`/`o`, and it must not replay source-VM mount/device options
+without a separate, explicit contract. This restriction is only for Morbstack's
+archive-copy migration; normal Docker and Compose volume APIs relay driver options
+unchanged.
+
 `morb migrate volumes --from docker-desktop` remains the explicit CLI operation
 for named-volume copies. After the terminal confirmation it can create and
 remove migration-owned helper containers; if no suitable local helper image is

@@ -245,6 +245,7 @@ public enum VolumeMigrationTransactionError: Error, CustomStringConvertible {
     case confirmationDoesNotMatch
     case networkConsentDoesNotMatch
     case helperImageNetworkConsentRequired([String])
+    case unsupportedLocalDriverOptions([String])
 
     public var description: String {
         switch self {
@@ -257,6 +258,8 @@ public enum VolumeMigrationTransactionError: Error, CustomStringConvertible {
         case .networkConsentDoesNotMatch: return "network consent does not belong to this prepared volume migration"
         case .helperImageNetworkConsentRequired(let labels):
             return "a helper image is unavailable on \(labels.joined(separator: " and ")); explicitly approve the alpine:3.20 pull before transfer"
+        case .unsupportedLocalDriverOptions(let names):
+            return "these local volumes have custom or unverifiable driver options: \(names.joined(separator: ", ")). The archive migration refuses to silently discard or replay mount/device options on Morbstack."
         }
     }
 }
@@ -268,6 +271,7 @@ public enum VolumeMigrationTransaction {
 
     public static let safetyLimits = [
         "Only selected source volumes using Docker's local driver are considered.",
+        "A selected local volume must report an empty driver-option map; archive migration never silently drops or replays local mount/device options.",
         "Morbstack must not already have a volume with the selected name; existing destination contents are never inspected, merged, or replaced.",
         "The source helper container is created stopped with a read-only volume mount and is removed best-effort after its archive read.",
         "Destination volumes are additive only. The transaction never deletes a volume or performs automatic rollback.",
@@ -299,8 +303,9 @@ public enum VolumeMigrationTransaction {
             throw VolumeMigrationTransactionError.missingSourceSocket
         }
 
-        let selected = try selectedItems(selection, from: volumePlan)
         let sourceClient = EngineClient.forUnixSocket(sourceSocket)
+        let selected = try selectedItems(selection, from: volumePlan)
+        try verifyArchiveTransferVolumeSemantics(selected, on: sourceClient)
         let destinationClient = EngineClient()
         let sourceHasHelper: Bool
         let destinationHasHelper: Bool
@@ -425,6 +430,42 @@ public enum VolumeMigrationTransaction {
         }
     }
 
+    /// Re-inspects exact selected source volumes before review. The initial list plan
+    /// is necessarily a snapshot; allowing a `local` volume with `type`, `device`,
+    /// `o`, or another option through would later create a plain default volume and
+    /// silently change the storage contract the user asked to migrate.
+    private static func verifyArchiveTransferVolumeSemantics(
+        _ items: [MigrationVolumePlanItem],
+        on client: EngineClient
+    ) throws {
+        var unsupported: [String] = []
+        for item in items {
+            let info: [String: Any]
+            do {
+                info = try client.jsonObject("GET", "/volumes/\(item.name)", timeout: 30)
+            } catch {
+                throw VolumeMigrationTransactionError.unavailable(
+                    "could not recheck selected volume \(item.name): \(error)")
+            }
+            if !isOptionFreeLocalVolume(info) { unsupported.append(item.name) }
+        }
+        if !unsupported.isEmpty {
+            throw VolumeMigrationTransactionError.unsupportedLocalDriverOptions(unsupported.sorted())
+        }
+    }
+
+    /// `Options: null` is an Engine spelling for an option-free volume. A missing,
+    /// malformed, non-string, or nonempty map is not assumed safe: the local driver
+    /// can receive mount types, devices, and flags through this field.
+    private static func isOptionFreeLocalVolume(_ volume: [String: Any]) -> Bool {
+        guard JSONRead.string(volume, "Driver") == "local",
+              let rawOptions = volume["Options"]
+        else { return false }
+        if rawOptions is NSNull { return true }
+        guard let options = rawOptions as? [String: Any] else { return false }
+        return options.isEmpty && options.values.allSatisfy { $0 is String }
+    }
+
     private static func resolveHelperImages(
         source: MigrationSource,
         destination: EngineClient,
@@ -509,6 +550,12 @@ public enum VolumeMigrationTransaction {
                               destinationHelperCreated: destinationHelperCreated, outcome: .failed,
                               destinationState: .notCreated,
                               detail: "source volume is no longer a Docker local-driver volume")
+            }
+            guard isOptionFreeLocalVolume(sourceInfo) else {
+                return report(for: item, bytes: archiveBytes, sourceHelperCreated: sourceHelperCreated,
+                              destinationHelperCreated: destinationHelperCreated, outcome: .failed,
+                              destinationState: .notCreated,
+                              detail: "source volume has custom or unverifiable local-driver options; refusing to create a default destination volume that would change its storage contract")
             }
             guard try !volumeExists(item.name, on: destination) else {
                 return report(for: item, bytes: archiveBytes, sourceHelperCreated: sourceHelperCreated,
