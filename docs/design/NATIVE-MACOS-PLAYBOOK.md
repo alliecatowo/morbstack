@@ -167,6 +167,13 @@ for Apple HIG:
   `NSOutlineView` only for a measured large-data/performance issue or a required feature
   such as Finder-grade outline behavior, drag/reorder semantics, advanced inline
   editing, or column behavior that the system `Table` cannot provide.
+- `TableStyle` is a system choice, not a branded styling hook. Start automatic, then
+  inspect the actual WindowServer-composited route. If automatic produces the Tahoe
+  inset/rounded empty-row treatment that makes a dense operational grid read as
+  skeleton/dashboard UI, prefer the system `.bordered` style before considering any
+  custom drawing; it retains native column, selection, resize, and accessibility
+  behavior while avoiding inset-style rows. The choice must be recorded and rechecked
+  in light/dark and narrow windows. [TableStyle](https://developer.apple.com/documentation/swiftui/tablestyle)
 - Do not use `SwiftUI-Introspect` for appearance. Its own documentation notes that its
   view-hierarchy search can stop finding a component as SwiftUI evolves. A direct,
   small AppKit bridge is more explicit and removable if the system API has a real gap.
