@@ -115,6 +115,66 @@ workload; it does not follow logs or request a previous container's logs.
 Kubernetes controls log rotation and Event retention, so an empty result means
 only that no retained data was returned at that moment.
 
+### Planned selected-Pod local port-forward
+
+**Status: planned contract; not implemented, tested, or released.** This is
+the only port-forward capability proposed for Morbstack. It is deliberately a
+small local-development escape hatch, not a general Kubernetes proxy and not a
+replacement for a person's `kubectl` installation.
+
+The daemon will accept a request only for the Pod currently selected in
+Morbstack: its namespace, DNS-style name, and current Kubernetes UID, plus one
+validated TCP Pod port and a requested loopback TCP port. It will reject
+Services, Deployments, label selectors, arbitrary API paths, UDP, remote
+addresses, port ranges, `0.0.0.0`, an unselected Pod, and any request that does
+not identify the exact selected UID. The listener will bind only
+`127.0.0.1`; choosing an ephemeral local port is permitted, but it will never
+publish a LAN, VPN, or wildcard listener.
+
+The daemon owns the whole protocol. It will invoke only Morbstack's bundled,
+pinned `kubectl` binary by absolute path with a fixed port-forward argument
+shape; it will not search `PATH`, shell out through a command string, inherit
+`KUBECONFIG`, or invoke a user-installed `kubectl`. Its input is a
+daemon-created, mode-restricted temporary credential file derived from
+Morbstack's own private Kubernetes identity. It never reads, merges, writes,
+or switches `~/.kube/config`, and it never exposes that private file or client
+credentials in the UI, logs, diagnostics, process arguments, or an exported
+command.
+
+Before allocating the listener, and again after the child process reports it
+is ready, the daemon must revalidate all of the following: the engine and
+cluster are Ready; Morbstack's loopback API forward and pinned credentials are
+current; the exact namespace/name/UID is still the selected running Pod; and
+the requested TCP port remains valid for that Pod. A failed revalidation must
+close the listener and report the reason; it must not start the engine,
+generate a kubeconfig, select a replacement Pod, or fall back to a user
+configuration.
+
+The forward is one cancellable lease owned by the daemon. Cancelling it,
+changing selection, leaving the route, stopping the VM or Kubernetes,
+credential/API-forward invalidation, child exit, or a listener error closes the
+listener and every relay, terminates the child process group, removes the
+temporary credential material, and records only a bounded non-secret
+diagnostic. A vanished, restarted, or rescheduled Pod ends the lease. There is
+no transparent reconnect, retarget, retry loop, background persistence, or
+restoration after restart: the person selects the current Pod and explicitly
+starts a new forward.
+
+Required acceptance before this status can change:
+
+| Case | Required proof |
+| --- | --- |
+| Exact selection and authority | A selected Pod/UID succeeds; an old UID, another Pod, Service, selector, arbitrary command, user `kubectl`, and user kubeconfig are each rejected or unused. |
+| Listener boundary | The usable endpoint is TCP on `127.0.0.1` only; wildcard, LAN, VPN, UDP, ranges, and invalid ports fail without a listener. |
+| Credential and binary provenance | The daemon uses the bundled pinned binary and its private ephemeral credential input; `PATH`, `KUBECONFIG`, `~/.kube/config`, and logs/process arguments contain no controlling or leaked user credential state. |
+| Readiness and drift | Cluster/API/credential/Pod/port changes both before readiness and after startup close or prevent the forward with a specific recovery message. |
+| Cancellation and cleanup | Explicit cancel, route/selection change, VM/Kubernetes stop, child failure, and listener failure close all sockets/relays, kill the child group, and remove temporary credentials. |
+| No implicit restoration | Pod restart/reschedule, daemon/app restart, and VM recovery leave no listener or child; a new current selection and explicit request are required. |
+
+Passing that matrix on a real local cluster is a prerequisite for an
+implementation claim. It is not evidence of a general port-forward feature or
+of Docker Desktop replacement release readiness.
+
 ### Bounded Pod and Node descriptions
 
 `morb k8s describe pod <namespace> <name>` and `morb k8s describe node
@@ -229,8 +289,9 @@ Mac cannot represent that regardless of which package hits it next.
 
 - **Streaming or workload-control paths.** The app's log inspector is a
   bounded non-follow snapshot only. `kubectl exec`, `kubectl attach`,
-  `kubectl port-forward`, `kubectl logs -f`, previous-container logs,
-  workload edits, and workload deletion are not app features. `kubectl logs`
+  `kubectl logs -f`, previous-container logs, workload edits, and workload
+  deletion are not app features. The selected-Pod local port-forward above is
+  a planned, bounded contract, not a current capability. `kubectl logs`
   (non-follow) and `kubectl describe` both work; the streaming/exec paths
   were not verified either way and no claim is made about them here.
 - **Multi-node.** The node is fixed as `morbstack`; there is no join flow
