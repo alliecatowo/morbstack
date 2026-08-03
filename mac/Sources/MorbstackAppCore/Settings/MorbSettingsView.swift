@@ -621,7 +621,14 @@ private struct TrackDCommandLineToolsStatus {
     var contextSummary: String {
         guard context.registered else { return "Not registered" }
         guard context.matchesSocket else { return "Needs repair" }
-        return context.isCurrent ? "Current" : "Registered"
+        switch context.effectiveSelection {
+        case .environmentContext(let selected) where selected == MorbDockerContext.name:
+            return "Selected by shell"
+        case .environmentContext, .dockerHost:
+            return "Overridden by shell"
+        case .savedContext:
+            return context.isCurrent ? "Current" : "Registered"
+        }
     }
 
     var contextGuidance: String {
@@ -631,6 +638,15 @@ private struct TrackDCommandLineToolsStatus {
         if !context.matchesSocket {
             let endpoint = context.registeredHost ?? "an unrecognized endpoint"
             return "The existing morbstack context points at \(endpoint). Morbstack leaves it unchanged; repair or rename that context, then review setup again."
+        }
+        if let environmentContext = context.environmentContext {
+            if environmentContext == MorbDockerContext.name {
+                return "DOCKER_CONTEXT selects Morbstack for commands launched with this environment. Docker gives it precedence over DOCKER_HOST and the saved selection."
+            }
+            return "DOCKER_CONTEXT selects \(environmentContext) for commands launched with this environment. Docker gives it precedence over DOCKER_HOST and the saved selection."
+        }
+        if context.hasDockerHostOverride {
+            return "DOCKER_HOST selects a direct endpoint for commands launched with this environment instead of the saved context."
         }
         if !context.isCurrent {
             return "The morbstack context is registered, but Docker’s saved selection is \(context.currentContext). Setup preserves a non-default selection."

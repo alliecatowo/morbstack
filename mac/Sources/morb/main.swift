@@ -801,15 +801,18 @@ case "context":
         out("")
         out("  current context: \(status.currentContext)"
             + (status.isCurrent ? " (morbstack)" : ""))
-        if status.hasDockerHostOverride {
-            out("  DOCKER_HOST is set in this shell and overrides the saved context.")
-            out("  Unset it before using the configured Morbstack context.")
-        } else if let environmentContext = status.environmentContext {
+        if let environmentContext = status.environmentContext {
             if environmentContext == MorbDockerContext.name {
-                out("  DOCKER_CONTEXT selects Morbstack for this shell.")
+                out("  DOCKER_CONTEXT selects Morbstack for this shell, ahead of the saved context.")
             } else {
-                out("  DOCKER_CONTEXT=\(environmentContext) overrides the saved context for this shell.")
+                out("  DOCKER_CONTEXT=\(environmentContext) selects that context for this shell, ahead of the saved context.")
             }
+            if status.hasDockerHostOverride {
+                out("  DOCKER_HOST is also set, but Docker gives DOCKER_CONTEXT precedence.")
+            }
+        } else if status.hasDockerHostOverride {
+            out("  DOCKER_HOST selects a direct endpoint for this shell instead of the saved context.")
+            out("  Unset it before using the configured Morbstack context.")
         }
         if !status.isCurrent {
             if status.wouldRefuseUse {
@@ -875,6 +878,19 @@ case "context":
             directSocketState = "unavailable"
             directSocketExistingDestination = .string(reason)
         }
+        let effectiveSelection: String
+        let effectiveContext: AnyCodableValue
+        switch status.effectiveSelection {
+        case .environmentContext(let selected):
+            effectiveSelection = "docker_context"
+            effectiveContext = .string(selected)
+        case .dockerHost:
+            effectiveSelection = "docker_host"
+            effectiveContext = .null
+        case .savedContext(let selected):
+            effectiveSelection = "saved_context"
+            effectiveContext = .string(selected)
+        }
         finish(.success([
             "name": .string(MorbDockerContext.name),
             "registered": .bool(status.registered),
@@ -884,6 +900,8 @@ case "context":
             "is_current": .bool(status.isCurrent),
             "environment_context": status.environmentContext.map { AnyCodableValue.string($0) } ?? .null,
             "docker_host_override": .bool(status.hasDockerHostOverride),
+            "effective_selection": .string(effectiveSelection),
+            "effective_context": effectiveContext,
             "docker_config_directory": .string(status.dockerConfigDirectory),
             "socket_path": .string(status.socketPath),
             "direct_socket_path": .string(directSocket.path),
@@ -942,12 +960,15 @@ case "context":
         if status.isCurrent && status.matchesSocket {
             finish(.success(["switched": .bool(false), "already_current": .bool(true)])) { _ in
                 out("[ok] \"\(MorbDockerContext.name)\" is already the saved current context")
-                if status.hasDockerHostOverride {
-                    out("[--] DOCKER_HOST is set in this shell, so it overrides that saved context")
-                } else if let environmentContext = status.environmentContext,
-                          environmentContext != MorbDockerContext.name
+                if let environmentContext = status.environmentContext,
+                   environmentContext != MorbDockerContext.name
                 {
                     out("[--] DOCKER_CONTEXT=\(environmentContext) overrides that saved context in this shell")
+                    if status.hasDockerHostOverride {
+                        out("[--] DOCKER_HOST is also set, but Docker gives DOCKER_CONTEXT precedence")
+                    }
+                } else if status.hasDockerHostOverride && status.environmentContext == nil {
+                    out("[--] DOCKER_HOST is set in this shell, so it overrides that saved context")
                 }
             }
         }
@@ -992,12 +1013,15 @@ case "context":
             case .current:
                 finish(.success(["switched": .bool(true)])) { _ in
                     out("[ok] saved current context is now \"\(MorbDockerContext.name)\"")
-                    if status.hasDockerHostOverride {
-                        out("[--] DOCKER_HOST is set in this shell, so it overrides that saved context")
-                    } else if let environmentContext = status.environmentContext,
-                              environmentContext != MorbDockerContext.name
+                    if let environmentContext = status.environmentContext,
+                       environmentContext != MorbDockerContext.name
                     {
                         out("[--] DOCKER_CONTEXT=\(environmentContext) overrides that saved context in this shell")
+                        if status.hasDockerHostOverride {
+                            out("[--] DOCKER_HOST is also set, but Docker gives DOCKER_CONTEXT precedence")
+                        }
+                    } else if status.hasDockerHostOverride && status.environmentContext == nil {
+                        out("[--] DOCKER_HOST is set in this shell, so it overrides that saved context")
                     }
                 }
             case .refused(let current):

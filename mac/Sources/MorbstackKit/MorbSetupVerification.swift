@@ -230,23 +230,23 @@ public enum MorbSetupVerification {
                 status: .failure,
                 detail: "The morbstack context is not registered for \(context.socketPath).")
         }
-        if context.hasDockerHostOverride {
-            return Check(
-                name: "Docker context",
-                status: .info,
-                detail: "The morbstack context points at Morbstack, but DOCKER_HOST is set in this process and overrides the saved context. Unset it to use the configured Morbstack context.")
-        }
         if let environmentContext = context.environmentContext {
             if environmentContext == MorbDockerContext.name {
                 return Check(
                     name: "Docker context",
                     status: .pass,
-                    detail: "The morbstack context points at Morbstack and is selected by DOCKER_CONTEXT for this process.")
+                    detail: "The morbstack context points at Morbstack and is selected by DOCKER_CONTEXT for this process. Docker gives it precedence over DOCKER_HOST and the saved context.")
             }
             return Check(
                 name: "Docker context",
                 status: .info,
-                detail: "The morbstack context points at Morbstack, but DOCKER_CONTEXT=\(environmentContext) overrides the saved context for this process.")
+                detail: "The morbstack context points at Morbstack, but DOCKER_CONTEXT=\(environmentContext) selects another context for this process. Docker gives it precedence over DOCKER_HOST and the saved context.")
+        }
+        if context.hasDockerHostOverride {
+            return Check(
+                name: "Docker context",
+                status: .info,
+                detail: "The morbstack context points at Morbstack, but DOCKER_HOST selects a direct endpoint for this process instead of the saved context. Unset it to use the configured Morbstack context.")
         }
         if context.isCurrent {
             return Check(

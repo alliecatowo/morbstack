@@ -15,6 +15,15 @@ working" has a precise, checkable answer rather than a marketing claim.
   non-Morbstack default context set (e.g. pointing at a remote Docker
   host, or at Docker Desktop during a side-by-side trial), Morbstack must
   not change that default without explicit user action.
+- **Connection diagnostics follow Docker’s documented precedence.** A saved
+  `currentContext` is not necessarily the endpoint a process will use.
+  Morbstack’s read-only status and setup report resolve the process-visible
+  choices as `DOCKER_CONTEXT` (when non-empty), then `DOCKER_HOST`, then the
+  saved current context. A `DOCKER_CONTEXT` value therefore wins even when
+  `DOCKER_HOST` is also set. Per-command `docker --context` and `docker
+  --host` options have higher precedence and cannot be inferred from a
+  process-level status report; that report never contacts an endpoint or
+  exposes a `DOCKER_HOST` value.
 - **Engine API = upstream moby, verbatim.** The API surface exposed over
   `~/.morbstack/run/docker.sock` is whatever the bundled upstream
   `dockerd` version exposes — Morbstack does not add, remove, or

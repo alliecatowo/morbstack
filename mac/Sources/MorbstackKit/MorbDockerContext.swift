@@ -99,6 +99,26 @@ public enum MorbDockerContext {
 
     /// A complete answer to "is the `morbstack` context registered and current".
     public struct Status: Equatable, Sendable {
+        /// Docker's process-level connection selection after applying the two
+        /// environment variables that a status inspection can observe. This is not a
+        /// claim about an individual command: `docker --context` and `docker --host`
+        /// have higher precedence and are intentionally outside this process snapshot.
+        ///
+        /// Docker documents `DOCKER_CONTEXT` as taking precedence over both
+        /// `DOCKER_HOST` and the saved current context. Keeping this as a derived,
+        /// typed value prevents separate callers from accidentally presenting those
+        /// environment variables in the wrong order.
+        public enum EffectiveSelection: Equatable, Sendable {
+            /// A non-empty `DOCKER_CONTEXT` selects this context for the process.
+            case environmentContext(String)
+            /// A non-empty `DOCKER_HOST` selects a direct endpoint for the process.
+            /// The value is deliberately not retained in a diagnostic model because a
+            /// URL may contain user-controlled or sensitive connection information.
+            case dockerHost
+            /// Neither process override is set, so the Docker config selection applies.
+            case savedContext(String)
+        }
+
         /// `~/.docker/contexts/meta/<digest>/meta.json` exists for the `morbstack` name,
         /// even when its contents cannot be parsed as a Docker endpoint.  Existence
         /// must not be inferred from `registeredHost`: a malformed same-named context
@@ -121,12 +141,25 @@ public enum MorbDockerContext {
         /// separately so a status report never mistakes the saved preference for the
         /// endpoint a command in this process will actually select.
         public var environmentContext: String?
-        /// Whether the invoking process sets `DOCKER_HOST`. Like an explicit context,
-        /// this is an environment-level endpoint override, so callers must not claim
-        /// that the saved context alone determines where `docker` will connect.
+        /// Whether the invoking process sets `DOCKER_HOST`. It selects the endpoint
+        /// only when ``environmentContext`` is absent: Docker gives `DOCKER_CONTEXT`
+        /// higher precedence. This still remains useful to expose because a shell may
+        /// carry both variables and the lower-priority setting needs explanation.
         public var hasDockerHostOverride: Bool
         public var dockerConfigDirectory: String
         public var socketPath: String
+
+        /// The effective source Docker will use for this process, limited to the
+        /// saved-context and environment-variable rules visible to this model.
+        public var effectiveSelection: EffectiveSelection {
+            if let environmentContext {
+                return .environmentContext(environmentContext)
+            }
+            if hasDockerHostOverride {
+                return .dockerHost
+            }
+            return .savedContext(currentContext)
+        }
 
         /// Whether `use(force: false, ...)` would be refused right now — i.e. some
         /// *other* explicit context already owns default. Mirrors the exact condition
