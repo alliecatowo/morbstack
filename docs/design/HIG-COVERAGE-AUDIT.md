@@ -186,6 +186,17 @@ narrow-width, keyboard/VoiceOver, context-menu, inspector, and lifecycle accepta
 remain required; this source change performs no build, test, Docker/VM, or live-app
 action.
 
+### 2026-08-03 Inspector density rule
+
+An inspector is a selected-record surface, not a compressed dashboard column. Computer
+Use showed that a roughly 300-point inspector made real monospaced Docker facts clip
+and caused otherwise-standard `Form` content to read as a hand-compressed web panel.
+For Containers, Stacks, and Images, the system `.inspectorColumnWidth` minimum is now
+340 points with a 400-point ideal width. This is a native width constraint, not a
+custom background, card, font, or field layout. Rich values still truncate/select
+according to their own content semantics; the acceptance pass must verify normal and
+narrow windows before this dimension is considered final.
+
 ## Charts audit: current concrete rule
 
 `ContainerStatsTab` currently contains the only real time-series visualization. It is
@@ -252,12 +263,12 @@ the WindowServer-composited bundle.
 | --- | --- | --- |
 | Shell/sidebar | Hide then show sidebar | System `NavigationSplitView` owned collapse/reveal; no custom toggle or overlay appeared. |
 | Engine-off content | Relaunched without accepting setup, then explicitly started Morbstack | Native `ContentUnavailableView` supplied the one appropriate Start action. The user-visible setup review was dismissed without changing shell/context settings. |
-| Container selection/inspector | Selected an actual stopped container and inspected Overview | The detail uses native `TabView` tabs and one grouped Form; scalar facts and variable rows remain semantic controls, while Start is the only primary lifecycle command for that stopped record. |
+| Container selection/inspector | Selected an actual stopped container and inspected Overview | The detail uses native `TabView` tabs and a system Form; scalar facts and variable rows remain semantic controls, while Start is the only primary lifecycle command for that stopped record. |
 | Images | Real local images, selection/inspector, Pull sheet opened then escaped | Direct sortable `Table`; no redundant first table section; Pull uses a system document-modal `Form` and no image was pulled. |
 | Volumes | Real local named volume selection | Inspector labels the Docker path as a **Guest Mount Point** and offers no impossible Finder reveal. |
 | Builds | Empty cache state; Build sheet opened then dismissed | `ContentUnavailableView` offers Build/Refresh; Build is a system document-modal review sheet and no build ran. |
 | Disk | Real `/system/df` data and selection | Native list sections separate non-additive aggregate categories from largest individual resources; the VM capacity indicator remains factual. |
-| Stacks | Real Compose project outline expanded; stopped service selected | The native `Table(children:)` disclosure exposes the actual project→service hierarchy, the inspector uses `Form` facts/actions, and the selected stopped service has exactly one symbol-only Start primary action. No lifecycle command was invoked. |
+| Stacks | Real Compose project outline expanded; stopped service selected | The native `List` + `OutlineGroup` disclosure exposes the actual project→service hierarchy without unused table rows, the inspector uses `Form` facts/actions, and the selected stopped service has exactly one symbol-only Start primary action. No lifecycle command was invoked. |
 | Migration | Real Docker Desktop and Morbstack inventory selected | The native runtime `Table` and inspector compared real local inventories in read-only mode. No image or volume workflow was opened, so transfer/recheck/progress acceptance remains pending. |
 | Kubernetes | Rebuilt daemon diagnosis and Enable review | The stale-daemon compatibility error disappeared after a clean daemon restart. Kubernetes accurately reported Off, then showed a standard enable confirmation naming the first-download consequence; it was cancelled, so k3s was not enabled. |
 
