@@ -1218,26 +1218,46 @@ struct KubernetesRootView: View {
                     Text("Showing the 20 most recent of \(podEvents.count) retained events.")
                         .foregroundStyle(.secondary)
                 }
-                ForEach(podEvents.prefix(20)) { event in
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack {
-                            Text(event.reason)
-                            Text(event.type)
-                                .foregroundStyle(.secondary)
-                            if event.count > 1 {
-                                Text("\(event.count) times")
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
+                Table(podEvents.prefix(20)) {
+                    TableColumn("Reason") { event in
+                        Text(event.reason)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    .width(min: 96, ideal: 128, max: 180)
+
+                    TableColumn("Message") { event in
                         Text(event.message)
                             .foregroundStyle(.secondary)
-                        if let lastObserved = event.lastObserved {
-                            Text(Formatters.absoluteDate(lastObserved))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
+                            .lineLimit(2)
+                            .truncationMode(.tail)
                     }
+                    .width(min: 180, ideal: 280)
+
+                    TableColumn("Type") { event in
+                        Text(event.type)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    .width(min: 60, ideal: 76, max: 100)
+
+                    TableColumn("Times") { event in
+                        Text(event.count, format: .number)
+                            .monospacedDigit()
+                    }
+                    .width(min: 48, ideal: 56, max: 68)
+
+                    TableColumn("Last Observed") { event in
+                        Text(event.lastObserved.map(Formatters.absoluteDate) ?? "Unavailable")
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    .width(min: 120, ideal: 156, max: 220)
                 }
+                .tableStyle(.automatic)
+                .frame(minHeight: 120, idealHeight: 180, maxHeight: 260)
+                .accessibilityLabel("20 most recent Kubernetes events")
             }
         }
     }
