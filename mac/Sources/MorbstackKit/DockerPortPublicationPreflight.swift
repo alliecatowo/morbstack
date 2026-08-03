@@ -177,7 +177,7 @@ public enum DockerPortPublicationPreflight {
                         message: "published \(protocolName.uppercased()) host port \(hostPort) is not a single port; dynamic and range allocations are not preflighted")
                 }
 
-                if let targetPort = containerPort(in: containerPort) {
+                if let targetPort = Self.containerPort(in: containerPort) {
                     let endpoint = "\(protocolName)|\(port)"
                     if let existingTarget = containerTargetByEndpoint[endpoint], existingTarget != targetPort {
                         return .rejected(
