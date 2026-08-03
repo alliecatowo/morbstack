@@ -107,7 +107,9 @@ guarantee.
 ### P2 — exceed the competing native experience
 
 1. `*.morb.local`, automatic local HTTPS with a narrowly scoped CA, direct
-   service opening/copying, macOS scoped DNS and VPN correctness.
+   service opening/copying, macOS scoped DNS and VPN correctness. The staged
+   resolver/router/CA contract and its inactive claim foundation are in
+   [`domains.md`](domains.md); no local-domain route is currently claimed.
 2. Native file access with truthful read/write semantics; use explicit safe
    export or temporary inspection until Finder integration is real.
 3. Toolbox-backed `morb debug` for distroless containers; never market a
