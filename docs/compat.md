@@ -24,12 +24,17 @@ working" has a precise, checkable answer rather than a marketing claim.
   --host` options have higher precedence and cannot be inferred from a
   process-level status report; that report never contacts an endpoint or
   exposes a `DOCKER_HOST` value.
-- **Engine API = upstream moby, verbatim.** The API surface exposed over
-  `~/.morbstack/run/docker.sock` is whatever the bundled upstream
-  `dockerd` version exposes — Morbstack does not add, remove, or
-  reshape API endpoints. Version skew concerns are the same ones that
-  exist between any two upstream Docker Engine versions, not
-  Morbstack-specific ones.
+- **Upstream Engine behind a transparent socket relay.** The API surface over
+  `~/.morbstack/run/docker.sock` is supplied by the bundled upstream `dockerd`,
+  and ordinary client traffic is relayed without a client endpoint whitelist.
+  Morbstack intentionally intercepts bounded container-create and selected
+  start/restart shapes to enforce bind-share safety and make host port publication
+  truthful; those paths can reject unsupported forms before they reach the Engine.
+  The exact API-version, relay, interception, and evidence boundary is maintained
+  in [`docker-engine-compatibility-inventory.md`](docker-engine-compatibility-inventory.md).
+  Version skew therefore includes both the selected upstream Engine and every
+  explicitly documented host-integration policy; no source-level relay statement is
+  a substitute for release acceptance evidence.
 - **Compose v2 and buildx are bundled.** The packaged app carries pinned,
   unmodified upstream `docker`, `docker-compose`, and `docker-buildx`
   binaries. Its consented first-run transaction puts the client on PATH,
