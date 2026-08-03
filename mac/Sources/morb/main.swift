@@ -577,6 +577,7 @@ case "service":
                 ("launch agent", status.plistPath ?? "not available from this executable"),
                 ("control socket", status.controlSocketPath),
                 ("socket present", status.controlSocketPresent ? "yes" : "no"),
+                ("socket state", status.controlSocketState.rawValue),
                 ("diagnostic", status.diagnostic),
             ])
         }
@@ -584,7 +585,10 @@ case "service":
 
     switch action {
     case "status":
-        renderService(MorbBackgroundService.status())
+        // This bounded AF_UNIX connection is diagnostic only: it distinguishes a
+        // stale socket pathname from an accepting daemon without launching either
+        // morbstackd or the VM.
+        renderService(MorbBackgroundService.status(checkControlSocket: true))
     case "enable":
         do {
             renderService(try MorbBackgroundService.enable())

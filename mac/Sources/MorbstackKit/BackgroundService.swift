@@ -39,6 +39,24 @@ public enum MorbBackgroundService {
         case unknown
     }
 
+    /// The observed state of the daemon control socket when a caller explicitly
+    /// requests a liveness probe.
+    ///
+    /// A LaunchAgent's registration tells us whether macOS may run it, not whether
+    /// the currently installed daemon has bound its control socket. Keeping that
+    /// distinction explicit makes a no-window service failure diagnosable without
+    /// claiming that a socket pathname is a healthy daemon.
+    public enum ControlSocketState: String, Codable, Equatable, Sendable {
+        /// The caller requested registration-only status, so no connection was attempted.
+        case notChecked = "not-checked"
+        /// No filesystem entry exists at the expected control socket path.
+        case missing
+        /// A filesystem entry exists but did not accept a bounded connection.
+        case unresponsive
+        /// A listener accepted a bounded connection at the expected path.
+        case responding
+    }
+
     /// A self-contained report suitable for a CLI or a future native settings pane.
     public struct Status: Codable, Equatable, Sendable {
         public let registration: Registration
@@ -48,6 +66,11 @@ public enum MorbBackgroundService {
         public let controlSocketPath: String
         /// Existence only — this never connects to or starts the daemon.
         public let controlSocketPresent: Bool
+        /// Whether an explicitly requested, bounded liveness probe reached a listener.
+        ///
+        /// ``ControlSocketState/notChecked`` preserves status inspection's original
+        /// registration-only behavior for callers such as first-run setup.
+        public let controlSocketState: ControlSocketState
         /// An actionable explanation of the registration state.
         public let diagnostic: String
 
@@ -56,12 +79,14 @@ public enum MorbBackgroundService {
             plistPath: String?,
             controlSocketPath: String,
             controlSocketPresent: Bool,
+            controlSocketState: ControlSocketState = .notChecked,
             diagnostic: String
         ) {
             self.registration = registration
             self.plistPath = plistPath
             self.controlSocketPath = controlSocketPath
             self.controlSocketPresent = controlSocketPresent
+            self.controlSocketState = controlSocketState
             self.diagnostic = diagnostic
         }
 
@@ -72,23 +97,31 @@ public enum MorbBackgroundService {
                 "plist": plistPath.map(AnyCodableValue.string) ?? .null,
                 "control_socket": .string(controlSocketPath),
                 "control_socket_present": .bool(controlSocketPresent),
+                "control_socket_state": .string(controlSocketState.rawValue),
                 "diagnostic": .string(diagnostic),
             ]
         }
     }
 
-    /// Inspects the service without registering it, launching it, or connecting to it.
-    public static func status() -> Status {
+    /// Inspects the service without registering it or launching it.
+    ///
+    /// The default is deliberately registration-only, so first-run setup can read
+    /// Service Management on its main actor without touching the daemon. Callers that
+    /// need no-window lifecycle diagnostics can request one bounded Unix-socket
+    /// connection; that probe never starts a daemon or VM.
+    public static func status(checkControlSocket: Bool = false) -> Status {
         guard let bundle = bundledLaunchAgent() else {
             return report(
                 registration: .unavailable,
                 plistPath: nil,
+                checkControlSocket: checkControlSocket,
                 diagnostic: "the Morbstack background service is available only from a complete Morbstack.app bundle")
         }
         let registration = registration(of: service())
         return report(
             registration: registration,
             plistPath: bundle.plistURL.path,
+            checkControlSocket: checkControlSocket,
             diagnostic: diagnostic(for: registration, bundle: bundle))
     }
 
@@ -268,12 +301,30 @@ public enum MorbBackgroundService {
         return BundleAgent(appURL: appURL, plistURL: plist, daemonURL: daemon)
     }
 
-    private static func report(registration: Registration, plistPath: String?, diagnostic: String) -> Status {
+    private static func report(
+        registration: Registration,
+        plistPath: String?,
+        checkControlSocket: Bool = false,
+        diagnostic: String
+    ) -> Status {
+        let controlSocketPath = MorbPaths.controlSocket.path
+        let controlSocketPresent = FileManager.default.fileExists(atPath: controlSocketPath)
+        let controlSocketState: ControlSocketState
+        if !checkControlSocket {
+            controlSocketState = .notChecked
+        } else if !controlSocketPresent {
+            controlSocketState = .missing
+        } else if UnixSocketClient.isAlive(path: controlSocketPath) {
+            controlSocketState = .responding
+        } else {
+            controlSocketState = .unresponsive
+        }
         Status(
             registration: registration,
             plistPath: plistPath,
-            controlSocketPath: MorbPaths.controlSocket.path,
-            controlSocketPresent: FileManager.default.fileExists(atPath: MorbPaths.controlSocket.path),
+            controlSocketPath: controlSocketPath,
+            controlSocketPresent: controlSocketPresent,
+            controlSocketState: controlSocketState,
             diagnostic: diagnostic)
     }
 
