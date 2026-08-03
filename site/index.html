@@ -196,7 +196,7 @@
           <span class="pill pill-pass">M0 complete</span>
           <span class="pill pill-pass">Kubernetes landed</span>
         </div>
-        <p>Morbstack has passed M0 — the core bet (unmodified Docker Engine, one shared VM, fast boot) plus the four functional gates added on top of it: published ports, container outbound networking, disk persistence across a restart, and <code class="inline">docker compose up -d</code>. A local Kubernetes cluster (<code class="inline">morb k8s</code>) also works, pulled forward from a later milestone. It is <strong>not yet</strong> something you run containers with day to day: there is no host app release, no <code class="inline">morb.local</code> DNS, and the gaps below are real.</p>
+        <p>Morbstack has passed M0 — the core bet (unmodified Docker Engine, one shared VM, fast boot) plus published ports, container outbound networking, disk persistence across a restart, and <code class="inline">docker compose up -d</code>. It now has a native macOS operations app, reviewed CLI setup, bundled Compose and Buildx, and a local Kubernetes cluster (<code class="inline">morb k8s</code>). These are implemented, not release-certified: clean-profile and real-engine acceptance remain required. <code class="inline">*.morb.local</code> DNS and the gaps below are still real.</p>
 
         <div class="tally mt-5">
           <span class="pill pill-pass">20 PASS</span>
@@ -210,11 +210,10 @@
         <div class="callout callout-bad">
           <div class="callout-title">What doesn't work yet</div>
           <ul>
-            <li><strong>No <code class="inline">buildx</code> shipped out of the box.</strong> The guest's BuildKit is fully functional, but no <code class="inline">docker-buildx</code> client plugin is installed by default yet.</li>
-            <li><strong>No <code class="inline">host.docker.internal</code> / <code class="inline">gateway.docker.internal</code>.</strong> Neither resolves inside a container today — not degraded, completely absent.</li>
-            <li><strong>No zero-config Docker socket discovery.</strong> You must set <code class="inline">DOCKER_HOST</code> or run <code class="inline">docker context create</code> by hand; nothing auto-registers yet.</li>
-            <li><strong>No inotify across bind mounts.</strong> A host-side edit is correct the instant you read it, but hot-reload watchers (<code class="inline">nodemon</code>, <code class="inline">vite</code>, <code class="inline">webpack --watch</code>) see no event. Polling watchers (<code class="inline">--legacy-watch</code>) work.</li>
-            <li><strong>The <code class="inline">/tmp</code> vs. <code class="inline">/private/tmp</code> bind-mount footgun.</strong> A bind mount through an unresolved <code class="inline">/tmp/...</code> path silently mounts an empty directory instead of your file — no error, no warning.</li>
+            <li><strong>No <code class="inline">*.morb.local</code> domains or local HTTPS.</strong> Those need a narrowly-scoped DNS and trust design; neither is claimed today.</li>
+            <li><strong>Hot-reload still lacks an inotify bridge.</strong> A host-side edit is correct the instant you read it, but watchers need polling until the explicitly-scoped FSEvents bridge has a guest injection endpoint.</li>
+            <li><strong>Published-port parity is intentionally narrow.</strong> Fixed loopback TCP has synchronous admission; dynamic/range ports, VM-stop persistence, and any not-yet-implemented protocol remain unavailable rather than silently misrepresented.</li>
+            <li><strong>Migration is images-only.</strong> The native review/transfer/verification workflow deliberately excludes volumes, bind mounts, containers, credentials, and registry access until each can be proven safely.</li>
           </ul>
         </div>
         <div class="callout callout-good">
@@ -222,9 +221,10 @@
           <ul>
             <li>Core CLI surface — <code class="inline">ps</code>/<code class="inline">images</code>/<code class="inline">pull</code>/<code class="inline">run</code>/<code class="inline">exec</code>/<code class="inline">logs</code>/<code class="inline">inspect</code>/<code class="inline">cp</code>/<code class="inline">stats</code>/<code class="inline">events</code> — byte-for-byte the shape real Docker produces.</li>
             <li>Multi-service Compose stacks with healthchecks, named volumes, and custom networks.</li>
+            <li>Bundled Docker, Compose, and Buildx through an explicit, reversible setup transaction; direct socket discovery is created only when it is safe.</li>
             <li>Published ports, outbound container networking, and disk persistence across <code class="inline">morb stop</code> / <code class="inline">morb start</code>.</li>
             <li>amd64 images via Rosetta, verified bit-identical against native output.</li>
-            <li>A local Kubernetes cluster on the same engine, off by default.</li>
+            <li>A native operations app with actual container, stack, image, volume, network, BuildKit, Kubernetes, disk, and migration routes.</li>
           </ul>
         </div>
       </div>

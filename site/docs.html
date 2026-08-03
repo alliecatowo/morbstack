@@ -252,7 +252,7 @@ docker compose version</pre>
                 <thead><tr><th>#</th><th>Test</th><th>Result</th><th>Notes</th></tr></thead>
                 <tbody>
                   <tr><td class="num">12</td><td>Multi-stage Dockerfile, cache reuse on rebuild</td><td><span class="pill pill-pass">PASS</span></td><td>Every step <code class="inline">CACHED</code>; final image built in 0.44s.</td></tr>
-                  <tr><td class="num">13</td><td><code class="inline">docker build</code> / <code class="inline">buildx</code> out of the box</td><td><span class="pill pill-fail">FAIL</span></td><td>No <code class="inline">docker-buildx</code> CLI plugin shipped, so the modern BuildKit-by-default path fails with a stock CLI.</td></tr>
+                  <tr><td class="num">13</td><td><code class="inline">docker build</code> / <code class="inline">buildx</code> out of the box</td><td><span class="pill pill-partial">HISTORICAL</span></td><td>The original live audit found no plugin. The signed runtime now bundles Buildx; clean-profile revalidation is still required before this becomes a PASS.</td></tr>
                   <tr><td class="num">14</td><td>BuildKit itself, once a stock <code class="inline">docker-buildx</code> binary is placed manually</td><td><span class="pill pill-pass">PASS</span></td><td>Multi-platform build, cache mounts, all work perfectly once the client binary exists.</td></tr>
                 </tbody>
               </table>
@@ -274,9 +274,9 @@ docker compose version</pre>
               <table>
                 <thead><tr><th>#</th><th>Test</th><th>Result</th><th>Notes</th></tr></thead>
                 <tbody>
-                  <tr><td class="num">17</td><td>Zero-config socket discovery at conventional paths</td><td><span class="pill pill-fail">FAIL</span></td><td>None of the three conventional paths point at Morbstack; <code class="inline">DOCKER_HOST</code> or a context must be set by hand.</td></tr>
-                  <tr><td class="num">18</td><td><code class="inline">host.docker.internal</code> resolution</td><td><span class="pill pill-fail">FAIL</span></td><td>No <code class="inline">/etc/hosts</code> entry, no DNS answer — absent, not degraded.</td></tr>
-                  <tr><td class="num">19</td><td><code class="inline">gateway.docker.internal</code> resolution</td><td><span class="pill pill-fail">FAIL</span></td><td>Same as #18.</td></tr>
+                  <tr><td class="num">17</td><td>Zero-config socket discovery at conventional paths</td><td><span class="pill pill-partial">HISTORICAL</span></td><td>The audited build lacked discovery. The consented setup transaction now creates it only when safe; clean-profile revalidation remains required.</td></tr>
+                  <tr><td class="num">18</td><td><code class="inline">host.docker.internal</code> resolution</td><td><span class="pill pill-partial">HISTORICAL</span></td><td>The audited build lacked an answer. Guest split DNS is implemented; live revalidation remains required.</td></tr>
+                  <tr><td class="num">19</td><td><code class="inline">gateway.docker.internal</code> resolution</td><td><span class="pill pill-partial">HISTORICAL</span></td><td>Same historical result as #18; the current guest implementation also needs a fresh live run.</td></tr>
                   <tr><td class="num">20</td><td><code class="inline">--network host</code></td><td><span class="pill pill-partial">PARTIAL</span></td><td>Works inside the guest; unreachable from the Mac — matches Docker Desktop's own long-standing behavior.</td></tr>
                   <tr><td class="num">21</td><td>Docker-in-Docker via the bind-mounted socket</td><td><span class="pill pill-pass">PASS</span></td><td><code class="inline">docker:cli</code> talked straight to the guest's real <code class="inline">dockerd</code>.</td></tr>
                   <tr><td class="num">22</td><td>Container-to-host connections</td><td><span class="pill pill-partial">PARTIAL</span></td><td>Possible via the guest VM's own gateway IP, but not exposed as any documented hostname.</td></tr>
@@ -302,14 +302,14 @@ docker compose version</pre>
                 <thead><tr><th>#</th><th>Test</th><th>Result</th><th>Notes</th></tr></thead>
                 <tbody>
                   <tr><td class="num">26</td><td>Disk full</td><td><span class="pill pill-pass">PASS</span></td><td>Standard <code class="inline">dd: No space left on device</code>; the daemon stayed fully responsive afterward.</td></tr>
-                  <tr><td class="num">27</td><td>Port already bound on the Mac</td><td><span class="pill pill-partial">PARTIAL</span></td><td><code class="inline">docker run</code> succeeds and <code class="inline">docker ps</code> misleadingly shows the port as published; real Docker Desktop fails synchronously instead. Only <code class="inline">morb status</code> reveals the truth.</td></tr>
+                  <tr><td class="num">27</td><td>Port already bound on the Mac</td><td><span class="pill pill-partial">HISTORICAL</span></td><td>The original run succeeded incorrectly. The recognized fixed loopback TCP create/start path now retains a listener and rejects a conflict before the container is reported running; dynamic and nonstandard cases need their own contract.</td></tr>
                   <tr><td class="num">28</td><td>Image that does not exist</td><td><span class="pill pill-pass">PASS</span></td><td>Byte-identical to real Docker Hub errors.</td></tr>
                   <tr><td class="num">29</td><td>OOM</td><td><span class="pill pill-pass">PASS</span></td><td><code class="inline">OOMKilled=true</code>, exit code 137 — the standard Docker contract.</td></tr>
                 </tbody>
               </table>
             </div>
 
-            <p class="mt-5"><strong>Tally: 20 PASS, 3 PARTIAL, 6 FAIL</strong> out of 29 checks — counted directly from the rows above, matching <a class="text-link" href="../docs/parity.md">docs/parity.md</a>'s own table.</p>
+            <p class="mt-5"><strong>Historical tally: 20 PASS, 3 PARTIAL, 6 FAIL</strong> out of 29 checks — counted directly from the original live audit. Rows marked <em>HISTORICAL</em> have a later implementation follow-up but remain pending a fresh live run.</p>
           </section>
 
           <section class="docs-section" id="troubleshooting">
@@ -323,7 +323,7 @@ docker compose version</pre>
 
               <div class="callout callout-bad">
                 <div class="callout-title">My bind mount is empty, or a single-file mount reads as a directory</div>
-                <p class="text-small">Run <code class="inline">morb shares</code>. If the path isn't under a listed root, add it to <code class="inline">shared_paths</code> and restart the engine. A specific, nasty case: a bind mount source written as an unresolved <code class="inline">/tmp/...</code> path (macOS symlinks <code class="inline">/tmp</code> → <code class="inline">/private/tmp</code>) silently mounts an <em>empty directory</em> in the guest instead of your file — no error, no warning, just a container that can't find what it expects. Use <code class="inline">/private/tmp/...</code> explicitly. <code class="inline">morb doctor</code> flags this exact gotcha.</p>
+                <p class="text-small">Run <code class="inline">morb shares</code>. A current Engine request canonicalizes macOS <code class="inline">/tmp</code> to <code class="inline">/private/tmp</code>, checks the configured share that is actually mounted in the guest, and rejects unshared, missing explicit, or symlink-escaping bind sources with a Docker error before forwarding. The old silent-empty-directory behavior is retained only as historical audit evidence.</p>
               </div>
 
               <div class="callout callout-warn">
@@ -333,7 +333,7 @@ docker compose version</pre>
 
               <div class="callout callout-warn">
                 <div class="callout-title">A published port answers nothing, and <code class="inline">docker ps</code> insists it's published</div>
-                <p class="text-small">Something else on the Mac already holds that host port, so the forwarder couldn't bind it — a state <code class="inline">docker ps</code> can't show you, because as far as the engine is concerned the port <em>is</em> published. This is a real behavioral difference from Docker Desktop, which fails <code class="inline">docker run</code> synchronously in this situation; Morbstack's <code class="inline">docker run</code> succeeds instead. Run <code class="inline">morb status</code> — it lists these under "unavailable ports" with the reason, and the forwarder retries on a timer (5s backing off to 60s) once the conflict clears.</p>
+                <p class="text-small">For an ordinary fixed loopback TCP publication, Morbstack now holds the host listener before create and returns a Docker-style conflict before the container is reported running. Dynamic/range ports, unsupported request framing, and VM-stop recovery have their own explicit capability boundaries; Morbstack must reject or diagnose them rather than show a successful-looking unreachable port.</p>
               </div>
             </div>
           </section>
