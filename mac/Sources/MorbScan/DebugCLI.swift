@@ -41,6 +41,7 @@ enum DebugCLI {
             out("  engine     \(readiness.engineAccess)")
             out("  network    \(readiness.networkAccess)")
             renderAssetAssessment(readiness.assetAssessment)
+            renderAcquisitionPlan(readiness.acquisitionPlan)
             renderMissingRequirements(readiness)
         }
         return 2
@@ -118,6 +119,7 @@ enum DebugCLI {
         out("  state           \(plan.target.state ?? "-")")
         out("  running         \(plan.target.isRunning.map { $0 ? "yes" : "no" } ?? "-")")
         renderAssetAssessment(plan.readiness.assetAssessment)
+        renderAcquisitionPlan(plan.readiness.acquisitionPlan)
         out()
         out("Read-only engine request:")
         for request in plan.engineRequests { out("  \(request)") }
@@ -141,6 +143,31 @@ enum DebugCLI {
         out("  provenance      \(manifest.provenance.method) from \(manifest.provenance.issuer)")
         out("  valid through   \(manifest.validThrough)")
         out("  verification    not performed; this descriptor does not make a toolbox available")
+    }
+
+    private static func renderAcquisitionPlan(_ plan: DebugToolboxAcquisitionPlan) {
+        out()
+        out("Future acquisition and rollback contract (not executed):")
+        out("  status          unavailable")
+        out("  next disposition \(plan.disposition.rawValue)")
+        out("  network         \(plan.networkAccess)")
+        out("  engine          \(plan.engineAccess)")
+        out("  required stages:")
+        for stage in plan.stages {
+            out("    - \(stage.rawValue): \(stage.description)")
+        }
+        out("  rollback guarantees:")
+        for guarantee in plan.rollback.guarantees {
+            out("    - \(guarantee)")
+        }
+        out("  prohibited fallbacks:")
+        for fallback in plan.rollback.prohibitedFallbacks {
+            out("    - \(fallback)")
+        }
+        out("  no operation was performed:")
+        for nonAction in plan.nonActions {
+            out("    - \(nonAction)")
+        }
     }
 
     private static func renderMissingRequirements(_ readiness: DebugToolboxReadiness) {
@@ -190,6 +217,7 @@ enum DebugCLI {
             "engine": readiness.engineAccess,
             "network": readiness.networkAccess,
             "asset": assetJSON(readiness.assetAssessment),
+            "acquisition": acquisitionJSON(readiness.acquisitionPlan),
             "missing_requirements": readiness.missingRequirements.map { $0.rawValue },
             "non_actions": [
                 "did not create or start a toolbox container",
@@ -220,6 +248,23 @@ enum DebugCLI {
         output["valid_through"] = manifest.validThrough
         output["verified"] = false
         return output
+    }
+
+    private static func acquisitionJSON(_ plan: DebugToolboxAcquisitionPlan) -> [String: Any] {
+        [
+            "available": plan.available,
+            "disposition": plan.disposition.rawValue,
+            "network": plan.networkAccess,
+            "engine": plan.engineAccess,
+            "stages": plan.stages.map {
+                ["id": $0.rawValue, "description": $0.description]
+            },
+            "rollback": [
+                "guarantees": plan.rollback.guarantees,
+                "prohibited_fallbacks": plan.rollback.prohibitedFallbacks,
+            ],
+            "non_actions": plan.nonActions,
+        ]
     }
 
     private static func planJSON(_ plan: DebugToolboxPlan) -> [String: Any] {

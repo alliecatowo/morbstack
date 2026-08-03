@@ -32,6 +32,13 @@ an image is present or safe. `check` reports one of these asset states:
 
 All four states leave the toolbox unavailable and exit with status `2`.
 
+`check` also returns a static, machine-readable **future acquisition and
+rollback contract**. It identifies the next safe disposition for the observed
+descriptor and lists the required transaction stages. This is deliberately a
+preview: it does not request network consent, contact a registry or Docker,
+inspect/import/pull/remove/tag an image, write a receipt, or activate anything.
+Its `available` value is always `false`.
+
 ### Asset-manifest v1
 
 The future acquisition flow may write one v1 descriptor after explicit user
@@ -64,6 +71,34 @@ resolve an OCI index, validate the `linux/arm64` entry, retrieve anything, or
 verify the declared Sigstore bundle/certificate/identity. It therefore never
 removes `verified_pinned_toolbox_asset` from the readiness gate. This keeps a
 convenient local manifest from becoming a confused authorization mechanism.
+
+### Future acquisition and rollback transaction
+
+The future implementation must use the same ordered transaction, regardless of
+whether candidate bytes come from an explicitly consented registry download or
+another separately disclosed import mechanism:
+
+1. Show the exact digest, selected source, registry/network effect, retention,
+   and update policy, then obtain fresh explicit consent. Transport never counts
+   as verification.
+2. Put the candidate image/index and Sigstore material in a private staging
+   location. The active toolbox remains unchanged.
+3. Verify the staged local bytes resolve to the manifest's exact digest; verify
+   its `linux/arm64` platform; then verify the declared Sigstore bundle, issuer,
+   signer identity, and policy expiry.
+4. Write a private verification receipt containing the verified digest, platform,
+   policy expiry, verifier version, and disclosed source. Publish that receipt
+   and the candidate together atomically only after all verification passes.
+5. Keep the preceding verified asset until the replacement is known usable. A
+   rollback must re-check the retained asset's receipt and policy expiry before
+   it becomes active again.
+
+If any stage fails or is interrupted, clean up only that staged candidate and
+record whether cleanup succeeded. The implementation must never fall back to an
+expired, unsigned, tag-only, or merely declared asset, and it must never delete
+or replace the prior verified asset before the new candidate is completely
+verified. A successful pull/import/copy, or a receipt file by itself, is not a
+toolbox session and cannot open a terminal.
 
 `morb debug <container>` (also spelled `morb debug plan <container>`) makes one
 read-only Docker Engine request, after the same default local descriptor check:
@@ -103,10 +138,12 @@ below is implemented and independently verified against a real engine:
    needs inspection by its pinned digest, platform/index validation, and actual
    provenance/signature/certificate/identity verification before it is allowed
    into a target's namespaces.
-2. **Consented acquisition and update policy.** If the asset is absent or
-   expired, fetching it is a separately announced, user-approved network
-   action. The product must define verification, retention, expiry, and
-   rollback behavior; `morb debug` must never silently pull or refresh it.
+2. **Consented acquisition and update policy.** `morb debug check` now exposes
+   the required non-executing transaction/rollback contract. An implementation
+   still needs the separately announced, user-approved acquisition controller,
+   private staging/receipt storage, real byte/provenance verification, atomic
+   activation, cleanup, and retained-asset rollback behavior. `morb debug` must
+   never silently pull, import, refresh, or activate it.
 3. **Isolated session policy.** The helper-container lifecycle must define the
    exact PID, network, filesystem/mount, user, capability, secret, and
    namespace boundaries. It must include cancellation, cleanup, and visible

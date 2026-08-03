@@ -48,19 +48,25 @@ public struct DebugToolboxReadiness: Sendable, Equatable {
     /// A local manifest assessment. This can describe an expected pinned asset, but
     /// never says that the image or its provenance has been cryptographically verified.
     public let assetAssessment: DebugToolboxAssetAssessment
+    /// A non-executing acquisition/rollback contract derived from the local
+    /// assessment. It is never an authorization to fetch, inspect, or activate a
+    /// toolbox candidate.
+    public let acquisitionPlan: DebugToolboxAcquisitionPlan
 
     public init(
         available: Bool,
         missingRequirements: [DebugToolboxRequirement],
         networkAccess: String,
         engineAccess: String,
-        assetAssessment: DebugToolboxAssetAssessment
+        assetAssessment: DebugToolboxAssetAssessment,
+        acquisitionPlan: DebugToolboxAcquisitionPlan
     ) {
         self.available = available
         self.missingRequirements = missingRequirements
         self.networkAccess = networkAccess
         self.engineAccess = engineAccess
         self.assetAssessment = assetAssessment
+        self.acquisitionPlan = acquisitionPlan
     }
 }
 
@@ -145,12 +151,14 @@ public enum DebugToolboxPlanner {
     public static func readiness(
         manifestURL: URL = MorbPaths.debugToolboxManifest
     ) -> DebugToolboxReadiness {
-        DebugToolboxReadiness(
+        let assessment = DebugToolboxAsset.assess(manifestURL: manifestURL)
+        return DebugToolboxReadiness(
             available: false,
             missingRequirements: DebugToolboxRequirement.allCases,
             networkAccess: "not used",
             engineAccess: "not contacted",
-            assetAssessment: DebugToolboxAsset.assess(manifestURL: manifestURL))
+            assetAssessment: assessment,
+            acquisitionPlan: DebugToolboxAcquisitionPlan.preview(assessment: assessment))
     }
 
     public static func inspect(
