@@ -84,32 +84,40 @@ public struct MigrationImagePlan: Sendable, Equatable, Codable {
 
 /// A side-effect-free migration inspection result.
 ///
-/// `imagePlan` is intentionally optional. A nil plan means the comparison was not
-/// derived; callers must surface `unavailableReason` rather than treating it as an
-/// empty image list. Volume planning is excluded because the existing volume dry run
-/// uses a helper container to inspect destination contents.
+/// The image and volume portions are intentionally independent. An image-list failure
+/// must not turn a successfully derived volume inventory into an empty list, and vice
+/// versa. Neither optional plan is a transfer authorization.
 public struct MigrationReadOnlyPlan: Sendable, Equatable, Codable {
     public let source: MigrationPlanEndpoint
     public let destination: MigrationPlanEndpoint
     public let imagePlan: MigrationImagePlan?
+    public let volumePlan: MigrationVolumePlan?
+    /// Why the image comparison was not derived. Kept as the existing image-facing
+    /// field so image callers do not accidentally display a volume inventory failure.
     public let unavailableReason: String?
+    /// Why the read-only source/destination volume inventory was not derived.
+    public let volumeUnavailableReason: String?
 
     public init(
         source: MigrationPlanEndpoint,
         destination: MigrationPlanEndpoint,
         imagePlan: MigrationImagePlan?,
-        unavailableReason: String?
+        unavailableReason: String?,
+        volumePlan: MigrationVolumePlan? = nil,
+        volumeUnavailableReason: String? = nil
     ) {
         self.source = source
         self.destination = destination
         self.imagePlan = imagePlan
+        self.volumePlan = volumePlan
         self.unavailableReason = unavailableReason
+        self.volumeUnavailableReason = volumeUnavailableReason
     }
 }
 
-/// Produces truthful migration readiness and image-comparison data without changing
-/// either engine. This is the only public migration planning entry point intended for
-/// UI use; transfer commands remain explicit CLI operations.
+/// Produces truthful migration readiness plus image and named-volume eligibility data
+/// without changing either engine. This is the only public migration planning entry
+/// point intended for UI use; transfer commands remain explicit CLI operations.
 public enum MigrationReadOnlyPlanner {
 
     /// Inspects a named source (`docker-desktop`, `colima`, `orbstack`) or a live Unix
@@ -137,7 +145,9 @@ public enum MigrationReadOnlyPlanner {
                 source: source,
                 destination: destination,
                 imagePlan: nil,
-                unavailableReason: reason)
+                unavailableReason: reason,
+                volumePlan: nil,
+                volumeUnavailableReason: reason)
         }
 
         // `morbstack` is a destination, not a legitimate source for a migration plan.
@@ -152,7 +162,9 @@ public enum MigrationReadOnlyPlanner {
                 source: source,
                 destination: destination,
                 imagePlan: nil,
-                unavailableReason: source.detail)
+                unavailableReason: source.detail,
+                volumePlan: nil,
+                volumeUnavailableReason: source.detail)
         }
 
         source = MigrationPlanEndpoint(
@@ -167,34 +179,73 @@ public enum MigrationReadOnlyPlanner {
                 source: source,
                 destination: destination,
                 imagePlan: nil,
-                unavailableReason: reason)
+                unavailableReason: reason,
+                volumePlan: nil,
+                volumeUnavailableReason: reason)
         }
 
+        let destinationClient = EngineClient()
         let (items, planError) = ImagesCommand.plan(
             source: resolvedSource,
-            destination: EngineClient(),
+            destination: destinationClient,
             filter: filter,
             includeAll: includeDanglingImages)
-        if let planError {
-            return MigrationReadOnlyPlan(
-                source: source,
-                destination: destination,
-                imagePlan: nil,
-                unavailableReason: planError)
+        let imagePlan: MigrationImagePlan?
+        if planError == nil {
+            imagePlan = MigrationImagePlan(items: items.map { item in
+                MigrationImagePlanItem(
+                    reference: item.reference,
+                    imageID: item.id,
+                    sizeBytes: item.size,
+                    disposition: item.status == "planned" ? .wouldCopy : .alreadyPresent)
+            })
+        } else {
+            imagePlan = nil
         }
-
-        let imagePlan = MigrationImagePlan(items: items.map { item in
-            MigrationImagePlanItem(
-                reference: item.reference,
-                imageID: item.id,
-                sizeBytes: item.size,
-                disposition: item.status == "planned" ? .wouldCopy : .alreadyPresent)
-        })
+        let (derivedVolumePlan, volumePlanError) = deriveVolumePlan(
+            source: resolvedSource,
+            destination: destinationClient)
         return MigrationReadOnlyPlan(
             source: source,
             destination: destination,
             imagePlan: imagePlan,
-            unavailableReason: nil)
+            unavailableReason: planError,
+            volumePlan: derivedVolumePlan,
+            volumeUnavailableReason: volumePlanError)
+    }
+
+    /// Reads the two Docker volume inventories only. In particular, it does not use
+    /// `VolumesCommand.isDestinationVolumeEmpty`: that path creates a helper
+    /// container and is appropriate only after a user has opted into transfer review.
+    private static func deriveVolumePlan(
+        source: MigrationSource,
+        destination: EngineClient
+    ) -> (MigrationVolumePlan?, String?) {
+        let sourceVolumes: [MigrationVolumeInventoryItem]
+        do {
+            sourceVolumes = try volumeInventory(on: source.client)
+        } catch {
+            return (nil, "Could not list named volumes on \(source.label): \(error)")
+        }
+        do {
+            let destinationVolumes = try volumeInventory(on: destination)
+            return (MigrationVolumePlanner.plan(source: sourceVolumes, destination: destinationVolumes), nil)
+        } catch {
+            return (nil, "Could not list named volumes on Morbstack: \(error)")
+        }
+    }
+
+    private static func volumeInventory(on client: EngineClient) throws -> [MigrationVolumeInventoryItem] {
+        let response = try client.jsonObject("GET", "/volumes", timeout: 30)
+        let volumes = JSONRead.array(response, "Volumes") as? [[String: Any]] ?? []
+        return volumes.compactMap { volume in
+            guard let name = JSONRead.string(volume, "Name"), !name.isEmpty else { return nil }
+            // Docker requires Driver, but a malformed/incomplete response must not be
+            // upgraded to `local` eligibility by a default value.
+            return MigrationVolumeInventoryItem(
+                name: name,
+                driver: JSONRead.string(volume, "Driver") ?? "unknown")
+        }
     }
 
     private static func endpoint(for report: RuntimeReport) -> MigrationPlanEndpoint {

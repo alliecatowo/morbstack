@@ -1,9 +1,10 @@
 // Copyright 2026 The Morbstack Authors.
 // Licensed under the Apache License, Version 2.0 (the "License").
 //
-// `morb migrate plan` — a structured, side-effect-free readiness and image
-// comparison. Unlike the transfer commands, this never writes a migration report,
-// creates a helper container, pulls an image, or contacts a credential helper.
+// `morb migrate plan` — a structured, side-effect-free readiness plus image and
+// named-volume eligibility comparison. Unlike the transfer commands, this never
+// writes a migration report, creates a helper container, pulls an image, or contacts
+// a credential helper.
 
 import Foundation
 import MorbFeatures
@@ -52,6 +53,24 @@ enum PlanCommand {
         } else {
             result["images"] = NSNull()
         }
+        if let volumePlan = plan.volumePlan {
+            result["volumes"] = [
+                "eligible": volumePlan.eligible.count,
+                "destination_existing": volumePlan.destinationExisting.count,
+                "unsupported": volumePlan.unsupported.count,
+                "items": volumePlan.items.map { item in
+                    [
+                        "name": item.name,
+                        "driver": item.driver,
+                        "disposition": item.disposition.rawValue,
+                        "reason": item.reason,
+                    ] as [String: Any]
+                },
+            ]
+        } else {
+            result["volumes"] = NSNull()
+        }
+        result["volume_unavailable_reason"] = plan.volumeUnavailableReason ?? NSNull()
         return result
     }
 
@@ -90,8 +109,31 @@ enum PlanCommand {
         }
 
         out("")
-        out("Volumes are intentionally excluded: the current volume dry run creates a helper container.")
+        if let volumePlan = plan.volumePlan {
+            var table = TextTable(headers: ["VOLUME", "DRIVER", "PLAN"])
+            for item in volumePlan.items {
+                table.add([item.name, item.driver, volumePlanText(item.disposition)])
+            }
+            out("Named volumes:")
+            out(volumePlan.items.isEmpty ? "  (no named source volumes)" : table.render())
+            out("")
+            out("Eligible for a later explicit transfer: \(volumePlan.eligible.count) volume(s)")
+            out("Destination already exists: \(volumePlan.destinationExisting.count) volume(s)")
+            out("Unsupported driver: \(volumePlan.unsupported.count) volume(s)")
+            out("No helper container was created and no volume contents were inspected.")
+        } else {
+            out("Named-volume eligibility was not derived: \(plan.volumeUnavailableReason ?? "unavailable")")
+        }
+        out("")
         out("Run an explicit transfer command only after reviewing this plan.")
+    }
+
+    private static func volumePlanText(_ disposition: MigrationVolumePlanDisposition) -> String {
+        switch disposition {
+        case .eligible: return "eligible"
+        case .destinationExists: return "destination exists"
+        case .unsupportedDriver: return "unsupported driver"
+        }
     }
 
     private static func printEndpoint(_ label: String, _ endpoint: MigrationPlanEndpoint) {

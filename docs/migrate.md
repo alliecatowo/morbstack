@@ -1,8 +1,10 @@
 # Migration contract
 
-Morbstack migration is deliberately split into a read-only comparison and a
-small, explicit transaction. It never changes another runtime's Docker CLI
-configuration, contexts, credentials, images, containers, or volumes.
+Morbstack migration is deliberately split into a read-only comparison, a small
+images-only transaction, and a separately confirmed named-volume CLI command.
+The read-only comparison never changes either runtime. The images-only
+transaction never changes another runtime's Docker CLI configuration, contexts,
+credentials, images, containers, or volumes.
 
 ## Images-only transaction
 
@@ -83,7 +85,7 @@ and its backup/restore guidance describes saving local images and loading the
 archive into a new image store. [Docker's backup guidance](https://docs.docker.com/desktop/settings-and-maintenance/backup-and-restore/)
 also makes clear that volume data is a separate concern.
 
-## Excluded on purpose
+## Excluded from the images-only transaction
 
 This transaction does **not** migrate:
 
@@ -98,6 +100,36 @@ The existing `morb migrate volumes` command remains a separate, explicitly
 reviewed operation because its current implementation requires helper
 containers (including on the source) to access volume bytes. It is not bundled
 into `run` and is not represented as part of an images-only success report.
+
+## Read-only named-volume eligibility
+
+`morb migrate plan --from docker-desktop` now includes a named-volume inventory
+alongside its image comparison. It reads only `GET /volumes` from the source and
+Morbstack. No helper container is created, no helper image is pulled, and no
+volume bytes or contents are inspected.
+
+The plan is intentionally conservative:
+
+- A source volume is **eligible** only when its driver is Docker's `local` and
+  Morbstack has no volume with the same name.
+- A same-named destination volume is reported as **destination exists**, not as
+  empty or safe to replace. The read-only plan never offers a merge or overwrite.
+- Any non-`local` (or malformed/unknown) source driver is **unsupported**. Its
+  storage semantics belong to that driver and are outside the archive-copy
+  contract.
+
+Eligibility is not a transfer authorization or a size estimate. A later,
+separately confirmed transfer still needs live engines, a usable helper image,
+temporary host disk, and archive-copy preflight. The native Migration route does
+not yet execute volume transfers.
+
+`morb migrate volumes --from docker-desktop` remains the explicit CLI operation
+for named-volume copies. After the terminal confirmation it can create and
+remove migration-owned helper containers; if no suitable local helper image is
+available, it separately asks before pulling `alpine:3.20`. It never deletes a
+volume, but `--overwrite` can merge source archive entries into an existing
+destination volume, so that mode is intentionally outside the read-only plan
+and any future first native workflow.
 
 ## Progress, verification, and reports
 

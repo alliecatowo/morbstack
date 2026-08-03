@@ -134,7 +134,7 @@ enum MigrateCLI {
         Subcommands:
           detect                 Survey local container runtimes (the default).
           config                 Inspect Docker CLI configuration, read-only.
-          plan [options]         Derive a read-only source/destination image plan.
+          plan [options]         Derive a read-only image comparison and named-volume eligibility plan.
           run [options]          Import an explicitly selected image set, verify it, and write a report.
           images [options]       Copy images into Morbstack.
           volumes [options]      Copy named volumes into Morbstack.
@@ -149,7 +149,7 @@ enum MigrateCLI {
 
         Plan options:
           --from <runtime|socket>  Docker Desktop, Colima, OrbStack, or a socket path.
-          --filter <text>          Include matching tagged images only.
+          --filter <text>          Include matching tagged images only; named volumes are not filtered.
           --all                    Include dangling images.
 
         Run options (images only):
