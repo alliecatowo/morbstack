@@ -127,6 +127,16 @@ func glyph(forState token: String) -> String {
     }
 }
 
+/// The distinct outcome vocabulary used by the post-setup read-back report.
+func glyph(forVerification status: MorbSetupVerification.Status) -> String {
+    switch status {
+    case .pass: return "[ok]"
+    case .info: return "[..]"
+    case .warning: return "[--]"
+    case .failure: return "[!!]"
+    }
+}
+
 // MARK: - Argument parsing
 
 var arguments = Array(CommandLine.arguments.dropFirst())
@@ -1112,6 +1122,23 @@ case "install-cli":
         if result.contextBecameCurrent { out("[ok] current Docker context is now `morbstack`") }
         if let contextError = result.contextError {
             out("[!!] CLI links were installed, but Docker context setup failed: \(contextError)")
+        }
+
+        // A completion claim without a read-back is not useful to a clean-machine
+        // user. This report re-reads the host integrations and observes only an
+        // already-running daemon; it never goes through `callDaemon`, so it cannot
+        // start morbstackd or a VM as a side effect of verification.
+        let verification = MorbSetupVerification.verify(installation: result)
+        out("")
+        out("Post-setup verification (read-only; it did not start the engine):")
+        for check in verification.integrations {
+            out("  \(glyph(forVerification: check.status))  \(check.name): \(check.detail)")
+        }
+        for check in verification.runtime {
+            out("  \(glyph(forVerification: check.status))  \(check.name): \(check.detail)")
+        }
+
+        if result.contextError != nil {
             fail("fix the Docker config issue above, then run `morb context create` and `morb context use`", code: 2)
         }
         out("")

@@ -29,6 +29,7 @@ final class FirstRunCLISetupModel {
     private(set) var plan: MorbCliInstallation.Plan?
     private(set) var result: MorbCliInstallation.InstallResult?
     private(set) var backgroundServiceStatus: MorbBackgroundService.Status?
+    private(set) var verification: MorbSetupVerification.Report?
     private(set) var errorMessage: String?
     private(set) var isLoading = false
     private(set) var isInstalling = false
@@ -131,6 +132,22 @@ final class FirstRunCLISetupModel {
                 // intentionally on the explicit setup path, never in `prepare()`.
                 backgroundServiceStatus = try MorbBackgroundService.enable()
             }
+            let serviceVerification: MorbSetupVerification.BackgroundService
+            if enableBackgroundService, let backgroundServiceStatus {
+                serviceVerification = .status(backgroundServiceStatus)
+            } else {
+                serviceVerification = .notRequested
+            }
+            let completedInstallation = result
+            // The verifier is intentionally observational: it does not follow any
+            // daemon auto-start path, and probes Docker only after the daemon reports
+            // an already-running, Docker-ready engine. Keep its bounded socket I/O off
+            // the main actor while the sheet shows real in-flight progress.
+            verification = await Task.detached(priority: .userInitiated) {
+                MorbSetupVerification.verify(
+                    installation: completedInstallation,
+                    backgroundService: serviceVerification)
+            }.value
             hasCompletedSetup = true
         } catch {
             errorMessage = (error as? MorbError)?.description ?? error.localizedDescription
@@ -142,6 +159,7 @@ final class FirstRunCLISetupModel {
         result = nil
         errorMessage = nil
         backgroundServiceStatus = nil
+        verification = nil
         hasCompletedSetup = false
         hasPrepared = false
         await prepare()
@@ -385,12 +403,37 @@ struct FirstRunCLISetupSheet: View {
                     }
                 }
             }
+            if let verification = model.verification {
+                verificationSection(
+                    title: "Verified Host Integration",
+                    checks: verification.integrations)
+                verificationSection(
+                    title: "Engine and Socket",
+                    checks: verification.runtime)
+            }
             Section("Next Step") {
                 if model.result != nil {
                     Text("Open a new Terminal session to use the updated command-line tools.")
                 } else {
                     Text("Use the Morbstack menu to start the engine when you are ready.")
                 }
+            }
+        }
+    }
+
+    private func verificationSection(
+        title: String,
+        checks: [MorbSetupVerification.Check]
+    ) -> some View {
+        Section(title) {
+            ForEach(checks) { check in
+                LabeledContent(check.name) {
+                    Label(check.status.firstRunTitle, systemImage: check.status.symbol)
+                }
+                Text(check.detail)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -507,6 +550,35 @@ private extension MorbBackgroundService.Registration {
             return "Needs approval in Login Items"
         case .unknown:
             return "Needs review in Login Items"
+        }
+    }
+}
+
+private extension MorbSetupVerification.Status {
+
+    var firstRunTitle: String {
+        switch self {
+        case .pass:
+            return "Verified"
+        case .info:
+            return "Not changed"
+        case .warning:
+            return "Needs attention"
+        case .failure:
+            return "Not verified"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .pass:
+            return "checkmark"
+        case .info:
+            return "info.circle"
+        case .warning:
+            return "exclamationmark.triangle"
+        case .failure:
+            return "xmark.octagon"
         }
     }
 }

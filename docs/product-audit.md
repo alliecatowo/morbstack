@@ -63,7 +63,10 @@ guarantee.
 3. **One transactional onboarding.** Preflight, show the exact changes,
    install the runtime/service/`morb`/Docker/Compose/Buildx/context/socket,
    start the engine, and run real health probes. It must be resumable and
-   offer a specific repair path.
+   offer a specific repair path. **Current implementation:** the explicit CLI
+   setup and first-run sheet now re-read every host integration and report
+   daemon/Docker reachability without starting a stopped runtime; the complete
+   engine-starting transaction and clean-profile live evidence remain P0 work.
 4. **Release evidence, not documentation promises.** Run a clean-profile
    compatibility matrix for direct socket discovery, Docker contexts,
    Buildx, Compose, Testcontainers, Dev Containers and core IDE paths.

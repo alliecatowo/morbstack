@@ -91,6 +91,26 @@ The command-line equivalents (`morb service status`, `enable`, `disable`, and
 See [`background-service.md`](background-service.md) for the signed-bundle,
 Service Management, and update-registration requirements.
 
+## Post-setup verification
+
+After the person confirms setup, both the first-run completion sheet and
+`morb install-cli` re-read every host integration: the `docker`, Compose, and
+Buildx links; the PATH decision; the `morbstack` Docker context; and the
+conventional per-user discovery socket. Each entry states whether Morbstack
+verified it, intentionally preserved another runtime's selection, or needs
+attention.
+
+Runtime observation is deliberately separate from integration success. The
+verifier sends a read-only `status` request only when `morbstackd` is already
+listening. It sends Docker's read-only `GET /_ping` only after that status says
+the VM is running and Docker is ready. If no daemon or engine is already
+running, the report says so and skips the Docker socket probe; it never starts
+a daemon, VM, or background service to make a completion screen look healthy.
+
+This is host-setup evidence, not the clean-machine release gate. The full
+first-ten-minutes transaction still needs serialized live evidence for a new
+engine, Docker, Compose, Buildx, Testcontainers, Dev Containers, and IDE paths.
+
 After opening a new terminal, the clean-machine smoke checks are:
 
 ```sh
