@@ -44,6 +44,7 @@ let usage = """
       scan         SBOM and CVE scan an image, entirely on this machine
       debug        Open a toolbox shell in a container, even a distroless one
       context      Inspect the `morbstack` Docker context and discovery socket
+      service      Manage Morbstack's explicit per-user background service
       install-cli  Install bundled docker, compose, and buildx for this user
       uninstall-cli Remove only the CLI links/socket/context/profile block Morbstack owns
       install-cli-plugins
@@ -64,6 +65,10 @@ let usage = """
       context use            Make it the default context. Always asks; refuses
                              to replace another explicit default without --force
                              (never stomps — see docs/compat.md).
+      service status         Show background-service registration and approval state
+      service enable         Register the signed app's per-user LaunchAgent
+      service disable        Unregister it; does not stop a manually started daemon
+      service settings       Open System Settings > Login Items explicitly
       ports check --tcp <port>
       ports check --udp <port>
                              Check one or more loopback endpoints before a Docker
@@ -464,6 +469,56 @@ case "version":
         ])
     }
     exit(0)
+
+case "service":
+    let action = extraArguments.first ?? "status"
+    guard extraArguments.count == 1 || extraArguments.isEmpty else {
+        fail("service accepts one action: status, enable, disable, or settings", code: 2)
+    }
+
+    func renderService(_ status: MorbBackgroundService.Status) -> Never {
+        finish(.success(status.ipcFields)) { data in
+            let glyph: String
+            switch status.registration {
+            case .enabled: glyph = "[ok]"
+            case .requiresApproval: glyph = "[..]"
+            case .notRegistered, .unavailable, .notFound, .unknown: glyph = "[--]"
+            }
+            out("\(glyph) Morbstack background service \(status.registration.rawValue)")
+            printAligned([
+                ("launch agent", status.plistPath ?? "not available from this executable"),
+                ("control socket", status.controlSocketPath),
+                ("socket present", status.controlSocketPresent ? "yes" : "no"),
+                ("diagnostic", status.diagnostic),
+            ])
+        }
+    }
+
+    switch action {
+    case "status":
+        renderService(MorbBackgroundService.status())
+    case "enable":
+        do {
+            renderService(try MorbBackgroundService.enable())
+        } catch {
+            fail((error as? MorbError)?.description ?? error.localizedDescription, code: 2)
+        }
+    case "disable":
+        do {
+            renderService(try MorbBackgroundService.disable())
+        } catch {
+            fail((error as? MorbError)?.description ?? error.localizedDescription, code: 2)
+        }
+    case "settings":
+        // Opening Login Items is a direct, user-requested action. No service is
+        // registered as a side effect; people retain control over the switch there.
+        MorbBackgroundService.openLoginItemsSettings()
+        finish(.success(["settings": .string("Login Items")])) { _ in
+            out("opened System Settings > Login Items")
+        }
+    default:
+        fail("unknown service action `\(action)`; expected status, enable, disable, or settings", code: 2)
+    }
 
 case "status":
     let response = callDaemon(DaemonRequest(cmd: "status"), timeout: 15)

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  Registered only through SMAppService.agent(plistName:). BundleProgram keeps the
+	  helper inside the signed app bundle; do not install this plist in ~/Library.
+	-->
+	<key>Label</key>
+	<string>dev.morbstack.daemon</string>
+	<key>BundleProgram</key>
+	<string>Contents/MacOS/morbstackd</string>
+	<!-- The agent does not boot a VM on its own; it only keeps the lightweight host
+	     control service available. The existing daemon idle policy still owns VM RAM. -->
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<!-- Avoid a tight respawn loop if launchd cannot start a bad release. -->
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+</dict>
+</plist>

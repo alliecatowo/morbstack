@@ -102,6 +102,14 @@ public struct MorbPaths {
     /// `~/.morbstack/data/vmstate.bin` — Virtualization.framework save/restore blob.
     public static var vmState: URL { dataDirectory.appendingPathComponent("vmstate.bin", isDirectory: false) }
 
+    /// `~/.morbstack/data/background-service-receipt.json` — records which signed
+    /// app payload was last registered with Service Management. It lets an explicit
+    /// `morb service enable` re-register a changed helper after an app update without
+    /// restarting an already-current service on every invocation.
+    public static var backgroundServiceReceipt: URL {
+        dataDirectory.appendingPathComponent("background-service-receipt.json", isDirectory: false)
+    }
+
     /// `~/.morbstack/data/save-restore-unsupported` — written when a restore has failed.
     ///
     /// Virtualization.framework accepts `saveMachineStateTo` for a direct-kernel

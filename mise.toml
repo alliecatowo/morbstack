@@ -236,6 +236,7 @@ VERSION=`sed -n 's/.*public static let string = "\\(.*\\)".*/\\1/p' mac/Sources/
 rm -rf dist/Morbstack.app
 mkdir -p dist/Morbstack.app/Contents/MacOS
 mkdir -p dist/Morbstack.app/Contents/Resources
+mkdir -p dist/Morbstack.app/Contents/Library/LaunchAgents
 cp mac/.build/release/MorbstackApp dist/Morbstack.app/Contents/MacOS/MorbstackApp
 cp mac/.build/release/morbstackd dist/Morbstack.app/Contents/MacOS/morbstackd
 cp mac/.build/release/morb dist/Morbstack.app/Contents/MacOS/morb
@@ -245,6 +246,8 @@ cp mac/.build/AppIcon.icns dist/Morbstack.app/Contents/Resources/AppIcon.icns
 # person at the keyboard has consented; the toolchain is never fetched from the
 # network, copied out of Docker Desktop, or looked up on PATH at install time.
 cp -R dist/host-bin dist/Morbstack.app/Contents/Resources/host-bin
+cp mac/AppResources/LaunchAgents/dev.morbstack.daemon.plist \
+	dist/Morbstack.app/Contents/Library/LaunchAgents/dev.morbstack.daemon.plist
 cp mac/AppResources/Info.plist dist/Morbstack.app/Contents/Info.plist
 printf 'APPL????' > dist/Morbstack.app/Contents/PkgInfo
 # A release carries every byte needed to boot Docker and enable Kubernetes. The
