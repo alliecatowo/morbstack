@@ -162,7 +162,7 @@ enum MigrateCLI {
         Volume options:
           --from <runtime|socket>  Docker Desktop, Colima, OrbStack, or a socket path.
           --filter <text>          Copy matching named volumes only.
-          --overwrite              Allow merging into a non-empty destination volume.
+          --overwrite              Rejected: selected migration never merges existing destination contents.
           --dry-run                Print the copy plan without changing anything.
           --yes                    Skip confirmations, including helper-image pulls.
 

@@ -43,10 +43,10 @@ enum HelperImage {
     private static let coreutilsHints = ["alpine", "busybox", "debian", "ubuntu", "fedora"]
 
     /// The first already-present image, by any reference that resolves — used by the
-    /// pure archive-copy path in ``VolumesCommand``, which never executes a command
+    /// pure archive-copy path in ``VolumeMigrationTransaction``, which never executes a command
     /// inside the container it creates and so does not care what the image contains.
-    static func anyExisting(on client: EngineClient) -> String? {
-        guard let images = try? client.jsonArray("GET", "/images/json", timeout: 15) else { return nil }
+    static func existingAny(on client: EngineClient) throws -> String? {
+        let images = try client.jsonArray("GET", "/images/json", timeout: 15)
         for image in images {
             if let tags = JSONRead.array(image, "RepoTags") as? [String],
                 let first = tags.first, first != "<none>:<none>" {
@@ -58,6 +58,14 @@ enum HelperImage {
             return id
         }
         return nil
+    }
+
+    /// Best-effort compatibility wrapper for older CLI paths that cannot yet
+    /// distinguish a failed image inventory from an empty one. New transactions use
+    /// ``existingAny(on:)`` so they never turn an unavailable Engine into an implicit
+    /// network pull decision.
+    static func anyExisting(on client: EngineClient) -> String? {
+        try? existingAny(on: client)
     }
 
     /// An already-present image likely to have `find`/`sha256sum` — used by

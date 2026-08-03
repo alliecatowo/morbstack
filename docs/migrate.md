@@ -127,9 +127,8 @@ not yet execute volume transfers.
 for named-volume copies. After the terminal confirmation it can create and
 remove migration-owned helper containers; if no suitable local helper image is
 available, it separately asks before pulling `alpine:3.20`. It never deletes a
-volume, but `--overwrite` can merge source archive entries into an existing
-destination volume, so that mode is intentionally outside the read-only plan
-and any future first native workflow.
+volume and now rejects `--overwrite`: the shared selected-volume transaction
+creates only missing destination volumes and never merges existing contents.
 
 ## Progress, verification, and reports
 
