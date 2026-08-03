@@ -824,6 +824,54 @@ class DockerClient: @unchecked Sendable {
             reclaimable: danglingImageBytes + reclaimableVolumeBytes + reclaimableCacheBytes + reclaimableContainerBytes)
     }
 
+    /// Every BuildKit cache record `/system/df` knows about.
+    ///
+    /// A second read of the same endpoint `diskUsage()` calls — the response is small
+    /// (a few hundred records at most) and this is only fetched when the Builds screen
+    /// is actually on screen, the same rule `refreshDisk()` follows for the rest of
+    /// this endpoint.
+    func buildCacheRecords() async throws -> [BuildCacheRecord] {
+        let data = try await run { try self.send(method: "GET", path: self.url("/system/df"), timeout: 45) }
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw DockerClientError.decoding("/system/df did not return an object")
+        }
+        return Self.buildCacheRecords(from: object)
+    }
+
+    static func buildCacheRecords(from object: [String: Any]) -> [BuildCacheRecord] {
+        let buildCache = object["BuildCache"] as? [[String: Any]] ?? []
+        return buildCache.compactMap { record -> BuildCacheRecord? in
+            guard let id = record["ID"] as? String else { return nil }
+            let size: Int64
+            switch record["Size"] {
+            case let value as Int64: size = value
+            case let value as Int: size = Int64(value)
+            case let value as Double: size = Int64(value)
+            case let value as NSNumber: size = value.int64Value
+            default: size = 0
+            }
+            let createdAt = (record["CreatedAt"] as? String).flatMap(LogLineAssembler.parseRFC3339) ?? .distantPast
+            let lastUsed = (record["LastUsedAt"] as? String).flatMap(LogLineAssembler.parseRFC3339)
+            let usageCount: Int
+            switch record["UsageCount"] {
+            case let value as Int: usageCount = value
+            case let value as NSNumber: usageCount = value.intValue
+            default: usageCount = 0
+            }
+            let description = record["Description"] as? String ?? ""
+            return BuildCacheRecord(
+                id: id,
+                description: description.isEmpty ? (record["Type"] as? String ?? "cache record") : description,
+                type: record["Type"] as? String ?? "regular",
+                size: max(0, size),
+                inUse: record["InUse"] as? Bool ?? false,
+                shared: record["Shared"] as? Bool ?? false,
+                createdAt: createdAt,
+                lastUsedAt: lastUsed,
+                usageCount: usageCount)
+        }
+    }
+
     /// The full inspect document, pretty-printed for the detail pane's JSON tab.
     func inspectContainer(id: String) async throws -> String {
         let data = try await run { try self.send(method: "GET", path: self.url("/containers/\(id)/json")) }

@@ -1,0 +1,81 @@
+name: Compatibility report
+description: A specific tool, image, or workflow doesn't work with Morbstack the way it does with Docker Desktop or another Docker host
+title: "[compat] "
+labels: ["compatibility"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is the highest-value report type for a Docker Desktop
+        replacement: a concrete "tool X does Y against Morbstack instead of
+        Z" report, ideally with the exact command and output. Please check
+        `docs/parity.md` and `docs/compat.md` first — several known,
+        already-documented gaps live there (no `host.docker.internal`/
+        `gateway.docker.internal`, no zero-config socket discovery, no
+        `buildx` bundled yet, no inotify across bind mounts, the `/tmp` vs
+        `/private/tmp` bind-mount footgun). If your report matches one of
+        those, a comment adding your specific tool/workflow to the existing
+        thread is more useful than a new duplicate issue.
+
+  - type: input
+    id: tool
+    attributes:
+      label: Tool / workflow
+      description: The specific tool, library, or workflow that doesn't work as expected.
+      placeholder: "e.g. Testcontainers (Java), VS Code Dev Containers, docker-py, kind, Tilt"
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What happens against real Docker Desktop, Docker Engine on Linux, or another Docker host?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior against Morbstack
+      description: What actually happens? Include exact error messages/output.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: The exact commands, in order.
+    validations:
+      required: true
+
+  - type: input
+    id: morb-version
+    attributes:
+      label: Morbstack version
+      description: "Output of `morb version`"
+    validations:
+      required: true
+
+  - type: textarea
+    id: docker-version
+    attributes:
+      label: "`docker version` output"
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: tool-version
+    attributes:
+      label: Tool version
+      description: Version of the tool/library that's incompatible (e.g. Testcontainers 1.20.1, docker-py 7.1.0).
+
+  - type: checkboxes
+    id: checked-known-gaps
+    attributes:
+      label: Checklist
+      options:
+        - label: I checked `docs/parity.md` and `docs/compat.md` and this isn't already a documented gap (or I'm reporting new information about one that is)
+          required: true

@@ -42,9 +42,45 @@ let package = Package(
             dependencies: ["MorbstackKit"],
             swiftSettings: commonSwiftSettings
         ),
+        // Shared plumbing for the feature modules below: a general-purpose Docker
+        // Engine API client, a subprocess runner with a deadline, and the table/format
+        // helpers they all print through. Built on MorbstackKit's HTTP framing so the
+        // repository has one chunked-transfer decoder rather than two.
+        .target(
+            name: "MorbFeatures",
+            dependencies: ["MorbstackKit"],
+            swiftSettings: commonSwiftSettings
+        ),
+        // `morb mcp serve` — a Model Context Protocol server over stdio, read-only by
+        // default. See docs/mcp.md.
+        .target(
+            name: "MorbMCP",
+            dependencies: ["MorbFeatures", "MorbstackKit"],
+            swiftSettings: commonSwiftSettings
+        ),
+        // `morb migrate` — Docker Desktop / Colima / OrbStack migration. Never
+        // destructive, never writes to another runtime's state. See docs/migrate.md.
+        .target(
+            name: "MorbMigrate",
+            dependencies: ["MorbFeatures", "MorbstackKit"],
+            swiftSettings: commonSwiftSettings
+        ),
+        // `morb bench` — the open benchmark harness. See docs/benchmarks.md.
+        .target(
+            name: "MorbBench",
+            dependencies: ["MorbFeatures", "MorbstackKit"],
+            swiftSettings: commonSwiftSettings
+        ),
+        // `morb scan` and `morb debug` — local-only SBOM/CVE scanning, and a toolbox
+        // shell for containers that ship none. See docs/scanning.md, docs/debug.md.
+        .target(
+            name: "MorbScan",
+            dependencies: ["MorbFeatures", "MorbstackKit"],
+            swiftSettings: commonSwiftSettings
+        ),
         .executableTarget(
             name: "morb",
-            dependencies: ["MorbstackKit"],
+            dependencies: ["MorbstackKit", "MorbMCP", "MorbMigrate", "MorbBench", "MorbScan"],
             swiftSettings: commonSwiftSettings
         ),
         // The SwiftUI app. Same zero-dependency rule as everything else: SwiftUI +
@@ -92,6 +128,15 @@ let package = Package(
         .testTarget(
             name: "MorbstackAppTests",
             dependencies: ["MorbstackAppCore"],
+            swiftSettings: commonSwiftSettings
+        ),
+        // One suite for all four feature modules. They share the same helpers and the
+        // same "pure logic is unit-tested, anything needing a booted VM is a live
+        // check" split, so splitting them into four test targets would multiply build
+        // time without separating anything that is actually separate.
+        .testTarget(
+            name: "MorbFeaturesTests",
+            dependencies: ["MorbFeatures", "MorbMCP", "MorbMigrate", "MorbBench", "MorbScan"],
             swiftSettings: commonSwiftSettings
         ),
     ]

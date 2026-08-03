@@ -1,31 +1,275 @@
 # mise configuration for Morbstack.
 #
-# Pins the toolchain so `mise install` gives every contributor (and CI) the
-# same Rust compiler for the guest-side `morbinit` binary. Swift is not
-# managed here: it comes from the Xcode toolchain (macOS 26.4 / Swift 6.3).
+# This file is the single source of truth for build logic. Two toolchains
+# live side by side: Swift (host daemon + CLI, under mac/) and Rust (guest
+# PID 1, under guest/morbinit/). `mise install` pins the Rust compiler for
+# every contributor and CI; Swift is not managed here — it comes from the
+# Xcode toolchain (macOS 26.4 / Swift 6.3).
+#
+# The Makefile at the repo root is now a thin compatibility shim: every
+# `make <target>` just runs `mise run <target>`. It exists only so callers
+# that still type `make build` keep working; new callers (docs, CI, scripts)
+# should use `mise run <task>` directly. See docs/build.md for the full task
+# list.
+#
+# NOTE on first run: `mise run <anything>` requires this file to already be
+# trusted, which is a chicken-and-egg problem for a task that tries to
+# automate `mise trust` itself — mise refuses to even parse an untrusted
+# config to find the task in the first place. So the very first command on a
+# fresh clone must be literal `mise trust && mise install` (see README.md /
+# CONTRIBUTING.md and the Makefile's `setup` shim), not `mise run setup`.
+# The `setup` task below still exists for convenience on an already-trusted
+# checkout (e.g. after pulling a mise.toml change that bumps the Rust pin).
 
 [tools]
 rust = "stable"
 
-# `mise run <task>` (or `mise <task>`) shells out to the matching `make`
-# target, so `make` remains the single source of truth for build logic and
-# `mise.toml` stays a thin, easily-audited entry point.
+# ---------------------------------------------------------------------------
+# Setup
+# ---------------------------------------------------------------------------
+
+[tasks.setup]
+description = "Trust this config and install pinned toolchains (Rust; Swift comes from Xcode)"
+run = """
+mise trust
+mise install
+"""
+
+# ---------------------------------------------------------------------------
+# Build
+# ---------------------------------------------------------------------------
+
 [tasks.build]
-run = "make build"
-description = "Build the mac daemon/CLI and the guest morbinit binary"
+description = "Build everything: mac host binaries and the guest init binary"
+depends = ["build-mac", "build-guest"]
 
 [tasks.build-mac]
-run = "make build-mac"
-description = "Build morbstackd and morb (Swift)"
+description = "Build morbstackd and morb (Swift), host arch"
+run = "cd mac && swift build"
 
 [tasks.build-guest]
-run = "make build-guest"
-description = "Build morbinit (Rust, guest PID 1)"
+description = "Build morbinit (Rust, guest PID 1), host arch"
+run = "cd guest/morbinit && cargo build"
 
+# Where the messense/homebrew-macos-cross-toolchains aarch64-unknown-linux-musl
+# GCC cross toolchain lives (see dist/CROSS_COMPILE.md for the install
+# recipe). Only used by cross-build-guest / guest-image, so a plain
+# build-guest (host-arch dev loop) never needs it on PATH.
+[tasks.cross-build-guest]
+description = "Cross-compile morbinit for aarch64-unknown-linux-musl (the real guest target)"
+run = """
+CROSS_TOOLCHAIN_BIN=/opt/homebrew/opt/aarch64-unknown-linux-musl/bin
+if [ ! -x "$CROSS_TOOLCHAIN_BIN/aarch64-unknown-linux-musl-gcc" ]; then
+	echo "error: aarch64-unknown-linux-musl cross toolchain not found at $CROSS_TOOLCHAIN_BIN" >&2
+	echo "       see dist/CROSS_COMPILE.md for the install recipe (brew tap" >&2
+	echo "       messense/macos-cross-toolchains && brew install" >&2
+	echo "       messense/macos-cross-toolchains/aarch64-unknown-linux-musl)" >&2
+	exit 1
+fi
+cd guest/morbinit && \
+	PATH="$CROSS_TOOLCHAIN_BIN:$PATH" \
+	CC_aarch64_unknown_linux_musl="$CROSS_TOOLCHAIN_BIN/aarch64-unknown-linux-musl-gcc" \
+	CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER="$CROSS_TOOLCHAIN_BIN/aarch64-unknown-linux-musl-gcc" \
+	cargo build --release --target aarch64-unknown-linux-musl
+"""
+
+# Build the bootable initramfs: cross-compiled morbinit as /init, plus the
+# Alpine minirootfs and the static Docker engine binaries from dist/. Writes
+# $MORBSTACK_HOME/data/kernel/initrd.img (default ~/.morbstack, override via
+# the MORBSTACK_HOME env var, honoured by scripts/mkinitramfs.sh itself).
+[tasks.guest-image]
+description = "Build the bootable guest initramfs (cross-compiled morbinit + Alpine rootfs + Docker engine)"
+depends = ["cross-build-guest"]
+run = "scripts/mkinitramfs.sh"
+
+# ---------------------------------------------------------------------------
+# Sign / run
+# ---------------------------------------------------------------------------
+
+# Ad-hoc codesign with the entitlements morbstackd needs to open a
+# Virtualization.framework VM (com.apple.security.virtualization, etc.).
+# Development-only: signs with the local machine identity ("-"), not a
+# Developer ID. Depends on build-mac so this works on a fresh checkout
+# instead of failing on a missing binary.
+#
+# The real binary lives at mac/.build/arm64-apple-macosx/debug/morbstackd;
+# mac/.build/debug is a symlink to the per-arch build dir, so signing
+# through it signs the same file `swift build` just produced. This must be
+# the LAST step before starting the daemon: `swift build` strips
+# com.apple.security.virtualization from morbstackd on every rebuild.
+[tasks.sign]
+description = "Ad-hoc codesign morbstackd with the virtualization entitlement (must run after any swift build, before starting the daemon)"
+depends = ["build-mac"]
+run = 'codesign --force --sign - --entitlements mac/Resources/morbstackd.entitlements mac/.build/debug/morbstackd'
+
+[tasks.run-daemon]
+description = "Build, sign, and run the daemon in the foreground for local development"
+depends = ["sign"]
+run = "exec mac/.build/debug/morbstackd --foreground"
+
+# ---------------------------------------------------------------------------
+# Test
+# ---------------------------------------------------------------------------
+
+# The Swift suite only exists once mac/Tests is populated, so guard on that
+# to keep this green on a fresh checkout.
 [tasks.test]
-run = "make test"
 description = "Run the Swift and Rust test suites"
+run = """
+if [ -d mac/Tests ]; then (cd mac && swift test); fi
+(cd guest/morbinit && cargo test)
+"""
+
+# ---------------------------------------------------------------------------
+# Live shots
+# ---------------------------------------------------------------------------
+
+# Self-capture the *real* MorbstackApp window — titlebar, toolbar, sidebar
+# material and Liquid Glass and all — instead of MorbShots' offscreen
+# approximation (dist/shots), which cannot render any of those. See
+# Sources/MorbstackAppCore/Shots/LiveCapture.swift for why an offscreen
+# bitmap structurally can't and this can.
+#
+# `--tour-fixtures` serves the same canned Docker world MorbShots renders
+# offscreen, so no morbstackd and no VM are needed — this never starts the
+# engine. Only build-mac, not sign: nothing here touches the daemon, so
+# morbstackd's virtualization entitlement is irrelevant to this target.
+#
+# Two full launches, not one: SwiftUI's `.preferredColorScheme` is applied
+# when the window is created, so light and dark each need their own process.
+# The app briefly takes focus and shows real windows on screen while each
+# run captures — that is the whole mechanism, not a side effect to suppress.
+[tasks.shots-live]
+description = "Self-capture the real MorbstackApp window in light and dark (dist/shots-live)"
+depends = ["build-mac"]
+run = """
+rm -rf dist/shots-live
+mkdir -p dist/shots-live
+mac/.build/debug/MorbstackApp --tour-fixtures --tour-capture dist/shots-live \
+	--window-size 1440x900 --appearance light
+mac/.build/debug/MorbstackApp --tour-fixtures --tour-capture dist/shots-live \
+	--window-size 1440x900 --appearance dark
+"""
+
+# ---------------------------------------------------------------------------
+# The SwiftUI app bundle.
+#
+# SwiftPM builds executables, not `.app`s, so the bundle is assembled by hand
+# here. That is a feature rather than a workaround: the layout is thirty
+# lines of `cp` and `mkdir` that anyone can read, with no Xcode project to
+# drift out of sync with Package.swift and nothing to regenerate on a fresh
+# clone.
+# ---------------------------------------------------------------------------
+
+# Render the icon PNGs and pack them into an .icns.
+#
+# `iconutil` is part of the base system, so this needs nothing installed.
+# The iconset directory is rebuilt from scratch each time the task actually
+# runs: a stale PNG left over from an earlier design silently ends up in the
+# icns, and the only symptom is a Dock icon that is wrong at exactly one
+# size. sources/outputs are declared because the icon is generated
+# procedurally (make-icon.swift draws every shape in code, no external image
+# assets) — safe to skip when that one script hasn't changed.
+[tasks.app-icon]
+description = "Render AppIcon.icns from mac/AppResources/make-icon.swift"
+sources = ["mac/AppResources/make-icon.swift"]
+outputs = ["mac/.build/AppIcon.icns"]
+run = """
+rm -rf mac/.build/AppIcon.iconset
+mkdir -p mac/.build/AppIcon.iconset
+swift mac/AppResources/make-icon.swift mac/.build/AppIcon.iconset
+iconutil --convert icns --output mac/.build/AppIcon.icns mac/.build/AppIcon.iconset
+"""
+
+# Build a launchable Morbstack.app in dist/.
+#
+# The daemon and CLI are copied in beside the app binary on purpose:
+# `DaemonClient.locateDaemonExecutable` looks for `morbstackd` next to the
+# running executable first, so a bundle assembled here can start the engine
+# without anything being installed on PATH. That is what makes the app work
+# on a machine that has only ever seen the repository.
+#
+# Ad-hoc signing (`--sign -`) is the last step because every earlier step
+# mutates the bundle, and a signature only covers what was there when it was
+# made. Unsigned, macOS 15 refuses to launch the bundle at all.
+[tasks.app]
+description = "Build, assemble, and sign Morbstack.app into dist/"
+depends = ["app-icon"]
+run = """
+# One product per invocation: `swift build` accepts a single `--product`,
+# and passing two silently builds only the last one — which then fails
+# three lines down on a missing binary rather than at the flag that was
+# wrong.
+#
+# This list of three (MorbstackApp, morbstackd, morb) is a curated bundle
+# manifest, not an enumeration of Package.swift's product/target graph —
+# do NOT "helpfully" derive it from the package (e.g. by looping over every
+# `.executable` product, or every target morb depends on). Which binaries
+# belong inside a GUI app bundle is a product decision, not something
+# inferable from the dependency graph: morb pulls in MorbFeatures, MorbMCP,
+# MorbMigrate, MorbBench, MorbScan etc. as internal library targets (not
+# separate top-level executables), and none of that plumbing belongs in
+# Contents/MacOS. If a future product decision adds a fourth binary to the
+# bundle, add it here explicitly, the same way you would have added a
+# fourth `swift build --product` line to the old Makefile recipe.
+(cd mac && swift build -c release --product MorbstackApp)
+(cd mac && swift build -c release --product morbstackd)
+(cd mac && swift build -c release --product morb)
+rm -rf dist/Morbstack.app
+mkdir -p dist/Morbstack.app/Contents/MacOS
+mkdir -p dist/Morbstack.app/Contents/Resources
+cp mac/.build/release/MorbstackApp dist/Morbstack.app/Contents/MacOS/MorbstackApp
+cp mac/.build/release/morbstackd dist/Morbstack.app/Contents/MacOS/morbstackd
+cp mac/.build/release/morb dist/Morbstack.app/Contents/MacOS/morb
+cp mac/.build/AppIcon.icns dist/Morbstack.app/Contents/Resources/AppIcon.icns
+cp mac/AppResources/Info.plist dist/Morbstack.app/Contents/Info.plist
+printf 'APPL????' > dist/Morbstack.app/Contents/PkgInfo
+# Stamp the real version in, so the bundle and `morb version` agree.
+VERSION=`sed -n 's/.*public static let string = "\\(.*\\)".*/\\1/p' mac/Sources/MorbstackKit/Version.swift`
+if [ -n "$VERSION" ]; then
+	/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" dist/Morbstack.app/Contents/Info.plist
+	/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" dist/Morbstack.app/Contents/Info.plist
+fi
+# Sign inside-out: nested helpers first, then the bundle that contains them.
+#
+# morbstackd needs the virtualization entitlement to open a VM at all, and
+# it is signed separately because the app itself must not carry that
+# entitlement. The order matters and so does the absence of --deep: --deep
+# re-signs nested code with the *outer* invocation's arguments, so signing
+# the app with --deep after signing morbstackd silently re-signs morbstackd
+# with no entitlements at all. The symptom is not a build failure — it is a
+# shipped app whose bundled daemon cannot create a VZVirtualMachine, which
+# is the one thing it is in there to do. Signing the outer bundle on its own
+# seals the helpers by reference through CodeResources and leaves their own
+# signatures, and their entitlements, intact.
+codesign --force --sign - dist/Morbstack.app/Contents/MacOS/morb
+codesign --force --sign - --entitlements mac/Resources/morbstackd.entitlements \
+	dist/Morbstack.app/Contents/MacOS/morbstackd
+codesign --force --sign - dist/Morbstack.app
+# Fail loudly rather than shipping a daemon that cannot boot the guest.
+codesign -d --entitlements - dist/Morbstack.app/Contents/MacOS/morbstackd 2>&1 \
+	| grep -q "com.apple.security.virtualization" \
+	|| { echo "error: morbstackd lost its virtualization entitlement during signing" >&2; exit 1; }
+echo "built dist/Morbstack.app"
+"""
+
+[tasks.run-app]
+description = "Build and launch Morbstack.app"
+depends = ["app"]
+run = "open dist/Morbstack.app"
+
+# ---------------------------------------------------------------------------
+# Clean
+# ---------------------------------------------------------------------------
+
+[tasks.clean-app]
+description = "Remove the assembled app bundle and icon build products"
+run = "rm -rf dist/Morbstack.app mac/.build/AppIcon.icns mac/.build/AppIcon.iconset"
 
 [tasks.clean]
-run = "make clean"
-description = "Remove build outputs"
+description = "Remove build outputs from both toolchains"
+depends = ["clean-app"]
+run = """
+rm -rf mac/.build
+(cd guest/morbinit && cargo clean)
+"""

@@ -95,10 +95,10 @@ struct DiskRootView: View {
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: Theme.space6) {
-                        barCard
-                        legend
-                        biggest
-                        footnote
+                        usageSummary
+                        categorySection
+                        biggestSection
+                        diskImageSection
                     }
                     .padding(.horizontal, Theme.pagePadding)
                     .padding(.top, Theme.space5)
@@ -153,96 +153,112 @@ struct DiskRootView: View {
         }
     }
 
-    // MARK: The bar
+    // MARK: Usage summary
+    //
+    // The one thing on this screen that earns a custom drawing rather than a system
+    // container: a real chart, not a card. `TrackCStackedBar` is a `Canvas`, not a
+    // painted panel — it carries no fill, no hairline border and no card chrome of its
+    // own, so it is not what the "delete the cards" instruction is about. It sits
+    // directly on the window's content background, restrained to two numbers and one
+    // bar rather than the four-card spread this replaces.
 
-    private var barCard: some View {
-        MorbCard(padding: Theme.space5) {
-            VStack(alignment: .leading, spacing: Theme.space4) {
-                HStack(alignment: .firstTextBaseline, spacing: Theme.space6) {
-                    let total = splitBytes(usage.total)
-                    MorbMetric(value: total.value, unit: total.unit, caption: "used by Docker", emphasis: .leading)
-                    if usage.reclaimable > 0 {
-                        let reclaim = splitBytes(usage.reclaimable)
-                        MorbMetric(value: reclaim.value, unit: reclaim.unit, caption: "reclaimable", tone: Theme.statusBusy)
-                    }
-                    Spacer(minLength: Theme.space3)
+    private var usageSummary: some View {
+        VStack(alignment: .leading, spacing: Theme.space4) {
+            HStack(alignment: .firstTextBaseline, spacing: Theme.space6) {
+                let total = splitBytes(usage.total)
+                MorbMetric(value: total.value, unit: total.unit, caption: "used by Docker", emphasis: .leading)
+                if usage.reclaimable > 0 {
+                    let reclaim = splitBytes(usage.reclaimable)
+                    MorbMetric(value: reclaim.value, unit: reclaim.unit, caption: "reclaimable", tone: Theme.statusBusy)
                 }
-
-                TrackCStackedBar(segments: segments, highlighted: highlighted)
-                    .frame(height: 36)
-                    .morbAnimation(.fade, value: highlighted)
-
-                HStack(spacing: Theme.space2) {
-                    Text("Layers on disk")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                    MorbNumber(Formatters.bytesString(usage.layersSize), font: .caption2)
-                    Text("— shared base layers are counted once, so this is smaller than the sum of image sizes.")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                    Spacer()
-                }
+                Spacer(minLength: Theme.space3)
             }
+
+            TrackCStackedBar(segments: segments, highlighted: highlighted)
+                .frame(height: 30)
+                .morbAnimation(.fade, value: highlighted)
+
+            HStack(spacing: Theme.space2) {
+                Text("Layers on disk")
+                    .foregroundStyle(.tertiary)
+                MorbNumber(Formatters.bytesString(usage.layersSize))
+                Text("— shared base layers are counted once, so this is smaller than the sum of image sizes.")
+                    .foregroundStyle(.tertiary)
+                Spacer()
+            }
+            .font(.caption2)
         }
     }
 
-    // MARK: Legend
+    // MARK: Category breakdown
 
-    private var legend: some View {
-        MorbCard(padding: 0) {
-            VStack(spacing: 0) {
-                ForEach(segments) { segment in
-                    legendRow(segment)
-                    if segment.id != segments.last?.id {
-                        MorbRowDivider(rowClass: .rich)
-                    }
+    private var categorySection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            MorbSectionHeader("By Category", symbol: "chart.pie")
+                .padding(.bottom, Theme.space2)
+            Table(segments) {
+                TableColumn("Category") { segment in
+                    categoryCell(segment)
+                        .frame(height: Theme.rowStandard, alignment: .leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                TableColumn("Size") { segment in
+                    MorbNumber(Formatters.bytesString(segment.bytes), tone: .primary, font: .callout)
+                        .frame(height: Theme.rowStandard, alignment: .trailing)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+                .width(min: 76, ideal: 96, max: 130)
+                TableColumn("Reclaimable") { segment in
+                    reclaimableCell(segment)
+                        .frame(height: Theme.rowStandard, alignment: .trailing)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+                .width(min: 96, ideal: 130, max: 180)
+                TableColumn("") { segment in
+                    Button("Prune", role: .destructive) {
+                        pruning = segment.category.pruneTarget
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .disabled(busy)
+                    .help(segment.category.pruneSummary)
+                    .frame(height: Theme.rowStandard, alignment: .trailing)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+                .width(min: 50, ideal: 60, max: 70)
             }
+            .tableStyle(.inset)
+            .alternatingRowBackgrounds()
+            .frame(height: Theme.rowGroupHeader + CGFloat(segments.count) * Theme.rowStandard)
         }
     }
 
-    private func legendRow(_ segment: TrackCDiskSegment) -> some View {
+    private func categoryCell(_ segment: TrackCDiskSegment) -> some View {
         HStack(spacing: Theme.space3) {
-            RoundedRectangle(cornerRadius: Theme.radiusChip, style: .continuous)
+            Circle()
                 .fill(segment.category.color)
                 .frame(width: Theme.dotSize, height: Theme.dotSize)
-
-            VStack(alignment: .leading, spacing: Theme.space1) {
-                Text(segment.category.title)
-                    .font(.body.weight(.medium))
-                HStack(spacing: Theme.space2) {
-                    Text(shareText(segment))
-                        .monospacedDigit()
-                    if segment.reclaimableBytes > 0 {
-                        Text("·")
-                        Text(
-                            "\(Formatters.bytesString(segment.reclaimableBytes)) reclaimable"
-                            + (segment.isEstimate ? " (approx.)" : ""))
-                            .monospacedDigit()
-                    }
-                }
+            Text(segment.category.title)
+            Text(shareText(segment))
                 .font(.caption2)
+                .monospacedDigit()
                 .foregroundStyle(.secondary)
-            }
-
-            Spacer(minLength: Theme.space3)
-
-            MorbNumber(Formatters.bytesString(segment.bytes), tone: .primary, font: .callout)
-
-            Button("Prune", role: .destructive) {
-                pruning = segment.category.pruneTarget
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .disabled(busy)
-            .help(segment.category.pruneSummary)
         }
-        .padding(.horizontal, Theme.space4)
-        .frame(height: Theme.rowRich)
-        .background(highlighted == segment.category ? Theme.rowHover : .clear)
         .contentShape(Rectangle())
         .onHover { hovering in
             highlighted = hovering ? segment.category : (highlighted == segment.category ? nil : highlighted)
+        }
+    }
+
+    @ViewBuilder
+    private func reclaimableCell(_ segment: TrackCDiskSegment) -> some View {
+        if segment.reclaimableBytes > 0 {
+            Text(Formatters.bytesString(segment.reclaimableBytes) + (segment.isEstimate ? " (approx.)" : ""))
+                .font(.callout)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+        } else {
+            Text("—").foregroundStyle(.tertiary)
         }
     }
 
@@ -252,98 +268,100 @@ struct DiskRootView: View {
     }
 
     // MARK: Biggest items
+    //
+    // The named offenders behind two of the four categories. The categories answer
+    // *where* the disk went; they cannot answer *what to delete*. "Volumes, 13.26 GB" is
+    // a fact you can do nothing with. "shopfront_uploads, 3.22 GB" is a decision. Images
+    // and volumes only: containers and build cache are aggregates the engine reports as
+    // a lump. Real `Table`s, not hand-drawn progress bars — the size column, already
+    // sorted largest first, says everything a bar underneath it would have repeated.
 
-    /// The named offenders behind two of the four bars.
-    ///
-    /// The categories answer *where* the disk went; they cannot answer *what to delete*.
-    /// "Volumes, 13.26 GB" is a fact you can do nothing with. "shopfront_uploads, 3.22 GB"
-    /// is a decision. Images and volumes only: containers and build cache are aggregates
-    /// the engine reports as a lump.
-    ///
-    /// Both columns share one `MorbMeter` denominator — the larger of the two peaks — so
-    /// a 3.22 GB volume draws a longer bar than a 1.49 GB image, which the previous
-    /// per-column scale could not promise.
+    /// How many rows each table shows before it would rather scroll than grow.
+    private static let biggestRows = 5
+
     @ViewBuilder
-    private var biggest: some View {
+    private var biggestSection: some View {
         let topImages = TrackCDiskMath.largestImages(model.images, limit: Self.biggestRows)
         let topVolumes = TrackCDiskMath.largestVolumes(model.volumes, limit: Self.biggestRows)
-        let peak = Double(max(1, (topImages + topVolumes).map(\.bytes).max() ?? 1))
 
         if !topImages.isEmpty || !topVolumes.isEmpty {
             HStack(alignment: .top, spacing: Theme.space5) {
                 if !topImages.isEmpty {
-                    biggestCard(title: "Largest images", symbol: "shippingbox",
-                                tint: TrackCPalette.images, items: topImages, peak: peak)
+                    biggestTable(title: "Largest Images", symbol: "shippingbox", items: topImages)
                 }
                 if !topVolumes.isEmpty {
-                    biggestCard(title: "Largest volumes", symbol: "externaldrive",
-                                tint: TrackCPalette.volumes, items: topVolumes, peak: peak)
+                    biggestTable(title: "Largest Volumes", symbol: "externaldrive", items: topVolumes)
                 }
             }
         }
     }
 
-    /// How many rows each column shows. Five is what fits beside the other three cards in
-    /// the shortest window the app allows without the page starting to scroll.
-    private static let biggestRows = 5
-
-    private func biggestCard(
-        title: String, symbol: String, tint: Color, items: [TrackCNamedSize], peak: Double
-    ) -> some View {
-        MorbCard(title, symbol: symbol) {
-            VStack(alignment: .leading, spacing: Theme.space4) {
-                ForEach(items) { item in
-                    VStack(alignment: .leading, spacing: Theme.space2) {
-                        HStack(alignment: .firstTextBaseline, spacing: Theme.space3) {
-                            Text(item.label)
-                                .font(.caption)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                                .help(item.detail ?? item.label)
-                            Spacer(minLength: Theme.space3)
-                            MorbNumber(Formatters.bytesString(item.bytes), font: .caption)
-                        }
-                        MorbMeter(value: Double(item.bytes), total: peak, tone: tint, height: 4)
-                    }
+    private func biggestTable(title: String, symbol: String, items: [TrackCNamedSize]) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            MorbSectionHeader(title, symbol: symbol)
+                .padding(.bottom, Theme.space2)
+            Table(items) {
+                TableColumn("Name") { item in
+                    Text(item.label)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(item.detail ?? item.label)
+                        .frame(height: Theme.rowStandard, alignment: .leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                TableColumn("Size") { item in
+                    MorbNumber(Formatters.bytesString(item.bytes), tone: .primary, font: .callout)
+                        .frame(height: Theme.rowStandard, alignment: .trailing)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+                .width(min: 76, ideal: 92, max: 120)
             }
+            .tableStyle(.inset)
+            .alternatingRowBackgrounds()
+            .frame(height: Theme.rowGroupHeader + CGFloat(items.count) * Theme.rowStandard)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    // MARK: Footnote
+    // MARK: VM disk image
+    //
+    // A `GroupBox` of `LabeledContent` rows rather than a nested `Form`: the rest of the
+    // screen already lives inside one `ScrollView`, and a `Form` — List-backed, like
+    // every SwiftUI form — fights an enclosing scroll view for the gesture unless it is
+    // given a hand-measured fixed height. Four static rows do not need List's machinery;
+    // `GroupBox` gives the same grouped, boxed look `Form` would without the conflict,
+    // which is what item 1 of the design brief means by "`GroupBox` only where a genuine
+    // box is warranted" — a self-contained footnote panel is exactly that case.
 
     @ViewBuilder
-    private var footnote: some View {
-        MorbCard("VM disk image", symbol: "internaldrive") {
-            if let footprint {
-                VStack(alignment: .leading, spacing: Theme.space4) {
-                    HStack(alignment: .firstTextBaseline, spacing: Theme.space6) {
-                        let apparent = splitBytes(footprint.apparentBytes)
-                        let actual = splitBytes(footprint.actualBytes)
-                        MorbMetric(value: apparent.value, unit: apparent.unit, caption: "Apparent")
-                        MorbMetric(value: actual.value, unit: actual.unit, caption: "Actual on APFS", emphasis: .leading)
-                        MorbMetric(value: Formatters.percent(footprint.occupancy * 100), caption: "Allocated")
-                        Spacer(minLength: Theme.space3)
+    private var diskImageSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            MorbSectionHeader("VM Disk Image", symbol: "internaldrive")
+                .padding(.bottom, Theme.space2)
+            GroupBox {
+                if let footprint {
+                    VStack(alignment: .leading, spacing: Theme.space3) {
+                        LabeledContent("Apparent", value: Formatters.bytesString(footprint.apparentBytes))
+                        LabeledContent("Actual on APFS", value: Formatters.bytesString(footprint.actualBytes))
+                        LabeledContent("Allocated", value: Formatters.percent(footprint.occupancy * 100))
+                        LabeledContent("Path") {
+                            Text(footprint.path)
+                                .font(.system(.callout, design: .monospaced))
+                                .textSelection(.enabled)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        Divider()
+                        footnoteExplanation(footprint)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
-
-                    footnoteExplanation(footprint)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    Text(footprint.path)
-                        .font(.system(.caption2, design: .monospaced))
+                    .padding(Theme.space4)
+                } else {
+                    Text("No disk image yet — one is created the first time the engine starts.")
                         .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .textSelection(.enabled)
-                        .padding(.horizontal, Theme.space2)
-                        .padding(.vertical, Theme.space1)
-                        .background(.quaternary, in: RoundedRectangle(cornerRadius: Theme.radiusChip, style: .continuous))
+                        .padding(Theme.space4)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
-            } else {
-                Text("No disk image yet — one is created the first time the engine starts.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
         }
     }

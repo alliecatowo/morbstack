@@ -1,0 +1,356 @@
+.Dd August 2, 2026
+.Dt MORB 1
+.Os
+.Sh NAME
+.Nm morb
+.Nd control the Morbstack VM and the containers running inside it
+.Sh SYNOPSIS
+.Nm
+.Op Fl -json
+.Nm
+.Op Fl -help | Fl h
+.Nm
+.Cm status | start | stop | suspend | resume | shares | version | doctor
+.Op Fl -json
+.Nm
+.Cm stop | reset-disk
+.Op Fl -force
+.Op Fl -json
+.Nm
+.Cm rosetta
+.Op Cm status | install
+.Op Fl -print-plan
+.Op Fl -json
+.Nm
+.Cm k8s
+.Op Cm status | enable | disable
+.Op Fl -json
+.Nm
+.Cm k8s Cm kubeconfig
+.Op Fl -merge
+.Op Fl -switch-context
+.Op Fl -force
+.Op Fl -json
+.Sh DESCRIPTION
+.Nm
+is the command-line client for
+.Sy morbstackd ,
+the Morbstack daemon
+.Pq no separate man page ships for it yet
+that runs a single Linux virtual machine on macOS via
+.Em Virtualization.framework
+and forwards the Docker Engine API out of it.
+Most subcommands talk to
+.Nm morbstackd
+over a local Unix-domain socket; a few
+.Pq Cm shares , Cm rosetta status , Cm doctor
+answer from host-side state alone and never require the daemon to be
+running.
+.Pp
+Commands that need the VM running
+.Po
+.Cm start ,
+.Cm stop ,
+.Cm suspend ,
+.Cm resume ,
+.Cm k8s enable ,
+.Cm k8s disable ,
+.Cm k8s kubeconfig
+.Pc
+will start
+.Nm morbstackd
+on demand if it is not already running and a sibling
+.Nm morbstackd
+binary can be found and is correctly signed for virtualization.
+Purely observational commands
+.Po
+.Cm status ,
+.Cm shares ,
+.Cm rosetta status ,
+.Cm doctor
+.Pc
+never do this: if the daemon is not running they report that fact instead
+of starting one just to ask it a question.
+.Sh COMMANDS
+.Bl -tag -width Ds
+.It Cm status
+Show daemon and VM state: lifecycle state, guest control channel, Docker
+readiness, where container data is stored, active connections, published
+ports, and daemon version.
+.It Cm start
+Boot the VM.
+.It Cm stop
+Shut the VM down.
+Accepts
+.Fl -force
+to stop without first asking the guest to shut down cleanly.
+.It Cm suspend
+Save the VM to disk and free the memory and CPU it was using.
+On a host where save/restore is unsupported this behaves like
+.Cm stop
+and the containers do not survive it; the daemon reports this via a note
+in the response.
+.It Cm resume
+Restore a VM previously put down with
+.Cm suspend .
+.It Cm shares
+List the shared host paths configured in
+.Pa config.toml
+and, if the daemon is running, whether the guest actually has each one
+mounted.
+Answerable without the daemon.
+.It Cm rosetta Op Cm status
+Show whether Rosetta is installed on the host, enabled in the Morbstack
+config, and active in the guest.
+This is the default when
+.Cm rosetta
+is given no subcommand.
+Answerable without the daemon.
+.It Cm rosetta Cm install
+Install Rosetta for Linux and enable it in the Morbstack config.
+Always prompts for interactive confirmation on a terminal before doing
+anything; refuses to run with stdin not a terminal.
+Installing Rosetta itself triggers a separate, unavoidable macOS system
+licence prompt that
+.Nm
+does not and cannot answer on the user's behalf.
+Accepts
+.Fl -print-plan
+to print exactly what it would do and exit without doing it.
+Does
+.Em not
+accept
+.Fl -force :
+this is deliberate, and passing it is a hard error.
+See
+.Sx OPTIONS .
+.It Cm k8s Op Cm status
+Show whether the local Kubernetes cluster is installed in the guest,
+enabled, and how many nodes/pods are Ready.
+This is the default when
+.Cm k8s
+is given no subcommand.
+.It Cm k8s Cm enable
+Install the Kubernetes payload into the guest if it is not already
+there, then start the cluster.
+May start the daemon and the VM.
+.It Cm k8s Cm disable
+Stop the cluster.
+The installed payload and its on-disk state are left in place.
+.It Cm k8s Cm kubeconfig
+Write a kubeconfig for the Morbstack cluster to
+.Pa ~/.morbstack/kubeconfig .
+With
+.Fl -merge ,
+instead merge a
+.Dq morbstack
+cluster/user/context into
+.Pa ~/.kube/config ,
+after asking for confirmation and writing a timestamped backup of that
+file first; add
+.Fl -switch-context
+to also point
+.Cm current-context
+at
+.Dq morbstack
+as part of the merge.
+.Fl -force
+skips the merge confirmation prompt.
+.It Cm version
+Print the CLI version, and the daemon's version if it can be reached.
+Never fails just because nothing is running.
+.It Cm doctor
+Diagnose the host: signature/entitlement checks, kernel/initrd presence,
+Rosetta support, and similar preflight facts.
+Works without the daemon.
+Exits 2 if any check is unhealthy.
+.It Cm reset-disk
+Delete the Docker data disk image
+.Pq Pa ~/.morbstack/data/disk.img
+and nothing else under
+.Pa ~/.morbstack ,
+so every image, container and volume in the VM is gone on the next
+.Cm start .
+Refuses to run while the VM is in any state other than
+.Dq stopped
+or
+.Dq error .
+Prompts for interactive confirmation unless
+.Fl -force
+is given.
+.El
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl -json
+Emit raw JSON instead of human-readable output.
+Recognized anywhere on the command line, not only after the command; it
+is stripped from the argument list before the command itself is even
+read, so
+.Nm morb --json status
+and
+.Nm morb status --json
+are identical.
+.It Fl -force
+Skip a confirmation prompt.
+Its meaning depends on the command: for
+.Cm stop
+it skips asking the guest to shut down cleanly first; for
+.Cm reset-disk
+and
+.Cm k8s kubeconfig --merge
+it skips the interactive
+.Dq are you sure
+prompt.
+It is silently ignored (not rejected) on every other command, including
+.Cm start , suspend , resume , k8s status , k8s enable
+and
+.Cm k8s disable ,
+where it is never read by the parser at all.
+It is deliberately
+.Em refused
+.Pq a hard error, exit 2
+by
+.Cm rosetta install ,
+which installs system software under Apple's licence and therefore
+always asks the person at the keyboard regardless of any flag; use
+.Fl -print-plan
+to preview it, or run
+.Xr softwareupdate 8
+.Fl -install-rosetta
+directly for an unattended install.
+.It Fl -print-plan
+Valid only for
+.Cm rosetta install .
+Prints the exact steps that command would take and exits without taking
+them.
+.It Fl -merge
+Valid only for
+.Cm k8s kubeconfig .
+Merge the Morbstack context into
+.Pa ~/.kube/config
+instead of only writing the standalone kubeconfig file.
+.It Fl -switch-context
+Valid only for
+.Cm k8s kubeconfig
+alongside
+.Fl -merge .
+Also switch
+.Cm current-context
+to
+.Dq morbstack
+as part of the merge.
+This flag exists and is honored by
+.Nm ,
+but is not mentioned anywhere in
+.Nm morb --help Ns 's
+own usage text.
+.It Fl -help , Fl h
+Print the top-level usage summary and exit 0.
+Recognized anywhere on the command line and checked before any
+subcommand is parsed, so it always prints the same global summary rather
+than help for the specific subcommand it follows;
+.Nm morb k8s kubeconfig --help
+prints the same text as
+.Nm morb --help .
+.Fl h
+works identically to
+.Fl -help
+but is not listed in
+.Nm morb --help Ns 's
+own OPTIONS section.
+.El
+.Sh ENVIRONMENT
+.Nm Ns 's
+argument parser and command dispatch
+.Pq mac/Sources/morb/main.swift
+do not read any environment variables; every path it uses comes from a
+fixed, compiled-in location under
+.Pa ~/.morbstack .
+No
+.Ev MORBSTACK_HOME
+or equivalent override is consulted at that layer.
+.Sh FILES
+.Bl -tag -width "~/.morbstack/run/morbstackd.sock"
+.It Pa ~/.morbstack/run/docker.sock
+Unix-domain socket that relays the Docker Engine API out of the guest.
+Point
+.Ev DOCKER_HOST
+at it, e.g.
+.Dl DOCKER_HOST=unix://$HOME/.morbstack/run/docker.sock docker ps
+.It Pa ~/.morbstack/run/morbstackd.sock
+Unix-domain control socket
+.Nm
+uses to talk to
+.Nm morbstackd
+(newline-delimited JSON).
+.It Pa ~/.morbstack/kubeconfig
+Kubeconfig written by
+.Cm k8s kubeconfig .
+.It Pa ~/.morbstack/data/disk.img
+The Docker data disk image; deleted by
+.Cm reset-disk .
+.It Pa ~/.morbstack/config.toml
+Host-side configuration, including
+.Cm shared_paths
+and the
+.Cm rosetta
+setting toggled by
+.Cm rosetta install .
+.It Pa ~/.kube/config
+The user's own kubectl config, edited only by
+.Cm k8s kubeconfig --merge ,
+and only after asking and taking a timestamped backup.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width Ds
+.It 0
+Success.
+.It 1
+.Nm morbstackd
+could not be reached: it was not running, no sibling
+.Nm morbstackd
+binary was found or it was not signed for virtualization, or it could
+not be started or bound its socket in time.
+.It 2
+The command ran but failed: an unknown command or subcommand, a rejected
+flag combination
+.Pq e.g. Cm rosetta install Fl -force ,
+a cancelled confirmation prompt, a check that
+.Cm doctor
+reports unhealthy, or a daemon-reported failure.
+.El
+.Sh EXAMPLES
+.Bl -tag -width Ds
+.It Boot the VM and check on it
+.Dl morb start
+.Dl morb status
+.It Run a container through the relayed Docker socket
+.Dl DOCKER_HOST=unix://$HOME/.morbstack/run/docker.sock docker run --rm hello-world
+.It Preview a Rosetta install without doing it
+.Dl morb rosetta install --print-plan
+.It Bring up the local Kubernetes cluster and use it
+.Dl morb k8s enable
+.Dl morb k8s kubeconfig --merge --switch-context
+.Dl kubectl get nodes
+.It Get machine-readable status for scripting
+.Dl morb status --json
+.It Start over with an empty Docker data disk
+.Dl morb stop
+.Dl morb reset-disk --force
+.El
+.Sh SEE ALSO
+.Xr docker 1 ,
+.Xr docker-compose 1 ,
+.Xr kubectl 1 ,
+.Xr softwareupdate 8
+.Sh AUTHORS
+.Nm
+is developed by
+.An "The Morbstack Authors"
+and distributed under the Apache License, Version 2.0.
+See
+.Pa LICENSE
+and
+.Pa NOTICE
+in the Morbstack source tree for the full license text and third-party
+notices.

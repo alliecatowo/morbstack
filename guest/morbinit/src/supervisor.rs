@@ -263,6 +263,50 @@ pub fn default_services(docker_data_on_disk: bool) -> Vec<ServiceSpec> {
     ]
 }
 
+/// Adds the `--dns`/`--host-gateway-ip` flags that make
+/// `host.docker.internal`/`gateway.docker.internal` resolve by default and
+/// make `--add-host=foo:host-gateway` resolve to the right place
+/// (docs/parity.md #18/#19), onto an already-built `dockerd` spec.
+///
+/// A separate function rather than extra parameters on `default_services`
+/// itself: those two addresses come from DHCP (`net::guest_ipv4`,
+/// `net::default_gateway`) and can legitimately be unavailable (no network),
+/// in which case `main.rs` simply does not call this and dockerd starts
+/// exactly as it always has — `default_services`'s own five existing call
+/// sites (four of them tests) stay untouched rather than growing two
+/// `Option` parameters they would all have to thread through as `None`.
+///
+///   * `--dns <guest_ip>`: the address containers' own resolver actually
+///     dials. Must be one of the guest's *own* addresses — see `dns.rs`'s
+///     module docs for why the legacy default-bridge network requires this
+///     specifically, not the gateway or loopback.
+///   * `--host-gateway-ip <gateway_ip>`: dockerd's own documented switch for
+///     what the magic `host-gateway` string in `--add-host` resolves to.
+///     Passing the same address `dns.rs`'s stub answers with keeps the two
+///     mechanisms — Morbstack's default DNS answer, and the standard
+///     `--add-host=foo:host-gateway` spelling — in agreement.
+///
+/// No-op (services returned unchanged) if `services` has no `dockerd` entry,
+/// which cannot happen from `default_services` but keeps this total rather
+/// than panicking on a table some future caller reshapes.
+pub fn apply_dns_flags(
+    mut services: Vec<ServiceSpec>,
+    guest_ip: Option<std::net::Ipv4Addr>,
+    host_gateway_ip: Option<std::net::Ipv4Addr>,
+) -> Vec<ServiceSpec> {
+    if let Some(dockerd) = services.iter_mut().find(|s| s.name == "dockerd") {
+        if let Some(ip) = guest_ip {
+            dockerd.args.push("--dns".to_string());
+            dockerd.args.push(ip.to_string());
+        }
+        if let Some(ip) = host_gateway_ip {
+            dockerd.args.push("--host-gateway-ip".to_string());
+            dockerd.args.push(ip.to_string());
+        }
+    }
+    services
+}
+
 /// Whether dockerd in `services` was started with the userland proxy
 /// (`docker-proxy`) enabled.
 ///
@@ -1789,6 +1833,46 @@ mod tests {
         for on_disk in [true, false] {
             assert_eq!(default_services(on_disk).len(), SUPERVISED_SERVICE_COUNT);
         }
+    }
+
+    #[test]
+    fn apply_dns_flags_adds_dns_and_host_gateway_ip_to_dockerd_only() {
+        let services = apply_dns_flags(
+            default_services(true),
+            Some("192.168.64.3".parse().unwrap()),
+            Some("192.168.64.1".parse().unwrap()),
+        );
+        let dockerd = services.iter().find(|s| s.name == "dockerd").unwrap();
+        assert!(dockerd.args.windows(2).any(|w| w == ["--dns", "192.168.64.3"]));
+        assert!(dockerd
+            .args
+            .windows(2)
+            .any(|w| w == ["--host-gateway-ip", "192.168.64.1"]));
+        // containerd never sees these — they are dockerd-specific flags.
+        let containerd = services.iter().find(|s| s.name == "containerd").unwrap();
+        assert!(containerd.args.is_empty());
+    }
+
+    #[test]
+    fn apply_dns_flags_is_a_no_op_with_nothing_to_add() {
+        let before = default_services(true);
+        let after = apply_dns_flags(default_services(true), None, None);
+        let before_args = &before.iter().find(|s| s.name == "dockerd").unwrap().args;
+        let after_args = &after.iter().find(|s| s.name == "dockerd").unwrap().args;
+        assert_eq!(before_args, after_args);
+    }
+
+    #[test]
+    fn apply_dns_flags_can_add_just_one_of_the_two() {
+        let dns_only = apply_dns_flags(default_services(true), Some("10.0.0.5".parse().unwrap()), None);
+        let args = &dns_only.iter().find(|s| s.name == "dockerd").unwrap().args;
+        assert!(args.iter().any(|a| a == "--dns"));
+        assert!(!args.iter().any(|a| a == "--host-gateway-ip"));
+
+        let gateway_only = apply_dns_flags(default_services(true), None, Some("10.0.0.1".parse().unwrap()));
+        let args = &gateway_only.iter().find(|s| s.name == "dockerd").unwrap().args;
+        assert!(!args.iter().any(|a| a == "--dns"));
+        assert!(args.iter().any(|a| a == "--host-gateway-ip"));
     }
 
     #[test]

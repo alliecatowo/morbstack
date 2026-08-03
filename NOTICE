@@ -2,8 +2,74 @@ Morbstack
 Copyright 2026 The Morbstack Authors
 
 This product includes software developed by The Morbstack Authors and
-licensed under the Apache License, Version 2.0. Morbstack runs unmodified
-upstream Moby (dockerd/containerd) binaries inside a guest Linux virtual
-machine; those components are separate works distributed under their own
-licenses and are not covered by this NOTICE. See each component's own
-distribution for its license and attribution requirements.
+licensed under the Apache License, Version 2.0. This NOTICE file is
+provided per §4(d) of that license.
+
+Morbstack's own source (mac/, guest/morbinit/, proto/, scripts/) has no
+third-party dependencies: `mac/Package.swift` links only Foundation and
+system frameworks (no Swift packages are resolved), and
+`guest/morbinit/Cargo.toml` declares an empty `[dependencies]` table (Rust
+std only). Nothing below is compiled into the `morbstackd`, `morb`, or
+`morbinit` binaries themselves; it is unmodified upstream software that
+Morbstack's guest VM runs alongside its own code, or that Morbstack's
+tooling fetches as a build/runtime input.
+
+## What is actually in this git repository
+
+None of the binaries listed below are committed to this repository.
+`.gitignore` excludes everything under `dist/` except the `PROVENANCE.txt`
+files and `dist/CROSS_COMPILE.md` — the repository tracks the *record* of
+what was fetched, from where, and with which cryptographic hash, not the
+bytes themselves. `scripts/fetch-guest-assets.sh` re-downloads and
+re-verifies every item below against the pins recorded in that script and
+in the corresponding `dist/*/PROVENANCE.txt` file. A `git clone` of
+Morbstack alone contains none of this NOTICE's third-party redistributed
+material; a *built* `Morbstack.app` or guest disk image does, because
+`mise run guest-image` assembles the boot image and `morb k8s enable` streams
+the Kubernetes payload into a running guest.
+
+## Third-party components
+
+| Component | Version | Upstream | License (upstream's own) | How Morbstack obtains it |
+|---|---|---|---|---|
+| Linux kernel (`vmlinux`) | kata-containers 3.28.0 release, kernel 6.18.15 | https://github.com/kata-containers/kata-containers | GPL-2.0-only | Fetched by `scripts/fetch-guest-assets.sh --kernel-only` from a kata-containers GitHub Release, archive- and member-hash-pinned. Unmodified. Boots as the guest's kernel; not linked with or compiled into any Morbstack binary. |
+| Alpine Linux minirootfs | 3.24.1 (aarch64) | https://alpinelinux.org | Aggregate of its own packages' licenses — principally musl libc (MIT), BusyBox (GPL-2.0-only), and Alpine's own `apk-tools`/`alpine-baselayout` (GPL-2.0-only) | Fetched by `scripts/fetch-guest-assets.sh --alpine-only`, verified against Alpine's own CDN-published sha256/sha512 sidecars. Unpacked as the guest's base filesystem. |
+| Docker Engine static binaries: `dockerd`, `docker` (CLI), `containerd`, `containerd-shim-runc-v2`, `ctr`, `runc`, `docker-proxy`, `docker-init` | 29.7.1 (aarch64 static release) | https://github.com/moby/moby, https://github.com/containerd/containerd, https://github.com/opencontainers/runc | Apache-2.0 (Moby/Docker, containerd, runc); `docker-init` is Docker's static build of `tini`, MIT License, per Docker's own release packaging | Fetched by `scripts/fetch-guest-assets.sh --docker-only` from `download.docker.com`, archive-hash-pinned. Unmodified. Runs as the guest's container engine, supervised by `morbinit` as a separate process — not linked into it. |
+| `docker-compose` (CLI plugin) | v5.3.1 (darwin-aarch64) | https://github.com/docker/compose | Apache-2.0 | Fetched by `scripts/fetch-guest-assets.sh --compose-only`, verified against the release's own sha256 sidecar. Unmodified. Runs on the **host** (Mac), not the guest; not linked into `morb`/`morbstackd`. Not auto-installed into `~/.docker/cli-plugins/` — see README "Install". |
+| `k3s` | v1.36.2+k3s1 (arm64) | https://github.com/k3s-io/k3s | Apache-2.0 | Fetched by `scripts/fetch-guest-assets.sh --k8s-only`, verified against k3s's own release sha256 sidecar. Unmodified. Streamed into a running guest over vsock (§3.3 of `docs/protocol.md`) only when `morb k8s enable` is run; absent otherwise. |
+| `cri-dockerd` | v0.4.4 (arm64) | https://github.com/Mirantis/cri-dockerd | Apache-2.0 | Fetched by `scripts/fetch-guest-assets.sh --k8s-only`, archive- and member-hash-pinned (Mirantis publishes no sidecar). Unmodified. Same delivery path as `k3s` above. |
+| Guest filesystem/networking utilities: `btrfs-progs`, `e2fsprogs` (+`e2fsprogs-libs`), `iptables`/`iptables-legacy` (+`libxtables`, `libip4tc`, `libip6tc`), and their transitive Alpine `.so` dependencies (`libblkid`, `libcom_err`, `libeconf`, `libuuid`, `eudev-libs`, `lzo`, `zstd-libs`) | Alpine v3.24 aarch64 package versions, pinned individually in `scripts/fetch-guest-assets.sh` and `dist/apks/PROVENANCE.txt` | https://gitlab.alpinelinux.org/alpine/aports | Predominantly GPL-2.0-only and LGPL-2.1-or-later (the `iptables`/`e2fsprogs`/`btrfs-progs` family), with `libuuid`/`libblkid` under util-linux's BSD-3-Clause/LGPL-2.1 split; consult each package's own Alpine `aports` metadata for the authoritative per-file license, since this table summarizes rather than replaces it | Fetched by `scripts/fetch-guest-assets.sh --fsutils-only`, each `.apk` archive-hash-pinned individually. Unmodified apk contents; `scripts/mkinitramfs.sh` stages selected files (documented per-package in `dist/apks/PROVENANCE.txt`) into the guest initramfs. |
+
+## On the GPL-2.0 Linux kernel specifically
+
+The guest kernel is GPL-2.0-only, unmodified, and fetched as a prebuilt
+binary from kata-containers' own public release — it is not modified,
+recompiled, or statically linked with any Apache-2.0-licensed Morbstack
+code. It runs as a separate operating system inside a
+`Virtualization.framework` VM, communicating with the macOS host only over
+vsock; nothing in `mac/` or `guest/morbinit/` is compiled against kernel
+headers or linked into the kernel image. Anyone who redistributes a built
+Morbstack guest image is also redistributing this kernel binary and must
+be able to satisfy GPL-2.0's corresponding-source obligation for it — in
+practice this is already met because kata-containers publishes the kernel
+as an unmodified, sourced, versioned public release; Morbstack does not
+patch it and has no source changes of its own to offer.
+
+## What has not been done
+
+No independent legal or license-compliance audit of this component list
+has been performed. The version/hash/source columns above are accurate as
+of the commit that last touched this file and are cross-checked against
+`scripts/fetch-guest-assets.sh` and each `dist/*/PROVENANCE.txt`; the
+license columns reflect each project's commonly published license as
+identified by this project's own maintainers, not a lawyer's review of
+every source file or a reproduction of any upstream project's own NOTICE
+file. `docs/roadmap.md` schedules an independent security audit before
+1.0; a license-compliance pass should happen alongside it before any
+binary distribution (DMG, Homebrew cask, etc.) ships to the public — see
+`docs/PUBLISHING.md`.
+
+TODO(human): before the first public binary release, verify this table
+against each upstream project's own LICENSE/NOTICE files directly (rather
+than this summary) and reproduce any upstream NOTICE text §4(d) requires
+verbatim, in this file.

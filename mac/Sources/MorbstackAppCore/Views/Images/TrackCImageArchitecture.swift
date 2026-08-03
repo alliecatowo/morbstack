@@ -208,12 +208,12 @@ enum TrackCImageArch {
                     + "variant, prefer it."
             }
             return "This image is \(name) and Rosetta is not available, so it will fail to "
-                + "start with `exec format error`. Run `morb rosetta install`, or use an arm64 "
+                + "start with exec format error. Run morb rosetta install, or use an arm64 "
                 + "variant of the image."
         case .foreign(let name):
             return "This image is \(name), which this Mac cannot run natively and Rosetta "
                 + "cannot translate. Containers created from it will fail with "
-                + "`exec format error`."
+                + "exec format error."
         }
     }
 

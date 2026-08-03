@@ -171,7 +171,7 @@ class DaemonClient: @unchecked Sendable {
     private func call(_ request: DaemonRequest, timeout: TimeInterval) async throws {
         let response = try await roundTrip(request, timeout: timeout)
         guard response.ok else {
-            throw MorbError.vm(response.error ?? "morbstackd rejected `\(request.cmd)`")
+            throw MorbError.vm(response.error ?? "morbstackd rejected \(request.cmd)")
         }
     }
 
@@ -228,7 +228,7 @@ class DaemonClient: @unchecked Sendable {
         guard let daemonExecutable else {
             throw MorbError.notFound(
                 "could not find the morbstackd binary — install it alongside Morbstack.app, "
-                    + "or start the engine with `morb start`")
+                    + "or start the engine with morb start")
         }
         let process = Process()
         process.executableURL = daemonExecutable

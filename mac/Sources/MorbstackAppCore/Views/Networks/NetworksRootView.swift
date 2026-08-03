@@ -209,7 +209,7 @@ struct NetworksRootView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        ToolbarItem(id: "networks.removeUnused", placement: MorbToolbarGroup.actions) {
+        ToolbarItem(id: "networks.removeUnused", placement: MorbToolbarGroup.secondary) {
             Button {
                 showingPruneSheet = true
             } label: {
@@ -233,7 +233,15 @@ struct NetworksRootView: View {
             MorbEmptyState(
                 "No networks",
                 systemImage: "network",
-                description: "Start the engine and Docker's three built-in networks will appear here.")
+                description: "Docker's three built-in networks appear here once the engine has fully come up."
+            ) {
+                Button {
+                    Task { await model.refreshAll() }
+                } label: {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                }
+                .morbButton(.standard)
+            }
         } else if split.custom.isEmpty && split.builtIn.isEmpty {
             MorbNoMatches(query: query)
         } else {

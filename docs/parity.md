@@ -9,7 +9,7 @@ it actually break?
 
 ## Method
 
-Built once (`make build && make sign`), then copied `morbstackd`/`morb` out
+Built once (`mise run build && mise run sign`), then copied `morbstackd`/`morb` out
 to a private directory (`/tmp/morbparity/bin`) so a concurrent `swift
 build` from another session couldn't strip the daemon's virtualization
 entitlement mid-run. Ran against an isolated `MORBSTACK_HOME` (short path,
@@ -59,7 +59,7 @@ unmodified.
 
 ### Tally
 
-29 checks: **19 PASS**, **4 PARTIAL** (documented-but-undersold behavioral differences), **6 FAIL** (2 of which — inotify and buildx-not-shipped — are already openly acknowledged as gaps in `README.md`/`docs/compat.md`; the other 4 — the `/tmp` symlink bind-mount corruption, `host.docker.internal`, `gateway.docker.internal`, and zero-config socket discovery — are not called out anywhere as prominently as their real-world impact deserves).
+29 checks: **20 PASS**, **3 PARTIAL** (#20, #22, #27 — documented-but-undersold behavioral differences), **6 FAIL** (#9, #10, #13, #17, #18, #19 — 2 of which, #10 inotify and #13 buildx-not-shipped, are already openly acknowledged as gaps in `README.md`/`docs/compat.md`; the other 4 — #9 the `/tmp` symlink bind-mount corruption, #18 `host.docker.internal`, #19 `gateway.docker.internal`, and #17 zero-config socket discovery — are not called out anywhere as prominently as their real-world impact deserves).
 
 ## Root-cause hypotheses and suggested fixes
 

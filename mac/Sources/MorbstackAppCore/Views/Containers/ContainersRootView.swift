@@ -21,6 +21,7 @@
 // exactly what ships. See this track's handoff notes for the full writeup.
 
 import AppKit
+import MorbstackKit
 import SwiftUI
 
 // MARK: - Root
@@ -149,29 +150,29 @@ struct ContainersRootView: View {
             .fixedSize()
             .help("Show all containers or only running ones")
         }
-        ToolbarItem(id: "containers.prune", placement: MorbToolbarGroup.actions) {
+        ToolbarItem(id: "containers.prune", placement: MorbToolbarGroup.secondary) {
             pruneButton
         }
     }
 
+    /// Symbol only — the count and the "stopped" qualifier live in the tooltip, not
+    /// welded onto the button as permanent text. A spinner replaces the glyph while the
+    /// prune is in flight rather than sitting beside it, since a toolbar item shows one
+    /// glyph at a time on macOS.
     private var pruneButton: some View {
         Button {
             pruneStopped()
         } label: {
-            HStack(spacing: Theme.space2) {
-                if isPruning {
-                    ProgressView().controlSize(.small).scaleEffect(0.7).frame(width: 12)
-                } else {
-                    Image(systemName: "trash")
-                }
-                Text("Prune stopped")
-                if stoppedCount > 0 {
-                    MorbCountBadge(count: stoppedCount)
-                }
+            if isPruning {
+                ProgressView().controlSize(.small).scaleEffect(0.7).frame(width: 16, height: 16)
+            } else {
+                Label("Prune Stopped Containers", systemImage: "trash")
             }
         }
         .disabled(stoppedCount == 0 || isPruning)
-        .help("Remove every stopped container")
+        .help(stoppedCount == 0
+              ? "No stopped containers to remove"
+              : "Remove \(stoppedCount) stopped container\(stoppedCount == 1 ? "" : "s")")
     }
 
     // MARK: Content
@@ -316,10 +317,33 @@ struct ContainersRootView: View {
         MorbEmptyState(
             "No containers yet",
             systemImage: "shippingbox",
-            description: "Nothing is running on this engine. Start something from a terminal and it will show up here the moment it exists.",
-            actionTitle: "Refresh"
+            description: "Nothing is running on this engine. Point the Docker CLI at it and start something — it shows up here the moment it exists."
         ) {
-            Task { await model.refreshAll() }
+            VStack(spacing: Theme.space3) {
+                Button {
+                    Task { await model.refreshAll() }
+                } label: {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                }
+                .morbButton(.standard)
+
+                Button {
+                    TrackBClipboard.copy(
+                        "docker --host unix://\(MorbPaths.dockerSocket.path) run --rm -it alpine sh")
+                } label: {
+                    Label("Copy an Example Run Command", systemImage: "doc.on.doc")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .font(.caption)
+
+                Text("docker --host unix://\(MorbPaths.dockerSocket.path) run --rm -it alpine sh")
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                    .textSelection(.enabled)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
         }
     }
 

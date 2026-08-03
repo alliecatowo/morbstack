@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 128" width="560" height="128" role="img" aria-label="Morbstack">
+  <title>Morbstack</title>
+  <!--
+    The Morbstack wordmark: the mark at 128, then the name set in the reader's system
+    UI font.
+
+    ON THE TYPE. No font file is embedded or redistributed here, and the letterforms
+    are not outlined. That is a licensing decision, not an oversight: outlining SF Pro
+    into a redistributable Apache-2.0 asset is not clearly permitted by Apple's font
+    licence, and vendoring a third-party open font to avoid that would add a binary
+    blob to a repository whose whole build story is "no dependencies". So the wordmark
+    sets live, in the system UI font — SF Pro on Apple platforms, which is exactly the
+    right face for a Mac-native product, and a reasonable grotesque everywhere else.
+
+    The practical consequence: this file renders correctly in any browser and in any
+    macOS app, and renders in a substituted face under a headless rasteriser that has
+    no system font stack (rsvg-convert on macOS falls back to Hiragino Sans). For a
+    fixed-pixel wordmark, use brand/out/wordmark.png, which brand/render.sh produces
+    via AppKit and therefore in the real system font. See brand/README.md.
+
+    `currentColor` on the text means a page can flip the wordmark for dark mode with
+    one CSS `color` declaration and no second asset.
+  -->
+  <defs>
+    <linearGradient id="plate" x1="11.264" y1="11.264" x2="116.736" y2="116.736" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2A1F9E"/>
+      <stop offset="1" stop-color="#7A3BE8"/>
+    </linearGradient>
+    <mask id="gap">
+      <rect x="0" y="0" width="128" height="128" fill="#000"/>
+      <rect x="11.264" y="11.264" width="105.472" height="105.472" rx="24.786" ry="24.786" fill="#fff"/>
+      <circle cx="64" cy="48.179" r="27.739" fill="#000"/>
+    </mask>
+  </defs>
+
+  <!-- The mark, at 128: brand/mark.svg's geometry divided by 8. -->
+  <g>
+    <rect x="11.264" y="11.264" width="105.472" height="105.472" rx="24.786" ry="24.786" fill="url(#plate)"/>
+    <g mask="url(#gap)" fill="#FFFFFF">
+      <rect x="18.647" y="94.851" width="90.706" height="11.075" rx="3.164" ry="3.164"/>
+      <rect x="18.647" y="76.920" width="90.706" height="11.075" rx="3.164" ry="3.164"/>
+      <rect x="18.647" y="58.990" width="90.706" height="11.075" rx="3.164" ry="3.164"/>
+    </g>
+    <circle cx="64" cy="48.179" r="24.786" fill="#FFFFFF"/>
+  </g>
+
+  <text x="140" y="86"
+        font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', 'Helvetica Neue', Helvetica, Arial, sans-serif"
+        font-size="68" font-weight="600" letter-spacing="-1.4" fill="currentColor">Morbstack</text>
+</svg>

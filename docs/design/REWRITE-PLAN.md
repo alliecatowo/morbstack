@@ -293,7 +293,7 @@ Run in this order. Any failure blocks the merge.
    grep -rn --include='*.swift' "#available" mac/Sources/MorbstackAppCore | grep -v "/Design/"
    ```
    must return **nothing**. It is clean at the design-system commit.
-6. `make sign` still produces a `morbstackd` with the virtualization entitlement, and the
+6. `mise run sign` still produces a `morbstackd` with the virtualization entitlement, and the
    app bundle still launches. (`swift build` strips it; signing must remain the last step.)
 
 ### 6.2 Design conformance

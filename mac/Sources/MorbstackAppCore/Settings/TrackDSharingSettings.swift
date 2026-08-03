@@ -122,16 +122,21 @@ struct TrackDSharingSettings: View {
             Text(Self.silentFailureText)
                 .foregroundStyle(.orange)
             sharingActions
-            Text(sharingEditHint)
+            sharingEditHint
                 .foregroundStyle(.tertiary)
         }
         .font(.caption)
         .fixedSize(horizontal: false, vertical: true)
     }
 
-    private var sharingEditHint: String {
-        "Edit `\(MorbShareSurface.sharedPathsKey)` in \(store.url.path), then restart the "
-            + "engine: shares are attached when the VM boots."
+    /// Built as `Text` concatenation, not a plain `String` handed to `Text(_:)` — a
+    /// plain `String` does not parse Markdown, so the backticks around the key name
+    /// rendered as literal characters. `Text + Text` is what actually gets a monospaced
+    /// run without going through `LocalizedStringKey` interpolation.
+    private var sharingEditHint: Text {
+        Text("Edit ")
+            + Text(MorbShareSurface.sharedPathsKey).font(.system(.caption, design: .monospaced))
+            + Text(" in \(store.url.path), then restart the engine: shares are attached when the VM boots.")
     }
 
     private var sharingActions: some View {
@@ -149,20 +154,26 @@ struct TrackDSharingSettings: View {
     }
 
     private var rosettaExplanation: some View {
+        // Plain `String` concatenation, deliberately: `Text` only parses Markdown —
+        // including the backticks below — when it is handed a `LocalizedStringKey`
+        // *literal*, and `+`-joining string literals resolves to plain `String` before
+        // `Text` ever sees it. Wrapping words in backticks and losing to that inference
+        // rule is exactly how a build ends up with visible backtick characters on
+        // screen, so this text carries no Markdown at all rather than pretending to.
         VStack(alignment: .leading, spacing: Theme.space2) {
             Text(
-                "Rosetta lets the VM run `amd64` (x86-64) container images on Apple silicon by "
-                    + "translating their binaries. Images built for `arm64` do not need it and "
+                "Rosetta lets the VM run amd64 (x86-64) container images on Apple silicon by "
+                    + "translating their binaries. Images built for arm64 do not need it and "
                     + "always run faster; Rosetta is for the ones that only ship amd64."
             )
             if model.rosetta.availability == .notInstalled {
                 Text(
-                    "Install it from a terminal with `morb rosetta install`, which explains what "
+                    "Install it from a terminal with morb rosetta install, which explains what "
                         + "it will do and asks first. Morbstack never accepts Apple's licence for you."
                 )
             }
             if model.rosetta.availability == .disabled {
-                Text("Set `rosetta = true` in \(store.url.path) and restart the engine.")
+                Text("Set rosetta = true in \(store.url.path) and restart the engine.")
             }
             if let note = model.rosetta.note, !note.isEmpty {
                 Text(note).foregroundStyle(.tertiary)

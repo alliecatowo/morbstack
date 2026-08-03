@@ -1,0 +1,45 @@
+name: Feature request
+description: Propose something Morbstack doesn't do yet
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing: check `docs/roadmap.md` — this may already be planned
+        for a specific milestone (M1/M2/1.0/1.x), in which case a comment on
+        context you can add is more useful than a duplicate request. Also
+        check `docs/parity.md` and `docs/compat.md`, since some of what
+        looks like a missing feature is a documented, known gap already
+        (e.g. no `host.docker.internal`, no UDP port forwarding, no
+        `buildx`).
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve
+      description: Describe the workflow or use case this would unblock, not just the feature itself.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: What would Morbstack do differently? Concrete commands/UI/output are more useful than a general description.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds you're using today, or how Docker Desktop / another tool handles this, if relevant.
+
+  - type: checkboxes
+    id: checked-roadmap
+    attributes:
+      label: Checklist
+      options:
+        - label: I checked `docs/roadmap.md` and this isn't already planned in a way that covers my request
+          required: true
+        - label: I checked `docs/parity.md` and `docs/compat.md` and this isn't already a documented, known gap
+          required: true

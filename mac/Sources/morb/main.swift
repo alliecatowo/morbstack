@@ -10,6 +10,10 @@
 
 import Darwin
 import Foundation
+import MorbBench
+import MorbMCP
+import MorbMigrate
+import MorbScan
 import MorbstackKit
 
 // MARK: - Output helpers
@@ -32,6 +36,14 @@ let usage = """
       version      Print CLI and daemon versions
       doctor       Diagnose the host; works without the daemon
       reset-disk   Delete the Docker data disk and start over (destructive)
+      mcp          Model Context Protocol server; read-only unless granted
+      migrate      Import images, volumes and config from another runtime
+      bench        Run the open benchmark suite and report the numbers
+      scan         SBOM and CVE scan an image, entirely on this machine
+      debug        Open a toolbox shell in a container, even a distroless one
+      context      Manage the `morbstack` docker context (zero-config discovery)
+      install-cli-plugins
+                   Symlink docker-compose/docker-buildx into ~/.docker/cli-plugins
 
     SUBCOMMANDS:
       rosetta install        Install Rosetta and enable it. Always asks first.
@@ -43,15 +55,25 @@ let usage = """
       k8s kubeconfig         Write ~/.morbstack/kubeconfig and say how to use it
       k8s kubeconfig --merge Merge the `morbstack` context into ~/.kube/config,
                              after asking, and after taking a timestamped backup
+      context status         Show whether the context is registered and current
+      context create         Register the `morbstack` docker context. Asks first.
+      context use            Make it the default context. Always asks; refuses
+                             to replace another explicit default without --force
+                             (never stomps — see docs/compat.md).
 
     OPTIONS:
       --json     Emit raw JSON instead of human-readable output
-      --force    Skip Morbstack's confirmation prompt (reset-disk), or stop
-                 the VM without asking the guest first (stop). Deliberately
-                 refused by `rosetta install`: that installs system software
-                 under Apple's licence, so it always asks the person at the
+      --force    Skip Morbstack's confirmation prompt (reset-disk, context
+                 create, install-cli-plugins), replace another explicit
+                 default context (context use), or stop the VM without asking
+                 the guest first (stop). Deliberately refused by
+                 `rosetta install`: that installs system software under
+                 Apple's licence, so it always asks the person at the
                  keyboard. Use --print-plan, or run
                  `softwareupdate --install-rosetta` yourself.
+      --print-plan
+                 Print what a command would do and exit without doing it
+                 (rosetta install, install-cli-plugins).
       --help     Print this help
     """
 
@@ -426,6 +448,251 @@ case "shares":
             out("")
             out("  Run `morb start` to find out which of them the guest actually has.")
         }
+    }
+
+case "context":
+    // Zero-config discovery (docs/parity.md #17/#23): nothing here spawns the daemon —
+    // it is all local file reads/writes against ~/.docker (or $DOCKER_CONFIG), following
+    // the same rule as `shares`/`doctor`/`rosetta status`.
+    let contextSubcommand = extraArguments.first { !$0.hasPrefix("-") } ?? "status"
+
+    func renderContextStatus(_ status: MorbDockerContext.Status) {
+        if status.registered && status.matchesSocket {
+            out("[ok] context \"\(MorbDockerContext.name)\" is registered and points at the right socket")
+        } else if status.registered {
+            out("[!!] context \"\(MorbDockerContext.name)\" is registered but points elsewhere")
+            out("     registered: \(status.registeredHost ?? "-")")
+            out("     expected:   unix://\(status.socketPath)")
+            out("     Run `morb context create` to fix it.")
+        } else {
+            out("[--] context \"\(MorbDockerContext.name)\" is not registered")
+            out("     Run `morb context create` to add it.")
+        }
+        out("")
+        out("  current context: \(status.currentContext)"
+            + (status.isCurrent ? " (morbstack)" : ""))
+        if !status.isCurrent {
+            if status.wouldRefuseUse {
+                out("  `morb context use` will refuse to switch: \"\(status.currentContext)\" is an")
+                out("  explicit non-default context, and Morbstack never stomps one. Pass --force")
+                out("  to switch anyway, or run `docker context use \(MorbDockerContext.name)` yourself.")
+            } else {
+                out("  Run `morb context use` to make \"\(MorbDockerContext.name)\" the default —")
+                out("  it always asks first.")
+            }
+        }
+        out("")
+        out("  docker config directory: \(status.dockerConfigDirectory)")
+        out("")
+        out("  Optional: some tools (older scripts, some IDE defaults) still look for the")
+        out("  conventional \(MorbDockerContext.systemSocketPath) before trying a context or")
+        out("  DOCKER_HOST. Morbstack never creates that symlink itself — it is a system")
+        out("  path outside \(MorbPaths.root.path) — but if you want it, run:")
+        out("      \(MorbDockerContext.suggestedSymlinkCommand())")
+        out("  (only if nothing else already owns that path).")
+    }
+
+    switch contextSubcommand {
+    case "status":
+        let status = MorbDockerContext.status()
+        finish(.success([
+            "name": .string(MorbDockerContext.name),
+            "registered": .bool(status.registered),
+            "registered_host": status.registeredHost.map { AnyCodableValue.string($0) } ?? .null,
+            "matches_socket": .bool(status.matchesSocket),
+            "current_context": .string(status.currentContext),
+            "is_current": .bool(status.isCurrent),
+            "docker_config_directory": .string(status.dockerConfigDirectory),
+            "socket_path": .string(status.socketPath),
+            "system_socket_symlink_command": .string(MorbDockerContext.suggestedSymlinkCommand()),
+        ])) { _ in renderContextStatus(status) }
+
+    case "create":
+        let before = MorbDockerContext.status()
+        if before.registered && before.matchesSocket {
+            finish(.success([
+                "created": .bool(false),
+                "already_correct": .bool(true),
+            ])) { _ in
+                out("[ok] context \"\(MorbDockerContext.name)\" already exists and is correct; nothing to do")
+            }
+        }
+        if !extraArguments.contains("--force") {
+            out("`morb context create` will write:")
+            out("  \(MorbDockerContext.metaFile(dockerConfigDirectory: MorbDockerContext.dockerConfigDirectory()).path)")
+            out("registering a docker context named \"\(MorbDockerContext.name)\" that points at")
+            out("\(MorbPaths.dockerSocket.path).")
+            out("It will NOT change your current/default context — run `morb context use`")
+            out("separately for that, which asks again.")
+            out("")
+            guard isatty(STDIN_FILENO) == 1 else {
+                fail(
+                    "context create needs confirmation and stdin is not a terminal.\n"
+                        + "       Re-run with --force if you really mean it.", code: 2)
+            }
+            FileHandle.standardOutput.write(Data("Continue? [y/N] ".utf8))
+            let answer = (readLine(strippingNewline: true) ?? "").trimmingCharacters(in: .whitespaces)
+            guard answer.lowercased() == "y" || answer.lowercased() == "yes" else {
+                fail("cancelled; nothing was changed", code: 2)
+            }
+        }
+        do {
+            let wrote = try MorbDockerContext.create()
+            finish(.success(["created": .bool(wrote)])) { _ in
+                out("[ok] context \"\(MorbDockerContext.name)\" \(wrote ? "created" : "already correct")")
+                out("     Run `morb context use` to make it the default, or point a single")
+                out("     command at it with `DOCKER_CONTEXT=\(MorbDockerContext.name) docker ...`.")
+            }
+        } catch {
+            fail((error as? MorbError)?.description ?? error.localizedDescription, code: 2)
+        }
+
+    case "use":
+        let force = extraArguments.contains("--force")
+        let status = MorbDockerContext.status()
+        if status.isCurrent {
+            finish(.success(["switched": .bool(false), "already_current": .bool(true)])) { _ in
+                out("[ok] \"\(MorbDockerContext.name)\" is already the current context")
+            }
+        }
+        if !status.registered || !status.matchesSocket {
+            fail(
+                "context \"\(MorbDockerContext.name)\" is not registered (or is stale).\n"
+                    + "       Run `morb context create` first.", code: 2)
+        }
+        if status.wouldRefuseUse && !force {
+            out("Current context is \"\(status.currentContext)\", an explicit non-default context.")
+            out("Morbstack never stomps that without being told to (docs/compat.md).")
+            fail(
+                "refusing to change the default context without --force.\n"
+                    + "       Re-run with --force, or switch it yourself with\n"
+                    + "       `docker context use \(MorbDockerContext.name)`.", code: 2)
+        }
+        out("`morb context use\(force ? " --force" : "")` will set the current docker context")
+        out("to \"\(MorbDockerContext.name)\" in "
+            + "\(MorbDockerContext.configFile(dockerConfigDirectory: MorbDockerContext.dockerConfigDirectory()).path),")
+        out("preserving every other key in that file (credsStore, credHelpers, etc).")
+        if status.wouldRefuseUse {
+            out("This REPLACES the current explicit context (\"\(status.currentContext)\") — that is")
+            out("what --force means here.")
+        }
+        out("")
+        guard isatty(STDIN_FILENO) == 1 else {
+            fail(
+                "context use needs confirmation and stdin is not a terminal.\n"
+                    + "       This command has no non-interactive form: switching the default\n"
+                    + "       context is exactly the kind of change docs/compat.md promises never\n"
+                    + "       happens silently. Run `docker context use \(MorbDockerContext.name)`\n"
+                    + "       yourself for a scriptable equivalent.", code: 2)
+        }
+        FileHandle.standardOutput.write(Data("Continue? [y/N] ".utf8))
+        let answer = (readLine(strippingNewline: true) ?? "").trimmingCharacters(in: .whitespaces)
+        guard answer.lowercased() == "y" || answer.lowercased() == "yes" else {
+            fail("cancelled; nothing was changed", code: 2)
+        }
+        do {
+            let result = try MorbDockerContext.use(force: force)
+            switch result {
+            case .current:
+                finish(.success(["switched": .bool(true)])) { _ in
+                    out("[ok] current context is now \"\(MorbDockerContext.name)\"")
+                }
+            case .refused(let current):
+                // Only reachable if something changed `currentContext` between the check
+                // above and now; still handled rather than asserted impossible.
+                fail("current context changed to \"\(current)\" concurrently; re-run to retry", code: 2)
+            }
+        } catch {
+            fail((error as? MorbError)?.description ?? error.localizedDescription, code: 2)
+        }
+
+    default:
+        fail(
+            "unknown context subcommand `\(contextSubcommand)` (expected `status`, `create`, or `use`)",
+            code: 2)
+    }
+
+case "install-cli-plugins":
+    // Also host-only: symlinking into ~/.docker/cli-plugins never needs the daemon.
+    let plan = MorbCliPlugins.plan()
+    let force = extraArguments.contains("--force")
+
+    if plan.isEmpty {
+        fail(
+            "no plugin binaries found next to \(MorbExecutable.currentPath()) or under a\n"
+                + "       dist/host-bin checkout. Run `scripts/fetch-guest-assets.sh --compose-only`\n"
+                + "       and `--buildx-only` first (see dist/host-bin/PROVENANCE.txt).", code: 2)
+    }
+
+    func renderPlan() {
+        out("`morb install-cli-plugins` will symlink into \(plan.directory):")
+        out("")
+        for item in plan.items {
+            guard let source = item.source else {
+                out("  docker-\(item.plugin): SKIPPED — no source binary found")
+                continue
+            }
+            if item.alreadyCorrect {
+                out("  docker-\(item.plugin): already correct (\(item.destination) -> \(source))")
+            } else if item.willReplace {
+                out("  docker-\(item.plugin): \(item.destination) -> \(source)")
+                out("      REPLACES an existing file/symlink at that path")
+            } else {
+                out("  docker-\(item.plugin): \(item.destination) -> \(source)")
+            }
+        }
+        out("")
+        out("Nothing outside \(plan.directory) is touched, and no other key in")
+        out("config.json is read or written.")
+    }
+
+    if extraArguments.contains("--print-plan") {
+        renderPlan()
+        out("")
+        out("  Nothing was changed. Re-run without --print-plan to go ahead.")
+        exit(0)
+    }
+
+    if !force {
+        renderPlan()
+        out("")
+        guard isatty(STDIN_FILENO) == 1 else {
+            fail(
+                "install-cli-plugins needs confirmation and stdin is not a terminal.\n"
+                    + "       Re-run with --force if you really mean it, or see the manual\n"
+                    + "       one-liner in dist/host-bin/PROVENANCE.txt.", code: 2)
+        }
+        FileHandle.standardOutput.write(Data("Continue? [y/N] ".utf8))
+        let answer = (readLine(strippingNewline: true) ?? "").trimmingCharacters(in: .whitespaces)
+        guard answer.lowercased() == "y" || answer.lowercased() == "yes" else {
+            fail("cancelled; nothing was changed", code: 2)
+        }
+    }
+
+    let outcomes = MorbCliPlugins.install()
+    var jsonOutcomes: [String: AnyCodableValue] = [:]
+    var anyFailed = false
+    for outcome in outcomes {
+        switch outcome {
+        case .linked(let name): jsonOutcomes[name] = .string("linked")
+        case .alreadyCorrect(let name): jsonOutcomes[name] = .string("already_correct")
+        case .sourceMissing(let name): jsonOutcomes[name] = .string("source_missing")
+        case .failed(let name, let reason):
+            jsonOutcomes[name] = .string("failed: \(reason)")
+            anyFailed = true
+        }
+    }
+    finish(anyFailed ? .failure("one or more plugins could not be installed") : .success(jsonOutcomes)) { _ in
+        for outcome in outcomes {
+            switch outcome {
+            case .linked(let name): out("[ok] docker-\(name) linked")
+            case .alreadyCorrect(let name): out("[ok] docker-\(name) already correct")
+            case .sourceMissing(let name): out("[--] docker-\(name): no source binary found, skipped")
+            case .failed(let name, let reason): out("[!!] docker-\(name): \(reason)")
+            }
+        }
+        out("")
+        out("Verify with `docker compose version` and `docker buildx version`.")
     }
 
 case "rosetta":
@@ -866,6 +1133,25 @@ case "k8s":
             }
         }
     }
+
+// The feature modules own their own argument parsing, output and exit codes. Each
+// gets the residual arguments and the global `--json` flag and nothing else: the
+// alternative is this switch growing a nested parser per feature, which is how a CLI
+// ends up with five subtly different ideas of what `--force` means.
+case "mcp":
+    exit(MorbMCPCommand.run(extraArguments, json: wantsJSON))
+
+case "migrate":
+    exit(MorbMigrateCommand.run(extraArguments, json: wantsJSON))
+
+case "bench":
+    exit(MorbBenchCommand.run(extraArguments, json: wantsJSON))
+
+case "scan":
+    exit(MorbScanCommand.run(extraArguments, json: wantsJSON))
+
+case "debug":
+    exit(MorbDebugCommand.run(extraArguments, json: wantsJSON))
 
 case "start", "stop", "suspend", "resume":
     var args: [String: String] = [:]

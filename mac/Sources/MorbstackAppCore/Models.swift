@@ -314,6 +314,31 @@ struct DiskUsage: Sendable, Equatable {
     var total: Int64 { imagesTotal + volumesTotal + buildCacheTotal + containersTotal }
 }
 
+// MARK: - Build cache
+
+/// One record from `/system/df`'s `BuildCache` array — a single BuildKit cache layer.
+///
+/// This is the closest thing the engine exposes to build history: the classic Docker
+/// build cache has no notion of "a build," only a graph of cache records shared across
+/// every build that ever ran, so `Description` (a snippet of the instruction that
+/// produced it, e.g. `RUN pip install -r requirements.txt`) is the closest thing to a
+/// name any record has. There is no per-record delete in the Docker Engine API — only
+/// `POST /build/prune`, which removes every unused record at once — so the Builds
+/// screen can inspect these but can only prune all of them together.
+struct BuildCacheRecord: Identifiable, Sendable, Equatable {
+    var id: String
+    var description: String
+    var type: String
+    var size: Int64
+    var inUse: Bool
+    var shared: Bool
+    var createdAt: Date
+    var lastUsedAt: Date?
+    var usageCount: Int
+
+    var shortID: String { String(id.prefix(12)) }
+}
+
 // MARK: - Logs and stats
 
 /// Which pipe a log line came out of.

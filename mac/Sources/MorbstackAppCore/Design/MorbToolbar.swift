@@ -32,6 +32,14 @@ enum MorbToolbarGroup {
     /// The screen's own actions: Prune, Refresh, Pull. Trailing side.
     static let actions: ToolbarItemPlacement = .primaryAction
 
+    /// Secondary controls — Prune, Remove Unused, a copy-path button. Center of the
+    /// toolbar, so macOS collapses them into its own overflow automatically once space
+    /// tightens (an inspector opening, a narrower window) — the same graceful yielding
+    /// the leading sidebar toggle already does. Keep only the inspector toggle, search
+    /// and the one primary action in ``actions``; everything else that is not essential
+    /// at every width belongs here instead of being hand-collapsed.
+    static let secondary: ToolbarItemPlacement = .principal
+
     /// Overflow — anything that belongs in the ⋯ menu.
     static let overflow: ToolbarItemPlacement = .secondaryAction
 

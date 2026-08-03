@@ -1,25 +1,210 @@
 name: CI
 
+# Trigger on every push and PR, plus a manual button for re-running the
+# slow guest-image job without pushing an empty commit.
 on:
   push:
   pull_request:
+  workflow_dispatch:
+
+# Cancel a superseded run on the same branch/PR rather than letting two
+# copies of the same workflow race each other for runner minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least-privilege default; nothing in this workflow needs to write to the
+# repo, open PRs, or touch packages.
+permissions:
+  contents: read
 
 jobs:
-  build:
-    runs-on: macos-latest
+  # ---------------------------------------------------------------------
+  # Change detection, so the slow guest-image job (below) only runs when
+  # something it actually depends on changed, plus always on push to main
+  # and on a manual dispatch. See that job for why it's slow enough to be
+  # worth gating.
+  # ---------------------------------------------------------------------
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      guest_image: ${{ steps.filter.outputs.guest_image }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            guest_image:
+              - 'guest/morbinit/**'
+              - 'scripts/mkinitramfs.sh'
+              - 'scripts/fetch-guest-assets.sh'
+              - 'dist/CROSS_COMPILE.md'
+              - 'mise.toml'
+
+  # ---------------------------------------------------------------------
+  # The dev-loop build: host-arch morbinit (no cross toolchain needed —
+  # see mise.toml's build-guest vs cross-build-guest task split) plus both
+  # Swift binaries, then both test suites. This is the job every PR must
+  # pass; it needs Apple Silicon + Xcode for Virtualization.framework and
+  # Swift 6.3, hence macos-26 rather than a Linux runner.
+  # ---------------------------------------------------------------------
+  build-and-test:
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
 
+      # macos-26 ships Xcode 26.5, 26.4.1 (default), 26.3, 26.2, and
+      # 26.1.1. mac/Package.swift declares swift-tools-version 6.0 and a
+      # macOS(.v15) deployment target, and this project's own
+      # documentation (CONTRIBUTING.md, README.md) has been built and
+      # verified against Xcode 26 — the runner's default (26.4.1) already
+      # satisfies "Xcode 26 or later," so no explicit xcode-select step
+      # is needed. If a future Swift-only feature needs a newer default,
+      # pin it here explicitly rather than relying on whatever GitHub
+      # ships as default that month.
+      - name: Show Xcode version
+        run: xcodebuild -version
+
       - uses: jdx/mise-action@v2
 
-      # Also exercises the documented first-run path. `mise trust` is what
-      # makes this work on a fresh checkout: mise refuses to read a config
-      # file it has not been told to trust.
+      # SwiftPM build products. There are no third-party SwiftPM
+      # dependencies to resolve (mac/Package.swift is deliberately
+      # dependency-free), so this cache buys incremental *compilation*
+      # reuse across runs, not dependency-resolution time.
+      - name: Cache SwiftPM build
+        uses: actions/cache@v4
+        with:
+          path: mac/.build
+          key: swiftpm-${{ runner.os }}-${{ hashFiles('mac/Package.swift') }}-${{ github.sha }}
+          restore-keys: |
+            swiftpm-${{ runner.os }}-${{ hashFiles('mac/Package.swift') }}-
+            swiftpm-${{ runner.os }}-
+
+      # Cargo registry + host-arch build products for morbinit. Keyed on
+      # Cargo.lock even though [dependencies] is empty today (std-only —
+      # see NOTICE), so this starts paying off the moment that changes.
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            guest/morbinit/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('guest/morbinit/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ hashFiles('guest/morbinit/Cargo.lock') }}-
+            cargo-${{ runner.os }}-
+
+      # Also exercises the documented first-run path: `mise trust` is
+      # what makes this work on a fresh checkout, since mise refuses to
+      # read a config file — including its task list — it hasn't been
+      # told to trust. That's why this is the literal commands rather
+      # than `mise run setup`: `mise run` can't find the setup task
+      # itself until the config is trusted.
       - name: Set up toolchain
-        run: make setup
+        run: mise trust && mise install
 
       - name: Build
-        run: make build
+        run: mise run build
 
       - name: Test
-        run: make test
+        run: mise run test
+
+  # ---------------------------------------------------------------------
+  # Static checks that don't need a full build: Rust formatting/lints,
+  # and shell script linting. No Swift lint job: this repo carries no
+  # .swift-format or SwiftLint config (checked — neither file exists),
+  # so there is nothing real to run `swift format lint` against yet. Add
+  # one here the same shape as the Rust job below once a config lands,
+  # rather than inventing default rules this project hasn't agreed to.
+  # ---------------------------------------------------------------------
+  lint:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+
+      - name: Set up toolchain
+        run: mise trust && mise install
+
+      - name: Cargo fmt check
+        run: cd guest/morbinit && mise x -- cargo fmt -- --check
+
+      - name: Cargo clippy
+        run: cd guest/morbinit && mise x -- cargo clippy --all-targets -- -D warnings
+
+      # ShellCheck ships preinstalled on GitHub's macOS runner images; the
+      # fallback install only matters if that ever changes, and keeps
+      # this step runnable rather than aspirational either way.
+      - name: ShellCheck
+        run: |
+          command -v shellcheck >/dev/null 2>&1 || brew install shellcheck
+          shellcheck scripts/*.sh
+
+  # ---------------------------------------------------------------------
+  # The bootable guest image: cross-compiles morbinit for
+  # aarch64-unknown-linux-musl via the messense Homebrew cross toolchain,
+  # fetches and hash-verifies every third-party guest asset (kernel,
+  # Docker engine, Alpine rootfs, fsutils — see
+  # scripts/fetch-guest-assets.sh and NOTICE), and assembles the
+  # initramfs. This is real end-to-end coverage that `mise run build`/
+  # `mise run test` above cannot provide (they only build morbinit for the host
+  # arch), but it is also slow — installing the cross toolchain and
+  # downloading ~300MB+ of pinned upstream binaries on every push would
+  # burn runner minutes on PRs that never touch guest-boot code at all.
+  # So it's gated: only runs when the `changes` job above detects an
+  # edit to something this pipeline actually depends on, plus
+  # unconditionally on push to main (so a change that lands via a
+  # squash-merge that altered the diff shape still gets one real check
+  # before it's the tip of main) and on a manual workflow_dispatch.
+  # ---------------------------------------------------------------------
+  guest-image:
+    needs: changes
+    if: |
+      needs.changes.outputs.guest_image == 'true' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+
+      - name: Install aarch64-unknown-linux-musl cross toolchain
+        run: |
+          brew tap messense/macos-cross-toolchains
+          brew install messense/macos-cross-toolchains/aarch64-unknown-linux-musl
+
+      # mise's rust core plugin manages the toolchain through rustup, so
+      # `rustup` is on PATH after `mise install` — this is what
+      # dist/CROSS_COMPILE.md's own recorded setup steps rely on too.
+      - name: Add Rust cross target
+        run: rustup target add aarch64-unknown-linux-musl
+
+      - name: Cache guest-image build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            guest/morbinit/target
+            dist/rootfs
+            dist/guest-bin
+            dist/apks
+          key: guest-image-${{ runner.os }}-${{ hashFiles('scripts/fetch-guest-assets.sh', 'guest/morbinit/Cargo.lock') }}
+          restore-keys: |
+            guest-image-${{ runner.os }}-
+
+      - name: Set up toolchain
+        run: mise trust && mise install
+
+      # Kernel/k8s payload fetches are skipped here on purpose: they're
+      # not inputs to mise run guest-image (see scripts/mkinitramfs.sh),
+      # and skipping them keeps this job's network footprint to what the
+      # initramfs itself actually needs.
+      - name: Fetch guest assets
+        run: |
+          ./scripts/fetch-guest-assets.sh --docker-only
+          ./scripts/fetch-guest-assets.sh --alpine-only
+          ./scripts/fetch-guest-assets.sh --fsutils-only
+
+      - name: Build guest image
+        run: mise run guest-image

@@ -314,10 +314,8 @@ struct Sidebar: View {
     /// The trailing count on a row, when there is a number worth knowing.
     ///
     /// Only sections whose count changes on its own get one. A badge on Networks that
-    /// permanently reads "3" is furniture, not information. `Builds` carries a word
-    /// rather than a number because it does not exist yet.
+    /// permanently reads "3" is furniture, not information.
     private func badge(for nav: Nav) -> Text? {
-        if nav == .builds { return Text("Soon") }
         guard model.engine.isRunning else { return nil }
         switch nav {
         case .containers:
@@ -483,6 +481,10 @@ struct DetailHost: View {
             guard model.selection == .disk else { return }
             await model.refreshDisk()
         }
+        .task(id: model.selection) {
+            guard model.selection == .builds else { return }
+            await model.refreshBuildCache()
+        }
     }
 
     /// Refresh, in the toolbar, on every screen.
@@ -513,7 +515,7 @@ struct DetailHost: View {
         case .networks: NetworksRootView(model: model)
         case .disk: DiskRootView(model: model)
         case .kubernetes: KubernetesRootView(model: model)
-        case .builds: PlaceholderView(nav: model.selection)
+        case .builds: BuildsRootView(model: model)
         }
     }
 

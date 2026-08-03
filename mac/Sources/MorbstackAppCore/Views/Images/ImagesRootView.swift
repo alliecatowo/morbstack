@@ -171,7 +171,11 @@ struct ImagesRootView: View {
             .help("Pull an image")
             .popover(isPresented: $showingPull, arrowEdge: .bottom) { pullPopover }
         }
-        ToolbarItem(id: "images.pruneDangling", placement: MorbToolbarGroup.actions) {
+        // Center, not trailing: this is the screen's secondary action, so it is the one
+        // that should yield first when the inspector opens and the toolbar tightens —
+        // the pull button and the inspector toggle are what must stay reachable at
+        // every width.
+        ToolbarItem(id: "images.pruneDangling", placement: MorbToolbarGroup.secondary) {
             pruneDanglingButton
         }
         MorbInspectorToggle(id: "images.inspector", isPresented: $showsInspector)
@@ -180,14 +184,15 @@ struct ImagesRootView: View {
     @ViewBuilder
     private var pruneDanglingButton: some View {
         let count = model.images.filter { $0.isDangling && $0.containersUsing <= 0 }.count
+        // Symbol only, no forced text — a toolbar item that always shows both an icon
+        // and a label reads as glued-together stickers, and "wand.and.sparkles" implies
+        // this does something clever rather than what it actually does: delete unused
+        // layers. `trash` says that plainly; the count and the reason live in the
+        // tooltip, which is where the honest, longer explanation belongs.
         Button {
             Task { await pruneDangling() }
         } label: {
-            HStack(spacing: Theme.space2) {
-                Image(systemName: "wand.and.sparkles")
-                Text("Prune Dangling")
-                if count > 0 { MorbCountBadge(count: count) }
-            }
+            Label("Prune Dangling Layers", systemImage: "trash")
         }
         .disabled(count == 0 || busy)
         .help(
@@ -276,7 +281,11 @@ struct ImagesRootView: View {
             MorbEmptyState(
                 "No images yet",
                 systemImage: "square.on.square",
-                description: "Pull one from the toolbar, or run a container and Morbstack will fetch it for you.")
+                description: "Pull one, or run a container and Morbstack fetches it for you.",
+                actionTitle: "Pull an Image"
+            ) {
+                showingPull = true
+            }
         } else if split.tagged.isEmpty && split.dangling.isEmpty {
             MorbNoMatches(query: query)
         } else {

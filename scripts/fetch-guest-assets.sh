@@ -23,7 +23,18 @@
 #   5. compose:  docker/compose v5.3.1 CLI plugin binary for the HOST Mac
 #                (darwin-aarch64), verified against its GitHub Release
 #                sha256 sidecar -> dist/host-bin/docker-compose.
-#   6. k8s:      k3s v1.36.2+k3s1 arm64 server binary and cri-dockerd v0.4.4
+#   6. buildx:   docker/buildx v0.36.0 CLI plugin binary for the HOST Mac
+#                (darwin-arm64). Unlike compose, buildx's GitHub Release does
+#                NOT publish darwin binaries in its plain checksums.txt (only
+#                the linux/freebsd/netbsd/openbsd builds are listed there) —
+#                the darwin binaries' hashes live in the separate
+#                checksums-signed.txt asset instead, which this script
+#                fetches and checks the pin against exactly the same way.
+#                -> dist/host-bin/docker-buildx. See #14 in docs/parity.md:
+#                the guest's BuildKit is already fully functional; shipping
+#                this client-side plugin is what turns that into a working
+#                `docker build`/`docker buildx build` out of the box.
+#   7. k8s:      k3s v1.36.2+k3s1 arm64 server binary and cri-dockerd v0.4.4
 #                arm64, both hash-pinned -> dist/guest-k8s/ (the repository's
 #                provenance-bearing cache) and $MORBSTACK_HOME/data/k8s/ (the
 #                copy morbstackd actually reads). This is the OPTIONAL
@@ -45,6 +56,7 @@
 #   scripts/fetch-guest-assets.sh --alpine-only    # alpine rootfs only
 #   scripts/fetch-guest-assets.sh --fsutils-only   # btrfs/e2fs/iptables apks only
 #   scripts/fetch-guest-assets.sh --compose-only   # host docker-compose only
+#   scripts/fetch-guest-assets.sh --buildx-only    # host docker-buildx only
 #   scripts/fetch-guest-assets.sh --k8s-only       # k3s + cri-dockerd only
 #   scripts/fetch-guest-assets.sh -h               # help
 #
@@ -160,13 +172,26 @@ COMPOSE_SHA256_SIDECAR_URL="${COMPOSE_RELEASE_URL}.sha256"
 COMPOSE_VERSION="v5.3.1"
 COMPOSE_SHA256="32691ba1196d819fa68cbdc0aad9a5569e730a35ae40c6fdd8458110ecd69488"
 
+# --- buildx: docker/buildx v0.36.0 CLI plugin, HOST darwin-arm64 ---
+#
+# docker/buildx's plain checksums.txt release asset only lists linux/free|
+# net|openbsd builds; the darwin (and windows) hashes live in the separate
+# checksums-signed.txt asset for that same release. Both this pin and the
+# sidecar URL below point at that file. Independently cross-checked at
+# pin time against the GitHub Releases API's own per-asset "digest" field
+# for buildx-v0.36.0.darwin-arm64, which agreed exactly.
+BUILDX_VERSION="v0.36.0"
+BUILDX_RELEASE_URL="https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/buildx-${BUILDX_VERSION}.darwin-arm64"
+BUILDX_SHA256_SIDECAR_URL="https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/checksums-signed.txt"
+BUILDX_SHA256="82c6a3d9df37790c5bdb0d7ca88986d1d17622fc2b88ebe34b275c6c47acd7a6"
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 usage() {
 	cat <<EOF
-Usage: $(basename "$0") [--kernel-only|--docker-only|--alpine-only|--fsutils-only|--compose-only|--k8s-only] [-h]
+Usage: $(basename "$0") [--kernel-only|--docker-only|--alpine-only|--fsutils-only|--compose-only|--buildx-only|--k8s-only] [-h]
 
 Fetch and verify all pinned third-party guest assets:
   kernel   -> ${MORBSTACK_HOME}/data/kernel/vmlinux
@@ -174,6 +199,7 @@ Fetch and verify all pinned third-party guest assets:
   alpine   -> ${REPO_ROOT}/dist/rootfs/
   fsutils  -> ${REPO_ROOT}/dist/apks/
   compose  -> ${REPO_ROOT}/dist/host-bin/docker-compose
+  buildx   -> ${REPO_ROOT}/dist/host-bin/docker-buildx
   k8s      -> ${REPO_ROOT}/dist/guest-k8s/  and  ${MORBSTACK_HOME}/data/k8s/
 
 Options:
@@ -182,6 +208,7 @@ Options:
   --alpine-only    Only fetch/verify the Alpine minirootfs
   --fsutils-only   Only fetch/verify the btrfs-progs/e2fsprogs/iptables-legacy apks
   --compose-only   Only fetch/verify the host docker-compose CLI plugin
+  --buildx-only    Only fetch/verify the host docker-buildx CLI plugin
   --k8s-only       Only fetch/verify the k3s + cri-dockerd Kubernetes payload
   -h               Show this help and exit
 EOF
@@ -563,6 +590,64 @@ fetch_compose() {
 }
 
 # ---------------------------------------------------------------------------
+# Step: docker buildx CLI plugin (HOST darwin-arm64)
+# ---------------------------------------------------------------------------
+
+fetch_buildx() {
+	echo "== buildx (docker/buildx ${BUILDX_VERSION}, HOST darwin-arm64) =="
+
+	local dest_dir="${REPO_ROOT}/dist/host-bin"
+	local dest_file="${dest_dir}/docker-buildx"
+
+	require_cmd curl
+
+	if [ -x "${dest_file}" ]; then
+		local have_sha
+		have_sha="$(sha256_of "${dest_file}")"
+		if [ "${have_sha}" = "${BUILDX_SHA256}" ]; then
+			check "docker-buildx already present and verified: ${dest_file}"
+			return 0
+		fi
+		echo "  existing ${dest_file} has sha256 ${have_sha}, expected ${BUILDX_SHA256}; re-fetching" >&2
+	fi
+
+	mkdir -p "${dest_dir}"
+
+	local tmp
+	tmp="$(mktemp "${TMPDIR:-/tmp}/morbstack-buildx.XXXXXX")"
+	trap 'rm -f "${tmp}"' RETURN
+
+	info "downloading ${BUILDX_RELEASE_URL}"
+	curl --fail --location --show-error --progress-bar --output "${tmp}" "${BUILDX_RELEASE_URL}" ||
+		fail "failed to download docker-buildx"
+
+	# See the BUILDX_SHA256_SIDECAR_URL comment above: darwin hashes are only
+	# in checksums-signed.txt, not the plain checksums.txt this release also
+	# publishes, so the sidecar line is matched by exact asset filename
+	# rather than assumed to be the only line in the file.
+	info "fetching sha256 sidecar ${BUILDX_SHA256_SIDECAR_URL}"
+	local sidecar_sha
+	sidecar_sha="$(curl --fail --location --show-error --silent "${BUILDX_SHA256_SIDECAR_URL}" |
+		awk -v want="buildx-${BUILDX_VERSION}.darwin-arm64" '$2 == "*"want || $2 == want { print $1 }')"
+	[ -n "${sidecar_sha}" ] || fail "failed to fetch/parse the docker-buildx sha256 sidecar (no darwin-arm64 line)"
+	[ "${sidecar_sha}" = "${BUILDX_SHA256}" ] ||
+		fail "docker-buildx sha256 sidecar (${sidecar_sha}) does not match the pin in this script (${BUILDX_SHA256}); upstream release may have changed"
+
+	local got_sha
+	got_sha="$(sha256_of "${tmp}")"
+	[ "${got_sha}" = "${BUILDX_SHA256}" ] ||
+		fail "docker-buildx sha256 mismatch: got ${got_sha}, expected ${BUILDX_SHA256} (possible corruption or upstream tamper)"
+	check "sha256 verified against pin and GitHub Release sidecar"
+
+	mv "${tmp}" "${dest_file}"
+	chmod 755 "${dest_file}"
+	check "installed: ${dest_file}"
+
+	trap - RETURN
+	rm -f "${tmp}"
+}
+
+# ---------------------------------------------------------------------------
 # Step: k8s (k3s + cri-dockerd, GUEST aarch64)
 # ---------------------------------------------------------------------------
 
@@ -766,6 +851,7 @@ DO_DOCKER=1
 DO_ALPINE=1
 DO_FSUTILS=1
 DO_COMPOSE=1
+DO_BUILDX=1
 DO_K8S=1
 
 while [ $# -gt 0 ]; do
@@ -775,6 +861,7 @@ while [ $# -gt 0 ]; do
 		DO_ALPINE=0
 		DO_FSUTILS=0
 		DO_COMPOSE=0
+		DO_BUILDX=0
 		DO_K8S=0
 		;;
 	--docker-only)
@@ -782,6 +869,7 @@ while [ $# -gt 0 ]; do
 		DO_ALPINE=0
 		DO_FSUTILS=0
 		DO_COMPOSE=0
+		DO_BUILDX=0
 		DO_K8S=0
 		;;
 	--alpine-only)
@@ -789,6 +877,7 @@ while [ $# -gt 0 ]; do
 		DO_DOCKER=0
 		DO_FSUTILS=0
 		DO_COMPOSE=0
+		DO_BUILDX=0
 		DO_K8S=0
 		;;
 	--fsutils-only)
@@ -796,6 +885,7 @@ while [ $# -gt 0 ]; do
 		DO_DOCKER=0
 		DO_ALPINE=0
 		DO_COMPOSE=0
+		DO_BUILDX=0
 		DO_K8S=0
 		;;
 	--compose-only)
@@ -803,6 +893,15 @@ while [ $# -gt 0 ]; do
 		DO_DOCKER=0
 		DO_ALPINE=0
 		DO_FSUTILS=0
+		DO_BUILDX=0
+		DO_K8S=0
+		;;
+	--buildx-only)
+		DO_KERNEL=0
+		DO_DOCKER=0
+		DO_ALPINE=0
+		DO_FSUTILS=0
+		DO_COMPOSE=0
 		DO_K8S=0
 		;;
 	--k8s-only)
@@ -811,6 +910,7 @@ while [ $# -gt 0 ]; do
 		DO_ALPINE=0
 		DO_FSUTILS=0
 		DO_COMPOSE=0
+		DO_BUILDX=0
 		;;
 	-h | --help)
 		usage
@@ -830,6 +930,7 @@ done
 [ "${DO_ALPINE}" -eq 1 ] && fetch_alpine
 [ "${DO_FSUTILS}" -eq 1 ] && fetch_fsutils
 [ "${DO_COMPOSE}" -eq 1 ] && fetch_compose
+[ "${DO_BUILDX}" -eq 1 ] && fetch_buildx
 [ "${DO_K8S}" -eq 1 ] && fetch_k8s
 
 echo ""

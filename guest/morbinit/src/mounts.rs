@@ -156,6 +156,76 @@ pub fn mount_shares(specs: &[ShareSpec]) -> Vec<(String, MountState)> {
     results
 }
 
+/// The guest path a shared root has to appear at for `alias_tmp` to fire.
+const SHARED_TMP_PATH: &str = "/private/tmp";
+/// Where the guest's own tmpfs `/tmp` (mounted by `early_mounts`) lives.
+const GUEST_TMP_PATH: &str = "/tmp";
+
+/// Bind-mount the guest's `/tmp` onto the same content as `/private/tmp`,
+/// when (and only when) that root is actually a live host share.
+///
+/// This is docs/parity.md #9's fix: on macOS, `/tmp` is a symlink to
+/// `/private/tmp`, and the default `shared_paths` shares `/private/tmp`
+/// (not the bare, unresolved `/tmp` a Mac user naturally types). Without
+/// this, `docker run -v /tmp/x/f:/y ...` doesn't error — dockerd just
+/// creates `/tmp/x/f` as an empty directory in the guest, because the
+/// guest's own `/tmp` is its own independent tmpfs that has never heard of
+/// the host's `/private/tmp` share, and a bind mount of a path that doesn't
+/// exist yet is dockerd's own default behaviour for "create it". That is
+/// the worst class of bug: no error, no warning at the point of failure,
+/// just silently wrong data days later.
+///
+/// The fix mirrors what macOS itself already does with `/tmp`: after this
+/// runs, the guest's own `/tmp` shows the exact same content as
+/// `/private/tmp` (a plain Linux bind mount, `mount --bind`), so a bind
+/// mount source of literal `/tmp/x/f` now resolves to the real host file —
+/// the same way it already does today on the Mac side, where every
+/// process's own `/tmp` writes land in `/private/tmp` because that is what
+/// the symlink already means. There is a real trade-off worth knowing: any
+/// of dockerd/containerd/buildkit's own incidental scratch use of `/tmp`
+/// (not a bind mount — their own temp files) now round-trips through
+/// VirtioFS like any other shared directory, rather than a local tmpfs.
+/// Given the alternative is silent data loss on one of the most natural
+/// paths a Mac user can type, that trade is made unconditionally by
+/// default; see `docs/sharing.md` for the user-facing writeup.
+///
+/// Best effort and entirely silent-safe in the other direction too: if
+/// `/private/tmp` was never shared (a customized `shared_paths` without it,
+/// or the mount failed) this does nothing and says so loudly instead —
+/// `morb doctor`'s existing `shares-tmp` check (see
+/// `MorbstackKit/DirectoryShares.swift`) already tells the user what to do
+/// on the host side, which is the fallback the audit itself calls out
+/// ("detect and warn loudly" where the safe fix cannot apply).
+pub fn alias_tmp_to_shared_private_tmp(share_results: &[(String, MountState)]) {
+    let shared_tmp_is_live = share_results
+        .iter()
+        .any(|(path, state)| path == SHARED_TMP_PATH && *state == MountState::Mounted);
+
+    if !shared_tmp_is_live {
+        log::log(&format!(
+            "{} is not a live host share (not in shared_paths, or it failed to mount) — \
+             the guest's {} stays its own tmpfs, so a bind mount source under the bare, \
+             unresolved {} (as opposed to {}) will silently see an empty directory; see \
+             `morb doctor`'s shares-tmp check",
+            SHARED_TMP_PATH, GUEST_TMP_PATH, GUEST_TMP_PATH, SHARED_TMP_PATH
+        ));
+        return;
+    }
+
+    match sys::mount(SHARED_TMP_PATH, GUEST_TMP_PATH, "", sys::MS_BIND) {
+        Ok(()) => log::log(&format!(
+            "bind-mounted {} onto {} — `-v /tmp/...` bind-mount sources now resolve the \
+             same way they do on the Mac itself",
+            SHARED_TMP_PATH, GUEST_TMP_PATH
+        )),
+        Err(e) => log::log(&format!(
+            "WARNING: could not bind-mount {} onto {}: {} — a bind mount source under the \
+             bare, unresolved {} will silently see an empty directory; use {} instead",
+            SHARED_TMP_PATH, GUEST_TMP_PATH, e, GUEST_TMP_PATH, SHARED_TMP_PATH
+        )),
+    }
+}
+
 /// Mount every pseudo-filesystem PID 1 needs before anything else runs.
 /// Idempotent: safe to call more than once (an already-mounted target
 /// reports `EBUSY`, which we log and treat as success).

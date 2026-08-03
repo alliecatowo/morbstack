@@ -1,0 +1,14 @@
+# Funding links for this repository's "Sponsor" button.
+#
+# Everything below is commented out on purpose: Morbstack does not have a
+# GitHub Sponsors handle, Open Collective, or any other funding channel
+# set up yet, and this file should not invent one.
+#
+# TODO(human): if/when a real funding channel exists, uncomment and fill
+# in the relevant line(s) below. See
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/displaying-a-sponsor-button-in-your-repository
+# for the supported platforms and the exact key format each expects.
+
+# github: [morbstack]
+# open_collective: morbstack
+# custom: ["https://example.com/donate"]

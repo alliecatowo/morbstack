@@ -152,6 +152,7 @@ final class AppModel {
     var volumes: [VolumeSummary] = []
     var networks: [NetworkSummary] = []
     var disk: DiskUsage?
+    var buildCache: [BuildCacheRecord] = []
 
     var selection: Nav = .containers
     var selectedContainerID: String?
@@ -396,6 +397,15 @@ final class AppModel {
         guard engine.isRunning else { return }
         if let usage = await fetch({ try await self.client.diskUsage() }) {
             disk = usage
+        }
+    }
+
+    /// Re-reads the BuildKit cache record list, the same endpoint `refreshDisk()` uses.
+    /// Kept separate so the Builds screen does not pay for a fetch nobody but it wants.
+    func refreshBuildCache() async {
+        guard engine.isRunning else { return }
+        if let records = await fetch({ try await self.client.buildCacheRecords() }) {
+            buildCache = records
         }
     }
 

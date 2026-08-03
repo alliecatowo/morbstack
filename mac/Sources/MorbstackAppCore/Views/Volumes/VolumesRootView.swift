@@ -16,6 +16,7 @@
 // `content` below for why it used not to be).
 
 import AppKit
+import MorbstackKit
 import SwiftUI
 
 // MARK: - Sorting and filtering
@@ -224,7 +225,7 @@ struct VolumesRootView: View {
         // a third copy of it welded into a toolbar button is what makes a toolbar look
         // hand-assembled. The HIG is explicit that toolbar items sharing a background
         // should not mix text and icons ad hoc.
-        ToolbarItem(id: "volumes.removeUnused", placement: MorbToolbarGroup.actions) {
+        ToolbarItem(id: "volumes.removeUnused", placement: MorbToolbarGroup.secondary) {
             Button {
                 showingUnusedSheet = true
             } label: {
@@ -248,7 +249,16 @@ struct VolumesRootView: View {
                 "No volumes",
                 systemImage: "externaldrive",
                 description: "Volumes appear here as soon as a container asks for persistent storage — "
-                    + "either a named volume in a compose file or a -v flag on morb run.")
+                    + "either a named volume in a compose file or a -v flag on docker run."
+            ) {
+                Button {
+                    TrackBClipboard.copy(
+                        "docker --host unix://\(MorbPaths.dockerSocket.path) volume create my-data")
+                } label: {
+                    Label("Copy a Create Command", systemImage: "doc.on.doc")
+                }
+                .morbButton(.standard)
+            }
         } else if visible.isEmpty {
             MorbNoMatches(query: query)
         } else {

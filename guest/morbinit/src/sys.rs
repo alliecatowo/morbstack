@@ -24,6 +24,13 @@ pub const MS_NOSUID: c_ulong = 1 << 1;
 pub const MS_NODEV: c_ulong = 1 << 2;
 pub const MS_NOEXEC: c_ulong = 1 << 3;
 pub const MS_REMOUNT: c_ulong = 1 << 5;
+/// Bind-mount an existing directory (or file) onto another path instead of
+/// mounting a filesystem. `fstype` is ignored by the kernel for this flag —
+/// callers pass an empty string, which `mount()` below turns into a valid
+/// (non-NULL, zero-length) C string rather than a NULL `data`/`fstype`
+/// pointer, which is what the raw `mount(2)` wrapper otherwise reserves for
+/// "no filesystem-specific option string".
+pub const MS_BIND: c_ulong = 1 << 12;
 
 /// `umount2(2)` flag: detach the mount from the tree immediately and clean
 /// up once the last reference goes away. The escape hatch when a normal

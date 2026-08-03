@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-label="Morbstack">
+  <title>Morbstack</title>
+  <!--
+    The Morbstack mark: a solid orb resting on a stack of full-width slabs, with the
+    topmost slab passing BEHIND the orb through a hard gradient-coloured gap.
+
+    Geometry is docs/design/IDENTITY.md §1, stated once there and implemented three
+    times: mac/AppResources/make-icon.swift (CoreGraphics, for the .icns),
+    mac/Sources/MorbstackAppCore/Design/MorbBrand.swift (SwiftUI, for the in-app mark),
+    and this file (SVG, for the web and for print). IDENTITY.md is the tie-breaker.
+
+    All numbers below are the spec's plate-relative fractions resolved against a
+    1024 canvas with the standard 8.8% inset, so plate = 843.776 wide at (90.112, 90.112):
+
+      plate corner  0.235 * 843.776 = 198.287
+      orb centre    (0.500, 0.650)  -> (512, 385.434)      [SVG y is measured downward]
+      orb radius    0.235 * 843.776 = 198.287
+      halo radius   0.263 * 843.776 = 221.913              [orb + gap; the gap is 0.028]
+      slab width    0.860 * 843.776 = 725.647, x = 149.176
+      slab height   0.105 * 843.776 =  88.596, corner 25.313
+      slab centres  v = 0.155, 0.325, 0.495
+
+    The gap is cut by a MASK, not by stroking the slabs a second time, so there is no
+    double-drawn edge where the two shapes meet. Same reason the CoreGraphics version
+    uses an even-odd clip.
+  -->
+  <defs>
+    <linearGradient id="plate" x1="90.112" y1="90.112" x2="933.888" y2="933.888" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2A1F9E"/>
+      <stop offset="1" stop-color="#7A3BE8"/>
+    </linearGradient>
+
+    <!-- Theme.brand's lens gradient on the orb: white to 92% white, top-left to
+         bottom-right. 8% of range, so it reads as volume at 1024 and is invisible
+         (and harmless) at 16. -->
+    <linearGradient id="lens" x1="313.713" y1="187.147" x2="710.287" y2="583.721" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#EBEBEB"/>
+    </linearGradient>
+
+    <!-- The sheen: what keeps a flat gradient from looking like a swatch. -->
+    <radialGradient id="sheen" cx="326.369" cy="241.992" r="607.519" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.20"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+
+    <clipPath id="plateClip">
+      <rect x="90.112" y="90.112" width="843.776" height="843.776" rx="198.287" ry="198.287"/>
+    </clipPath>
+
+    <mask id="gap">
+      <rect x="0" y="0" width="1024" height="1024" fill="#000"/>
+      <rect x="90.112" y="90.112" width="843.776" height="843.776" rx="198.287" ry="198.287" fill="#fff"/>
+      <circle cx="512" cy="385.434" r="221.913" fill="#000"/>
+    </mask>
+  </defs>
+
+  <!-- 1. The plate. -->
+  <rect x="90.112" y="90.112" width="843.776" height="843.776" rx="198.287" ry="198.287" fill="url(#plate)"/>
+  <rect x="90.112" y="90.112" width="843.776" height="843.776" rx="198.287" ry="198.287" fill="url(#sheen)"/>
+
+  <!-- 2. The stack, with the gap masked out around the orb. -->
+  <g mask="url(#gap)" fill="#FFFFFF">
+    <rect x="149.176" y="758.805" width="725.647" height="88.596" rx="25.313" ry="25.313"/>
+    <rect x="149.176" y="615.363" width="725.647" height="88.596" rx="25.313" ry="25.313"/>
+    <rect x="149.176" y="471.921" width="725.647" height="88.596" rx="25.313" ry="25.313"/>
+  </g>
+
+  <!-- 3. The orb. -->
+  <circle cx="512" cy="385.434" r="198.287" fill="url(#lens)"/>
+
+  <!-- 4. The inner rim: a hairline of white that makes a flat shape read as an object
+          with a lit edge. Drawn last and clipped so only the inner half of the stroke
+          lands on the plate. -->
+  <g clip-path="url(#plateClip)">
+    <rect x="90.112" y="90.112" width="843.776" height="843.776" rx="198.287" ry="198.287"
+          fill="none" stroke="#FFFFFF" stroke-opacity="0.16" stroke-width="10.13"/>
+  </g>
+</svg>

@@ -149,7 +149,7 @@ enum ShotScenes {
             ShotScene(name: "disk", size: ShotScene.windowSize) {
                 AnyView(diskWindow(size: ShotScene.windowSize))
             },
-            ShotScene(name: "placeholder-builds", size: ShotScene.windowSize) {
+            ShotScene(name: "builds", size: ShotScene.windowSize) {
                 AnyView(fullWindow(selection: .builds))
             },
             ShotScene(name: "kubernetes", size: ShotScene.windowSize) {

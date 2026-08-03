@@ -1,11 +1,20 @@
-Morbstack host docker-compose CLI plugin provenance
-=====================================================
+Morbstack host Docker CLI plugin provenance
+=============================================
+
+Two client-side CLI plugin binaries live here. Both are host Mac (arm64)
+binaries that never enter the VM/initramfs — they run directly under the
+user's own `docker` CLI, which resolves subcommands like `docker compose`
+and `docker buildx` via its cli-plugins mechanism
+(~/.docker/cli-plugins/).
+
+-----------------------------------------------------------------------
+docker-compose
+-----------------------------------------------------------------------
 
 File: docker-compose
 Source: https://github.com/docker/compose/releases/download/v5.3.1/docker-compose-darwin-aarch64
 Release: docker/compose v5.3.1 (latest release at time of fetch)
-Platform: darwin-aarch64 (host Mac, arm64 — this is a host CLI plugin
-          binary, not a guest asset; it never enters the VM/initramfs)
+Platform: darwin-aarch64 (host Mac, arm64)
 sha256: 32691ba1196d819fa68cbdc0aad9a5569e730a35ae40c6fdd8458110ecd69488
 
 Verification: sha256 fetched from GitHub Release's own per-asset sidecar
@@ -19,13 +28,60 @@ host without needing `docker` on PATH first.
 
 Purpose: gate G4 (`docker compose up -d` via the standard compose CLI
 plugin) needs the `docker compose` subcommand, which the docker CLI
-resolves via its cli-plugins mechanism. This binary is fetched and cached
-here so the repo doesn't depend on the user having Docker Desktop (which
-normally ships its own copy) — but it is NOT installed into
-~/.docker/cli-plugins/ by this repo's tooling. Per task instructions, do
-not touch the user's dotfiles; the docs should tell users to symlink it
-themselves:
-  mkdir -p ~/.docker/cli-plugins
-  ln -sf "$(pwd)/dist/host-bin/docker-compose" ~/.docker/cli-plugins/docker-compose
+resolves via its cli-plugins mechanism.
 
 Fetched by scripts/fetch-guest-assets.sh (--compose-only).
+
+-----------------------------------------------------------------------
+docker-buildx
+-----------------------------------------------------------------------
+
+File: docker-buildx
+Source: https://github.com/docker/buildx/releases/download/v0.36.0/buildx-v0.36.0.darwin-arm64
+Release: docker/buildx v0.36.0 (latest release at time of fetch)
+Platform: darwin-arm64 (host Mac, arm64)
+sha256: 82c6a3d9df37790c5bdb0d7ca88986d1d17622fc2b88ebe34b275c6c47acd7a6
+
+Verification: docker/buildx's release does NOT put darwin hashes in its
+plain `checksums.txt` asset (that file only lists linux/freebsd/netbsd/
+openbsd builds) — the darwin (and windows) hashes live in the separate
+`checksums-signed.txt` asset for the same release instead. The pin above
+was matched against that file's
+"82c6a3d9...  *buildx-v0.36.0.darwin-arm64" line, and independently
+cross-checked against the GitHub Releases API's own per-asset "digest"
+field for that same asset (`GET /repos/docker/buildx/releases/latest`,
+`assets[].digest` = "sha256:82c6a3d9..."), which agreed exactly. Both
+matched the locally computed hash of the downloaded file.
+
+`file` confirms: Mach-O 64-bit executable arm64. Runs standalone
+(`./docker-buildx version` -> "github.com/docker/buildx v0.36.0 ...") on
+this host without needing `docker` on PATH first.
+
+Purpose: parity check #13/#14 in docs/parity.md — the guest's dockerd
+ships upstream BuildKit and it is fully functional (multi-platform
+builds, cache mounts, everything works), but no `docker-buildx` client
+binary was shipped anywhere in the repo, so `docker build` (BuildKit is
+the default builder since Docker 23+) and `docker buildx build` both
+failed out of the box with a stock docker CLI: `docker: 'buildx' is not
+a docker command`. This is the single highest-ROI fix identified by that
+audit. Fetched by scripts/fetch-guest-assets.sh (--buildx-only).
+
+-----------------------------------------------------------------------
+Installing either plugin
+-----------------------------------------------------------------------
+
+Neither binary is installed into ~/.docker/cli-plugins/ by the fetch
+script itself — fetching is a repo-local caching step and must not touch
+the user's dotfiles without being asked. Two supported ways to install:
+
+  1. `morb install-cli-plugins` — explains exactly what it will do
+     (symlink docker-compose and docker-buildx from here into
+     ~/.docker/cli-plugins/), asks for confirmation, and does nothing
+     without an explicit yes (or `--force`). See `morb install-cli-plugins
+     --print-plan` to see the plan without being prompted, and `morb
+     install-cli-plugins --json` for scriptable output.
+
+  2. The manual one-liner, if you would rather do it yourself:
+       mkdir -p ~/.docker/cli-plugins
+       ln -sf "$(pwd)/dist/host-bin/docker-compose" ~/.docker/cli-plugins/docker-compose
+       ln -sf "$(pwd)/dist/host-bin/docker-buildx" ~/.docker/cli-plugins/docker-buildx

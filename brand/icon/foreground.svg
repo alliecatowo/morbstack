@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!--
+    Icon Composer FOREGROUND layer. Import into Icon Composer above background.svg.
+
+    Flat, pure white, fully opaque, on a transparent 1024x1024 canvas. No lens
+    gradient on the orb, unlike brand/mark.svg: docs/design/tahoe/HIG-FINDINGS.md
+    says the system generates specular response for layered icons, so the 8%-of-range
+    lens that docs/design/IDENTITY.md §1.5 specifies for the standalone mark would be
+    a second, conflicting light source here. IDENTITY.md remains the tie-breaker for
+    the mark; this file is the tie-breaker for the layered icon, and the difference is
+    deliberate and documented rather than a drift.
+
+    ON THE GLYPH'S SIZE. The background layer is full-bleed because Icon Composer
+    applies the mask, but the GLYPH still uses the same inset-plate coordinates as
+    brand/mark.svg — plate 843.776 wide at (90.112, 90.112), i.e. the standard 8.8%
+    inset — rather than being scaled up to the full canvas.
+
+    That is on purpose. Placing the glyph against the full canvas makes the slabs
+    ~7% from the mask edge instead of the ~15% the shipping .icns has, and the icon
+    stops matching the one in the Dock. The verified composition is the one in
+    docs/design/IDENTITY.md §1.7's checklist and in docs/design/icon-reference.png;
+    reproducing it exactly is worth more than reclaiming a few percent of canvas.
+
+      orb centre    (0.500, 0.650) of the plate  -> (512, 385.434)   [SVG y downward]
+      orb radius    0.235 * 843.776 = 198.287
+      halo radius   0.263 * 843.776 = 221.913                        [orb + the 0.028 gap]
+      slab width    0.860 * 843.776 = 725.647, x = 149.176
+      slab height   0.105 * 843.776 =  88.596, corner 25.313
+      slab centres  v = 0.155, 0.325, 0.495
+
+    Full detail (three slabs) only: Icon Composer renders every size down from one
+    1024 source, so the two-slab compact level (IDENTITY.md §1.4) has no home in this
+    pipeline. brand/mark-compact.svg carries it for the favicon, which is the one
+    place something else picks the size.
+  -->
+  <defs>
+    <mask id="gap">
+      <rect x="0" y="0" width="1024" height="1024" fill="#000"/>
+      <rect x="0" y="0" width="1024" height="1024" fill="#fff"/>
+      <circle cx="512" cy="385.434" r="221.913" fill="#000"/>
+    </mask>
+  </defs>
+
+  <g mask="url(#gap)" fill="#FFFFFF">
+    <rect x="149.176" y="758.805" width="725.647" height="88.596" rx="25.313" ry="25.313"/>
+    <rect x="149.176" y="615.363" width="725.647" height="88.596" rx="25.313" ry="25.313"/>
+    <rect x="149.176" y="471.921" width="725.647" height="88.596" rx="25.313" ry="25.313"/>
+  </g>
+
+  <circle cx="512" cy="385.434" r="198.287" fill="#FFFFFF"/>
+</svg>

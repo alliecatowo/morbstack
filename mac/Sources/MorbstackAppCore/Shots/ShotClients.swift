@@ -41,6 +41,7 @@ final class ShotDockerClient: DockerClient, @unchecked Sendable {
     override func listVolumes() async throws -> [VolumeSummary] { ShotFixtures.volumes }
     override func listNetworks() async throws -> [NetworkSummary] { ShotFixtures.networks }
     override func diskUsage() async throws -> DiskUsage { ShotFixtures.disk }
+    override func buildCacheRecords() async throws -> [BuildCacheRecord] { ShotFixtures.buildCache }
 
     override func inspectContainer(id: String) async throws -> String {
         guard let container = ShotFixtures.containers.first(where: { $0.id == id }) else {

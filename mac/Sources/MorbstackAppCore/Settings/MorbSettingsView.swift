@@ -154,7 +154,7 @@ private struct TrackDGeneralSettings: View {
             Section {
                 Toggle("Launch Morbstack at login", isOn: $launchAtLogin)
                 Text(
-                    "Not active yet. The login item is registered with `SMAppService.mainApp` "
+                    "Not active yet. The login item is registered with SMAppService.mainApp "
                         + "once Morbstack ships as a signed bundle; this switch records the "
                         + "preference so it takes effect the moment it does."
                 )

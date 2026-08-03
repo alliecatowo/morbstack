@@ -1,0 +1,97 @@
+name: Bug report
+description: Something in Morbstack itself is broken (daemon, CLI, VM lifecycle, sharing, networking, etc.)
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. Morbstack is pre-release (milestone M0) and
+        moving fast — please check `docs/roadmap.md` and `docs/parity.md`
+        first in case this is already a known, tracked gap rather than a new
+        bug.
+
+        If this is a security issue (something that lets an untrusted
+        process reach the Docker socket, escape the guest, or read/write
+        host files outside your configured shares), please use a private
+        [Security Advisory](../../security/advisories/new) instead of a
+        public issue — see `SECURITY.md`.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: A clear description of the bug. What did you expect instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: The exact commands you ran, in order, from a clean state if possible.
+      placeholder: |
+        1. morb start
+        2. docker run -d -p 8080:80 nginx
+        3. curl http://127.0.0.1:8080
+        4. ...
+    validations:
+      required: true
+
+  - type: input
+    id: macos-version
+    attributes:
+      label: macOS version
+      description: "System Settings > General > About, or `sw_vers -productVersion`"
+      placeholder: "e.g. 26.4"
+    validations:
+      required: true
+
+  - type: input
+    id: mac-model
+    attributes:
+      label: Mac model / chip
+      description: "System Settings > General > About, or `sysctl -n machdep.cpu.brand_string` / `system_profiler SPHardwareDataType | grep Chip`"
+      placeholder: "e.g. MacBook Pro 14-inch 2023, Apple M2 Pro"
+    validations:
+      required: true
+
+  - type: input
+    id: morb-version
+    attributes:
+      label: Morbstack version
+      description: "Output of `morb version`"
+      placeholder: "e.g. morb 0.1.0-m0"
+    validations:
+      required: true
+
+  - type: textarea
+    id: morb-doctor
+    attributes:
+      label: "`morb doctor` output"
+      description: Run `morb doctor` (or `morb doctor --json` if you prefer structured output) and paste the full output. This works without a running daemon.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: docker-version
+    attributes:
+      label: "`docker version` output"
+      description: "Run `docker version` with `DOCKER_HOST` pointed at Morbstack's socket (`unix://$HOME/.morbstack/run/docker.sock`), or via whatever docker context you have active."
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: "Anything relevant from `~/.morbstack/logs/daemon.log` or `~/.morbstack/logs/console.log` (guest console output). Trim to the relevant window rather than pasting the whole file if it's large."
+      render: text
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Anything else
+      description: Compose files, container images involved, or anything else that might help reproduce this.

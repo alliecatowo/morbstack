@@ -1,0 +1,454 @@
+{
+  "name": "morbstack",
+  "displayName": "Morbstack",
+  "description": "Manage containers, images, volumes and Kubernetes on the Morbstack engine from inside VS Code.",
+  "version": "0.1.0",
+  "publisher": "morbstack",
+  "license": "Apache-2.0",
+  "icon": "media/icon.png",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "docker",
+    "containers",
+    "morbstack",
+    "compose",
+    "kubernetes"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/alliecatowo/morbstack.git",
+    "directory": "integrations/vscode"
+  },
+  "bugs": {
+    "url": "https://github.com/alliecatowo/morbstack/issues"
+  },
+  "homepage": "https://github.com/alliecatowo/morbstack/tree/main/integrations/vscode#readme",
+  "extensionKind": [
+    "ui",
+    "workspace"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true,
+      "description": "The extension talks only to the local Morbstack engine socket; it does not read workspace configuration."
+    }
+  },
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "morbstack",
+          "title": "Morbstack",
+          "icon": "media/sidebar.svg"
+        }
+      ]
+    },
+    "views": {
+      "morbstack": [
+        {
+          "id": "morbstack.containers",
+          "name": "Containers",
+          "icon": "media/sidebar.svg"
+        },
+        {
+          "id": "morbstack.images",
+          "name": "Images",
+          "icon": "media/sidebar.svg"
+        },
+        {
+          "id": "morbstack.volumes",
+          "name": "Volumes",
+          "icon": "media/sidebar.svg"
+        },
+        {
+          "id": "morbstack.kubernetes",
+          "name": "Kubernetes",
+          "icon": "media/sidebar.svg"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "morbstack.containers",
+        "contents": "The Morbstack engine is not reachable at the configured socket.\n\n[Start the engine](command:morbstack.engine.start)\n\n[Open settings](command:morbstack.openSettings)\n\nIf Morbstack is not installed, see the [project README](https://github.com/alliecatowo/morbstack#readme).",
+        "when": "!morbstack.engineUp"
+      }
+    ],
+    "commands": [
+      {
+        "command": "morbstack.refresh",
+        "title": "Refresh",
+        "category": "Morbstack",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "morbstack.engine.start",
+        "title": "Start Engine",
+        "category": "Morbstack",
+        "icon": "$(debug-start)"
+      },
+      {
+        "command": "morbstack.engine.stop",
+        "title": "Stop Engine",
+        "category": "Morbstack",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "morbstack.engine.status",
+        "title": "Show Engine Status",
+        "category": "Morbstack"
+      },
+      {
+        "command": "morbstack.container.start",
+        "title": "Start Container",
+        "category": "Morbstack",
+        "icon": "$(debug-start)"
+      },
+      {
+        "command": "morbstack.container.stop",
+        "title": "Stop Container",
+        "category": "Morbstack",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "morbstack.container.restart",
+        "title": "Restart Container",
+        "category": "Morbstack",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "morbstack.container.remove",
+        "title": "Remove Container",
+        "category": "Morbstack",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "morbstack.container.logs",
+        "title": "View Logs",
+        "category": "Morbstack",
+        "icon": "$(output)"
+      },
+      {
+        "command": "morbstack.container.shell",
+        "title": "Open Shell in Container",
+        "category": "Morbstack",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "morbstack.container.inspect",
+        "title": "Inspect Container",
+        "category": "Morbstack",
+        "icon": "$(json)"
+      },
+      {
+        "command": "morbstack.container.openPort",
+        "title": "Open Published Port in Browser",
+        "category": "Morbstack",
+        "icon": "$(link-external)"
+      },
+      {
+        "command": "morbstack.port.open",
+        "title": "Open Port in Browser",
+        "category": "Morbstack",
+        "icon": "$(link-external)"
+      },
+      {
+        "command": "morbstack.compose.up",
+        "title": "Start All Containers in Project",
+        "category": "Morbstack",
+        "icon": "$(debug-start)"
+      },
+      {
+        "command": "morbstack.compose.stop",
+        "title": "Stop All Containers in Project",
+        "category": "Morbstack",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "morbstack.image.remove",
+        "title": "Remove Image",
+        "category": "Morbstack",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "morbstack.image.inspect",
+        "title": "Inspect Image",
+        "category": "Morbstack",
+        "icon": "$(json)"
+      },
+      {
+        "command": "morbstack.volume.remove",
+        "title": "Remove Volume",
+        "category": "Morbstack",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "morbstack.volume.inspect",
+        "title": "Inspect Volume",
+        "category": "Morbstack",
+        "icon": "$(json)"
+      },
+      {
+        "command": "morbstack.prune",
+        "title": "Prune Unused Data",
+        "category": "Morbstack",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "morbstack.copyDockerHost",
+        "title": "Copy DOCKER_HOST for the Morbstack Socket",
+        "category": "Morbstack"
+      },
+      {
+        "command": "morbstack.openSettings",
+        "title": "Open Settings",
+        "category": "Morbstack",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "morbstack.showOutput",
+        "title": "Show Extension Log",
+        "category": "Morbstack"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "morbstack.container.start",
+          "when": "false"
+        },
+        {
+          "command": "morbstack.container.stop",
+          "when": "false"
+        },
+        {
+          "command": "morbstack.container.restart",
+          "when": "false"
+        },
+        {
+          "command": "morbstack.container.remove",
+          "when": "false"
+        },
+        {
+          "command": "morbstack.container.logs",
+          "when": "false"
+        },
+        {
+          "command": "morbstack.container.shell",
+          "when": "false"
+        },
+        {
+          "command": "morbstack.container.inspect",
+          "when": "false"
+        },
+        {
+          "command": "morbstack.container.openPort",
+          "when": "false"
+        },
+        {
+          "command": "morbstack.port.open",
+          "when": "false"
+        },
+        {
+          "command": "morbstack.compose.up",
+          "when": "false"
+        },
+        {
+          "command": "morbstack.compose.stop",
+          "when": "false"
+        },
+        {
+          "command": "morbstack.image.remove",
+          "when": "false"
+        },
+        {
+          "command": "morbstack.image.inspect",
+          "when": "false"
+        },
+        {
+          "command": "morbstack.volume.remove",
+          "when": "false"
+        },
+        {
+          "command": "morbstack.volume.inspect",
+          "when": "false"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "morbstack.refresh",
+          "when": "view =~ /^morbstack\\./",
+          "group": "navigation@1"
+        },
+        {
+          "command": "morbstack.prune",
+          "when": "view == morbstack.containers || view == morbstack.images || view == morbstack.volumes",
+          "group": "navigation@2"
+        },
+        {
+          "command": "morbstack.openSettings",
+          "when": "view =~ /^morbstack\\./",
+          "group": "1_config@1"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "morbstack.container.start",
+          "when": "view == morbstack.containers && viewItem =~ /^container\\.stopped/",
+          "group": "inline@1"
+        },
+        {
+          "command": "morbstack.container.stop",
+          "when": "view == morbstack.containers && viewItem =~ /^container\\.running/",
+          "group": "inline@1"
+        },
+        {
+          "command": "morbstack.container.logs",
+          "when": "view == morbstack.containers && viewItem =~ /^container\\./",
+          "group": "inline@2"
+        },
+        {
+          "command": "morbstack.container.shell",
+          "when": "view == morbstack.containers && viewItem =~ /^container\\.running/",
+          "group": "inline@3"
+        },
+        {
+          "command": "morbstack.container.start",
+          "when": "view == morbstack.containers && viewItem =~ /^container\\./",
+          "group": "1_lifecycle@1"
+        },
+        {
+          "command": "morbstack.container.stop",
+          "when": "view == morbstack.containers && viewItem =~ /^container\\./",
+          "group": "1_lifecycle@2"
+        },
+        {
+          "command": "morbstack.container.restart",
+          "when": "view == morbstack.containers && viewItem =~ /^container\\./",
+          "group": "1_lifecycle@3"
+        },
+        {
+          "command": "morbstack.container.remove",
+          "when": "view == morbstack.containers && viewItem =~ /^container\\./",
+          "group": "1_lifecycle@4"
+        },
+        {
+          "command": "morbstack.container.inspect",
+          "when": "view == morbstack.containers && viewItem =~ /^container\\./",
+          "group": "2_inspect@1"
+        },
+        {
+          "command": "morbstack.container.openPort",
+          "when": "view == morbstack.containers && viewItem =~ /published/",
+          "group": "2_inspect@2"
+        },
+        {
+          "command": "morbstack.compose.up",
+          "when": "view == morbstack.containers && viewItem == project",
+          "group": "inline@1"
+        },
+        {
+          "command": "morbstack.compose.stop",
+          "when": "view == morbstack.containers && viewItem == project",
+          "group": "inline@2"
+        },
+        {
+          "command": "morbstack.port.open",
+          "when": "view == morbstack.containers && viewItem == port.published",
+          "group": "inline@1"
+        },
+        {
+          "command": "morbstack.image.remove",
+          "when": "view == morbstack.images && viewItem == image",
+          "group": "inline@1"
+        },
+        {
+          "command": "morbstack.image.inspect",
+          "when": "view == morbstack.images && viewItem == image",
+          "group": "1_inspect@1"
+        },
+        {
+          "command": "morbstack.volume.remove",
+          "when": "view == morbstack.volumes && viewItem == volume",
+          "group": "inline@1"
+        },
+        {
+          "command": "morbstack.volume.inspect",
+          "when": "view == morbstack.volumes && viewItem == volume",
+          "group": "1_inspect@1"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Morbstack",
+      "properties": {
+        "morbstack.socketPath": {
+          "type": "string",
+          "default": "~/.morbstack/run/docker.sock",
+          "markdownDescription": "Path to the Morbstack Docker Engine API socket. `~` is expanded to your home directory. This is the same socket a stock `docker` CLI reaches via `DOCKER_HOST=unix://<path>`.",
+          "scope": "machine-overridable"
+        },
+        "morbstack.morbPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Path to the `morb` CLI. Leave empty to search `PATH`, then `/Applications/Morbstack.app/Contents/MacOS/morb`, then `~/Applications/Morbstack.app/Contents/MacOS/morb`.",
+          "scope": "machine-overridable"
+        },
+        "morbstack.showStoppedContainers": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show stopped containers in the Containers view."
+        },
+        "morbstack.groupByComposeProject": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Group containers by their `com.docker.compose.project` label. Containers without the label are listed under Standalone."
+        },
+        "morbstack.refreshInterval": {
+          "type": "number",
+          "default": 5,
+          "minimum": 0,
+          "markdownDescription": "Seconds between background refreshes. The views also update immediately from the engine event stream; this is the fallback poll. Set to `0` to disable polling and rely on events alone."
+        },
+        "morbstack.shell": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Command to run when opening a shell in a container. Leave empty to try `/bin/bash` and fall back to `/bin/sh`."
+        },
+        "morbstack.statusBar": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the Morbstack engine status bar item."
+        },
+        "morbstack.logTail": {
+          "type": "number",
+          "default": 500,
+          "minimum": 1,
+          "description": "Number of historical log lines to fetch when opening container logs."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "tsc -p ./ --noEmit",
+    "package": "vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.2.1",
+    "typescript": "^5.5.4"
+  }
+}

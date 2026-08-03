@@ -269,7 +269,17 @@ enum LiveCaptureRunner {
     }
 
     private static func captureWindow(_ window: NSWindow, name: String, scheme: String, to directory: URL) throws -> Output {
+        NSApp.activate()
         window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+        // A real, on-screen, window-server-composited draw pass — the same one that
+        // runs on every ordinary frame — *before* asking the view to cache itself.
+        // Vibrancy (`.listStyle(.sidebar)`, `.thinMaterial`) is a live compositing
+        // effect the window server resolves during a real display pass; skipping
+        // straight to `cacheDisplay` risks asking for a cache of content that was never
+        // actually composited for real, which is exactly the "nothing behind it to
+        // sample" failure the offscreen harness has, just for a different reason.
+        window.displayIfNeeded()
         let (rep, strategy) = try renderedBitmap(of: window)
         guard let png = rep.representation(using: .png, properties: [:]) else {
             throw LiveCaptureError.encode(name)

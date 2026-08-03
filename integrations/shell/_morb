@@ -1,0 +1,217 @@
+#compdef morb
+# Zsh completion for the `morb` CLI (Morbstack).
+#
+# Install: put this file, named exactly `_morb`, in a directory on $fpath
+# (e.g. symlink it into a directory that's already on $fpath, then run
+# `autoload -U compinit && compinit`). See integrations/shell/README.md.
+#
+# The command surface is derived from mac/Sources/morb/main.swift, not
+# just `morb --help` — per-subcommand flags in particular are not fully
+# documented by the help text. See the README for the discrepancies found.
+#
+# Important caveat: `mcp`, `migrate`, `bench`, `scan` and `debug` each
+# parse their own arguments in a separate Swift module that main.swift
+# does not define ("The feature modules own their own argument parsing,
+# output and exit codes" — main.swift's own comment) and this completion
+# could not read. Only their command name and the flags morb's top-level
+# parser honors uniformly (--json, --help/-h) are completed for them.
+
+_morb() {
+    local curcontext="$curcontext" state line
+    typeset -A opt_args
+
+    local -a commands
+    commands=(
+        'status:Show daemon and VM state'
+        'start:Boot the VM'
+        'stop:Shut the VM down'
+        'suspend:Save the VM to disk and free its memory'
+        'resume:Restore a suspended VM'
+        'shares:List the shared host paths and whether the guest has them'
+        'rosetta:Show Rosetta status; "rosetta install" sets it up'
+        'k8s:Run a local Kubernetes cluster (off by default)'
+        'version:Print CLI and daemon versions'
+        'doctor:Diagnose the host; works without the daemon'
+        'reset-disk:Delete the Docker data disk and start over (destructive)'
+        'context:Manage the morbstack docker context (zero-config discovery)'
+        'install-cli-plugins:Symlink docker-compose/docker-buildx into ~/.docker/cli-plugins'
+        'mcp:Model Context Protocol server; read-only unless granted'
+        'migrate:Import images, volumes and config from another runtime'
+        'bench:Run the open benchmark suite and report the numbers'
+        'scan:SBOM and CVE scan an image, entirely on this machine'
+        'debug:Open a toolbox shell in a container, even a distroless one'
+    )
+
+    _arguments -C \
+        '--json[Emit raw JSON instead of human-readable output]' \
+        '(--help -h)'{--help,-h}'[Print help and exit]' \
+        '1: :->command' \
+        '*:: :->args' \
+        && return 0
+
+    case $state in
+        command)
+            _describe -t commands 'morb command' commands
+            ;;
+        args)
+            case ${words[1]} in
+                rosetta)
+                    _morb_rosetta
+                    ;;
+                k8s)
+                    _morb_k8s
+                    ;;
+                context)
+                    _morb_context
+                    ;;
+                install-cli-plugins)
+                    _arguments \
+                        '--force[Skip the confirmation prompt]' \
+                        '--print-plan[Print exactly what it would symlink, and stop]' \
+                        '--json[Emit raw JSON instead of human-readable output]' \
+                        '(--help -h)'{--help,-h}'[Print help and exit]'
+                    ;;
+                stop | reset-disk)
+                    _arguments \
+                        '--force[Skip the confirmation prompt]' \
+                        '--json[Emit raw JSON instead of human-readable output]' \
+                        '(--help -h)'{--help,-h}'[Print help and exit]'
+                    ;;
+                start | suspend | resume | status | shares | version | doctor)
+                    _arguments \
+                        '--json[Emit raw JSON instead of human-readable output]' \
+                        '(--help -h)'{--help,-h}'[Print help and exit]'
+                    ;;
+                mcp | migrate | bench | scan | debug)
+                    # No sub-subcommand or flag information is available:
+                    # each of these has its own parser in a separate
+                    # Swift module not defined in main.swift. Only the
+                    # flags morb's top-level parser itself honors
+                    # uniformly are offered.
+                    _arguments \
+                        '--json[Emit raw JSON instead of human-readable output]' \
+                        '(--help -h)'{--help,-h}'[Print help and exit]'
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_morb_rosetta() {
+    local -a subs
+    subs=(
+        'status:Show Rosetta status (the default with no subcommand)'
+        'install:Install Rosetta and enable it; always asks for confirmation'
+    )
+
+    _arguments -C \
+        '1: :->subcommand' \
+        '*:: :->subargs'
+
+    case $state in
+        subcommand)
+            _describe -t rosetta-subcommands 'rosetta subcommand' subs
+            ;;
+        subargs)
+            case ${words[1]} in
+                install)
+                    # --force is deliberately refused by `rosetta install`
+                    # (main.swift makes it a hard error), so it is not
+                    # offered here.
+                    _arguments \
+                        '--print-plan[Print exactly what install would do, and stop]' \
+                        '--json[Emit raw JSON instead of human-readable output]' \
+                        '(--help -h)'{--help,-h}'[Print help and exit]'
+                    ;;
+                status)
+                    _arguments \
+                        '--json[Emit raw JSON instead of human-readable output]' \
+                        '(--help -h)'{--help,-h}'[Print help and exit]'
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_morb_k8s() {
+    local -a subs
+    subs=(
+        'status:Show whether the cluster is installed, on, and Ready (the default)'
+        'enable:Install the payload if needed, then start the cluster'
+        'disable:Stop the cluster; the payload and its state are kept'
+        'kubeconfig:Write ~/.morbstack/kubeconfig and say how to use it'
+    )
+
+    _arguments -C \
+        '1: :->subcommand' \
+        '*:: :->subargs'
+
+    case $state in
+        subcommand)
+            _describe -t k8s-subcommands 'k8s subcommand' subs
+            ;;
+        subargs)
+            case ${words[1]} in
+                kubeconfig)
+                    _arguments \
+                        '--merge[Merge the morbstack context into ~/.kube/config, after asking]' \
+                        '--switch-context[With --merge, also switch current-context to morbstack]' \
+                        '--force[Skip the --merge confirmation prompt]' \
+                        '--json[Emit raw JSON instead of human-readable output]' \
+                        '(--help -h)'{--help,-h}'[Print help and exit]'
+                    ;;
+                status | enable | disable)
+                    _arguments \
+                        '--json[Emit raw JSON instead of human-readable output]' \
+                        '(--help -h)'{--help,-h}'[Print help and exit]'
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_morb_context() {
+    local -a subs
+    subs=(
+        'status:Show whether the context is registered and current (the default)'
+        'create:Register the morbstack docker context; asks first'
+        'use:Make it the default context; always asks, refuses to replace another explicit default without --force'
+    )
+
+    _arguments -C \
+        '1: :->subcommand' \
+        '*:: :->subargs'
+
+    case $state in
+        subcommand)
+            _describe -t context-subcommands 'context subcommand' subs
+            ;;
+        subargs)
+            case ${words[1]} in
+                create)
+                    _arguments \
+                        '--force[Skip the confirmation prompt]' \
+                        '--json[Emit raw JSON instead of human-readable output]' \
+                        '(--help -h)'{--help,-h}'[Print help and exit]'
+                    ;;
+                use)
+                    # Note: --force here does NOT skip the interactive
+                    # confirmation prompt (context use always asks); it
+                    # only lifts the refusal to replace another explicit
+                    # non-default context. Still a real, accepted flag.
+                    _arguments \
+                        '--force[Allow replacing another explicit default context]' \
+                        '--json[Emit raw JSON instead of human-readable output]' \
+                        '(--help -h)'{--help,-h}'[Print help and exit]'
+                    ;;
+                status)
+                    _arguments \
+                        '--json[Emit raw JSON instead of human-readable output]' \
+                        '(--help -h)'{--help,-h}'[Print help and exit]'
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_morb "$@"

@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Morbstack — the Docker you wish Docker shipped</title>
+<meta name="description" content="Morbstack is a free, Apache-2.0, source-visible Docker Desktop replacement for macOS: unmodified upstream dockerd in a single lightweight VM, driven by a native SwiftUI app. Pre-release.">
+
+<link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="assets/favicon-16.png">
+<link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+
+<meta property="og:type" content="website">
+<meta property="og:title" content="Morbstack — the Docker you wish Docker shipped">
+<meta property="og:description" content="A free, Apache-2.0 Docker Desktop replacement for macOS. Unmodified upstream dockerd, one shared lightweight VM, native SwiftUI. Pre-release — read the honest status before you install.">
+<!-- TODO(human): og:image and twitter:image must be absolute URLs per the Open Graph
+     spec (relative paths are undefined behavior for crawlers/scrapers, which don't
+     resolve against the page the way a browser does). Replace with
+     https://<real-domain>/assets/og-image.png once Morbstack has a real domain. -->
+<meta property="og:image" content="assets/og-image.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Morbstack — the Docker you wish Docker shipped">
+<meta name="twitter:description" content="A free, Apache-2.0 Docker Desktop replacement for macOS. Unmodified upstream dockerd, one shared lightweight VM, native SwiftUI.">
+<meta name="twitter:image" content="assets/og-image.png">
+
+<link rel="stylesheet" href="style.css">
+<script>
+  // Applied synchronously so the page never flashes the wrong theme.
+  (function () {
+    try {
+      var t = localStorage.getItem("morbstack-theme");
+      if (t === "dark" || t === "light") document.documentElement.setAttribute("data-theme", t);
+    } catch (e) {}
+  })();
+</script>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand-lockup" href="index.html">
+      <img class="mark" src="assets/mark.svg" alt="" width="28" height="28">
+      <span>Morbstack</span>
+    </a>
+    <nav class="main-nav" aria-label="Primary">
+      <a href="index.html" aria-current="page">Overview</a>
+      <a href="download.html">Download</a>
+      <a href="docs.html">Docs</a>
+      <a href="comparison.html">Comparison</a>
+    </nav>
+    <div class="header-actions">
+      <button class="theme-toggle" type="button" aria-label="Toggle color theme" aria-pressed="false">
+        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z"/></svg>
+      </button>
+    </div>
+  </div>
+</header>
+
+<main id="main">
+
+  <!-- Hero -->
+  <section class="hero">
+    <div class="wrap">
+      <div class="hero-inner">
+        <div>
+          <img class="hero-mark" src="assets/mark.svg" alt="" width="56" height="56">
+          <h1>The Docker you wish Docker shipped.</h1>
+          <p class="lede">Morbstack runs unmodified upstream <code class="inline">dockerd</code>/<code class="inline">containerd</code> inside one shared, lightweight Linux VM on Apple's <code class="inline">Virtualization.framework</code> — free forever, Apache-2.0, no account, no telemetry.</p>
+          <div class="hero-actions">
+            <a class="btn btn-primary" href="download.html">Get Morbstack</a>
+            <a class="btn btn-secondary" href="docs.html">Read the docs</a>
+          </div>
+        </div>
+        <div class="hero-shot shot-pair">
+          <img class="shot-light" src="assets/shots/containers-light.png" alt="The Morbstack containers list in light mode, showing running and stopped containers with status, image, and port columns.">
+          <img class="shot-dark" src="assets/shots/containers-dark.png" alt="The Morbstack containers list in dark mode, showing running and stopped containers with status, image, and port columns.">
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Honest pitch -->
+  <section class="section-lg" id="pitch">
+    <div class="wrap">
+      <span class="eyebrow">Why Morbstack</span>
+      <h2>Six claims, each one checkable.</h2>
+      <p class="section-intro">No embellishment — every line below is true today and traceable to this repository's own license file, source tree, or docs.</p>
+      <div class="grid grid-3">
+        <div class="card pitch-card">
+          <h3><span class="check" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M4 12l5 5L20 6"/></svg></span>Free forever</h3>
+          <p>No tier, no seat limit, no company-size threshold. Every feature that runs on your machine costs nothing, for anyone.</p>
+        </div>
+        <div class="card pitch-card">
+          <h3><span class="check" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M4 12l5 5L20 6"/></svg></span>Apache-2.0</h3>
+          <p>The whole project — daemon, CLI, app, guest init — is Apache-2.0. See <code class="inline">LICENSE</code> and <code class="inline">NOTICE</code> in the repository.</p>
+        </div>
+        <div class="card pitch-card">
+          <h3><span class="check" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M4 12l5 5L20 6"/></svg></span>No account</h3>
+          <p>Nothing to sign in to. Nothing phones home to check a license. There is no account system anywhere in this codebase.</p>
+        </div>
+        <div class="card pitch-card">
+          <h3><span class="check" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M4 12l5 5L20 6"/></svg></span>No telemetry, no license nags</h3>
+          <p>No analytics, no crash reporting service, no "upgrade to Pro" interstitials. What you run is what's in the repo.</p>
+        </div>
+        <div class="card pitch-card">
+          <h3><span class="check" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M4 12l5 5L20 6"/></svg></span>Unmodified upstream Docker Engine</h3>
+          <p>A static, unpatched Docker Engine build runs inside the guest — the same <code class="inline">dockerd</code>/<code class="inline">containerd</code> you'd get anywhere else, not a reimplementation.</p>
+        </div>
+        <div class="card pitch-card">
+          <h3><span class="check" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M4 12l5 5L20 6"/></svg></span>Native SwiftUI, zero web views</h3>
+          <p>No Electron, no Chromium, no embedded browser anywhere in the app. SwiftUI and Foundation, the same frameworks a Mac-native app is supposed to use.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Performance -->
+  <section class="section-lg" id="performance">
+    <div class="wrap">
+      <span class="eyebrow">Performance</span>
+      <h2>Measured numbers, and separately, targets.</h2>
+      <p class="section-intro">Every number below is labelled with the file it came from. The two groups are not the same kind of claim — conflating them is exactly the kind of dishonesty this project exists to avoid.</p>
+
+      <span class="badge-measured">Measured</span>
+      <p class="text-small" style="margin-top:0;color:var(--text-tertiary);max-width:70ch;">Real, timed runs against a live build — not simulated, not estimated. See <code class="inline">docs/roadmap.md</code> and <code class="inline">docs/parity.md</code>.</p>
+      <div class="grid grid-3 mt-5">
+        <div class="metric-card">
+          <div class="metric-value">2.09 s</div>
+          <div class="metric-label">Cold boot to <code class="inline">docker run hello-world</code> completing — socket-activated, no pre-warmed VM state.</div>
+          <div class="metric-source">docs/roadmap.md — M0</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-value">2.16 s</div>
+          <div class="metric-label">Cold VM boot to a usable Docker Engine API.</div>
+          <div class="metric-source">docs/parity.md — check #1</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-value">29.7.1</div>
+          <div class="metric-label">Docker Engine version in the guest, driven by a stock Docker CLI 27.4.0 over the relay — no patched client required.</div>
+          <div class="metric-source">docs/parity.md — check #1</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-value">0.44 s</div>
+          <div class="metric-label">A cached multi-stage Dockerfile rebuild, classic builder.</div>
+          <div class="metric-source">docs/parity.md — check #12</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-value">10.7 s / instant</div>
+          <div class="metric-label"><code class="inline">morb stop</code> takes 10.7s; <code class="inline">morb start</code> brings a <code class="inline">--restart unless-stopped</code> container back running, no manual restart.</div>
+          <div class="metric-source">docs/parity.md — check #24</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-value">~5.1x / ~3.8x / ~2.3x</div>
+          <div class="metric-label">amd64-via-Rosetta slowdown vs. native arm64: SHA-256, RSA-2048 sign, RSA-2048 verify.</div>
+          <div class="metric-source">docs/parity.md — check #16</div>
+        </div>
+      </div>
+
+      <div class="mt-6">
+        <span class="badge-target">Target — not yet measured</span>
+        <p class="text-small" style="margin-top:0;color:var(--text-tertiary);max-width:70ch;">These are commitments, not results. <code class="inline">docs/roadmap.md</code> commits Morbstack to publishing accurate, current status against every one of these via <code class="inline">morb bench</code> from milestone M2 onward.</p>
+        <div class="table-scroll mt-5">
+          <table>
+            <caption class="visually-hidden">Public performance target table</caption>
+            <thead>
+              <tr><th>Target</th><th>Goal</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Cold boot</td><td class="num">≤ 2.0 s</td></tr>
+              <tr><td>Resume (from suspend-to-zero)</td><td class="num">≤ 500 ms</td></tr>
+              <tr><td>Idle host CPU</td><td class="num">≤ 0.1 %</td></tr>
+              <tr><td>Idle wakeups</td><td class="num">&lt; 20 / s</td></tr>
+              <tr><td>Host RSS (<code class="inline">morbstackd</code>, idle)</td><td class="num">≤ 120 MB</td></tr>
+              <tr><td>Guest memory floor</td><td class="num">≤ 256 MB</td></tr>
+              <tr><td><code class="inline">git status</code> on a bind-mounted Linux tree, vs. native</td><td class="num">≤ 2x native</td></tr>
+              <tr><td><code class="inline">npm install</code> on a bind-mounted project, vs. native</td><td class="num">≤ 1.5x native</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="text-small mt-4" style="color:var(--text-tertiary);">Source: <code class="inline">docs/roadmap.md</code>, "Public performance target table".</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Honest status -->
+  <section class="section-lg" id="status">
+    <div class="wrap">
+      <span class="eyebrow">Status</span>
+      <h2>Pre-release. Here's exactly where it stands.</h2>
+      <div class="status-banner">
+        <div class="status-banner-head">
+          <span class="pill pill-partial">Pre-release</span>
+          <span class="pill pill-pass">M0 complete</span>
+          <span class="pill pill-pass">Kubernetes landed</span>
+        </div>
+        <p>Morbstack has passed M0 — the core bet (unmodified Docker Engine, one shared VM, fast boot) plus the four functional gates added on top of it: published ports, container outbound networking, disk persistence across a restart, and <code class="inline">docker compose up -d</code>. A local Kubernetes cluster (<code class="inline">morb k8s</code>) also works, pulled forward from a later milestone. It is <strong>not yet</strong> something you run containers with day to day: there is no host app release, no <code class="inline">morb.local</code> DNS, and the gaps below are real.</p>
+
+        <div class="tally mt-5">
+          <span class="pill pill-pass">20 PASS</span>
+          <span class="pill pill-partial">3 PARTIAL</span>
+          <span class="pill pill-fail">6 FAIL</span>
+          <span class="text-small" style="color:var(--text-tertiary);align-self:center;">— out of 29 real drop-in-compatibility checks, run against a live build</span>
+        </div>
+      </div>
+
+      <div class="grid grid-2 mt-6">
+        <div class="callout callout-bad">
+          <div class="callout-title">What doesn't work yet</div>
+          <ul>
+            <li><strong>No <code class="inline">buildx</code> shipped out of the box.</strong> The guest's BuildKit is fully functional, but no <code class="inline">docker-buildx</code> client plugin is installed by default yet.</li>
+            <li><strong>No <code class="inline">host.docker.internal</code> / <code class="inline">gateway.docker.internal</code>.</strong> Neither resolves inside a container today — not degraded, completely absent.</li>
+            <li><strong>No zero-config Docker socket discovery.</strong> You must set <code class="inline">DOCKER_HOST</code> or run <code class="inline">docker context create</code> by hand; nothing auto-registers yet.</li>
+            <li><strong>No inotify across bind mounts.</strong> A host-side edit is correct the instant you read it, but hot-reload watchers (<code class="inline">nodemon</code>, <code class="inline">vite</code>, <code class="inline">webpack --watch</code>) see no event. Polling watchers (<code class="inline">--legacy-watch</code>) work.</li>
+            <li><strong>The <code class="inline">/tmp</code> vs. <code class="inline">/private/tmp</code> bind-mount footgun.</strong> A bind mount through an unresolved <code class="inline">/tmp/...</code> path silently mounts an empty directory instead of your file — no error, no warning.</li>
+          </ul>
+        </div>
+        <div class="callout callout-good">
+          <div class="callout-title">What already works</div>
+          <ul>
+            <li>Core CLI surface — <code class="inline">ps</code>/<code class="inline">images</code>/<code class="inline">pull</code>/<code class="inline">run</code>/<code class="inline">exec</code>/<code class="inline">logs</code>/<code class="inline">inspect</code>/<code class="inline">cp</code>/<code class="inline">stats</code>/<code class="inline">events</code> — byte-for-byte the shape real Docker produces.</li>
+            <li>Multi-service Compose stacks with healthchecks, named volumes, and custom networks.</li>
+            <li>Published ports, outbound container networking, and disk persistence across <code class="inline">morb stop</code> / <code class="inline">morb start</code>.</li>
+            <li>amd64 images via Rosetta, verified bit-identical against native output.</li>
+            <li>A local Kubernetes cluster on the same engine, off by default.</li>
+          </ul>
+        </div>
+      </div>
+      <p class="mt-5"><a class="text-link" href="../docs/parity.md">Read the full 29-check parity audit →</a></p>
+    </div>
+  </section>
+
+  <!-- Gallery -->
+  <section class="section-lg" id="gallery">
+    <div class="wrap">
+      <span class="eyebrow">Screens</span>
+      <h2>What it looks like.</h2>
+      <p class="section-intro">Rendered from the real shipping SwiftUI views via the app's own screenshot harness, not mockups. Some fixture data (container names, version strings) is placeholder test data, not a claim about the current release.</p>
+      <div class="grid grid-2">
+        <figure class="gallery-item">
+          <img src="assets/shots/images-light.png" alt="The Morbstack Images screen, listing pulled images with repository, tag, size, and created-date columns.">
+          <figcaption><strong>Images.</strong> Every pulled image with its repository, tag, size, and layers — the same registry data <code class="inline">docker images</code> would show.</figcaption>
+        </figure>
+        <figure class="gallery-item">
+          <img src="assets/shots/stacks-light.png" alt="The Morbstack Stacks screen, showing a Compose project's services grouped together with their individual container states.">
+          <figcaption><strong>Stacks.</strong> Compose projects grouped by service, with per-container state rolled up under the stack that owns them.</figcaption>
+        </figure>
+        <figure class="gallery-item">
+          <img src="assets/shots/kubernetes-dark.png" alt="The Morbstack Kubernetes screen in dark mode, showing cluster status and node readiness for the local morb k8s cluster.">
+          <figcaption><strong>Kubernetes.</strong> Status for the local <code class="inline">morb k8s</code> single-node cluster, wired to the same engine as everything else.</figcaption>
+        </figure>
+        <figure class="gallery-item">
+          <img src="assets/shots/command-palette-dark.png" alt="The Morbstack command palette in dark mode, showing a searchable list of containers, images, and actions.">
+          <figcaption><strong>Command palette.</strong> A keyboard-driven jump list across containers, images, and actions.</figcaption>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="footer-grid">
+      <div class="footer-col">
+        <div class="footer-brand">
+          <img class="mark" src="assets/mark.svg" alt="" width="24" height="24">
+          <span>Morbstack</span>
+        </div>
+        <p class="text-small">Everything that runs on your machine is free forever.</p>
+      </div>
+      <div class="footer-col">
+        <h4>Product</h4>
+        <ul>
+          <li><a href="download.html">Download</a></li>
+          <li><a href="docs.html">Documentation</a></li>
+          <li><a href="comparison.html">Comparison</a></li>
+        </ul>
+      </div>
+      <div class="footer-col">
+        <h4>Project</h4>
+        <ul>
+          <li><a href="../docs/roadmap.md">Roadmap</a></li>
+          <li><a href="../docs/parity.md">Parity report</a></li>
+          <li><a href="../LICENSE">License (Apache-2.0)</a></li>
+        </ul>
+      </div>
+      <div class="footer-col">
+        <h4>Source</h4>
+        <ul>
+          <!-- TODO(human): replace with the real GitHub repository URL once this
+               project is published. There is no public repository yet. -->
+          <li><a href="https://github.com/REPLACE_ME/morbstack" target="_blank" rel="noopener">GitHub</a></li>
+          <li><a href="../docs/architecture.md">Architecture</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="footer-bottom">
+      <span>Apache-2.0. Copyright © 2026 The Morbstack Authors.</span>
+      <span>Pre-release software. Nothing here is a shipped product yet.</span>
+    </div>
+  </div>
+</footer>
+
+<script src="site.js"></script>
+</body>
+</html>

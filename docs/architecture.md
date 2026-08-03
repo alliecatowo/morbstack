@@ -254,7 +254,7 @@ root filesystem, which is the state of every fresh install:
   parsing, `VMManager` boot-loader wiring) so that switch is a data-plane
   change, not a new code path to write from scratch.
 
-`make guest-image` (`scripts/mkinitramfs.sh`) assembles the initramfs used
+`mise run guest-image` (`scripts/mkinitramfs.sh`) assembles the initramfs used
 by the first path: cross-compiled `morbinit` as `/init`, the Alpine 3.24.1
 aarch64 minirootfs, the static Docker 29.7.1 engine binaries under
 `/usr/local/bin`, the fsutils group (`btrfs-progs`, `e2fsprogs`, and

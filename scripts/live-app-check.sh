@@ -8,7 +8,7 @@
 # that boots a VM behind your back is exactly the sort of thing that leaves an orphaned
 # daemon holding a disk image when it fails halfway. Bring the engine up yourself —
 #
-#     make sign && mac/.build/debug/morbstackd --foreground     # in its own terminal
+#     mise run sign && mac/.build/debug/morbstackd --foreground     # in its own terminal
 #     mac/.build/debug/morb start
 #
 # — and then run this. It puts a small workload in place, runs the `MorbLive` harness
@@ -90,8 +90,8 @@ say() { printf '\n=== %s\n' "$1"; }
 # Preflight
 # ---------------------------------------------------------------------------
 
-[ -x "$MORB" ] || { echo "error: $MORB not built — run 'make build'" >&2; exit 1; }
-[ -x "$MORBLIVE" ] || { echo "error: $MORBLIVE not built — run 'make build'" >&2; exit 1; }
+[ -x "$MORB" ] || { echo "error: $MORB not built — run 'mise run build'" >&2; exit 1; }
+[ -x "$MORBLIVE" ] || { echo "error: $MORBLIVE not built — run 'mise run build'" >&2; exit 1; }
 [ -S "$SOCKET" ] || { echo "error: no engine socket at $SOCKET — start the daemon first" >&2; exit 1; }
 command -v docker >/dev/null 2>&1 || { echo "error: the docker CLI is not on PATH" >&2; exit 1; }
 

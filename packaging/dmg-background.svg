@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Copyright 2026 The Morbstack Authors.
+  Licensed under the Apache License, Version 2.0 (the "License").
+
+  DMG background artwork for the drag-to-Applications installer window.
+
+  Canvas is 660x400 to match the Finder container window scripts/make-dmg.sh
+  lays out (see that script's osascript block: window bounds, icon positions,
+  and icon size all key off these exact dimensions and off the two icon
+  centers marked below). Hand-written rather than exported from a design
+  tool, same as the rest of packaging/ and mac/AppResources/make-icon.swift
+  (procedural, no binary source-of-truth asset to go stale) — this file is
+  the only source of truth for the DMG background; packaging/dmg-background.png
+  and @2x are generated from it by packaging/render-dmg-background.sh and
+  committed only because a fresh clone should not need a working rasterizer
+  just to build a DMG (see that script for why qlmanage rather than a real
+  SVG renderer, and what happens when it's unavailable).
+
+  Colors match docs/design/IDENTITY.md's Theme.brandDeep -> Theme.brandSecondary
+  icon-plate gradient (#2A1F9E -> #7A3BE8), so the DMG the app arrives in
+  reads as the same product as the Dock icon it installs.
+
+  Icon geometry: scripts/make-dmg.sh places "Morbstack.app" at Finder icon
+  position {180, 170} and the "Applications" alias at {480, 170}, both at
+  icon size 128. Those two numbers and this file's ICON_L_CX/ICON_R_CX/ICON_CY
+  below must move together — the faint circular plates here are guides for
+  where Finder will actually draw the icons, not decoration that can drift
+  independently of the layout script.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="660" height="400" viewBox="0 0 660 400">
+  <defs>
+    <!-- Same two-stop diagonal used for the app icon plate (IDENTITY.md
+         Theme.brandDeep -> Theme.brandSecondary), so the DMG and the Dock
+         icon it installs read as one identity. -->
+    <linearGradient id="brand" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2A1F9E"/>
+      <stop offset="100%" stop-color="#7A3BE8"/>
+    </linearGradient>
+
+    <!-- Subtle top-left sheen, matching the glass highlight treatment used
+         on the app icon plate — kept faint so it never competes with the
+         real Finder icons Finder draws on top of this image. -->
+    <radialGradient id="sheen" cx="18%" cy="12%" r="70%">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.16"/>
+      <stop offset="55%" stop-color="#FFFFFF" stop-opacity="0.04"/>
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+
+    <linearGradient id="arrow" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.55"/>
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0.9"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Base plate -->
+  <rect width="660" height="400" fill="url(#brand)"/>
+  <rect width="660" height="400" fill="url(#sheen)"/>
+
+  <!-- Icon guides: faint plates behind where Finder will place the real
+       Morbstack.app and Applications-alias icons (128pt, centered at
+       y=170 per the layout script). Radius 78 sits just outside a 128pt
+       icon's visual bounds so the guide reads as a soft landing pad, not
+       a halo clipping the icon artwork. -->
+  <circle cx="180" cy="170" r="78" fill="#FFFFFF" opacity="0.06"/>
+  <circle cx="480" cy="170" r="78" fill="#FFFFFF" opacity="0.06"/>
+
+  <!-- Arrow from the app to the Applications folder. A single sweep with
+       an open head reads clearly at DMG-window scale (unlike a filled
+       triangle, which turns into a dark blob once Finder's real icons and
+       drop shadows sit on top of it at 128pt). -->
+  <g stroke="url(#arrow)" fill="none" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M 274 170 L 386 170"/>
+    <path d="M 362 148 L 386 170 L 362 192"/>
+  </g>
+
+  <!-- Caption -->
+  <text x="330" y="330" text-anchor="middle"
+        font-family="-apple-system, Helvetica, Arial, sans-serif"
+        font-size="19" font-weight="600"
+        fill="#FFFFFF" fill-opacity="0.92">Drag Morbstack to Applications to install</text>
+
+  <!-- Small wordmark, top-left, well clear of both icon guides and the
+       Finder toolbar/sidebar this window is configured (in make-dmg.sh) not
+       to show. -->
+  <text x="28" y="40"
+        font-family="-apple-system, Helvetica, Arial, sans-serif"
+        font-size="17" font-weight="700"
+        fill="#FFFFFF" fill-opacity="0.85">Morbstack</text>
+</svg>

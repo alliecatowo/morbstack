@@ -368,6 +368,41 @@ enum ShotFixtures {
         apparentBytes: 68_719_476_736,
         blocks512: 37_849_088)
 
+    // MARK: - Build cache
+
+    static let buildCache: [BuildCacheRecord] = [
+        BuildCacheRecord(
+            id: "a3f9c2e1b8d4f6a2", description: "RUN pip install -r requirements.txt",
+            type: "regular", size: 412_090_368, inUse: true, shared: false,
+            createdAt: Date(timeIntervalSinceNow: -3 * 86_400), lastUsedAt: Date(timeIntervalSinceNow: -3_600),
+            usageCount: 6),
+        BuildCacheRecord(
+            id: "c7b1d4e9a2f8c3b6", description: "COPY . /app",
+            type: "regular", size: 89_128_960, inUse: true, shared: false,
+            createdAt: Date(timeIntervalSinceNow: -3 * 86_400), lastUsedAt: Date(timeIntervalSinceNow: -3_600),
+            usageCount: 6),
+        BuildCacheRecord(
+            id: "f2e8a6c4b9d1e7f3", description: "docker-image://docker.io/library/node:22-alpine",
+            type: "source.local", size: 46_137_344, inUse: true, shared: true,
+            createdAt: Date(timeIntervalSinceNow: -9 * 86_400), lastUsedAt: Date(timeIntervalSinceNow: -3_600),
+            usageCount: 14),
+        BuildCacheRecord(
+            id: "9d4b6a1c8e3f2d7a", description: "RUN npm run build",
+            type: "regular", size: 1_207_959_552, inUse: false, shared: false,
+            createdAt: Date(timeIntervalSinceNow: -6 * 86_400), lastUsedAt: Date(timeIntervalSinceNow: -2 * 86_400),
+            usageCount: 3),
+        BuildCacheRecord(
+            id: "5e1a7c3f9b2d6e4a", description: "RUN apt-get update && apt-get install -y build-essential",
+            type: "regular", size: 318_767_104, inUse: false, shared: false,
+            createdAt: Date(timeIntervalSinceNow: -21 * 86_400), lastUsedAt: Date(timeIntervalSinceNow: -14 * 86_400),
+            usageCount: 2),
+        BuildCacheRecord(
+            id: "b8c2e6a4d9f1b7c3", description: "mount cache /root/.cache/go-build",
+            type: "exec.cachemount", size: 892_338_176, inUse: false, shared: false,
+            createdAt: Date(timeIntervalSinceNow: -12 * 86_400), lastUsedAt: Date(timeIntervalSinceNow: -5 * 86_400),
+            usageCount: 8),
+    ]
+
     // MARK: - Engine
 
     static let engineRunning = EngineStatus(

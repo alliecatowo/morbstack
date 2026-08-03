@@ -27,6 +27,14 @@ struct KubernetesRootView: View {
     @State private var podQuery = ""
     @State private var kubeconfigCopied = false
 
+    /// Which row is selected — a node or a pod, never both. Two independent `Table`
+    /// selections would leave the inspector unable to say which one is current, and the
+    /// underlying bug this whole feature exists to fix is that neither table had a
+    /// selection at all.
+    @State private var selectedNodeID: K8sNodeInfo.ID?
+    @State private var selectedPodID: K8sPodInfo.ID?
+    @State private var showsInspector = true
+
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var filteredPods: [K8sPodInfo] {
@@ -65,16 +73,22 @@ struct KubernetesRootView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
+        // A plain text button rather than a `Toggle(.switch)`: the system switch at its
+        // default control size reads as an enormous, brightly-tinted control sitting
+        // alone in the toolbar — the exact complaint. "Enable"/"Disable" says the same
+        // thing a symbol cannot, at the size every other toolbar button is.
         ToolbarItem(id: "kubernetes.enable", placement: MorbToolbarGroup.actions) {
-            Toggle("Kubernetes", isOn: enabledBinding)
-                .toggleStyle(.switch)
-                .disabled(!model.engine.isRunning || status.phase == .starting)
-                .help(model.engine.isRunning
-                    ? "Turn the local cluster on or off"
-                    : "Start the Morbstack engine first")
+            Button {
+                toggle(!status.enabled)
+            } label: {
+                Text(status.enabled ? "Disable" : "Enable")
+            }
+            .disabled(!model.engine.isRunning || status.phase == .starting)
+            .help(model.engine.isRunning
+                ? "Turn the local cluster on or off"
+                : "Start the Morbstack engine first")
         }
-        MorbToolbarGap(placement: MorbToolbarGroup.actions)
-        ToolbarItem(id: "kubernetes.kubeconfig", placement: MorbToolbarGroup.actions) {
+        ToolbarItem(id: "kubernetes.kubeconfig", placement: MorbToolbarGroup.secondary) {
             MorbIconButton(
                 kubeconfigCopied ? "checkmark" : "doc.on.doc",
                 help: "Copy the kubeconfig path (\(K8s.defaultKubeconfigURL.path))"
@@ -87,6 +101,9 @@ struct KubernetesRootView: View {
                 }
             }
             .disabled(status.phase != .ready)
+        }
+        if status.phase == .ready {
+            MorbInspectorToggle(id: "kubernetes.inspector", isPresented: $showsInspector)
         }
     }
 
@@ -181,6 +198,68 @@ struct KubernetesRootView: View {
             MorbRowDivider(rowClass: .rich)
             podsSection
         }
+        .inspector(isPresented: $showsInspector) {
+            detailPane
+                .inspectorColumnWidth(
+                    min: Theme.inspectorMinWidth,
+                    ideal: Theme.inspectorWidth,
+                    max: 460)
+        }
+    }
+
+    // MARK: Detail pane
+
+    @ViewBuilder
+    private var detailPane: some View {
+        if let node = nodes.first(where: { $0.id == selectedNodeID }) {
+            Form {
+                Section("Node") {
+                    LabeledContent("Name") {
+                        Text(node.name).textSelection(.enabled).lineLimit(1).truncationMode(.middle)
+                    }
+                    LabeledContent("Status") {
+                        MorbStatusBadge(
+                            tone: node.ready ? .running : .bad,
+                            title: node.ready ? "Ready" : "Not Ready",
+                            filled: false)
+                    }
+                    LabeledContent("Role", value: node.roleLabel)
+                    LabeledContent("Version") {
+                        Text(node.version).font(.system(.callout, design: .monospaced)).textSelection(.enabled)
+                    }
+                    LabeledContent("CPU", value: Formatters.percent(node.cpuPercent))
+                    LabeledContent("Memory", value: Formatters.bytesString(node.memoryBytes))
+                    LabeledContent("Age", value: Formatters.absoluteDate(node.age))
+                }
+            }
+            .formStyle(.grouped)
+        } else if let pod = pods.first(where: { $0.id == selectedPodID }) {
+            Form {
+                Section("Pod") {
+                    LabeledContent("Name") {
+                        Text(pod.name).textSelection(.enabled).lineLimit(1).truncationMode(.middle)
+                    }
+                    LabeledContent("Status") {
+                        MorbStatusBadge(tone: pod.tone, title: pod.phase.rawValue, filled: false)
+                    }
+                    LabeledContent("Namespace", value: pod.namespace)
+                    LabeledContent("Containers", value: "\(pod.readyContainers) of \(pod.totalContainers) ready")
+                    LabeledContent("Restarts", value: "\(pod.restarts)")
+                    LabeledContent("Node", value: pod.node)
+                    LabeledContent("Age", value: Formatters.absoluteDate(pod.age))
+                }
+                Section {
+                    Text("Pods are ordinary containers underneath — Logs and Stats work on them from the Containers screen too.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .formStyle(.grouped)
+        } else {
+            ContentUnavailableView(
+                "No Selection",
+                systemImage: "cube.transparent",
+                description: Text("Pick a node or a pod to see its detail."))
+        }
     }
 
     // MARK: Summary
@@ -215,7 +294,7 @@ struct KubernetesRootView: View {
                 .padding(.horizontal, Theme.pagePadding)
                 .padding(.top, Theme.space4)
                 .padding(.bottom, Theme.space2)
-            Table(nodes) {
+            Table(nodes, selection: $selectedNodeID) {
                 TableColumn("Name") { node in
                     nodeNameCell(node)
                         .frame(height: Theme.rowStandard, alignment: .leading)
@@ -260,6 +339,21 @@ struct KubernetesRootView: View {
             .tableStyle(.inset)
             .alternatingRowBackgrounds()
             .frame(height: nodesTableHeight)
+            .contextMenu(forSelectionType: K8sNodeInfo.ID.self) { ids in
+                if let id = ids.first, let node = nodes.first(where: { $0.id == id }) {
+                    Button("Copy Name") { trackDCopy(node.name) }
+                }
+            } primaryAction: { ids in
+                if let id = ids.first {
+                    selectedNodeID = id
+                    selectedPodID = nil
+                    showsInspector = true
+                }
+            }
+            .onChange(of: selectedNodeID) { _, newValue in
+                guard newValue != nil else { return }
+                selectedPodID = nil
+            }
         }
     }
 
@@ -298,7 +392,7 @@ struct KubernetesRootView: View {
     }
 
     private var podsTable: some View {
-        Table(filteredPods) {
+        Table(filteredPods, selection: $selectedPodID) {
             TableColumn("Name") { pod in
                 podNameCell(pod)
                     .frame(height: Theme.rowStandard, alignment: .leading)
@@ -344,6 +438,39 @@ struct KubernetesRootView: View {
         }
         .tableStyle(.inset)
         .alternatingRowBackgrounds()
+        .contextMenu(forSelectionType: K8sPodInfo.ID.self) { ids in
+            if let id = ids.first, let pod = pods.first(where: { $0.id == id }) {
+                Button("Copy Name") { trackDCopy(pod.name) }
+                Button("Copy Namespace") { trackDCopy(pod.namespace) }
+                if let container = matchingContainer(for: pod) {
+                    Divider()
+                    Button("View in Containers") {
+                        TrackDAppBridge.reveal(containerID: container.id, in: model, showingLogs: true)
+                    }
+                }
+            }
+        } primaryAction: { ids in
+            if let id = ids.first {
+                selectedPodID = id
+                selectedNodeID = nil
+                showsInspector = true
+            }
+        }
+        .onChange(of: selectedPodID) { _, newValue in
+            guard newValue != nil else { return }
+            selectedNodeID = nil
+        }
+    }
+
+    /// The ordinary container backing a pod, when one exists.
+    ///
+    /// k3s runs every pod as a plain container on the same `dockerd` the Containers
+    /// screen already lists, named `k8s_<container>_<pod>_<namespace>_...` by
+    /// convention. Matching on that prefix is what lets "View in Containers" jump
+    /// straight to a pod's real logs instead of promising a Kubernetes-native log
+    /// viewer this build does not have.
+    private func matchingContainer(for pod: K8sPodInfo) -> ContainerSummary? {
+        model.containers.first { $0.displayName.contains(pod.name) }
     }
 
     private func podNameCell(_ pod: K8sPodInfo) -> some View {

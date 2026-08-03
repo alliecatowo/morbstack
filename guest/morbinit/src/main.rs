@@ -46,10 +46,12 @@ mod binfmt;
 mod control;
 mod dial;
 mod disk;
+mod dns;
 mod jsonlite;
 mod log;
 mod mounts;
 mod net;
+mod netaddr;
 mod k8s;
 mod proxy;
 mod sha256;
@@ -167,7 +169,15 @@ fn real_init() {
     // off /proc/cmdline, which needs /proc and nothing else — and because a
     // failure here is worth seeing at the top of the console log rather than
     // buried between dockerd's startup lines.
-    let share_report = shares::encode_report(&mounts::mount_shares(&mounts::advertised_shares()));
+    let share_results = mounts::mount_shares(&mounts::advertised_shares());
+    // docs/parity.md #9: alias the guest's own /tmp onto the same content as
+    // a live /private/tmp share, so a bind mount source under the bare,
+    // unresolved /tmp a Mac user naturally types (macOS itself resolves it
+    // via the same symlink) does not silently see an empty directory. Right
+    // after the shares themselves mount, and well before dockerd starts, so
+    // every container sees the aliased /tmp from its very first bind mount.
+    mounts::alias_tmp_to_shared_private_tmp(&share_results);
+    let share_report = shares::encode_report(&share_results);
 
     // After `early_mounts`, which is what puts /dev/vda on /dev in the first
     // place, and before the supervisor, whose reaper would race the mkfs
@@ -185,6 +195,34 @@ fn real_init() {
     // works from the first container onwards.
     net::enable_container_forwarding();
 
+    // host.docker.internal / gateway.docker.internal (docs/parity.md
+    // #18/#19). Both addresses come from DHCP, so both can legitimately be
+    // absent (no network) — loud but not fatal, matching every other
+    // best-effort step in this boot sequence. Computed before the services
+    // are built below, since `apply_dns_flags` needs them, and the DNS stub
+    // itself is started before dockerd so it is already answering by the
+    // time the first container asks.
+    let guest_ip = net::guest_ipv4();
+    let host_gateway_ip = net::default_gateway();
+    match (guest_ip, host_gateway_ip) {
+        (Some(guest_ip), Some(gateway_ip)) => {
+            if let Err(e) = dns::spawn_split_dns(gateway_ip, gateway_ip) {
+                log::log(&format!(
+                    "WARNING: could not start the split DNS stub: {} — \
+                     host.docker.internal/gateway.docker.internal will not resolve",
+                    e
+                ));
+            }
+        }
+        _ => {
+            log::log(
+                "WARNING: could not determine the guest's own address and/or the VM \
+                 gateway (no DHCP lease?) — host.docker.internal/gateway.docker.internal \
+                 will not resolve, and --add-host=<name>:host-gateway will not work",
+            );
+        }
+    }
+
     // amd64 emulation before the engine starts, so the binfmt_misc entry is
     // already in place by the time the first container can be created. It
     // only needs /proc and the /run tmpfs, both of which `early_mounts`
@@ -192,7 +230,11 @@ fn real_init() {
     let binfmt_status = binfmt::setup();
 
     supervisor::prepare_runtime_dirs();
-    let services = supervisor::default_services(docker_data_on_disk);
+    let services = supervisor::apply_dns_flags(
+        supervisor::default_services(docker_data_on_disk),
+        guest_ip,
+        host_gateway_ip,
+    );
     // Captured before the table is handed to the supervisor: the host needs
     // it in `info`, and `dial.rs`'s ECONNREFUSED diagnostic is only accurate
     // if it describes the dockerd we actually started.

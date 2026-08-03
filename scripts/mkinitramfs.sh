@@ -85,7 +85,7 @@ fi
 # ---------------------------------------------------------------------------
 # morbinit: build it if the cross-compiled release binary isn't there yet.
 # We only ever read guest/morbinit (never write into it) — the cross build
-# is driven entirely by env vars, matching `make cross-build-guest`.
+# is driven entirely by env vars, matching `mise run cross-build-guest`.
 # ---------------------------------------------------------------------------
 
 if [ ! -x "${MORBINIT_BIN}" ]; then
@@ -97,7 +97,7 @@ if [ ! -x "${MORBINIT_BIN}" ]; then
 	if [ ! -x "${CROSS_GCC}" ]; then
 		echo "error: aarch64-unknown-linux-musl cross toolchain not found at ${CROSS_TOOLCHAIN_BIN}" >&2
 		echo "       see dist/CROSS_COMPILE.md for the install recipe, or run" >&2
-		echo "       'make cross-build-guest' directly for a clearer error." >&2
+		echo "       'mise run cross-build-guest' directly for a clearer error." >&2
 		exit 1
 	fi
 

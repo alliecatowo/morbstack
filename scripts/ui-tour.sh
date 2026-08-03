@@ -41,7 +41,7 @@ SIZE="${3:-1440x900}"
 
 if [ ! -x "$BIN" ]; then
 	echo "error: ${BUNDLE} not built." >&2
-	echo "Run 'make app' first (do NOT run it while another agent is building)." >&2
+	echo "Run 'mise run app' first (do NOT run it while another agent is building)." >&2
 	exit 1
 fi
 

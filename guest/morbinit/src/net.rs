@@ -181,3 +181,61 @@ fn write_resolv_conf() -> io::Result<()> {
         format!("nameserver {}\n", FALLBACK_NAMESERVER),
     )
 }
+
+// ---------------------------------------------------------------------------
+// host.docker.internal / gateway.docker.internal (docs/parity.md #18/#19).
+//
+// Two addresses this module can discover, both needed by `dns.rs` and by the
+// `--dns`/`--host-gateway-ip` flags `supervisor::default_services` passes to
+// dockerd:
+//
+//   * the guest's own address on eth0 (`guest_ipv4`) — a normal, locally
+//     owned address that containers on the *legacy* default bridge network
+//     can dial directly (dockerd writes `--dns` server IPs straight into
+//     those containers' /etc/resolv.conf; there is no embedded-DNS layer to
+//     do any NAT/pointer trick for them, so the address has to be one the
+//     kernel actually routes back to this host, not merely "reachable in the
+//     abstract"). The split-DNS stub in `dns.rs` binds every guest address
+//     including this one, so it answers there too.
+//   * the VM's default gateway (`default_gateway`) — the one address that is
+//     empirically confirmed (docs/parity.md #22) to reach a listener on the
+//     Mac, because Virtualization.framework's NAT device treats its own
+//     gateway address as "the host". This is both the answer the split-DNS
+//     stub gives for host.docker.internal/gateway.docker.internal, and the
+//     value handed to dockerd's own `--host-gateway-ip`, so the two
+//     mechanisms (Morbstack's default DNS answer, and the documented
+//     `--add-host=foo:host-gateway` spelling) always agree.
+//
+// The actual byte-parsing is pure and lives in `netaddr.rs` (untangled from
+// this file's `#![cfg(target_os = "linux")]`, specifically so it can be unit
+// tested on the macOS dev host — see that module's header). This pair of
+// functions is the only place that parsing meets real I/O.
+// ---------------------------------------------------------------------------
+
+/// The guest's own IPv4 address on `eth0`, as leased by DHCP.
+///
+/// Parsed from `busybox ip -4 -o addr show eth0` rather than an ioctl: this
+/// crate has zero external dependencies and no libc socket-ioctl bindings of
+/// its own (see `sys.rs`'s header), and busybox is already a hard
+/// prerequisite for bringing the interface up at all in `bring_up_network`.
+pub fn guest_ipv4() -> Option<std::net::Ipv4Addr> {
+    let output = Command::new(BUSYBOX)
+        .args(["ip", "-4", "-o", "addr", "show", "eth0"])
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    crate::netaddr::parse_ipv4_addr_show(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// The default route's gateway address, read from `/proc/net/route`.
+///
+/// A raw `/proc` read rather than `ip route show default | ...` parsing:
+/// the kernel's own table needs no external command and no textual
+/// column-format guessing.
+pub fn default_gateway() -> Option<std::net::Ipv4Addr> {
+    let text = std::fs::read_to_string("/proc/net/route").ok()?;
+    crate::netaddr::parse_default_gateway(&text)
+}
