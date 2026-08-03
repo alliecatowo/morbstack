@@ -209,9 +209,12 @@ Consulted: Apple’s [inspectors](https://developer.apple.com/documentation/swif
 [forms](https://developer.apple.com/documentation/swiftui/form), and SwiftUI
 [`DisclosureGroup`](https://developer.apple.com/documentation/swiftui/disclosuregroup).
 
-`ContainerOverviewTab` therefore retains the system inspector and automatic `Form`,
-keeps State, Configuration, and Ports visible, and places Environment, Mounts, and
-Labels in standard count-labelled `DisclosureGroup`s that are collapsed on first
+`ContainerOverviewTab` therefore retains the system inspector and uses its route-specific
+`FormStyle.columns` presentation: the captured automatic form centered its intrinsic-size
+fact cluster in the tab, while the standard column form uses the inspector's full
+top-leading canvas for legible label/value relationships at the supported 340-point
+minimum. State, Configuration, and Ports remain visible, and Environment, Mounts, and
+Labels are standard count-labelled `DisclosureGroup`s that are collapsed on first
 presentation. Environment expansion retains the existing filter, per-variable masked
 default, explicit reveal, copy action, icon help, and text-selection behavior; collapsing
 the group does not expose its values. Mount actions/context menu and label text selection
