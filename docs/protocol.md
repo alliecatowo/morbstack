@@ -521,9 +521,10 @@ endpoint is valid and currently available; the data plane below carries real UDP
 datagrams, not a TCP approximation.
 
 Once the VM is ready, the same preserved request body is also checked for bind
-sources in `HostConfig.Binds` and top-level `Mounts`. The check uses the directory
-shares actually attached to that VM plus the guest's `info.shares` mount report—not
-the next-boot `shared_paths` configuration. A lexical `/tmp` source is compared as
+sources in `HostConfig.Binds`, `HostConfig.Mounts`, and the older top-level `Mounts`
+shape. The check uses the directory shares actually attached to that VM plus the
+guest's `info.shares` mount report—not the next-boot `shared_paths` configuration.
+A lexical `/tmp` source is compared as
 `/private/tmp`; no source bytes are rewritten. It rejects an unshared source, a
 failed/unreported VirtioFS root, or a source (including a missing legacy `-v` child)
 whose existing symlink ancestor resolves outside a live share with a Docker-style

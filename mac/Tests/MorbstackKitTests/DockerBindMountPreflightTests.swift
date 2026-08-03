@@ -83,6 +83,25 @@ final class DockerBindMountPreflightTests: XCTestCase {
                 message: "invalid mount config for type \"bind\": bind source path does not exist: /Users/allie/missing"))
     }
 
+    func testHostConfigMountsRejectAnUnsharedSourceBeforeItReachesTheGuest() {
+        let result = inspect(
+            #"{"HostConfig":{"Mounts":[{"Type":"bind","Source":"/opt/project","Target":"/workspace"}]}}"#)
+        XCTAssertEqual(
+            result,
+            .rejected(
+                message: "invalid mount config for type \"bind\": bind source path is not shared with the Morbstack VM: /opt/project (add a shared_paths root that contains it, then restart Morbstack)"))
+    }
+
+    func testHostConfigMountsRequireAnExistingSource() {
+        let result = inspect(
+            #"{"HostConfig":{"Mounts":[{"Type":"bind","Source":"/Users/allie/missing","Target":"/workspace"}]}}"#,
+            sourceExists: { _ in false })
+        XCTAssertEqual(
+            result,
+            .rejected(
+                message: "invalid mount config for type \"bind\": bind source path does not exist: /Users/allie/missing"))
+    }
+
     func testLegacyBindRetainsDockerDirectoryCreationInsideALiveShare() {
         XCTAssertEqual(
             inspect(

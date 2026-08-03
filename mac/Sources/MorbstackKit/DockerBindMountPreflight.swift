@@ -16,7 +16,8 @@ public enum DockerBindMountPreflight {
         case rejected(message: String)
     }
 
-    /// Inspects bind mounts expressed by `HostConfig.Binds` and top-level `Mounts`.
+    /// Inspects bind mounts expressed by `HostConfig.Binds`, `HostConfig.Mounts`,
+    /// and the legacy top-level `Mounts` shape.
     ///
     /// Invalid JSON and shapes owned by the Engine are allowed through so dockerd
     /// remains the authority for Docker's full create grammar. A legacy `Binds`
@@ -57,15 +58,14 @@ public enum DockerBindMountPreflight {
             }
         }
 
-        if let mounts = object["Mounts"] as? [Any] {
-            for mount in mounts {
-                guard let mount = mount as? [String: Any],
-                      (mount["Type"] as? String)?.lowercased() == "bind",
-                      let source = mount["Source"] as? String
-                else { continue }
-                bindSources.append(BindSource(path: source, mustExist: true))
-            }
+        if let hostConfig = object["HostConfig"] as? [String: Any] {
+            bindSources.append(contentsOf: explicitBindSources(in: hostConfig["Mounts"]))
         }
+
+        // Keep accepting the older top-level shape as a compatibility backstop. The
+        // current Engine API places these under HostConfig, and missing that field
+        // would let an unshared source reach dockerd and become guest-local.
+        bindSources.append(contentsOf: explicitBindSources(in: object["Mounts"]))
 
         for bindSource in bindSources {
             // Docker's API does not expand `~`; a command shell does that before it
@@ -111,6 +111,20 @@ public enum DockerBindMountPreflight {
             }
         }
         return .allowed
+    }
+
+    /// Extracts explicit `--mount type=bind` style sources from one Engine API
+    /// location. Docker currently uses `HostConfig.Mounts`; the caller retains the
+    /// top-level form as a defensive compatibility path.
+    private static func explicitBindSources(in value: Any?) -> [BindSource] {
+        guard let mounts = value as? [Any] else { return [] }
+        return mounts.compactMap { rawMount in
+            guard let mount = rawMount as? [String: Any],
+                  (mount["Type"] as? String)?.lowercased() == "bind",
+                  let source = mount["Source"] as? String
+            else { return nil }
+            return BindSource(path: source, mustExist: true)
+        }
     }
 
     private struct BindSource {
