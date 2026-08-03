@@ -143,7 +143,8 @@ struct DockerDynamicTCPCreatePlan {
 /// verify before it relays the request to the guest Engine.
 public enum DockerPortPublicationPreflight {
 
-    /// Maximum number of distinct concrete TCP host endpoints one create may reserve.
+    /// Maximum number of distinct concrete TCP host endpoints one recognized create
+    /// may reserve.
     ///
     /// Docker CLI normalizes a fixed equal-length range into a collection of ordinary
     /// bindings, so this is intentionally a lease-size limit rather than a second
