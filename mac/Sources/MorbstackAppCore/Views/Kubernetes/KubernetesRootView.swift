@@ -580,32 +580,33 @@ struct KubernetesRootView: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
+            .width(min: 220, ideal: 280, max: 480)
             TableColumn("Namespace", sortUsing: KubernetesPodComparator(key: .namespace)) { pod in
                 Text(pod.namespace)
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
-            .width(min: 100, ideal: 140, max: 220)
+            .width(min: 88, ideal: 110, max: 150)
             TableColumn("Status", sortUsing: KubernetesPodComparator(key: .phase)) { pod in
                 Text(pod.phase.label)
             }
-            .width(min: 110, ideal: 140, max: 190)
+            .width(min: 100, ideal: 120, max: 160)
             TableColumn("Ready", sortUsing: KubernetesPodComparator(key: .ready)) { pod in
                 Text("\(pod.readyContainers)/\(pod.totalContainers)")
                     .monospacedDigit()
             }
-            .width(min: 56, ideal: 64, max: 80)
+            .width(min: 48, ideal: 56, max: 64)
             TableColumn("Restarts", sortUsing: KubernetesPodComparator(key: .restarts)) { pod in
                 Text(pod.restarts, format: .number)
                     .monospacedDigit()
             }
-            .width(min: 64, ideal: 76, max: 96)
+            .width(min: 56, ideal: 64, max: 72)
             TableColumn("Node", sortUsing: KubernetesPodComparator(key: .node)) { pod in
                 Text(pod.nodeLabel)
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
-            .width(min: 100, ideal: 140, max: 220)
+            .width(min: 92, ideal: 110, max: 150)
             TableColumn("Age", sortUsing: KubernetesPodComparator(key: .age)) { pod in
                 if let age = pod.age {
                     Text(Formatters.compactDuration(since: age))
@@ -616,7 +617,7 @@ struct KubernetesRootView: View {
                         .accessibilityLabel("Age unavailable")
                 }
             }
-            .width(min: 70, ideal: 88, max: 110)
+            .width(min: 56, ideal: 64, max: 72)
         }
         .contextMenu(forSelectionType: K8sPodInfo.ID.self) { ids in
             if let id = ids.first, let pod = pods.first(where: { $0.id == id }) {
@@ -644,6 +645,7 @@ struct KubernetesRootView: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
+            .width(min: 180, ideal: 260, max: 480)
             TableColumn("Status", sortUsing: KubernetesNodeComparator(key: .ready)) { node in
                 Text(node.ready ? "Ready" : "Not Ready")
             }
