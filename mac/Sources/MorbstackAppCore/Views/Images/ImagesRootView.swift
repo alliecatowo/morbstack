@@ -343,8 +343,11 @@ struct ImagesRootView: View {
 
     private var pullSheet: some View {
         Form {
-            Section("Image Reference") {
-                TextField("nginx:alpine", text: $pullReference)
+            Section {
+                TextField(
+                    "Image Reference",
+                    text: $pullReference,
+                    prompt: Text("nginx:alpine"))
                     .font(.system(.body, design: .monospaced))
                     .disabled(isPulling)
                     .focused($pullReferenceIsFocused)
@@ -469,14 +472,15 @@ struct ImagesRootView: View {
             .width(min: 56, ideal: 68, max: 90)
         } rows: {
             // Tagged images are the table's primary data, not a second level of
-            // hierarchy.  Giving the only data set a Section repeated the screen
+            // hierarchy. Giving the only data set a Section repeated the screen
             // title in the first row and caused Tahoe to reserve a grouped-table
-            // treatment for a group that does not exist.  Keep a Section only when
-            // dangling layers genuinely need their own, named group.
+            // treatment for a group that does not exist. Keep a Section only when
+            // tagged and dangling images are both present, and name both groups by
+            // their actual relationship rather than repeating the route title.
             if split.dangling.isEmpty {
                 ForEach(split.tagged) { TableRow($0) }
             } else if !split.tagged.isEmpty {
-                Section("Images") {
+                Section("Tagged Images") {
                     ForEach(split.tagged) { TableRow($0) }
                 }
             }
@@ -525,6 +529,8 @@ struct ImagesRootView: View {
             Label(badge.text, systemImage: badge.symbol ?? "exclamationmark.triangle")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .accessibilityLabel("Architecture mismatch: \(badge.text)")
+                .accessibilityHint("This image is not built for this Mac’s native architecture.")
                 .help("This image is built for \(badge.text), not this Mac's native architecture")
         }
     }
@@ -534,9 +540,14 @@ struct ImagesRootView: View {
         // `-1` is the engine declining to say, which is not the same as zero and should
         // not be rendered as a confident "unused".
         if image.containersUsing < 0 {
-            Text("—").foregroundStyle(.tertiary)
+            Text("—")
+                .foregroundStyle(.tertiary)
+                .accessibilityLabel("Container usage not reported")
         } else if image.containersUsing == 0 {
-            Text("—").foregroundStyle(.tertiary)
+            Text("0")
+                .monospacedDigit()
+                .accessibilityLabel("Used by no containers")
+                .help("Used by no containers")
         } else {
             Text("\(image.containersUsing)")
                 .monospacedDigit()
