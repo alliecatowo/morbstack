@@ -94,6 +94,16 @@ private enum BuildHistoryDetailState: Equatable {
     case unavailable(String)
 }
 
+/// Logs are an independent, explicitly requested Buildx read. They stay separate from
+/// inspect state so selecting a row, loading its metadata, or refreshing the history
+/// table never starts a potentially large transcript request.
+private enum BuildHistoryLogState: Equatable {
+    case idle
+    case loading
+    case loaded(BuildxHistoryLog)
+    case unavailable(String)
+}
+
 private enum BuildHistorySortKey: String, CaseIterable, Hashable {
     case name, status, createdAt, duration
 }
@@ -154,6 +164,8 @@ struct BuildsRootView: View {
     @State private var historySelection: BuildxHistoryRecord.ID?
     @State private var historyDetailState: BuildHistoryDetailState = .idle
     @State private var historyDetailTask: Task<Void, Never>?
+    @State private var historyLogState: BuildHistoryLogState = .idle
+    @State private var historyLogTask: Task<Void, Never>?
     @State private var showsInspector = true
     @State private var isRefreshing = false
     @State private var isPruning = false
@@ -350,6 +362,7 @@ struct BuildsRootView: View {
                 // client rather than leaving an unseen build running after navigation.
                 buildTask?.cancel()
                 historyDetailTask?.cancel()
+                historyLogTask?.cancel()
             }
     }
 
@@ -722,12 +735,9 @@ struct BuildsRootView: View {
                 }
             case .loaded(let detail):
                 if detail.hasReportableFields {
-                    historyDetailsForm(detail)
+                    historyDetailsForm(detail, recordID: record.id)
                 } else {
-                    ContentUnavailableView(
-                        "No Build Details Reported",
-                        systemImage: "doc.text.magnifyingglass",
-                        description: Text("Buildx returned this record without fields Morbstack can show."))
+                    historyDetailsUnavailable(for: record)
                 }
             }
         } else {
@@ -738,7 +748,10 @@ struct BuildsRootView: View {
         }
     }
 
-    private func historyDetailsForm(_ detail: BuildxHistoryDetail) -> some View {
+    private func historyDetailsForm(
+        _ detail: BuildxHistoryDetail,
+        recordID: BuildxHistoryRecord.ID
+    ) -> some View {
         Form {
             if detail.name != nil || detail.reference != nil || detail.status != nil {
                 Section("Build") {
@@ -858,6 +871,91 @@ struct BuildsRootView: View {
                     }
                 }
             }
+            historyLogSection(for: recordID)
+        }
+    }
+
+    @ViewBuilder
+    private func historyDetailsUnavailable(for record: BuildxHistoryRecord) -> some View {
+        switch historyLogState {
+        case .loaded:
+            Form {
+                Section("Build Details") {
+                    Text("Buildx returned this record without metadata Morbstack can show.")
+                        .foregroundStyle(.secondary)
+                }
+                historyLogSection(for: record.id)
+            }
+        case .idle, .loading, .unavailable:
+            ContentUnavailableView {
+                Label("No Build Details Reported", systemImage: "doc.text.magnifyingglass")
+            } description: {
+                Text("Buildx returned this record without fields Morbstack can show.")
+            } actions: {
+                historyLogAction(for: record.id)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func historyLogSection(for recordID: BuildxHistoryRecord.ID) -> some View {
+        Section("Build Log") {
+            switch historyLogState {
+            case .idle:
+                historyLogAction(for: recordID)
+            case .loading:
+                ProgressView("Reading the selected Buildx log…")
+                Button("Cancel Loading") {
+                    historyLogTask?.cancel()
+                }
+            case .unavailable(let detail):
+                Text(detail)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                Button("Load Logs Again") {
+                    loadHistoryLogs(for: recordID)
+                }
+            case .loaded(let log):
+                if log.hasOutput {
+                    ScrollView(.vertical) {
+                        Text(log.output)
+                            .font(.system(.callout, design: .monospaced))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                    }
+                    .frame(minHeight: 160, maxHeight: 280)
+                    if log.isTruncated {
+                        Text("Showing the first 4 MB returned by Buildx.")
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    LabeledContent("Output", value: "Buildx returned no log output.")
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func historyLogAction(for recordID: BuildxHistoryRecord.ID) -> some View {
+        switch historyLogState {
+        case .idle:
+            Button("Load Logs") {
+                loadHistoryLogs(for: recordID)
+            }
+        case .loading:
+            ProgressView("Reading the selected Buildx log…")
+            Button("Cancel Loading") {
+                historyLogTask?.cancel()
+            }
+        case .unavailable(let detail):
+            Text(detail)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+            Button("Load Logs Again") {
+                loadHistoryLogs(for: recordID)
+            }
+        case .loaded:
+            EmptyView()
         }
     }
 
@@ -867,6 +965,7 @@ struct BuildsRootView: View {
     private func loadHistoryDetails(for recordID: BuildxHistoryRecord.ID) {
         guard historySelection == recordID else { return }
         historyDetailTask?.cancel()
+        resetHistoryLogs()
         historyDetailState = .loading
         let socketPath = MorbPaths.dockerSocket.path
         historyDetailTask = Task { @MainActor [recordID, socketPath] in
@@ -894,6 +993,48 @@ struct BuildsRootView: View {
         historyDetailTask?.cancel()
         historyDetailTask = nil
         historyDetailState = .idle
+        resetHistoryLogs()
+    }
+
+    @MainActor
+    private func loadHistoryLogs(for recordID: BuildxHistoryRecord.ID) {
+        guard historySelection == recordID,
+              case .loaded = historyDetailState
+        else { return }
+        historyLogTask?.cancel()
+        historyLogState = .loading
+        let socketPath = MorbPaths.dockerSocket.path
+        historyLogTask = Task { @MainActor [recordID, socketPath] in
+            do {
+                let log = try await BuildxHistoryClient.logs(
+                    socketPath: socketPath,
+                    recordID: recordID)
+                guard !Task.isCancelled,
+                      historySelection == recordID,
+                      case .loaded = historyDetailState
+                else { return }
+                historyLogState = .loaded(log)
+            } catch is CancellationError {
+                guard historySelection == recordID else { return }
+                historyLogState = .idle
+            } catch {
+                guard !Task.isCancelled,
+                      historySelection == recordID,
+                      case .loaded = historyDetailState
+                else { return }
+                historyLogState = .unavailable(MorbErrorMessage.text(for: error))
+            }
+            if historySelection == recordID {
+                historyLogTask = nil
+            }
+        }
+    }
+
+    @MainActor
+    private func resetHistoryLogs() {
+        historyLogTask?.cancel()
+        historyLogTask = nil
+        historyLogState = .idle
     }
 
     // MARK: Operations

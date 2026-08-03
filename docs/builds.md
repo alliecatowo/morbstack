@@ -13,9 +13,14 @@ Morbstack's Builds route has two deliberately separate pieces of Docker state:
   inspector starts with a direct `ContentUnavailableView` and the clearly labeled
   **Load Details** action. Only that action runs the bounded, sealed-environment
   `docker buildx history inspect --format=json <selected-record-id>` read. Its `Form`
-  contains only JSON fields Buildx actually returned; absent fields stay absent. The
-  implementation does not read logs or attachments, and does not export, import, open,
-  or remove history records.
+  contains only JSON fields Buildx actually returned; absent fields stay absent. Only
+  after that inspection, the same selected-record inspector offers **Load Logs**. That
+  separate, bounded, sealed-environment `docker buildx history logs --progress rawjson
+  <selected-record-id>` read is cancellable and renders only its real stdout in a
+  selectable native scroll view. The reader drains both child pipes but retains at most
+  the first 4 MB of each, marking a displayed log prefix as truncated rather than
+  claiming it is complete. The implementation does not read attachments or invoke
+  history export, import, open, or removal.
 - **A new local build** is started only after the person selects a folder containing a
   root `Dockerfile` and confirms the request. The app runs its reviewed bundled
   `docker buildx build --progress=rawjson --load` client against Morbstack's own socket.
@@ -46,20 +51,23 @@ Docker Engine does **not** report a durable build history: `/system/df` cache re
 not identify a completed build, its logs, duration, or produced tag. Docker documents
 that this information is instead active-builder Buildx history metadata
 ([history list](https://docs.docker.com/reference/cli/docker/buildx/history/ls/) and
-[history inspect](https://docs.docker.com/reference/cli/docker/buildx/history/inspect/)).
-Morbstack adopts only the two read-only history commands above. It does not present a
-history detail until the person explicitly loads it, and it never synthesizes a history
-or an inspect field from shared cache layers.
+[history inspect](https://docs.docker.com/reference/cli/docker/buildx/history/inspect/), and
+[history logs](https://docs.docker.com/reference/cli/docker/buildx/history/logs/)).
+Morbstack adopts the three explicit, read-only history commands above. It does not
+present a history detail until the person explicitly loads it, never requests a log
+until that inspected record's **Load Logs** command, and never synthesizes a history,
+inspect field, or log line from shared cache layers.
 
 ## Native macOS semantics
 
 The route is a native sortable `Table` for each explicitly selected collection, standard
 `.searchable` discovery, and a system `.inspector`. The on-demand Buildx detail path
-uses `ContentUnavailableView`, `ProgressView`, then `Form`/`LabeledContent`; it has no
-automatic inspection, cache-derived details, cards, toolbar replicas, or progress
-dashboard. Build setup is a system sheet with a `Form` and document picker; active work
-is an ordinary `ProgressView`; cache pruning and build execution have explicit
-confirmation/recovery states.
+uses `ContentUnavailableView`, `ProgressView`, then `Form`/`LabeledContent`; its
+separately requested raw log uses a native scroll view and selectable monospaced text.
+It has no automatic inspection or log load, cache-derived details/logs, cards, toolbar
+replicas, or progress dashboard. Build setup is a system sheet with a `Form` and document
+picker; active work is an ordinary `ProgressView`; cache pruning and build execution have
+explicit confirmation/recovery states.
 
 This follows Apple’s [Lists and tables](https://developer.apple.com/design/human-interface-guidelines/lists-and-tables),
 [Toolbars](https://developer.apple.com/design/human-interface-guidelines/toolbars),

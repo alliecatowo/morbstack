@@ -7,8 +7,9 @@
 // The latter cannot identify individual completed builds. Buildx documents
 // `history ls --format=json` as the builder-scoped completed-build listing, so this
 // client shows only records that command returned and never fabricates them from cache
-// layers. It may inspect one selected record after an explicit user action, but it does
-// not invoke Buildx history deletion, export, import, `open`, or logs.
+// layers. It may inspect one selected record and read that inspected record's raw Buildx
+// log after explicit user actions, but it does not invoke history deletion, export,
+// import, or `open`.
 
 import Darwin
 import Foundation
@@ -59,7 +60,11 @@ enum BuildxHistoryClient {
             socketPath: socketPath,
             arguments: ["buildx", "history", "ls", "--format=json", "--no-trunc"])
             .run()
-        return try decodeList(output)
+        guard !output.stdoutWasTruncated else {
+            throw BuildxHistoryClientError.decoding(
+                "Buildx history returned more data than Morbstack can safely display.")
+        }
+        return try decodeList(output.stdout)
     }
 
     /// Reads the metadata Buildx reports for exactly one previously listed build record.
@@ -86,7 +91,39 @@ enum BuildxHistoryClient {
             socketPath: socketPath,
             arguments: ["buildx", "history", "inspect", "--format=json", recordID])
             .run()
-        return try decodeDetail(output)
+        guard !output.stdoutWasTruncated else {
+            throw BuildxHistoryClientError.decoding(
+                "Buildx history detail returned more data than Morbstack can safely display.")
+        }
+        return try decodeDetail(output.stdout)
+    }
+
+    /// Reads raw progress output for one record that the person has already inspected.
+    ///
+    /// `history logs` is a separate Buildx read. It is deliberately neither coupled to
+    /// history selection nor used to fill metadata: a person must first explicitly load
+    /// the selected record's details, then choose **Load Logs**. The returned text is the
+    /// command's stdout without cache-derived lines or app-authored progress messages.
+    static func logs(socketPath: String, recordID: String) async throws -> BuildxHistoryLog {
+        guard isInspectableRecordID(recordID) else {
+            throw BuildxHistoryClientError.invalidRecordID
+        }
+        guard let docker = MorbCliPlugins.sourceDockerCLI() else {
+            throw BuildxHistoryClientError.dockerCLIMissing
+        }
+        guard let buildx = MorbCliPlugins.sourceBinary(for: MorbCliPlugins.buildx) else {
+            throw BuildxHistoryClientError.buildxPluginMissing
+        }
+
+        let output = try await BuildxHistoryCommand(
+            docker: docker,
+            buildx: buildx,
+            socketPath: socketPath,
+            arguments: ["buildx", "history", "logs", "--progress", "rawjson", recordID])
+            .run()
+        return BuildxHistoryLog(
+            output: String(decoding: output.stdout, as: UTF8.self),
+            isTruncated: output.stdoutWasTruncated)
     }
 
     private static func decodeList(_ output: Data) throws -> [BuildxHistoryRecord] {
@@ -228,6 +265,18 @@ struct BuildxHistoryDetail: Sendable, Equatable {
     }
 }
 
+/// Raw stdout returned by an explicitly requested `buildx history logs` command.
+///
+/// The command can produce arbitrary-length output, so the subprocess always drains
+/// it but retains at most a documented prefix. `isTruncated` makes that limit visible
+/// instead of claiming that the text is a complete build transcript.
+struct BuildxHistoryLog: Sendable, Equatable {
+    var output: String
+    var isTruncated: Bool
+
+    var hasOutput: Bool { !output.isEmpty }
+}
+
 struct BuildxHistoryMaterial: Identifiable, Sendable, Equatable {
     var id: String
     var uri: String
@@ -260,7 +309,7 @@ private final class BuildxHistoryCommand: @unchecked Sendable {
         self.arguments = arguments
     }
 
-    func run() async throws -> Data {
+    func run() async throws -> BuildxHistoryCommandOutput {
         let execution = BuildxHistoryExecution()
         return try await withTaskCancellationHandler(
             operation: {
@@ -277,7 +326,7 @@ private final class BuildxHistoryCommand: @unchecked Sendable {
     }
 
     private func launch(
-        continuation: CheckedContinuation<Data, Error>,
+        continuation: CheckedContinuation<BuildxHistoryCommandOutput, Error>,
         execution: BuildxHistoryExecution
     ) {
         let environment: BuildxClientEnvironment
@@ -327,14 +376,12 @@ private final class BuildxHistoryCommand: @unchecked Sendable {
         let output = BuildxHistoryOutput()
         group.enter()
         DispatchQueue.global(qos: .userInitiated).async {
-            let data = stdout.fileHandleForReading.readDataToEndOfFile()
-            output.set(data, for: .stdout)
+            output.drain(stdout.fileHandleForReading, stream: .stdout)
             group.leave()
         }
         group.enter()
         DispatchQueue.global(qos: .userInitiated).async {
-            let data = stderr.fileHandleForReading.readDataToEndOfFile()
-            output.set(data, for: .stderr)
+            output.drain(stderr.fileHandleForReading, stream: .stderr)
             group.leave()
         }
         process.waitUntilExit()
@@ -342,8 +389,12 @@ private final class BuildxHistoryCommand: @unchecked Sendable {
         try? stdout.fileHandleForReading.close()
         try? stderr.fileHandleForReading.close()
 
-        let (stdoutData, stderrData) = output.contents()
-        let failure = String(decoding: stderrData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        let commandOutput = output.result()
+        var failure = String(decoding: commandOutput.stderr, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if commandOutput.stderrWasTruncated {
+            failure += failure.isEmpty ? "Output was truncated." : "\nOutput was truncated."
+        }
 
         switch execution.finish(process) {
         case .timedOut:
@@ -364,7 +415,7 @@ private final class BuildxHistoryCommand: @unchecked Sendable {
                     : failure))
             return
         }
-        continuation.resume(returning: stdoutData)
+        continuation.resume(returning: commandOutput)
     }
 }
 
@@ -440,25 +491,67 @@ private final class BuildxHistoryExecution: @unchecked Sendable {
     }
 }
 
+private struct BuildxHistoryCommandOutput: Sendable {
+    let stdout: Data
+    let stderr: Data
+    let stdoutWasTruncated: Bool
+    let stderrWasTruncated: Bool
+}
+
 private final class BuildxHistoryOutput: @unchecked Sendable {
     enum Stream { case stdout, stderr }
+
+    /// Retaining a bounded prefix keeps an unexpectedly verbose builder from making a
+    /// read-only inspector command consume unbounded application memory. Both pipes
+    /// continue to drain after the cap so the child cannot block on a full descriptor.
+    private static let maximumRetainedBytesPerStream = 4 * 1024 * 1024
+    private static let readChunkSize = 64 * 1024
 
     private let lock = NSLock()
     private var stdout = Data()
     private var stderr = Data()
+    private var stdoutWasTruncated = false
+    private var stderrWasTruncated = false
 
-    func set(_ data: Data, for stream: Stream) {
-        lock.lock()
-        defer { lock.unlock() }
-        switch stream {
-        case .stdout: stdout = data
-        case .stderr: stderr = data
+    func drain(_ handle: FileHandle, stream: Stream) {
+        while true {
+            let data = handle.readData(ofLength: Self.readChunkSize)
+            guard !data.isEmpty else { return }
+            append(data, for: stream)
         }
     }
 
-    func contents() -> (Data, Data) {
+    private func append(_ data: Data, for stream: Stream) {
         lock.lock()
         defer { lock.unlock() }
-        return (stdout, stderr)
+        switch stream {
+        case .stdout:
+            append(data, to: &stdout, truncated: &stdoutWasTruncated)
+        case .stderr:
+            append(data, to: &stderr, truncated: &stderrWasTruncated)
+        }
+    }
+
+    private func append(_ data: Data, to destination: inout Data, truncated: inout Bool) {
+        let remaining = Self.maximumRetainedBytesPerStream - destination.count
+        guard remaining > 0 else {
+            truncated = true
+            return
+        }
+        let retained = data.prefix(remaining)
+        destination.append(contentsOf: retained)
+        if retained.count < data.count {
+            truncated = true
+        }
+    }
+
+    func result() -> BuildxHistoryCommandOutput {
+        lock.lock()
+        defer { lock.unlock() }
+        return BuildxHistoryCommandOutput(
+            stdout: stdout,
+            stderr: stderr,
+            stdoutWasTruncated: stdoutWasTruncated,
+            stderrWasTruncated: stderrWasTruncated)
     }
 }
