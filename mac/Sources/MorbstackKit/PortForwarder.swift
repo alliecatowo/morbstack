@@ -383,6 +383,47 @@ public final class PortForwarder {
         return tcp + udp
     }
 
+    /// An atomic, structured view of Morbstack-owned loopback TCP forwards for the
+    /// pure local-domain claim reconciler.
+    ///
+    /// This does not expose listeners, cause a refresh, or reserve a port. The caller
+    /// must pair it with a fresh Engine `running`-container snapshot before trusting
+    /// a prospective domain claim. Failed and conflicting ports are captured under
+    /// the same lock as live listeners so a stale active entry can never win over a
+    /// known denial.
+    public var localDomainForwardSnapshot: MorbLocalDomain.LoopbackTCPForwardSnapshot {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let active = forwards.values.compactMap { forward -> MorbLocalDomain.LoopbackTCPForward? in
+            let binding = forward.binding
+            guard binding.networkProtocol == "tcp",
+                  (1...65_535).contains(binding.hostPort),
+                  !binding.containerID.isEmpty
+            else {
+                return nil
+            }
+            return MorbLocalDomain.LoopbackTCPForward(
+                ownerID: binding.containerID,
+                hostPort: UInt16(binding.hostPort))
+        }.sorted { lhs, rhs in
+            lhs.hostPort == rhs.hostPort ? lhs.ownerID < rhs.ownerID : lhs.hostPort < rhs.hostPort
+        }
+
+        let failed = Set(failedBinds.keys.compactMap(Self.validTCPHostPort))
+        let conflicts = Set(conflictingTCPForwards.keys.compactMap(Self.validTCPHostPort))
+        return MorbLocalDomain.LoopbackTCPForwardSnapshot(
+            forwarderIsRunning: running,
+            activeForwards: active,
+            failedHostPorts: failed,
+            conflictingHostPorts: conflicts)
+    }
+
+    private static func validTCPHostPort(_ port: Int) -> UInt16? {
+        guard (1...65_535).contains(port) else { return nil }
+        return UInt16(port)
+    }
+
     /// The number of forwarded connections currently being relayed.
     ///
     /// Counts the *current* generation only: connections belonging to a torn-down

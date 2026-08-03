@@ -103,9 +103,59 @@ public enum MorbLocalDomain {
 
         public var id: String { "\(ownerID)|\(name.hostname)|\(targetPort)" }
 
-        /// The only permitted eventual target. The active router must still re-check
-        /// that PortForwarder owns this exact publication before connecting.
+        /// The selected host TCP port of the only permitted eventual target. A future
+        /// router must still re-check that PortForwarder owns this exact publication
+        /// before connecting.
         public var loopbackTarget: String { "127.0.0.1:\(targetPort)" }
+    }
+
+    /// One concrete TCP listener that Morbstack owns on the Mac loopback interface.
+    ///
+    /// This is deliberately a small value type rather than a listener reference or a
+    /// Docker response. A domain reconciler can prove only an exact owner and host
+    /// port from one atomic daemon snapshot; it cannot use this model to bind, open,
+    /// or route a connection.
+    public struct LoopbackTCPForward: Hashable, Sendable {
+
+        /// Immutable Docker container ID that owns the forwarded publication.
+        public let ownerID: String
+        /// The TCP port on `127.0.0.1` owned by Morbstack's forwarder.
+        public let hostPort: UInt16
+
+        public init(ownerID: String, hostPort: UInt16) {
+            self.ownerID = ownerID
+            self.hostPort = hostPort
+        }
+    }
+
+    /// A single point-in-time view of the forwarder's TCP ownership.
+    ///
+    /// ``PortForwarder/localDomainForwardSnapshot`` builds this value while holding
+    /// its state lock, so a caller cannot combine a listener from one forwarder
+    /// generation with a failure or conflict from another. This snapshot has no
+    /// listener handles and grants no permission to alter the forwarder.
+    public struct LoopbackTCPForwardSnapshot: Sendable {
+
+        /// `false` when the daemon has stopped the forwarder or has not started it.
+        public let forwarderIsRunning: Bool
+        /// TCP listeners currently active and owned by Morbstack on loopback.
+        public let activeForwards: [LoopbackTCPForward]
+        /// Ports Docker published but Morbstack could not bind.
+        public let failedHostPorts: Set<UInt16>
+        /// Ports Docker described with competing TCP targets.
+        public let conflictingHostPorts: Set<UInt16>
+
+        public init(
+            forwarderIsRunning: Bool,
+            activeForwards: [LoopbackTCPForward],
+            failedHostPorts: Set<UInt16> = [],
+            conflictingHostPorts: Set<UInt16> = []
+        ) {
+            self.forwarderIsRunning = forwarderIsRunning
+            self.activeForwards = activeForwards
+            self.failedHostPorts = failedHostPorts
+            self.conflictingHostPorts = conflictingHostPorts
+        }
     }
 
     /// Resolves only an exact hostname from one in-memory snapshot. Collisions are
@@ -161,5 +211,110 @@ public enum MorbLocalDomain {
                 return "multiple containers claimed \(value)"
             }
         }
+    }
+}
+
+/// Validates one explicitly opted-in prospective local-domain claim against fresh,
+/// daemon-owned facts.
+///
+/// This is a pure reconciliation boundary. It does not retain a claim, talk to the
+/// Engine, bind a socket, configure a resolver, produce a URL, issue TLS material, or
+/// start a watcher. Until a future feature deliberately consumes a ``Result/validated(_:)``
+/// result, all `*.morb.local` names remain unclaimed and inactive.
+public enum LocalDomainClaimReconciler {
+
+    /// A request made through an explicit product opt-in. The domain and TCP port are
+    /// already exact because ``MorbLocalDomain/Claim`` validates both at construction.
+    public struct Request: Hashable, Sendable {
+
+        public let isExplicitlyOptedIn: Bool
+        public let claim: MorbLocalDomain.Claim
+
+        public init(isExplicitlyOptedIn: Bool, claim: MorbLocalDomain.Claim) {
+            self.isExplicitlyOptedIn = isExplicitlyOptedIn
+            self.claim = claim
+        }
+    }
+
+    /// One owner from a fresh Engine `running`-container response.
+    ///
+    /// Engine callers must pass only containers whose current state is `running`.
+    /// A stopped or deleted owner is consequently absent and can never be treated as
+    /// a routable target by this model.
+    public struct RunningContainerCandidate: Hashable, Sendable {
+
+        public let ownerID: String
+
+        public init(ownerID: String) {
+            self.ownerID = ownerID
+        }
+    }
+
+    /// Why a prospective claim is not validated. `rejected` is intentionally the
+    /// default for incomplete or inconsistent facts: a future router must not infer
+    /// availability from a name, label, or stale prior result.
+    public enum Rejection: Hashable, Sendable {
+        case explicitOptInRequired
+        case forwarderStopped
+        case ownerNotRunning
+        case failedForward
+        case conflictingForward
+        case forwardMissing
+        case forwardOwnerMismatch
+        case ambiguousForward
+    }
+
+    /// The outcome for one independent reconciliation. `validated` only means the
+    /// passed snapshots prove the existing loopback publication; it does not activate
+    /// DNS, HTTP routing, HTTPS, or any user-visible domain feature.
+    public enum Result: Hashable, Sendable {
+        case validated(MorbLocalDomain.Claim)
+        case rejected(Rejection)
+    }
+
+    /// Revalidates an exact opted-in domain claim from one fresh Engine list and one
+    /// atomic PortForwarder snapshot.
+    ///
+    /// The selected host TCP port is denied whenever its forward is failed or
+    /// conflicted, even if a stale active-forward entry also exists. The owner must
+    /// appear in the current Engine `running` list and the one active listener for
+    /// that port must name that same immutable owner ID.
+    public static func reconcile(
+        request: Request,
+        runningContainers: [RunningContainerCandidate],
+        forwards: MorbLocalDomain.LoopbackTCPForwardSnapshot
+    ) -> Result {
+        guard request.isExplicitlyOptedIn else {
+            return .rejected(.explicitOptInRequired)
+        }
+        guard forwards.forwarderIsRunning else {
+            return .rejected(.forwarderStopped)
+        }
+
+        let ownerIsRunning = runningContainers.contains { candidate in
+            candidate.ownerID == request.claim.ownerID
+        }
+        guard ownerIsRunning else {
+            return .rejected(.ownerNotRunning)
+        }
+
+        let port = request.claim.targetPort
+        guard !forwards.failedHostPorts.contains(port) else {
+            return .rejected(.failedForward)
+        }
+        guard !forwards.conflictingHostPorts.contains(port) else {
+            return .rejected(.conflictingForward)
+        }
+
+        let candidates = forwards.activeForwards.filter { forward in
+            forward.hostPort == port
+        }
+        guard candidates.count == 1 else {
+            return .rejected(candidates.isEmpty ? .forwardMissing : .ambiguousForward)
+        }
+        guard candidates[0].ownerID == request.claim.ownerID else {
+            return .rejected(.forwardOwnerMismatch)
+        }
+        return .validated(request.claim)
     }
 }
