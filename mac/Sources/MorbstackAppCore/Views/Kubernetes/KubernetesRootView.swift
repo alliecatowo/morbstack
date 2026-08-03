@@ -209,6 +209,11 @@ struct KubernetesRootView: View {
     @State private var resourceDescriptionRequestID = UUID()
     @State private var showsInspector = true
     @State private var lifecycleRequest: KubernetesLifecycleRequest?
+    /// A confirmed enable/disable request is still in progress until the daemon
+    /// replies with its authoritative status. Keep that short transition separate
+    /// from the guest-reported `.starting` phase: the former prevents duplicate
+    /// mutations, while the latter describes real k3s readiness after the request.
+    @State private var lifecycleInFlight: KubernetesLifecycleRequest?
     @State private var kubeconfigCopied = false
     @State private var hasKubeconfig = false
     @State private var isGeneratingKubeconfig = false
@@ -241,6 +246,35 @@ struct KubernetesRootView: View {
             return "Setting up k3s and waiting for its node to report ready."
         }
         return "Kubernetes is still starting. \(detail)"
+    }
+
+    /// Pods, nodes, and their search scope are meaningful only after the guest has
+    /// reported a Ready cluster. The explicit lifecycle state also keeps the old
+    /// ready-table controls out of the toolbar while a disable is being confirmed.
+    private var resourceControlsAreAvailable: Bool {
+        model.engine.isRunning && status.phase == .ready && lifecycleInFlight == nil
+    }
+
+    private var lifecycleProgressTitle: String {
+        switch lifecycleInFlight {
+        case .enable:
+            "Enabling Kubernetes"
+        case .disable:
+            "Disabling Kubernetes"
+        case nil:
+            "Updating Kubernetes"
+        }
+    }
+
+    private var lifecycleProgressDetail: String {
+        switch lifecycleInFlight {
+        case .enable:
+            "Morbstack is waiting for the guest daemon to confirm that the local k3s cluster was enabled."
+        case .disable:
+            "Morbstack is waiting for the guest daemon to confirm that the local k3s control plane stopped."
+        case nil:
+            "Morbstack is waiting for the guest daemon to report Kubernetes status."
+        }
     }
 
     private var filteredNodes: [K8sNodeInfo] {
@@ -301,10 +335,9 @@ struct KubernetesRootView: View {
     }
 
     var body: some View {
-        content
+        contentWithAvailableResourceControls
             .navigationTitle("Kubernetes")
             .navigationSubtitle(subtitle)
-            .searchable(text: $query, placement: .toolbar, prompt: "Search \(resource.rawValue.lowercased())")
             .toolbar { toolbarContent }
             .confirmationDialog(
                 lifecycleRequest?.title ?? "",
@@ -351,19 +384,35 @@ struct KubernetesRootView: View {
             }
     }
 
+    /// Search is a scoped control for the active ready-cluster table. Do not leave a
+    /// disabled-looking search field or resource picker above an unavailable state.
+    @ViewBuilder
+    private var contentWithAvailableResourceControls: some View {
+        if resourceControlsAreAvailable {
+            content.searchable(
+                text: $query,
+                placement: .toolbar,
+                prompt: "Search \(resource.rawValue.lowercased())")
+        } else {
+            content
+        }
+    }
+
     // MARK: - System toolbar commands
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        ToolbarItem(id: "kubernetes.resources", placement: .navigation) {
-            Picker("Kubernetes resource", selection: $resource) {
-                ForEach(KubernetesResource.allCases) { resource in
-                    Text(resource.rawValue).tag(resource)
+        if resourceControlsAreAvailable {
+            ToolbarItem(id: "kubernetes.resources", placement: .navigation) {
+                Picker("Kubernetes resource", selection: $resource) {
+                    ForEach(KubernetesResource.allCases) { resource in
+                        Text(resource.rawValue).tag(resource)
+                    }
                 }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .accessibilityLabel("Kubernetes resource")
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .accessibilityLabel("Kubernetes resource")
         }
 
         ToolbarItem(id: "kubernetes.refresh", placement: .secondaryAction) {
@@ -406,12 +455,13 @@ struct KubernetesRootView: View {
             }
             .accessibilityLabel("Kubernetes actions")
             .help("Kubernetes actions")
-            // Disable remains available during startup. A start that cannot reach
-            // Ready must always have a real, reversible escape action.
-            .disabled(!model.engine.isRunning)
+            // The request-in-flight unavailable state already owns lifecycle feedback.
+            // Re-enable this menu after the daemon replies so a cluster that remains
+            // in `.starting` still exposes its real, reversible disable action.
+            .disabled(!model.engine.isRunning || lifecycleInFlight != nil)
         }
 
-        if status.phase == .ready {
+        if resourceControlsAreAvailable {
             ToolbarItem(id: "kubernetes.inspector", placement: .primaryAction) {
                 Button {
                     showsInspector.toggle()
@@ -425,8 +475,12 @@ struct KubernetesRootView: View {
     }
 
     private func confirmLifecycle(_ request: KubernetesLifecycleRequest) {
+        guard lifecycleInFlight == nil else { return }
         lifecycleRequest = nil
+        clusterError = nil
+        lifecycleInFlight = request
         Task {
+            defer { lifecycleInFlight = nil }
             do {
                 status = try await provider.setEnabled(request == .enable)
                 clusterError = nil
@@ -721,6 +775,8 @@ struct KubernetesRootView: View {
                 }
                 .disabled(model.isEngineBusy)
             }
+        } else if lifecycleInFlight != nil {
+            lifecycleProgressState
         } else if let clusterError {
             ContentUnavailableView {
                 Label("Kubernetes Is Unavailable", systemImage: "exclamationmark.triangle")
@@ -742,6 +798,20 @@ struct KubernetesRootView: View {
                             .inspectorColumnWidth(min: 280, ideal: 340, max: 460)
                     }
             }
+        }
+    }
+
+    /// The confirmation dialog has already received explicit user consent; this is
+    /// the system unavailable/progress state while the daemon performs that one
+    /// requested lifecycle write. It deliberately offers no second lifecycle action.
+    private var lifecycleProgressState: some View {
+        ContentUnavailableView {
+            Label(lifecycleProgressTitle, systemImage: "cube.transparent")
+        } description: {
+            Text(lifecycleProgressDetail)
+        } actions: {
+            ProgressView()
+                .controlSize(.small)
         }
     }
 
