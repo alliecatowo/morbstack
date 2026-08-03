@@ -114,12 +114,22 @@ final class PortForwardingTests: XCTestCase {
             [DockerExplicitTCPPortBinding(hostIP: "0.0.0.0", hostPort: 8080, containerPort: 80)])
     }
 
-    func testExplicitTCPCreateBindingsDoNotGuessDynamicOrAmbiguousTargets() {
+    func testExplicitTCPCreateBindingsDoNotGuessDynamicTargets() {
         let dynamic = Data(#"{"HostConfig":{"PortBindings":{"80/tcp":[{"HostPort":""}]}}}"#.utf8)
-        let ambiguous = Data(
-            #"{"HostConfig":{"PortBindings":{"80/tcp":[{"HostPort":"8080"}],"81/tcp":[{"HostPort":"8080"}]}}}"#.utf8)
 
         XCTAssertTrue(DockerPortPublicationPreflight.explicitTCPBindings(in: dynamic).isEmpty)
+    }
+
+    func testPreflightRejectsOneHostEndpointWithMultipleContainerTargets() {
+        let ambiguous = Data(
+            #"{"HostConfig":{"PortBindings":{"80/tcp":[{"HostIp":"0.0.0.0","HostPort":"8080"}],"81/tcp":[{"HostIp":"::","HostPort":"8080"}]}}}"#.utf8)
+
+        guard case .rejected(let message) =
+            DockerPortPublicationPreflight.inspectContainerCreate(body: ambiguous)
+        else {
+            return XCTFail("one loopback listener cannot safely represent two TCP targets")
+        }
+        XCTAssertTrue(message.contains("more than one container port"), message)
         XCTAssertTrue(DockerPortPublicationPreflight.explicitTCPBindings(in: ambiguous).isEmpty)
     }
 

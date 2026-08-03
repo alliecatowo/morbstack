@@ -136,6 +136,13 @@ public enum DockerPortPublicationPreflight {
         }
 
         var examined: Set<String> = []
+        // Morbstack has exactly one safe loopback listener per transport/host-port
+        // pair. Docker can describe its dual-stack representation more than once,
+        // but two different container targets cannot both be delivered through that
+        // one listener. Detect the latter before a recognized create reaches the
+        // Engine rather than allowing a successful create followed by a lossy event
+        // reconciliation that picks an arbitrary target.
+        var containerTargetByEndpoint: [String: Int] = [:]
         for containerPort in portBindings.keys.sorted() {
             let protocolName = networkProtocol(in: containerPort)
             guard let entries = portBindings[containerPort] as? [Any] else {
@@ -168,6 +175,15 @@ public enum DockerPortPublicationPreflight {
                 guard let port = Int(hostPort) else {
                     return .rejected(
                         message: "published \(protocolName.uppercased()) host port \(hostPort) is not a single port; dynamic and range allocations are not preflighted")
+                }
+
+                if let targetPort = containerPort(in: containerPort) {
+                    let endpoint = "\(protocolName)|\(port)"
+                    if let existingTarget = containerTargetByEndpoint[endpoint], existingTarget != targetPort {
+                        return .rejected(
+                            message: "published \(protocolName.uppercased()) host port \(hostPort) maps to more than one container port; Morbstack cannot deliver one loopback listener to multiple targets")
+                    }
+                    containerTargetByEndpoint[endpoint] = targetPort
                 }
 
                 let transport: HostPortPreflight.Transport = protocolName == "tcp" ? .tcp : .udp
