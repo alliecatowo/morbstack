@@ -24,6 +24,7 @@
 // single total.
 
 import SwiftUI
+import UniformTypeIdentifiers
 
 // MARK: - Sorting and filtering
 
@@ -91,6 +92,15 @@ struct BuildsRootView: View {
     @State private var showsPruneConfirmation = false
     @State private var pruneError: String?
     @State private var lastPrunedBytes: Int64?
+    @State private var showsBuildSheet = false
+    @State private var showsContextPicker = false
+    @State private var draftContextDirectory: URL?
+    @State private var draftTag = ""
+    @State private var buildPreparationError: String?
+    @State private var pendingBuildRequest: LocalBuildRequest?
+    @State private var buildPhase: BuildSheetPhase = .configuration
+    @State private var buildEvents: [BuildProgressEvent] = []
+    @State private var buildTask: Task<Void, Never>?
 
     private var records: [BuildCacheRecord] { model.buildCache }
 
@@ -101,6 +111,7 @@ struct BuildsRootView: View {
     private var unusedCount: Int { BuildCacheList.unused(records).count }
 
     private var subtitle: String {
+        if case .running(let request) = buildPhase { return "Building \(request.displayName)…" }
         if isPruning { return "Pruning unused cache…" }
 
         guard !records.isEmpty else {
@@ -132,6 +143,43 @@ struct BuildsRootView: View {
             .navigationSubtitle(subtitle)
             .searchable(text: $query, placement: .toolbar, prompt: "Description, type, ID")
             .toolbar { toolbarContent }
+            .sheet(isPresented: $showsBuildSheet, onDismiss: resetBuildSheetIfIdle) {
+                buildSheet
+            }
+            .fileImporter(
+                isPresented: $showsContextPicker,
+                allowedContentTypes: [.folder],
+                allowsMultipleSelection: false
+            ) { result in
+                switch result {
+                case .success(let urls):
+                    draftContextDirectory = urls.first
+                    buildPreparationError = nil
+                case .failure(let error):
+                    buildPreparationError = MorbErrorMessage.text(for: error)
+                }
+            }
+            .confirmationDialog(
+                pendingBuildRequest.map { "Build \($0.displayName)?" } ?? "Build image?",
+                isPresented: Binding(
+                    get: { pendingBuildRequest != nil && buildPhase == .configuration },
+                    set: { if !$0 { pendingBuildRequest = nil } }),
+                titleVisibility: .visible
+            ) {
+                Button("Build Image") {
+                    guard let request = pendingBuildRequest else { return }
+                    pendingBuildRequest = nil
+                    startBuild(request)
+                }
+                Button("Cancel", role: .cancel) { pendingBuildRequest = nil }
+            } message: {
+                if let pendingBuildRequest {
+                    Text(
+                        "Buildx will read \(pendingBuildRequest.contextDirectory.path), honor its .dockerignore "
+                            + "file, and run the Dockerfile's instructions inside Morbstack's Linux VM. "
+                            + "This build loads an image locally and does not push to a registry.")
+                }
+            }
             .confirmationDialog(
                 "Prune unused build cache?",
                 isPresented: $showsPruneConfirmation,
@@ -173,12 +221,27 @@ struct BuildsRootView: View {
             .onChange(of: selection) { _, newValue in
                 if newValue != nil { showsInspector = true }
             }
+            .onDisappear {
+                // A build has one client connection. Cancelling its task closes that
+                // client rather than leaving an unseen build running after navigation.
+                buildTask?.cancel()
+            }
     }
 
     // MARK: Toolbar
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
+        ToolbarItem(id: "builds.start", placement: .primaryAction) {
+            Button {
+                showsBuildSheet = true
+            } label: {
+                Image(systemName: "plus")
+            }
+            .accessibilityLabel("Build an image")
+            .help("Build an image from a local Dockerfile")
+            .disabled(isPruning)
+        }
         ToolbarItem(id: "builds.refresh", placement: .primaryAction) {
             Button {
                 Task { await refreshBuildCache() }
@@ -234,12 +297,14 @@ struct BuildsRootView: View {
             ContentUnavailableView {
                 Label("No Build Cache", systemImage: "hammer")
             } description: {
-                Text("Build an image, then refresh to see the BuildKit cache it created.")
+                Text(
+                    "Build an image to see the BuildKit cache it creates. Docker Engine exposes cache "
+                        + "records here, not a durable history of completed builds.")
             } actions: {
                 Button {
-                    copyBuildCommand()
+                    showsBuildSheet = true
                 } label: {
-                    Label("Copy Build Command", systemImage: "doc.on.doc")
+                    Label("Build Image", systemImage: "plus")
                 }
                 Button {
                     Task { await refreshBuildCache() }
@@ -364,6 +429,12 @@ struct BuildsRootView: View {
                     }
                 }
                 cacheMaintenance
+                Section("Build History") {
+                    Text(
+                        "This is a cache record, not one completed build. Docker Engine does not expose "
+                            + "a durable build-history API; Buildx history is separate builder metadata.")
+                        .foregroundStyle(.secondary)
+                }
             }
         } else {
             ContentUnavailableView(
@@ -432,10 +503,6 @@ struct BuildsRootView: View {
         }
     }
 
-    private func copyBuildCommand() {
-        MorbPasteboard.copy("docker build -t my-image .")
-    }
-
     private func selectFirstVisibleRecordIfNeeded() {
         guard let selection else {
             self.selection = visible.first?.id
@@ -446,4 +513,252 @@ struct BuildsRootView: View {
         }
     }
 
+    // MARK: Local build workflow
+
+    private var buildSheet: some View {
+        NavigationStack {
+            Group {
+                switch buildPhase {
+                case .configuration:
+                    buildConfigurationForm
+                case .running(let request):
+                    buildProgressForm(for: request)
+                case .succeeded(let request):
+                    buildCompletionForm(for: request)
+                case .cancelled(let request):
+                    buildCancelledForm(for: request)
+                case .failed(let request, let detail):
+                    buildFailureForm(for: request, detail: detail)
+                }
+            }
+            .navigationTitle("Build Image")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    if case .running = buildPhase {
+                        Button("Cancel Build") { buildTask?.cancel() }
+                    } else {
+                        Button("Done") { showsBuildSheet = false }
+                    }
+                }
+            }
+        }
+        .frame(minWidth: 520, minHeight: 360)
+        .interactiveDismissDisabled(isBuilding)
+    }
+
+    private var buildConfigurationForm: some View {
+        Form {
+            if !BuildRunner.isAvailable() {
+                Section {
+                    Label(
+                        "The bundled Docker and Buildx tools are required to build from the app.",
+                        systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Section("Build Context") {
+                LabeledContent("Folder") {
+                    HStack {
+                        Text(draftContextDirectory?.path ?? "No folder selected")
+                            .textSelection(.enabled)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .foregroundStyle(draftContextDirectory == nil ? .secondary : .primary)
+                        Spacer(minLength: 12)
+                        Button("Choose…") { showsContextPicker = true }
+                    }
+                }
+                Text("The selected folder must contain a root-level Dockerfile.")
+                    .foregroundStyle(.secondary)
+            }
+            Section("Image") {
+                TextField("Tag (optional)", text: $draftTag)
+                Text("Leave the tag blank to load an untagged local image. This workflow never pushes to a registry.")
+                    .foregroundStyle(.secondary)
+            }
+            if let buildPreparationError {
+                Section {
+                    Text(buildPreparationError)
+                        .foregroundStyle(.red)
+                }
+            }
+            Section {
+                Button("Build Image…") { prepareBuild() }
+                    .disabled(draftContextDirectory == nil || !BuildRunner.isAvailable())
+            } footer: {
+                Text(
+                    "Buildx creates the context using Docker's own .dockerignore and symlink rules, then "
+                        + "streams real BuildKit status here. Dockerfile instructions can run arbitrary code in the VM. "
+                        + "This initial workflow does not import Docker credential helpers, so private base images may fail.")
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    private func buildProgressForm(for request: LocalBuildRequest) -> some View {
+        Form {
+            Section("Build") {
+                LabeledContent("Image", value: request.displayName)
+                LabeledContent("Context") {
+                    Text(request.contextDirectory.path)
+                        .font(.system(.body, design: .monospaced))
+                        .textSelection(.enabled)
+                        .lineLimit(2)
+                }
+                ProgressView("Building image…")
+                Text("BuildKit does not provide a reliable total step count before it runs, so this progress indicator is indeterminate.")
+                    .foregroundStyle(.secondary)
+            }
+            Section("Recent Output") {
+                if buildEvents.isEmpty {
+                    Text("Waiting for BuildKit…")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(buildEvents.suffix(8)) { event in
+                        Text(event.message)
+                            .font(.system(.body, design: .monospaced))
+                            .foregroundStyle(event.isError ? .red : .primary)
+                            .lineLimit(2)
+                    }
+                }
+            }
+            Section {
+                Button("Cancel Build", role: .cancel) { buildTask?.cancel() }
+            } footer: {
+                Text("Cancel closes this build's client connection. Docker cancels a build when its client disconnects.")
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    private func buildCompletionForm(for request: LocalBuildRequest) -> some View {
+        Form {
+            Section {
+                Label("Build Completed", systemImage: "checkmark.circle")
+                LabeledContent("Image", value: request.displayName)
+                Text("The result was loaded into Morbstack's local image store. Images and build-cache records were refreshed.")
+                    .foregroundStyle(.secondary)
+            }
+            buildResultActions
+        }
+        .formStyle(.grouped)
+    }
+
+    private func buildCancelledForm(for request: LocalBuildRequest) -> some View {
+        Form {
+            Section {
+                Label("Build Canceled", systemImage: "xmark.circle")
+                LabeledContent("Image", value: request.displayName)
+                Text("The client connection was closed. Refresh after retrying to inspect any cache BuildKit kept before cancellation.")
+                    .foregroundStyle(.secondary)
+            }
+            buildResultActions
+        }
+        .formStyle(.grouped)
+    }
+
+    private func buildFailureForm(for request: LocalBuildRequest, detail: String) -> some View {
+        Form {
+            Section {
+                Label("Build Failed", systemImage: "exclamationmark.triangle")
+                LabeledContent("Image", value: request.displayName)
+                Text(detail)
+                    .font(.system(.body, design: .monospaced))
+                    .textSelection(.enabled)
+            }
+            buildResultActions
+        }
+        .formStyle(.grouped)
+    }
+
+    private var buildResultActions: some View {
+        Section {
+            Button("Build Again") {
+                guard let request = currentBuildRequest else { return }
+                startBuild(request)
+            }
+            Button("Build Another Image") { resetBuildSheet() }
+        }
+    }
+
+    private var currentBuildRequest: LocalBuildRequest? {
+        switch buildPhase {
+        case .configuration: return nil
+        case .running(let request), .succeeded(let request), .cancelled(let request), .failed(let request, _):
+            return request
+        }
+    }
+
+    private var isBuilding: Bool {
+        if case .running = buildPhase { return true }
+        return false
+    }
+
+    private func prepareBuild() {
+        guard let draftContextDirectory else { return }
+        do {
+            pendingBuildRequest = try LocalBuildRequest(contextDirectory: draftContextDirectory, tag: draftTag)
+            buildPreparationError = nil
+        } catch {
+            buildPreparationError = MorbErrorMessage.text(for: error)
+        }
+    }
+
+    private func startBuild(_ request: LocalBuildRequest) {
+        buildEvents = []
+        buildPreparationError = nil
+        buildPhase = .running(request)
+        buildTask?.cancel()
+        buildTask = Task {
+            do {
+                try await BuildRunner.run(request, socketPath: model.client.socketPath) { event in
+                    Task { @MainActor in appendBuildEvent(event) }
+                }
+                guard !Task.isCancelled else { return }
+                buildPhase = .succeeded(request)
+                await model.refreshAll()
+                await model.refreshBuildCache()
+                await model.refreshDisk()
+            } catch is CancellationError {
+                buildPhase = .cancelled(request)
+                await model.refreshAll()
+                await model.refreshBuildCache()
+                await model.refreshDisk()
+            } catch {
+                buildPhase = .failed(request, MorbErrorMessage.text(for: error))
+                await model.refreshBuildCache()
+                await model.refreshDisk()
+            }
+            buildTask = nil
+        }
+    }
+
+    private func appendBuildEvent(_ event: BuildProgressEvent) {
+        guard isBuilding else { return }
+        buildEvents.append(event)
+        if buildEvents.count > 32 { buildEvents.removeFirst(buildEvents.count - 32) }
+    }
+
+    private func resetBuildSheetIfIdle() {
+        guard !isBuilding else { return }
+        resetBuildSheet()
+    }
+
+    private func resetBuildSheet() {
+        buildTask?.cancel()
+        buildTask = nil
+        buildPhase = .configuration
+        buildEvents = []
+        pendingBuildRequest = nil
+        buildPreparationError = nil
+    }
+
+}
+
+private enum BuildSheetPhase: Equatable {
+    case configuration
+    case running(LocalBuildRequest)
+    case succeeded(LocalBuildRequest)
+    case cancelled(LocalBuildRequest)
+    case failed(LocalBuildRequest, String)
 }
