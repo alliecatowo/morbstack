@@ -44,9 +44,10 @@ guarantee.
 | --- | --- | --- |
 | Self-contained runtime and host CLI | `e329140` packages a signed, versioned runtime manifest plus upstream Docker, Compose, and Buildx in the app; first-run setup links only reviewed user-owned locations. | Implemented; clean-profile live verification pending. |
 | Direct Docker discovery and durable ownership | `e329140` creates `~/.docker/run/docker.sock` only when it is safely absent; `1dda777` adds an explicit signed per-user `SMAppService` LaunchAgent; `ddac4a3` offers it default-off in first run. | Implemented; registration and clean-profile live verification pending. |
-| Diagnostics and recovery | `e329140` adds an offline, bounded, redacted `morb diagnose`; `cacda50` exposes actual Kubernetes startup diagnostics and an escape path. | Implemented; support-bundle smoke checked; full real-VM recovery matrix pending. |
-| Operational UI | `9c0cee5` adds a reviewed, native BuildKit local-build workflow; `e066891` adds a native selected-images migration workflow; `6b3aa92` adds real container network statistics; `34f3353` adds pod log/event inspection; `acd0925` makes disk-capacity and resize-readiness states truthful. | Implemented pending the corresponding real-engine acceptance paths. The full-window Computer Use review is recorded for safe routes; no build, migration, or Kubernetes mutation was performed during it. |
-| Port behavior | The fixed-TCP Docker create/start path now retains a real loopback listener through a bounded create-ID response and exact-204 start handoff; the CLI preflight remains an advisory diagnostic. | Fixed supported TCP publications are race-resistant through the recognized exchange. Dynamic/range ports, UDP, opaque/name-based start handoff, and VM-stop persistence remain incomplete. |
+| Diagnostics and recovery | `e329140` adds an offline, bounded, redacted `morb diagnose`; `cacda50` exposes actual Kubernetes startup diagnostics and an escape path; `2e44f05` adds the same `MorbDiagnostics` collector to the native engine-error state. The app asks for an explicit parent folder, never starts or contacts Docker/the daemon during collection, tells the person to review the bundle, and offers Finder reveal rather than upload/share. | Implemented; support-bundle smoke checked. The native recovery route has source/HIG evidence but awaits serialized real-window acceptance, and the full real-VM recovery matrix remains pending. |
+| Operational UI | `9c0cee5` adds a reviewed, native BuildKit local-build workflow; `e066891` adds a native selected-images migration workflow; `d77b81a` makes the native Migration inspector show the read-only named-volume eligibility plan; `6b3aa92` adds real container network statistics; `34f3353` adds pod log/event inspection; `acd0925` makes disk-capacity and resize-readiness states truthful. | Implemented pending the corresponding real-engine acceptance paths. The full-window Computer Use review is recorded for safe routes; no build, migration, or Kubernetes mutation was performed during it. |
+| Migration transfer boundary | `MigrationReadOnlyPlanner` reads image and named-volume inventories without mutation. `ImageMigrationTransaction` supports the selected-image native/CLI workflow; `bd7d7d0` adds `VolumeMigrationTransaction`, used by the separately confirmed `morb migrate volumes` CLI path. | Mechanically implemented pending a real two-engine matrix. Volume transfer is selected missing `local` volumes only, with fresh destination checks, separate helper-image network consent, helper cleanup, and a durable report; it never overwrites, merges, deletes, or inspects existing destination contents. The native app intentionally shows volume eligibility only, not a volume-copy action. |
+| Port behavior | The fixed-TCP Docker create/start path retains a real loopback listener through a bounded create-ID response and exact-204 handoff. `46d0b23` adds restart-safe recovery: after VM/daemon shutdown deliberately releases the listener, a bodyless canonical-full-ID start can inspect the same stopped container's fixed loopback TCP `HostConfig.PortBindings` and atomically re-reserve/associate it before relaying the unchanged start. | Fixed supported TCP publications are race-resistant through the recognized exchange, including the bounded exact-ID restart recovery path. Dynamic/range ports, UDP synchronous leases, opaque framing, name/ID-prefix starts, unsupported inspect shapes, and live VM/Docker acceptance evidence remain incomplete. |
 
 ## The parity program
 
@@ -75,28 +76,32 @@ guarantee.
 ### P1 — make the daily development loop reliable
 
 1. Complete Docker publication parity beyond the fixed-TCP create/start lease: execute
-   the live evidence for Phase 1's explicit-empty TCP allocation transaction, then add
-   `-P`, ranges, dynamic UDP, and a persistence/recovery design for VM-unavailable
-   intervals while preserving loopback-safe defaults. UDP already uses a real framed
-   datagram relay after Docker confirms a concrete publication, but deliberately has
-   no invented reservation. The dynamic-port boundary and delivery constraints are in
-   [`dynamic-port-allocation.md`](dynamic-port-allocation.md).
+   the live evidence for Phase 1's explicit-empty TCP allocation transaction and the
+   exact-ID post-VM-stop TCP re-reservation path, then add `-P`, ranges, and dynamic
+   UDP while preserving loopback-safe defaults. The implementation deliberately does
+   not retain a listener while no guest exists; names/prefixes and opaque/unsupported
+   start shapes remain event-reconciled rather than claiming synchronous recovery.
+   UDP already uses a real framed datagram relay after Docker confirms a concrete
+   publication, but deliberately has no invented reservation. The dynamic-port
+   boundary and delivery constraints are in [`dynamic-port-allocation.md`](dynamic-port-allocation.md).
 2. Turn unshared/misresolved bind sources into clear Docker errors, then
    ship FSEvents-to-inotify forwarding or an explicit synced-share tier.
 3. Add an end-to-end grow-only disk expansion transaction (the current guest exposes
    an explicit `disk_resize: unavailable` capability and the daemon has a read-only
    stop/preflight diagnostic, but no host image is resized), truthful idle-stop wording
-   until genuine suspend/restore is demonstrated, and a redacted `morb diagnose` bundle
-   with structured VM/DNS/share/forwarder/Kubernetes health.
+   until genuine suspend/restore is demonstrated, and live acceptance for the existing
+   redacted diagnostics bundle across VM/DNS/share/forwarder/Kubernetes failure states.
 4. Finish the remaining operational app workflows: exercise the implemented
    local BuildKit workflow against a clean engine; complete stack actions,
    container exec/debug, safe image/volume export and inspection, and
    Kubernetes exec/port-forward with reasons and recovery. Container
    logs/stats and selected-pod logs/events already use real read-only APIs.
 5. Finish migration beyond the implemented native selected-image
-   preparation/review/progress/verification/report workflow: add separately
-   proven volume transfer, rollback guidance, and explicit credential
-   remediation.
+   preparation/review/progress/verification/report workflow and selected-volume CLI
+   transaction: run real source/destination acceptance for the local-volume archive
+   path, add a native reviewed volume-transfer workflow only after that evidence,
+   then add bind-mount transfer, resumable cancellation, rollback guidance, and
+   explicit credential remediation.
 
 ### P2 — exceed the competing native experience
 

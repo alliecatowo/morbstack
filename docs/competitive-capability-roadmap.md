@@ -40,9 +40,10 @@ larger feature checklist.
 | Native operations app | `MorbstackAppCore` has real containers, stacks, images, volumes, networks, builds, Kubernetes, disk, and migration routes; `DockerClient.swift` performs real lifecycle, log, stats, inspection, and prune API calls. | Implemented surface. It is not a reason to defer behavioral gaps below. |
 | Self-contained CLI, standard plugins, context, direct discovery, and opt-in service | `CliPlugins.swift`, `MorbCliInstallation.swift`, `MorbDockerContext.swift`, `BackgroundService.swift`, and `MorbSetupVerification.swift`. The service is a signed per-user `SMAppService` LaunchAgent, not a root daemon. | Implemented pending one complete, fresh-user proof: install → selected integrations → service → engine start → Docker `/_ping` → Compose/buildx/Testcontainers/IDE discovery. |
 | Kubernetes and recovery | `guest/morbinit/src/k8s.rs`, `K8sRuntime.swift`, the Kubernetes route, and `k8s-diagnose`. | Opt-in cluster and diagnosis exist. Missing are safe workload-level logs, events, exec, and port-forward operations with clear cancellation/recovery. |
-| Migration | `MigrationReadOnlyPlanner` derives a read-only image comparison and conservative named-volume eligibility from the two Engine inventories. `ImageMigrationTransaction` and `morb migrate run` execute an explicitly selected images-only transfer with one confirmation, typed progress, post-load image-ID verification, and a durable report. `morb migrate volumes` remains a separately confirmed helper-container CLI path; the native app route currently exposes images only. | Images-only transaction implemented pending real-engine acceptance. The volume eligibility plan is read-only: only missing `local` volumes are eligible, and existing destination contents are not inspected. A reusable volume transaction, native workflow, bind mounts, containers, CLI configuration, credentials, registry/provenance policy, resumable cancellation, and automatic rollback remain deliberately out of scope. |
+| Diagnostics-bundle recovery | `MorbDiagnostics` and `morb diagnose` collect a bounded, redacted local bundle. `DiagnosticsBundleWorkflow` makes the same collector a native engine-error recovery action: a person picks the parent folder, collection does not start or contact Docker/the daemon, and success points them to the reviewable bundle in Finder. | Implemented mechanics and local smoke evidence exist; full real-VM recovery and real-window acceptance remain pending. The app does not upload, share, or claim an in-flight cancel contract. |
+| Migration | `MigrationReadOnlyPlanner` derives independent read-only image and named-volume comparisons. The native Migration inspector shows eligible, existing-destination, and unsupported-driver volume results without a helper container. `ImageMigrationTransaction` backs the reviewed native selected-image flow and `morb migrate run`; `VolumeMigrationTransaction` backs the separately confirmed `morb migrate volumes` CLI flow. | Implemented pending clean source/destination-engine acceptance. Volume execution is limited to selected missing `local` volumes: it rechecks before creation, never reads/merges/replaces/deletes an existing destination, needs separate consent before a missing helper image is pulled, and writes a durable report. The native route remains volume-inspection-only; bind mounts, containers, credentials/provenance policy, resumable cancellation, and automatic rollback remain out of scope. |
 | Filesystem sharing | VirtioFS same-path sharing and share inspection are implemented; [`sharing.md`](sharing.md) records that host edits do not emit guest inotify events. | Day-to-day hot reload remains broken. Silent unshared/misresolved source behavior is still too dangerous. |
-| Published ports | `PortForwarder.swift` forwards TCP loopback. For a normally encoded fixed supported TCP `docker run -p <port>:...`, `DockerProxy` binds and retains the listener before create, associates it from a bounded standard create response, and hands it off before an exact start `204` reaches the client. After a VM/daemon stop releases those listeners, a bodyless start by the canonical full container ID may prove the stopped container's fixed loopback TCP `HostConfig.PortBindings` by inspect and atomically rebuild the lease before the original start reaches dockerd. Explicit UDP and unsupported host-address publishes reject instead of pretending to publish. | Dynamic/ranged allocation, UDP synchronous leases, opaque/chunked create or start framing, starts by name/ID prefix, unsupported/ambiguous inspect documents, and live VM/Docker acceptance evidence remain absent. |
+| Published ports | `PortForwarder.swift` forwards TCP loopback. For a normally encoded fixed supported TCP `docker run -p <port>:...`, `DockerProxy` binds and retains the listener before create, associates it from a bounded standard create response, and hands it off before an exact start `204` reaches the client. A VM/daemon stop deliberately releases listeners while no guest service exists; after recovery, a bodyless start by the canonical full container ID can inspect the same stopped container's fixed loopback TCP `HostConfig.PortBindings` and atomically rebuild/associate its lease before the unchanged start reaches dockerd. Explicit UDP and unsupported host-address publishes reject instead of pretending to publish. | Dynamic/ranged allocation, UDP synchronous leases, opaque/chunked create or start framing, starts by name/ID prefix, unsupported/ambiguous inspect documents, and live VM/Docker acceptance evidence remain absent. |
 | Disk management | `DiskCapacity.swift` supplies the RAW-image facts. `MorbDiskResize` combines those facts with VM state and the guest's explicit `disk_resize` capability; the current guest reports `unavailable`. | No host image mutation occurs. A grow transaction still needs an explicit target, stopped-VM ownership, retained prior-capacity journal, guest filesystem identity/resize, and post-resize proof. Shrinking remains unsupported. |
 | Debug toolbox | `MorbScan/DebugToolboxPlan.swift` and `morb debug check` expose static readiness; `morb debug [plan] <container>` makes only `GET /containers/{id}/json` and reports its non-actions. | Read-only foundation. A verified pinned asset, consented acquisition/update policy, isolated namespace/cleanup policy, and interactive PTY bridge are still required before an executor or app action exists. |
 | Local domains, HTTPS, Finder-native files, Linux machines | Explicitly absent from current runtime/app implementation; see [`product-audit.md`](product-audit.md). | Differentiators, not P0 compatibility gates. They need a security and macOS-capability design before UI work. |
@@ -90,16 +91,23 @@ that is not actually usable.
 **Slice A — publication contract:** reserve fixed TCP host endpoints
 transactionally against Docker create/start, retain the listener/lease until
 container removal or failed start, and relay UDP as bounded event-confirmed
-datagram flows. Return a Docker-compatible conflict before the TCP container is
-reported running; retain a readable diagnostic for the app and `morb status`.
+datagram flows. A listener is deliberately released while the VM is down; the
+next bodyless canonical-full-ID start can inspect and atomically reconstruct a
+fully understood stopped-container TCP lease before the unchanged request reaches
+dockerd. Return a Docker-compatible conflict before the TCP container is reported
+running; retain a readable diagnostic for the app and `morb status`.
 
 **Slice B — share contract:** canonicalize macOS source paths before guest
 mapping, validate them against the configured share set, and reject a missing
 or unshared bind source through the Engine-facing path. The result must be a
 clear error, never an empty guest directory.
 
-**Acceptance:** race a bound TCP and UDP loopback port against a container
-start; both must either forward or fail synchronously. Exercise a file bind
+**Acceptance:** race a bound fixed TCP loopback port against a container start;
+it must either forward or fail synchronously. Verify fixed UDP only after Docker
+reports its concrete endpoint, with real datagram request/reply behavior rather than
+a TCP approximation. Stop the VM after a fixed TCP container stops, restart it, then
+start by canonical full ID: the host listener must be reclaimed before the Engine
+returns `204`, work immediately afterwards, and release on destroy. Exercise a file bind
 under `/tmp`, `/private/tmp`, a symlinked source, and an unshared source; each
 must bind the intended file or fail plainly.
 
@@ -135,9 +143,13 @@ Finish workflows rather than adding dashboard panels.
 
 1. **Migration transaction:** selected local-image planning, confirmation,
    typed progress, report, and image-ID verification exist in `MorbMigrate`.
-   Complete separately proven volume/bind-mount transfer, resumable cancellation,
+   The selected-volume CLI transaction is also implemented for missing
+   local-driver volumes, with fresh preflight, explicit helper-image network consent,
+   durable per-volume results, and no overwrite/merge path. Run its real two-engine
+   acceptance matrix before widening it; bind-mount transfer, resumable cancellation,
    credential/provenance remediation, and rollback *guidance* that never destroys
-   the source runtime. Keep the app read-only until each shared primitive exists.
+   the source runtime remain. Keep the app's volume side inspection-only until its
+   own reviewed transfer workflow is implemented and accepted.
 2. **Debug toolbox:** the read-only readiness and target-plan boundary exists;
    ship its executor only with a pinned, signed toolbox image, provenance,
    expiry/update policy, namespace/cleanup rules, and a real interactive PTY
