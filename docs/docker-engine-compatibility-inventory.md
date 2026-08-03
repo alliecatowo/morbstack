@@ -124,8 +124,10 @@ documented in [dynamic-port-allocation.md](dynamic-port-allocation.md): compatib
 TCP bindings reserve a real Mac loopback listener before the Engine receives the
 create; fixed TCP and exact empty/`"0"` dynamic TCP bindings have different bounded
 paths; explicit IPv4/default UDP retains an event-confirmed path rather than a held
-dynamic lease. Ranges, broad/ambiguous shapes, dynamic UDP, and non-loopback external
-publication are not silently presented as supported.
+dynamic lease. A normal Docker CLI equal-length fixed TCP range is normalized into
+those same individual concrete bindings, so it takes the fixed-TCP atomic lease path.
+Raw dynamic host-port ranges, broad/ambiguous shapes, dynamic UDP, and non-loopback
+external publication are not silently presented as supported.
 
 Docker documents `-P` as publishing every exposed port to a random host port; it is
 not a syntactic alias for a request-visible `-p <container-port>` binding. See the
