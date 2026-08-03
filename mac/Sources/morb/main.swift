@@ -63,6 +63,13 @@ let usage = """
                              Read one selected Pod through Morbstack's local API
       k8s describe node <name>
                              Read one selected Node through Morbstack's local API
+      k8s port-forward start <namespace> <pod> <uid> <pod-port>
+                             Start one selected-Pod loopback TCP lease; add
+                             --container <name> and/or --local-port <port> when needed
+      k8s port-forward status
+                             Show the one current selected-Pod loopback TCP lease
+      k8s port-forward cancel <lease>
+                             Cancel only that exact selected-Pod lease
       k8s enable             Install the payload if needed, then start the cluster
       k8s disable            Stop the cluster; the payload and its state are kept
       k8s kubeconfig         Write ~/.morbstack/kubeconfig and say how to use it
@@ -1674,7 +1681,7 @@ case "k8s":
     // that `MorbCommandPolicy` can let `enable` start a daemon while `status`
     // stays an observation that does not change what it observes.
     let action = extraArguments.first(where: { !$0.hasPrefix("-") }) ?? "status"
-    let known = ["status", "diagnose", "describe", "enable", "disable", "kubeconfig"]
+    let known = ["status", "diagnose", "describe", "port-forward", "enable", "disable", "kubeconfig"]
     guard known.contains(action) else {
         fail("unknown k8s subcommand `\(action)`; expected one of \(known.joined(separator: ", "))", code: 2)
     }
@@ -1778,6 +1785,34 @@ case "k8s":
         }
     }
 
+    /// The daemon returns only the operational fact of its one owned loopback lease.
+    /// It deliberately never prints a kubeconfig path, helper command, process ID,
+    /// private credential, or arbitrary Kubernetes object data.
+    func renderK8sPodPortForward(_ data: [String: AnyCodableValue]) {
+        guard data["active"] == .bool(true) else {
+            out("[--] no selected-Pod port-forward is active")
+            return
+        }
+        let namespace = data["namespace"]?.displayString ?? "-"
+        let pod = data["pod"]?.displayString ?? "-"
+        out("[ok] forwarding selected Pod \(namespace)/\(pod)")
+        var rows: [(String, String)] = [
+            ("listener", "\(data["local_address"]?.displayString ?? "127.0.0.1"):\(data["local_port"]?.displayString ?? "-")"),
+            ("Pod TCP port", data["pod_port"]?.displayString ?? "-"),
+        ]
+        if let container = data["container"], container != .null {
+            rows.append(("selected container", container.displayString))
+        }
+        if let lease = data["lease"]?.displayString, !lease.isEmpty, lease != "-" {
+            rows.append(("lease", lease))
+            printAligned(rows)
+            out("\n  Cancel only this lease with:")
+            out("    morb k8s port-forward cancel \(lease)")
+        } else {
+            printAligned(rows)
+        }
+    }
+
     switch action {
     case "status", "enable", "disable":
         let response = callDaemon(DaemonRequest(cmd: "k8s-\(action)"), timeout: 300)
@@ -1809,6 +1844,98 @@ case "k8s":
         }
         let response = callDaemon(DaemonRequest(cmd: "k8s-describe", args: arguments), timeout: 30)
         finish(response) { data in renderK8sDescription(data) }
+
+    case "port-forward":
+        let nested = Array(extraArguments.dropFirst())
+        guard let operation = nested.first else {
+            fail(
+                "usage: morb k8s port-forward start <namespace> <pod> <uid> <pod-port> [--container <name>] [--local-port <port>]\n"
+                    + "       morb k8s port-forward status\n"
+                    + "       morb k8s port-forward cancel <lease>",
+                code: 2)
+        }
+        switch operation {
+        case "status":
+            guard nested.count == 1 else {
+                fail("usage: morb k8s port-forward status", code: 2)
+            }
+            let response = callDaemon(DaemonRequest(cmd: "k8s-port-forward-status"), timeout: 5)
+            finish(response) { data in renderK8sPodPortForward(data) }
+
+        case "cancel":
+            guard nested.count == 2,
+                  let lease = UUID(uuidString: nested[1])
+            else {
+                fail("usage: morb k8s port-forward cancel <lease>", code: 2)
+            }
+            let response = callDaemon(
+                DaemonRequest(
+                    cmd: "k8s-port-forward-cancel",
+                    args: ["lease": lease.uuidString.lowercased()]),
+                timeout: 10)
+            finish(response) { data in
+                let lease = data["lease"]?.displayString ?? "the requested lease"
+                if data["cancelled"] == .bool(true) {
+                    out("[ok] cancelled selected-Pod port-forward lease \(lease)")
+                } else {
+                    out("[--] selected-Pod port-forward lease \(lease) is not current")
+                }
+            }
+
+        case "start":
+            var positional: [String] = []
+            var container: String?
+            var localPort: String?
+            var index = 1
+            while index < nested.count {
+                let argument = nested[index]
+                switch argument {
+                case "--container":
+                    guard container == nil, index + 1 < nested.count,
+                          !nested[index + 1].hasPrefix("-")
+                    else {
+                        fail("`--container` requires one nonempty value and may be specified once", code: 2)
+                    }
+                    container = nested[index + 1]
+                    index += 2
+                case "--local-port":
+                    guard localPort == nil, index + 1 < nested.count,
+                          !nested[index + 1].hasPrefix("-")
+                    else {
+                        fail("`--local-port` requires one decimal TCP port and may be specified once", code: 2)
+                    }
+                    localPort = nested[index + 1]
+                    index += 2
+                default:
+                    guard !argument.hasPrefix("-") else {
+                        fail("unknown k8s port-forward option `\(argument)`", code: 2)
+                    }
+                    positional.append(argument)
+                    index += 1
+                }
+            }
+            guard positional.count == 4 else {
+                fail(
+                    "usage: morb k8s port-forward start <namespace> <pod> <uid> <pod-port> [--container <name>] [--local-port <port>]",
+                    code: 2)
+            }
+            var args: [String: String] = [
+                "namespace": positional[0],
+                "pod": positional[1],
+                "uid": positional[2],
+                "pod_port": positional[3],
+            ]
+            if let container { args["container"] = container }
+            if let localPort { args["local_port"] = localPort }
+            let response = callDaemon(
+                DaemonRequest(cmd: "k8s-port-forward-start", args: args), timeout: 45)
+            finish(response) { data in renderK8sPodPortForward(data) }
+
+        default:
+            fail(
+                "unknown k8s port-forward operation `\(operation)`; expected one of start, status, cancel",
+                code: 2)
+        }
 
     default:  // kubeconfig
         let merge = extraArguments.contains("--merge")

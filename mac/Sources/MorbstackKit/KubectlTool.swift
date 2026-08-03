@@ -4,11 +4,12 @@
 import CryptoKit
 import Foundation
 
-/// The one host-side Kubernetes helper a future selected-Pod port-forward may use.
+/// The one host-side Kubernetes helper the daemon-owned selected-Pod port-forward
+/// boundary may use.
 ///
 /// This is deliberately a packaging and provenance boundary, not a port-forward
-/// implementation. No current app or CLI path invokes it. When a coordinator is
-/// introduced, it must call ``bundledKubectl()`` before it creates a listener or a
+/// implementation. `morb k8s port-forward start` reaches it only through the
+/// coordinator, which calls ``bundledKubectl()`` before it creates a listener or a
 /// temporary credential file. The resolver admits only the exact, hash-pinned file
 /// carried by this app (or the equivalent checked-out build input); it never searches
 /// `PATH`, accepts a user's `kubectl`, or discovers a kubeconfig.

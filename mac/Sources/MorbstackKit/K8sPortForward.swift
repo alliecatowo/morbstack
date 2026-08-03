@@ -269,10 +269,26 @@ public final class K8sPodPortForwardCoordinator: @unchecked Sendable {
     /// a no-op: a former inspector must not terminate a different selected Pod's
     /// newer forward.
     public func cancel(_ lease: K8sPodPortForwardLease) {
+        _ = cancel(id: lease.id)
+    }
+
+    /// Cancels only a current lease with this exact opaque ID. Returning `false` is
+    /// intentionally not an error: a selection owner may be cleaning up after the
+    /// helper already exited, and it must never turn that stale cleanup into a
+    /// cancellation of a later selection.
+    @discardableResult
+    public func cancel(id: UUID) -> Bool {
         lock.lock()
-        let run = current?.id == lease.id ? current : nil
+        let run: Run?
+        if let current, current.id == id, !current.cancelled, !current.exited {
+            run = current
+        } else {
+            run = nil
+        }
         lock.unlock()
-        if let run { stop(run, reason: "cancelled explicitly") }
+        guard let run else { return false }
+        stop(run, reason: "cancelled explicitly")
+        return true
     }
 
     /// Cancels the one current lease, if any. Daemon lifecycle, selection, and route

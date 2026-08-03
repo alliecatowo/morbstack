@@ -347,9 +347,9 @@ public final class K8sManager {
     /// The loopback forward for the API server. Public so ``Daemon`` can start and
     /// stop it alongside the port forwarder as the VM comes and goes.
     public let forward: K8sAPIServerForward
-    /// The daemon-owned selected-Pod port-forward session boundary. It has no IPC or
-    /// app control yet; a future selected-row action must call the explicit start and
-    /// cancel methods below, never shell out from the UI.
+    /// The daemon-owned selected-Pod port-forward session boundary. IPC and `morb`
+    /// use the explicit methods below; a future selected-row action must use those
+    /// same daemon methods rather than shelling out from the UI.
     public let podPortForward: K8sPodPortForwardCoordinator
 
     public init(vm: VMManager, log: MorbLog, payloadDirectory: URL = MorbPaths.k8sPayloadDirectory) {
@@ -461,6 +461,20 @@ public final class K8sManager {
     /// cancel a later selection's forward.
     public func cancelPodPortForward(_ lease: K8sPodPortForwardLease) {
         podPortForward.cancel(lease)
+    }
+
+    /// Cancels a lease only when the caller presents the exact opaque ID returned at
+    /// start. A stale ID is a truthful no-op, so an old CLI invocation can never
+    /// terminate a newly selected Pod's replacement forward.
+    @discardableResult
+    public func cancelPodPortForward(id: UUID) -> Bool {
+        podPortForward.cancel(id: id)
+    }
+
+    /// The one non-secret lease fact the daemon may expose to an IPC/CLI status
+    /// query. It neither probes Kubernetes nor creates a listener.
+    public var activePodPortForwardLease: K8sPodPortForwardLease? {
+        podPortForward.activeLease
     }
 
     /// VM, API-forward, route, and selection owners use this to end a current lease.

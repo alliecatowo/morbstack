@@ -43,6 +43,10 @@ morb k8s diagnose    # read-only recovery guidance from guest and daemon facts
 morb k8s kubeconfig  # writes ~/.morbstack/kubeconfig
 morb k8s describe pod default hello-web-6d9c8f7b7-x4n2q
 morb k8s describe node morbstack-vm
+morb k8s port-forward status
+morb k8s port-forward start <namespace> <pod> <uid> <pod-port> \
+  [--container <name>] [--local-port <port>]
+morb k8s port-forward cancel <lease>
 morb k8s disable      # stops the cluster; the payload and its data are kept
 ```
 
@@ -109,19 +113,50 @@ summary counts. A log error and an event error are shown separately in the
 inspector because either Kubernetes subresource can be unavailable while the
 pod list remains useful.
 
-This is intentionally an inspection feature, not workload control. It cannot
-create, delete, restart, edit, exec into, attach to, or port-forward a
-workload; it does not follow logs or request a previous container's logs.
-Kubernetes controls log rotation and Event retention, so an empty result means
-only that no retained data was returned at that moment.
+This native app view is intentionally an inspection feature, not workload
+control. It cannot create, delete, restart, edit, exec into, attach to, or
+port-forward a workload; it does not follow logs or request a previous
+container's logs. The separate daemon-owned CLI boundary below is the sole
+source-level exception proposed for one selected Pod TCP lease. Kubernetes
+controls log rotation and Event retention, so an empty result means only that
+no retained data was returned at that moment.
 
 ### Planned selected-Pod local port-forward
 
-**Status: source-level coordinator only; not tested or released.** This is the
-only port-forward capability proposed for Morbstack. It is deliberately a
-small local-development escape hatch, not a general Kubernetes proxy and not a
-replacement for a person's `kubectl` installation. `K8sManager` now owns the
-bounded session model, but no daemon IPC, CLI, or app action can invoke it.
+**Status: source-level coordinator, daemon IPC, and `morb` CLI only; not tested
+or released.** This is the only port-forward capability proposed for
+Morbstack. It is deliberately a small local-development escape hatch, not a
+general Kubernetes proxy and not a replacement for a person's `kubectl`
+installation. `K8sManager` owns the bounded session model. The CLI is its
+explicit owner while there is no native row action:
+
+```sh
+# The UID must be copied from the exact currently selected Pod, not inferred
+# from its reusable name. Omitting --local-port asks for a loopback ephemeral port.
+morb k8s port-forward start <namespace> <pod> <uid> <pod-port> \
+  [--container <name>] [--local-port <port>]
+morb k8s port-forward status
+morb k8s port-forward cancel <lease>
+```
+
+`start` accepts exactly one namespace/name/UID tuple, one decimal Pod TCP port,
+and optional selected-container and decimal local TCP port fields. The daemon
+does not accept arbitrary `kubectl` arguments, resource selectors, API paths,
+transport choices, remote bind addresses, port ranges, or a missing UID. It
+returns only an opaque lease ID and the non-secret loopback target facts;
+`cancel` needs that exact lease ID and a stale lease is a no-op. `status` only
+reads the in-memory lease and never probes Kubernetes or starts an engine.
+
+`start` is non-auto-starting: it requires a currently running Morbstack VM and
+a Ready Kubernetes runtime. It does not enable Kubernetes, generate a
+kubeconfig, or publish the Kubernetes API just because a command asks for a
+Pod forward.
+
+There is no native UI action yet, so this source-level CLI boundary does not
+claim that a command-line caller is the app's current visual selection. It
+still revalidates the exact live namespace/name/UID and requested running
+container before and after helper readiness; a reused Pod name cannot be
+adopted.
 
 The source tree now records the exact Darwin arm64 `kubectl` release that a
 future coordinator may use, and can hash-verify it if a release pipeline
@@ -131,18 +166,19 @@ by default and is absent from the current app, so this source boundary is
 unavailable in the shipped bundle. A missing, symlinked, non-executable, or
 hash-mismatched helper is an explicit unavailable result; it will not fall
 back to `PATH`, a user-installed `kubectl`, `KUBECONFIG`, or `~/.kube/config`.
-Without the verified helper and an explicit future UI/IPC action, it creates no
-listener, child process, credential material, or practical port-forward
-capability.
+Without the verified helper, the explicit daemon/CLI boundary fails as
+unavailable before it creates a listener, child process, credential material,
+or practical port-forward capability. It has no PATH fallback.
 
-The daemon will accept a request only for the Pod currently selected in
-Morbstack: its namespace, DNS-style name, and current Kubernetes UID, plus one
-validated TCP Pod port and a requested loopback TCP port. It will reject
-Services, Deployments, label selectors, arbitrary API paths, UDP, remote
-addresses, port ranges, `0.0.0.0`, an unselected Pod, and any request that does
-not identify the exact selected UID. The listener will bind only
-`127.0.0.1`; choosing an ephemeral local port is permitted, but it will never
-publish a LAN, VPN, or wildcard listener.
+The daemon will accept a request only for the exact Pod identity supplied by
+the selected CLI operation: its namespace, DNS-style name, and current
+Kubernetes UID, plus one validated TCP Pod port and a requested loopback TCP
+port. It will reject Services, Deployments, label selectors, arbitrary API
+paths, UDP, remote addresses, port ranges, `0.0.0.0`, and any request that does
+not identify the exact selected UID. A future native action must submit its
+current visual selection through this same contract. The listener will bind
+only `127.0.0.1`; choosing an ephemeral local port is permitted, but it will
+never publish a LAN, VPN, or wildcard listener.
 
 The daemon owns the whole protocol. It will invoke only Morbstack's bundled,
 pinned `kubectl` binary by absolute path with a fixed port-forward argument

@@ -237,6 +237,9 @@ public enum DaemonUpdateCompatibility {
     private static let restartRequiredCommands: [String: String] = [
         "k8s-diagnose": "Kubernetes diagnosis",
         "k8s-describe": "Kubernetes resource descriptions",
+        "k8s-port-forward-start": "Kubernetes Pod port forwarding",
+        "k8s-port-forward-status": "Kubernetes Pod port-forward status",
+        "k8s-port-forward-cancel": "Kubernetes Pod port-forward cancellation",
     ]
 
     /// The user-facing result of detecting a known newer-client/older-daemon mismatch.

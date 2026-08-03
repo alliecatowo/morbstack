@@ -416,6 +416,36 @@ public final class Daemon {
         if request.cmd == "k8s-enable" {
             return enableKubernetes()
         }
+        // A lease is daemon-process-local. These two operations need neither a
+        // running VM nor a Kubernetes API query: status can truthfully say that no
+        // child exists after a VM stop, and cancellation remains able to clean up a
+        // child whose VM transition raced the ordinary lifecycle hooks. Neither can
+        // start a daemon or a VM through the command policy.
+        if request.cmd == "k8s-port-forward-status" {
+            guard request.args == nil || request.args?.isEmpty == true else {
+                return .failure("k8s-port-forward-status does not accept arguments")
+            }
+            if let lease = k8s.activePodPortForwardLease {
+                return .success(Self.podPortForwardFields(for: lease))
+            }
+            return .success(["active": .bool(false)])
+        }
+        if request.cmd == "k8s-port-forward-cancel" {
+            markBusy()
+            let args = request.args ?? [:]
+            guard Set(args.keys) == Set(["lease"]),
+                  let rawLease = args["lease"],
+                  let lease = UUID(uuidString: rawLease)
+            else {
+                return .failure(
+                    "k8s-port-forward-cancel requires the exact lease ID returned by k8s-port-forward-start")
+            }
+            let cancelled = k8s.cancelPodPortForward(id: lease)
+            return .success([
+                "cancelled": .bool(cancelled),
+                "lease": .string(lease.uuidString.lowercased()),
+            ])
+        }
         guard vm.state == .running else {
             return .failure(
                 "the VM is \(vm.state.token). Kubernetes needs a running engine — "
@@ -457,6 +487,43 @@ public final class Daemon {
                 }
                 let reference = K8s.ResourceReference(kind: kind, name: name, namespace: namespace)
                 return .success(try k8s.describe(reference).ipcFields)
+            case "k8s-port-forward-start":
+                markBusy()
+                let args = request.args ?? [:]
+                let allowed = Set(["namespace", "pod", "uid", "container", "local_port", "pod_port"])
+                guard Set(args.keys).isSubset(of: allowed),
+                      let namespace = args["namespace"], !namespace.isEmpty,
+                      let pod = args["pod"], !pod.isEmpty,
+                      let uid = args["uid"], !uid.isEmpty,
+                      let rawPodPort = args["pod_port"],
+                      let podPort = Self.strictPort(rawPodPort)
+                else {
+                    return .failure(
+                        "k8s-port-forward-start requires exact namespace, pod, uid, and decimal pod_port arguments")
+                }
+                let container = args["container"]
+                if container?.isEmpty == true {
+                    return .failure("k8s-port-forward-start rejects an empty container name")
+                }
+                let localPort: Int?
+                if let rawLocalPort = args["local_port"] {
+                    guard let parsed = Self.strictPort(rawLocalPort) else {
+                        return .failure(
+                            "k8s-port-forward-start local_port must be a decimal TCP port from 1 through 65535")
+                    }
+                    localPort = parsed
+                } else {
+                    localPort = nil
+                }
+                let lease = try k8s.startPodPortForward(
+                    K8sPodPortForwardRequest(
+                        namespace: namespace,
+                        pod: pod,
+                        uid: uid,
+                        container: container,
+                        localPort: localPort,
+                        podPort: podPort))
+                return .success(Self.podPortForwardFields(for: lease))
             case "k8s-disable":
                 markBusy()
                 let status = try k8s.disable()
@@ -490,6 +557,39 @@ public final class Daemon {
         } catch {
             return .failure("\(error)")
         }
+    }
+
+    /// Rejects ambiguous spellings before a request reaches the coordinator. The
+    /// CLI and IPC use only canonical decimal TCP ports: no zero, signs, spaces,
+    /// leading zeroes, ranges, or transport suffixes are silently reinterpreted.
+    private static func strictPort(_ raw: String) -> Int? {
+        guard !raw.isEmpty,
+              raw.utf8.allSatisfy({ $0 >= 48 && $0 <= 57 }),
+              let port = Int(raw),
+              (1...65535).contains(port),
+              raw == String(port)
+        else {
+            return nil
+        }
+        return port
+    }
+
+    /// The control surface intentionally returns operational lease facts only. In
+    /// particular it never reflects private kubeconfig material, child arguments,
+    /// helper output, process IDs, a Kubernetes API address, or arbitrary Pod data.
+    private static func podPortForwardFields(
+        for lease: K8sPodPortForwardLease
+    ) -> [String: AnyCodableValue] {
+        [
+            "active": .bool(true),
+            "lease": .string(lease.id.uuidString.lowercased()),
+            "namespace": .string(lease.request.namespace),
+            "pod": .string(lease.request.pod),
+            "container": lease.request.container.map { AnyCodableValue.string($0) } ?? .null,
+            "local_address": .string("127.0.0.1"),
+            "local_port": .int(lease.localPort),
+            "pod_port": .int(lease.request.podPort),
+        ]
     }
 
     /// Makes the engine control-ready, then performs the user-requested Kubernetes
@@ -651,7 +751,8 @@ public final class Daemon {
                 "live_share_bridge": .object(liveShareBridge.ipcFields),
             ])
 
-        case "k8s-status", "k8s-diagnose", "k8s-describe", "k8s-enable", "k8s-disable", "k8s-kubeconfig":
+        case "k8s-status", "k8s-diagnose", "k8s-describe", "k8s-enable", "k8s-disable", "k8s-kubeconfig",
+             "k8s-port-forward-start", "k8s-port-forward-status", "k8s-port-forward-cancel":
             return handleK8s(request)
 
         case "start":
