@@ -471,8 +471,8 @@ struct ImagesRootView: View {
                 .inspector(isPresented: $showsInspector) {
                     detailPane
                         .inspectorColumnWidth(
-                            min: 280,
-                            ideal: 340,
+                            min: 340,
+                            ideal: 400,
                             max: 460)
                 }
         }

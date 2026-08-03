@@ -254,7 +254,7 @@ struct ContainersRootView: View {
             containerList
                 .inspector(isPresented: $showsInspector) {
                     inspector
-                        .inspectorColumnWidth(min: 300, ideal: 360, max: 520)
+                        .inspectorColumnWidth(min: 340, ideal: 400, max: 520)
                 }
         }
     }
