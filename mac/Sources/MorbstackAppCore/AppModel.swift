@@ -60,6 +60,26 @@ struct LaunchOptions: Sendable, Equatable {
     /// leave its evidence. `MORB_TOUR_DUMP_FILE` does the same job for a direct exec.
     var dumpFile: String?
 
+    /// `--tour-capture <dir>` — self-capture the *real* running window (titlebar,
+    /// toolbar, sidebar material, Liquid Glass and all) to PNGs in this directory, one
+    /// per screen, then exit.
+    ///
+    /// This is the answer to what `MorbShots`' offscreen harness structurally cannot do:
+    /// an offscreen `.borderless` window has no titlebar and no `NSToolbar` to draw in
+    /// the first place, and switching it to `.titled` blanks every `List`-backed screen
+    /// instead. Driving the shipping window for real sidesteps both — see
+    /// `Shots/LiveCapture.swift`.
+    var tourCapture: String?
+
+    /// `--tour-fixtures` — serve `ShotFixtures`' canned Docker world instead of dialling
+    /// the real engine.
+    ///
+    /// Exists so `--tour-capture` can populate every screen without a running
+    /// `morbstackd`: the same fixtures `MorbShots` renders offscreen, wired through the
+    /// same `ShotDockerClient`/`ShotDaemonClient` pair, so a live capture and an
+    /// offscreen one are pictures of the same data.
+    var tourFixtures = false
+
     static let none = LaunchOptions()
 
     /// `true` when the app was launched by the tour tooling rather than by a person.
