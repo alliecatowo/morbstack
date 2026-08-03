@@ -215,13 +215,13 @@ struct MorbCommands: Commands {
         }
 
         CommandMenu("Compose") {
-            Button("Save Compose File") {
+            Button("Save Project Source File") {
                 composeFileEditorCommandActions?.save()
             }
             .keyboardShortcut("s", modifiers: .command)
             .disabled(composeFileEditorCommandActions?.canSave != true)
 
-            Button("Discard Compose Changes") {
+            Button("Discard Project Source Changes") {
                 composeFileEditorCommandActions?.discard()
             }
             .disabled(composeFileEditorCommandActions?.canDiscard != true)

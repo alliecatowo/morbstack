@@ -164,9 +164,9 @@ struct StacksRootView: View {
     @State private var busyProjects: Set<String> = []
     @State private var busyServices: Set<ContainerSummary.ID> = []
     @State private var removalTarget: ContainerSummary?
-    /// A user-selected source document is intentionally separate from Compose metadata
-    /// inferred from running containers. Labels can describe a project, but they never
-    /// authorize Morbstack to open or write a file from the person's source tree.
+    /// A user-selected project source document is intentionally separate from Compose
+    /// metadata inferred from running containers. Labels can describe a project, but
+    /// they never authorize Morbstack to open or write a file from the person's tree.
     @State private var composeFileEditor = ComposeFileEditor()
 
     /// Compose projects only. Unmanaged containers belong to the Containers browser.
@@ -297,7 +297,7 @@ struct StacksRootView: View {
                 ComposeFileEditorSheet(editor: composeFileEditor)
             }
             .alert(
-                "Couldn’t Open Compose File",
+                composeFileEditor.openErrorTitle,
                 isPresented: Binding(
                     get: { composeFileEditor.openError != nil },
                     set: { if !$0 { composeFileEditor.openError = nil } })
@@ -783,6 +783,8 @@ struct StacksRootView: View {
             Divider()
             Button("Edit Compose File…") { chooseComposeFile() }
                 .disabled(composeFileEditor.isPresented)
+            Button("Edit Project Environment File…") { chooseProjectEnvironmentFile() }
+                .disabled(composeFileEditor.isPresented)
         }
     }
 
@@ -812,6 +814,10 @@ struct StacksRootView: View {
             }
             Button("Choose Compose File…") {
                 chooseComposeFile()
+            }
+            .disabled(composeFileEditor.isPresented)
+            Button("Choose Project Environment File…") {
+                chooseProjectEnvironmentFile()
             }
             .disabled(composeFileEditor.isPresented)
             Button("Copy Docker Context Command") {
@@ -892,9 +898,9 @@ struct StacksRootView: View {
     }
 
     /// The project label shown in the inspector is observational Docker metadata. A
-    /// native Open panel is the only way this app obtains a Compose source URL, and
-    /// choosing it never runs Compose, reloads a stack, deploys changes, or writes any
-    /// file. The editor revalidates this selection before opening it.
+    /// native Open panel is the only way this app obtains a source URL, and choosing it
+    /// never runs Compose, reloads a stack, deploys changes, or writes any file. The
+    /// editor revalidates this selection before opening it.
     private func chooseComposeFile() {
         guard !composeFileEditor.isPresented else { return }
         let panel = NSOpenPanel()
@@ -907,7 +913,29 @@ struct StacksRootView: View {
         panel.message = "Choose one Compose YAML source file to edit. Morbstack will not deploy or run it."
         panel.prompt = "Edit"
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        composeFileEditor.open(url)
+        composeFileEditor.open(url, as: .composeYAML)
+    }
+
+    /// A `.env` document is never presumed to be the selected stack's sibling. Docker
+    /// Compose can use an explicit `--env-file`, project-directory discovery, or other
+    /// precedence inputs, so only a person-chosen literal `.env` file enters this
+    /// local editor. Opening it is not an interpolation, credentials, or deployment
+    /// operation.
+    private func chooseProjectEnvironmentFile() {
+        guard !composeFileEditor.isPresented else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.canCreateDirectories = false
+        panel.allowsMultipleSelection = false
+        // A literal `.env` is hidden by Finder defaults. This panel exists only for
+        // that explicit document choice, so show dotfiles rather than requiring a
+        // separate Finder shortcut that could make the action look unavailable.
+        panel.showsHiddenFiles = true
+        panel.message = "Choose one project's .env file to inspect or edit. Morbstack will not apply, interpolate, or run it."
+        panel.prompt = "Open"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        composeFileEditor.open(url, as: .projectEnvironment)
     }
 
     private func portDescription(for service: ContainerSummary) -> String {
