@@ -6,10 +6,11 @@
 // Volumes are the one resource in this app where a wrong click loses data that cannot be
 // pulled again, so the screen is deliberately more cautious than the others: no prune
 // button in the header without a preview, no size shown as `0 B` when the truth is "not
-// reported", and the mountpoint always one click away.
+// reported", and the Docker-reported guest mount point available for inspection or copying
+// without pretending it is a Finder-accessible location on this Mac.
 //
 // A real `Table` replaces the hand-rolled column grid, and a detail pane replaces the
-// popover: selecting a volume opens its driver, mountpoint and reference count beside the
+// popover: selecting a volume opens its driver, guest mount point and reference count beside the
 // list rather than in a transient bubble, which is also what gives this screen something
 // to show besides a thin thirty-two-point row — the emptiness `CRITIQUE.md` calls out by
 // name. The pane is a real `.inspector(isPresented:)` trailing column (see the note on
@@ -525,7 +526,7 @@ struct VolumesRootView: View {
         if let id = ids.first, let volume = model.volumes.first(where: { $0.id == id }) {
             Button("Copy Name") { MorbPasteboard.copy(volume.name) }
             if !volume.mountpoint.isEmpty {
-                Button("Copy Mount Point") { MorbPasteboard.copy(volume.mountpoint) }
+                Button("Copy Guest Mount Point") { MorbPasteboard.copy(volume.mountpoint) }
             }
             Divider()
             Button("Export Volume Archive…") {
@@ -559,7 +560,7 @@ struct VolumesRootView: View {
                     LabeledContent("Status", value: volume.isUnused ? "Unused" : "In use")
                     LabeledContent("Size", value: volume.size.map(Formatters.bytesString) ?? "Unreported")
                     LabeledContent("Driver", value: volume.driver)
-                    LabeledContent("Mount point") {
+                    LabeledContent("Guest Mount Point") {
                         Text(volume.mountpoint.isEmpty ? "unknown" : volume.mountpoint)
                             .font(.system(.callout, design: .monospaced))
                             .textSelection(.enabled)
@@ -587,13 +588,6 @@ struct VolumesRootView: View {
                     }
                     .disabled(volume.driver != "local" || isPerformingVolumeOperation)
 
-                    Button {
-                        revealInFinder(volume)
-                    } label: {
-                        Label("Reveal in Finder", systemImage: "folder")
-                    }
-                    .disabled(volume.mountpoint.isEmpty)
-
                     Button(role: .destructive) {
                         removal = volume
                     } label: {
@@ -606,13 +600,8 @@ struct VolumesRootView: View {
             ContentUnavailableView(
                 "No Volume Selected",
                 systemImage: "externaldrive",
-                description: Text("Pick a volume to see where it lives on disk and what is using it."))
+                description: Text("Pick a volume to see its guest mount point and what is using it."))
         }
-    }
-
-    private func revealInFinder(_ volume: VolumeSummary) {
-        guard !volume.mountpoint.isEmpty else { return }
-        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: volume.mountpoint)])
     }
 
     // MARK: Operations
