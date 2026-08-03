@@ -197,6 +197,31 @@ custom background, card, font, or field layout. Rich values still truncate/selec
 according to their own content semantics; the acceptance pass must verify normal and
 narrow windows before this dimension is considered final.
 
+### 2026-08-03 Container inspector hierarchy correction
+
+The expanded real-container Overview inspector confirmed that width was not the remaining
+problem: rendering every environment variable and label as equal-weight form content
+created a centered wall of facts. The user task is to inspect State, Configuration, and
+published Ports first; environment variables, mounts, and labels are secondary metadata
+that a person requests when diagnosing a specific detail.
+
+Consulted: Apple’s [inspectors](https://developer.apple.com/documentation/swiftui/view/inspector(ispresented:content:)),
+[forms](https://developer.apple.com/documentation/swiftui/form), and SwiftUI
+[`DisclosureGroup`](https://developer.apple.com/documentation/swiftui/disclosuregroup).
+
+`ContainerOverviewTab` therefore retains the system inspector and automatic `Form`,
+keeps State, Configuration, and Ports visible, and places Environment, Mounts, and
+Labels in standard count-labelled `DisclosureGroup`s that are collapsed on first
+presentation. Environment expansion retains the existing filter, per-variable masked
+default, explicit reveal, copy action, icon help, and text-selection behavior; collapsing
+the group does not expose its values. Mount actions/context menu and label text selection
+remain inside their disclosed form content. This is an information-hierarchy correction,
+not a custom accordion, card, list row, width increase, or typography change.
+Current-bundle light/dark, minimum/ideal/expanded inspector width, disclosure keyboard
+and VoiceOver behavior, long-name truncation/copy, secret reveal/copy, mount actions,
+and lifecycle acceptance remain required; no build, test, Docker/VM action, or live-app
+interaction was performed for this source change.
+
 ## Charts audit: current concrete rule
 
 `ContainerStatsTab` currently contains the only real time-series visualization. It is

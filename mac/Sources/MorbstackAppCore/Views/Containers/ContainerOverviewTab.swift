@@ -19,6 +19,9 @@ struct ContainerOverviewTab: View {
 
     @State private var envQuery = ""
     @State private var revealed: Set<Int> = []
+    @State private var isEnvironmentExpanded = false
+    @State private var areMountsExpanded = false
+    @State private var areLabelsExpanded = false
 
     var body: some View {
         overviewContent
@@ -153,18 +156,23 @@ struct ContainerOverviewTab: View {
             needle: TrackBLogFilter.normalize(envQuery),
             lowered: \.lowered)
 
-        Section("Environment") {
-            if !details.env.isEmpty {
-                TextField("Filter variables", text: $envQuery)
-            }
-            if details.env.isEmpty {
-                Text("This container declares no environment variables.")
-                    .foregroundStyle(.secondary)
-            } else if variables.isEmpty {
-                ContentUnavailableView.search(text: envQuery)
-            } else {
-                ForEach(variables) { variable in
-                    environmentRow(variable)
+        Section {
+            DisclosureGroup(
+                "Environment (\(details.env.count) \(details.env.count == 1 ? "variable" : "variables"))",
+                isExpanded: $isEnvironmentExpanded)
+            {
+                if !details.env.isEmpty {
+                    TextField("Filter variables", text: $envQuery)
+                }
+                if details.env.isEmpty {
+                    Text("This container declares no environment variables.")
+                        .foregroundStyle(.secondary)
+                } else if variables.isEmpty {
+                    ContentUnavailableView.search(text: envQuery)
+                } else {
+                    ForEach(variables) { variable in
+                        environmentRow(variable)
+                    }
                 }
             }
         }
@@ -250,42 +258,47 @@ struct ContainerOverviewTab: View {
     @ViewBuilder
     private func mountsSection(_ details: TrackBInspectDetails) -> some View {
         let rows = mountRows(details)
-        Section("Mounts") {
-            ForEach(rows) { row in
-                LabeledContent {
-                    HStack(spacing: 8) {
-                        VStack(alignment: .trailing, spacing: 2) {
-                            Text(row.destination)
-                                .font(.system(.body, design: .monospaced))
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                            Text(row.accessDescription)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        if let hostPath = row.hostPath {
-                            Button("Reveal", systemImage: "arrow.up.forward.app") {
-                                TrackBFinder.reveal(hostPath)
+        Section {
+            DisclosureGroup(
+                "Mounts (\(rows.count) \(rows.count == 1 ? "mount" : "mounts"))",
+                isExpanded: $areMountsExpanded)
+            {
+                ForEach(rows) { row in
+                    LabeledContent {
+                        HStack(spacing: 8) {
+                            VStack(alignment: .trailing, spacing: 2) {
+                                Text(row.destination)
+                                    .font(.system(.body, design: .monospaced))
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Text(row.accessDescription)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
                             }
-                            .accessibilityLabel("Reveal \(hostPath) in Finder")
-                            .help("Reveal in Finder")
+                            if let hostPath = row.hostPath {
+                                Button("Reveal", systemImage: "arrow.up.forward.app") {
+                                    TrackBFinder.reveal(hostPath)
+                                }
+                                .accessibilityLabel("Reveal \(hostPath) in Finder")
+                                .help("Reveal in Finder")
+                            }
+                        }
+                    } label: {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Label(row.kindLabel.capitalized, systemImage: row.kind.symbol)
+                            mountSource(row)
                         }
                     }
-                } label: {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Label(row.kindLabel.capitalized, systemImage: row.kind.symbol)
-                        mountSource(row)
+                    .contextMenu {
+                        mountContextMenu(row: row)
                     }
                 }
-                .contextMenu {
-                    mountContextMenu(row: row)
-                }
-            }
 
-            if rows.contains(where: { $0.kind == .bind && $0.warning == nil }) {
-                Text("Bind mounts are folders on this Mac shared into the VM at the same path. Manage shared folders in Settings › File Sharing.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if rows.contains(where: { $0.kind == .bind && $0.warning == nil }) {
+                    Text("Bind mounts are folders on this Mac shared into the VM at the same path. Manage shared folders in Settings › File Sharing.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
     }
@@ -328,21 +341,26 @@ struct ContainerOverviewTab: View {
     }
 
     private func labelsSection(_ details: TrackBInspectDetails) -> some View {
-        Section("Labels") {
-            ForEach(details.labels) { label in
-                LabeledContent {
-                    Text(label.value.isEmpty ? "—" : label.value)
-                        .font(.system(.body, design: .monospaced))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .textSelection(.enabled)
-                } label: {
-                    Text(label.key)
-                        .font(.system(.body, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .textSelection(.enabled)
+        Section {
+            DisclosureGroup(
+                "Labels (\(details.labels.count) \(details.labels.count == 1 ? "label" : "labels"))",
+                isExpanded: $areLabelsExpanded)
+            {
+                ForEach(details.labels) { label in
+                    LabeledContent {
+                        Text(label.value.isEmpty ? "—" : label.value)
+                            .font(.system(.body, design: .monospaced))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .textSelection(.enabled)
+                    } label: {
+                        Text(label.key)
+                            .font(.system(.body, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .textSelection(.enabled)
+                    }
                 }
             }
         }

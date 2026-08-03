@@ -54,7 +54,11 @@ This follows the platform model: [SwiftUI inspectors](https://developer.apple.co
 ### Containers
 
 Keep the selected-container inspector as a system inspector at `340/400/520`. The
-Overview is a `Form` with factual sections. Logs and Inspect are intentionally separate
+Overview keeps compact State, Configuration, and published Ports visible in its `Form`.
+Environment, Mounts, and Labels are standard `DisclosureGroup`s with explicit item
+counts and start collapsed: they are secondary record metadata, not equal-weight facts.
+Expanding them preserves their normal form rows and existing contextual actions; it does
+not create a second list or custom panel. Logs and Inspect are intentionally separate
 long-text representations inside the selected-record `TabView`; they use selectable,
 scrollable monospaced text rather than a form. Stats earns a tab only when it presents a
 truthful, useful native chart or an unavailable state—never a decorative mini-dashboard.
