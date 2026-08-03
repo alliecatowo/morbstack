@@ -78,6 +78,7 @@ struct ImagesRootView: View {
     @State private var pullLines: [String] = []
     @State private var isPulling = false
     @State private var showingPull = false
+    @State private var showingPublicImageDiscovery = false
     @FocusState private var pullReferenceIsFocused: Bool
     /// Whether the trailing inspector column is open. SwiftUI restores this across
     /// launches for a trailing-column inspector, so it is not persisted here.
@@ -217,6 +218,9 @@ struct ImagesRootView: View {
             .sheet(isPresented: $showingPull) {
                 pullSheet
             }
+            .sheet(isPresented: $showingPublicImageDiscovery) {
+                PublicImageDiscoverySheet()
+            }
             .sheet(item: $imageArchiveExport) { operation in
                 ImageArchiveExportSheet(operation: operation, cancel: cancelImageArchiveExport)
                     .interactiveDismissDisabled()
@@ -296,6 +300,15 @@ struct ImagesRootView: View {
         }
         ToolbarItem(id: "images.pruneDangling", placement: .secondaryAction) {
             pruneDanglingButton
+        }
+        ToolbarItem(id: "images.explorePublic", placement: .secondaryAction) {
+            Button {
+                showingPublicImageDiscovery = true
+            } label: {
+                Image(systemName: "magnifyingglass")
+            }
+            .accessibilityLabel("Explore public images")
+            .help("Search public Docker Hub repositories")
         }
         ToolbarItem(id: "images.export", placement: .secondaryAction) {
             Button {

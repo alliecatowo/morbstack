@@ -1,16 +1,21 @@
 # Public image discovery
 
-Status: source-level foundation only, added 2026-08-03. It is not an image
-browser, registry integration, pull workflow, or Docker compatibility claim.
+Status: native source interaction plus service foundation, added 2026-08-03.
+It is not a registry integration, pull workflow, or Docker compatibility claim;
+real-window and controlled-network acceptance remain pending.
 
 ## The first user-visible contract
 
-A future **Explore Images** command may search public Docker Hub repositories
-only after a person submits text. It returns at most 25 first-page repository
-hints, with a bounded short description and the provider's reported public
-star/pull/official/automated fields. A result can prefill a later pull dialog;
-it never pulls, inspects, resolves a tag/digest, verifies provenance, or
-asserts that an image is available for the current architecture.
+The Images toolbar has an **Explore Public Images** command that opens a
+system document-modal sheet. The sheet uses a `Form` for explicit input and a
+native `List`/detail split for richer repository search results; it deliberately
+does not turn the local operational image `Table` into a generic card browser.
+Search runs only after the person submits text. It returns at most 25 first-page
+repository hints, with a bounded short description and the provider's reported
+public star/pull/official/automated fields. A selected result can copy its
+canonical repository name for a later explicit command; it never pulls,
+inspects, resolves a tag/digest, verifies provenance, or asserts that an image
+is available for the current architecture.
 
 The UI must show the following states distinctly:
 
@@ -56,11 +61,14 @@ configuration as a fallback.
 
 ## Promotion gate
 
-Before an Explore Images UI ships, validate the documented public Docker Hub
-API contract, cancellation, response/body limits, rate-limit presentation,
-and no-credential/no-pull behavior with a controlled network fixture. A later
-pull flow remains a separate, explicitly confirmed Docker Engine operation;
-it must resolve an exact tag or digest and report the daemon's real progress
-and error, not reuse search metadata as execution truth.
+Before promoting the existing Explore Images sheet, validate the documented
+public Docker Hub API contract, cancellation, response/body limits, rate-limit
+presentation, and no-credential/no-pull behavior with a controlled network
+fixture. Then inspect the actual app window in light/dark and narrow sizes,
+including keyboard List selection, focus return to the Form field, VoiceOver
+labels, toolbar overflow, and transparency/contrast/motion settings. A later
+pull flow remains a separate, explicitly confirmed Docker Engine operation; it
+must resolve an exact tag or digest and report the daemon's real progress and
+error, not reuse search metadata as execution truth.
 
 Relevant provider reference: [Docker Hub API documentation](https://docs.docker.com/docker-hub/api/latest/).
