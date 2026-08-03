@@ -1,56 +1,15 @@
 // Copyright 2026 The Morbstack Authors.
 // Licensed under the Apache License, Version 2.0 (the "License").
 //
-// The container browser deliberately follows the Finder/Xcode data-browser shape:
-// one sortable table is the content surface and the selected row is described in the
-// system-owned trailing inspector.  Lifecycle commands live in the window toolbar and
-// contextual menu rather than becoming controls embedded in every row.
+// The container browser uses a selected-record list because the current Tahoe Table
+// appearance makes unused rows read as a dashboard/skeleton at this route's typical
+// density. The selected row is described in the system-owned trailing inspector.
+// Lifecycle commands remain in the window toolbar and contextual menu rather than
+// becoming controls embedded in every row.
 
 import AppKit
 import MorbstackKit
 import SwiftUI
-
-// MARK: - Table sorting
-
-private enum ContainerSortKey: Hashable {
-    case name, project, image, state, ports, created
-}
-
-private struct ContainerComparator: SortComparator {
-    typealias Compared = ContainerSummary
-
-    var key: ContainerSortKey
-    var order: SortOrder = .forward
-
-    func compare(_ lhs: ContainerSummary, _ rhs: ContainerSummary) -> ComparisonResult {
-        let result: ComparisonResult
-        switch key {
-        case .name:
-            result = compare(lhs.displayName, rhs.displayName)
-        case .project:
-            result = compare(lhs.composeProject ?? "", rhs.composeProject ?? "")
-        case .image:
-            result = compare(lhs.image, rhs.image)
-        case .state:
-            result = compare(lhs.state, rhs.state)
-        case .ports:
-            result = compare(portText(lhs), portText(rhs))
-        case .created:
-            result = lhs.createdAt == rhs.createdAt
-                ? compare(lhs.displayName, rhs.displayName)
-                : (lhs.createdAt < rhs.createdAt ? .orderedAscending : .orderedDescending)
-        }
-        return order == .forward ? result : result.reversed
-    }
-
-    private func compare(_ lhs: String, _ rhs: String) -> ComparisonResult {
-        lhs.localizedStandardCompare(rhs)
-    }
-
-    private func portText(_ container: ContainerSummary) -> String {
-        container.ports.map(\.label).joined(separator: ", ")
-    }
-}
 
 // MARK: - Root
 
@@ -72,9 +31,6 @@ struct ContainersRootView: View {
 
     @State private var search = ""
     @State private var scope: ContainerScope = .all
-    @State private var sortOrder: [ContainerComparator] = [
-        ContainerComparator(key: .name)
-    ]
     @State private var hub: TrackBStatsHub
     @State private var busy: Set<String> = []
     @State private var isPruning = false
@@ -97,7 +53,6 @@ struct ContainersRootView: View {
                 || (container.composeProject ?? "").lowercased().contains(needle)
                 || (container.composeService ?? "").lowercased().contains(needle)
         }
-        .sorted(using: sortOrder)
     }
 
     private var selected: ContainerSummary? {
@@ -296,7 +251,7 @@ struct ContainersRootView: View {
                 ContentUnavailableView.search(text: search)
             }
         } else {
-            containerTable
+            containerList
                 .inspector(isPresented: $showsInspector) {
                     inspector
                         .inspectorColumnWidth(min: 300, ideal: 360, max: 520)
@@ -304,72 +259,32 @@ struct ContainersRootView: View {
         }
     }
 
-    private var containerTable: some View {
-        Table(filtered, selection: selectionBinding, sortOrder: $sortOrder) {
-            TableColumn("Name", sortUsing: ContainerComparator(key: .name)) { container in
-                HStack(spacing: 6) {
-                    Image(systemName: stateSymbol(for: container))
-                        .foregroundStyle(stateColor(for: container))
-                        .accessibilityHidden(true)
-                    Text(container.displayName)
+    private var containerList: some View {
+        List(selection: selectionBinding) {
+            ForEach(filtered) { container in
+                HStack {
+                    Label {
+                        Text(container.displayName)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    } icon: {
+                        Image(systemName: stateSymbol(for: container))
+                            .foregroundStyle(stateColor(for: container))
+                            .accessibilityHidden(true)
+                    }
+
+                    Spacer(minLength: 12)
+
+                    Text(container.status.isEmpty ? container.state.capitalized : container.status)
+                        .foregroundStyle(.secondary)
                         .lineLimit(1)
-                        .truncationMode(.middle)
+                        .truncationMode(.tail)
                 }
+                .tag(container.id)
                 .help(container.status.isEmpty ? container.state : container.status)
-            }
-            .width(min: 180, ideal: 260)
-
-            TableColumn("Project", sortUsing: ContainerComparator(key: .project)) { container in
-                Text(container.composeProject ?? "—")
-                    .foregroundStyle(container.composeProject == nil ? .tertiary : .secondary)
-                    .lineLimit(1)
-            }
-            .width(min: 100, ideal: 150)
-
-            TableColumn("Image", sortUsing: ContainerComparator(key: .image)) { container in
-                Text(container.image)
-                    .font(.system(.body, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            .width(min: 180, ideal: 280)
-
-            TableColumn("State", sortUsing: ContainerComparator(key: .state)) { container in
-                Text(container.status.isEmpty ? container.state.capitalized : container.status)
-                    .lineLimit(1)
-                    .foregroundStyle(.secondary)
-            }
-            .width(min: 110, ideal: 170)
-
-            TableColumn("Ports", sortUsing: ContainerComparator(key: .ports)) { container in
-                Text(portDescription(for: container))
-                    .font(.system(.body, design: .monospaced))
-                    .foregroundStyle(container.ports.isEmpty ? .tertiary : .secondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
-            .width(min: 90, ideal: 150)
-
-            TableColumn("Created", sortUsing: ContainerComparator(key: .created)) { container in
-                Text(Formatters.compactDuration(since: container.createdAt))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-                    .help(Formatters.absoluteDate(container.createdAt))
-            }
-            .width(min: 86, ideal: 106)
-        }
-        // The automatic Tahoe table style renders empty rows as inset, rounded bands
-        // in this dense operations pane. Bordered is the system's non-inset macOS
-        // table treatment; it preserves native selection, sorting, resizing, and
-        // accessibility without introducing a Morbstack row style.
-        .tableStyle(.bordered)
-        .contextMenu(forSelectionType: String.self) { ids in
-            contextMenu(for: ids)
-        } primaryAction: { ids in
-            if let id = ids.first {
-                model.selectedContainerID = id
-                showsInspector = true
+                .contextMenu {
+                    contextMenu(for: container)
+                }
             }
         }
         .onDeleteCommand {
@@ -396,20 +311,18 @@ struct ContainersRootView: View {
     }
 
     @ViewBuilder
-    private func contextMenu(for ids: Set<String>) -> some View {
-        if let id = ids.first, let container = model.containers.first(where: { $0.id == id }) {
-            ForEach(container.availableActions.filter { !$0.isDestructive }, id: \.rawValue) { action in
-                Button(action.title) { perform(action, on: id) }
-            }
-            Divider()
-            Button("Copy Name") { MorbPasteboard.copy(container.displayName) }
-            Button("Copy Container ID") { MorbPasteboard.copy(container.id) }
-            if let url = container.ports.compactMap(\.url).first {
-                Button("Open in Browser…") { NSWorkspace.shared.open(url) }
-            }
-            Divider()
-            Button("Remove…", role: .destructive) { removalTarget = container }
+    private func contextMenu(for container: ContainerSummary) -> some View {
+        ForEach(container.availableActions.filter { !$0.isDestructive }, id: \.rawValue) { action in
+            Button(action.title) { perform(action, on: container.id) }
         }
+        Divider()
+        Button("Copy Name") { MorbPasteboard.copy(container.displayName) }
+        Button("Copy Container ID") { MorbPasteboard.copy(container.id) }
+        if let url = container.ports.compactMap(\.url).first {
+            Button("Open in Browser…") { NSWorkspace.shared.open(url) }
+        }
+        Divider()
+        Button("Remove…", role: .destructive) { removalTarget = container }
     }
 
     private var engineEmptyState: some View {
@@ -458,11 +371,6 @@ struct ContainersRootView: View {
         case "paused", "restarting": return .orange
         default: return .secondary
         }
-    }
-
-    private func portDescription(for container: ContainerSummary) -> String {
-        guard !container.ports.isEmpty else { return "—" }
-        return container.ports.map(\.label).joined(separator: ", ")
     }
 
     // MARK: Intents

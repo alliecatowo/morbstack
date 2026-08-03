@@ -160,6 +160,31 @@ narrow-width, keyboard/VoiceOver, context-menu, inspector, and source-editing
 acceptance remain required; no build, test, Docker/VM action, or live-app interaction
 was performed for this source change.
 
+### 2026-08-03 Containers list override
+
+This decision supersedes the `Views/Containers/**` row’s earlier default-`Table`
+choice and the corresponding Table Semantics Audit inventory entry for this primary
+inventory only. The current Computer Use review showed four real containers followed by
+repeated dark unused-table stripes. At that density, the native table body was
+communicating an Activity Monitor/dashboard surface more strongly than the operational
+records, so changing its style again would not address the observed hierarchy problem.
+
+Consulted: Apple’s [lists and tables](https://developer.apple.com/design/human-interface-guidelines/lists-and-tables),
+SwiftUI [`List`](https://developer.apple.com/documentation/swiftui/list), and
+[`View.inspector`](https://developer.apple.com/documentation/swiftui/view/inspector(ispresented:content:)).
+
+`ContainersRootView` therefore uses direct `List(selection:)` for the flat local
+inventory. Each standard system row exposes only the container name and compact current
+state; selecting it remains the primary record action and reveals the existing native
+inspector. The inspector remains the detailed record surface for returned image, state,
+ports, and Compose metadata. Existing filter behavior, contextual lifecycle/copy/remove
+commands, Delete-key removal review, toolbar lifecycle actions, and destructive
+confirmation boundaries remain unchanged. The route adds no custom list style, cards,
+material, row background, or per-row command controls. Current-bundle light/dark,
+narrow-width, keyboard/VoiceOver, context-menu, inspector, and lifecycle acceptance
+remain required; this source change performs no build, test, Docker/VM, or live-app
+action.
+
 ## Charts audit: current concrete rule
 
 `ContainerStatsTab` currently contains the only real time-series visualization. It is
