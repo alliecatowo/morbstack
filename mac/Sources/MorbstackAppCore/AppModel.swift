@@ -144,6 +144,11 @@ final class AppModel {
     var networks: [NetworkSummary] = []
     var disk: DiskUsage?
     var buildCache: [BuildCacheRecord] = []
+    /// Completed builds reported by Buildx for Morbstack's active builder. This is
+    /// separate from `/system/df` cache records and remains empty until its own
+    /// read-only query succeeds.
+    var buildHistory: [BuildxHistoryRecord] = []
+    var buildHistoryState: BuildxHistoryLoadState = .idle
 
     var selection: Nav = .containers
     var selectedContainerID: String?
@@ -324,6 +329,9 @@ final class AppModel {
         volumes = []
         networks = []
         disk = nil
+        buildCache = []
+        buildHistory = []
+        buildHistoryState = .idle
         selectedContainerID = nil
         busyContainerIDs.removeAll()
     }
@@ -402,6 +410,25 @@ final class AppModel {
         guard engine.isRunning else { return }
         if let records = await fetch({ try await self.client.buildCacheRecords() }) {
             buildCache = records
+        }
+    }
+
+    /// Re-reads Buildx's completed-build history for its active Morbstack builder.
+    ///
+    /// This is a separate client command rather than a Docker Engine API call. Its
+    /// failure must not imply that the engine is down: a bundled Buildx version can be
+    /// missing history support while normal Docker operations are healthy, so the
+    /// Builds route renders this state locally instead of replacing the app-wide engine
+    /// status or inventing records from cache layers.
+    func refreshBuildHistory() async {
+        guard engine.isRunning else { return }
+        buildHistoryState = .loading
+        do {
+            buildHistory = try await BuildxHistoryClient.list(socketPath: MorbPaths.dockerSocket.path)
+            buildHistoryState = .loaded
+        } catch {
+            buildHistory = []
+            buildHistoryState = .unavailable(MorbErrorMessage.text(for: error))
         }
     }
 

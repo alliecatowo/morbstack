@@ -170,6 +170,69 @@ enum BuildRunner {
     }
 }
 
+/// The sealed Docker/Buildx environment shared by local builds and read-only Buildx
+/// history queries.
+///
+/// The app never borrows a shell's Docker host, context, TLS credentials, API version,
+/// config, credential helpers, or Buildx state. The temporary `DOCKER_CONFIG` exists
+/// solely so Docker can discover Morbstack's bundled plugin. `BUILDX_CONFIG`, in
+/// contrast, is a private durable directory: it holds the active-builder history that
+/// the same bundled client later reads.
+struct BuildxClientEnvironment {
+    let environment: [String: String]
+    private let temporaryDockerConfig: URL
+
+    static func prepare(buildx: URL, socketPath: String) throws -> BuildxClientEnvironment {
+        try MorbPaths.ensureDirectories()
+
+        let temporaryDockerConfig = try makeTemporaryDockerConfig(buildx: buildx)
+        var environment = ProcessInfo.processInfo.environment
+        // Do not inherit a remote engine or a named context from the GUI process. Both
+        // local builds and history reads must address the engine this window observes.
+        environment["DOCKER_HOST"] = "unix://\(socketPath)"
+        environment.removeValue(forKey: "DOCKER_CONTEXT")
+        // TLS settings, a remote cert path, or a pinned API version turn this explicit
+        // local Unix-socket request back into a person's ambient shell configuration.
+        for key in ["DOCKER_TLS", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "DOCKER_API_VERSION"] {
+            environment.removeValue(forKey: key)
+        }
+        environment["DOCKER_CONFIG"] = temporaryDockerConfig.path
+        environment["BUILDX_CONFIG"] = MorbPaths.buildxConfigDirectory.path
+        return BuildxClientEnvironment(
+            environment: environment,
+            temporaryDockerConfig: temporaryDockerConfig)
+    }
+
+    func cleanUp() {
+        try? FileManager.default.removeItem(at: temporaryDockerConfig)
+    }
+
+    private static func makeTemporaryDockerConfig(buildx: URL) throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("morbstack-buildx-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700])
+        do {
+            // Use Docker's documented plugin path configuration. This is deliberately
+            // separate from the persistent private Buildx state above, and does not
+            // consult `~/.docker` or any of its credential helpers.
+            let configuration: [String: Any] = [
+                "cliPluginsExtraDirs": [buildx.deletingLastPathComponent().path],
+            ]
+            let data = try JSONSerialization.data(withJSONObject: configuration, options: [.sortedKeys])
+            try data.write(
+                to: directory.appendingPathComponent("config.json", isDirectory: false),
+                options: .atomic)
+            return directory
+        } catch {
+            try? FileManager.default.removeItem(at: directory)
+            throw error
+        }
+    }
+}
+
 // MARK: - Process plumbing
 
 /// Owns exactly one child process and its two output pipes. The lock protects the
@@ -218,14 +281,14 @@ private final class BuildProcessRun: @unchecked Sendable {
     }
 
     private func launch(continuation: CheckedContinuation<Void, Error>) {
-        let dockerConfig: URL
+        let clientEnvironment: BuildxClientEnvironment
         do {
-            dockerConfig = try makeEphemeralDockerConfig()
+            clientEnvironment = try BuildxClientEnvironment.prepare(buildx: buildx, socketPath: socketPath)
         } catch {
             continuation.resume(throwing: BuildRunnerError.launchFailed(error.localizedDescription))
             return
         }
-        defer { try? FileManager.default.removeItem(at: dockerConfig) }
+        defer { clientEnvironment.cleanUp() }
 
         let process = Process()
         let stdout = Pipe()
@@ -237,28 +300,7 @@ private final class BuildProcessRun: @unchecked Sendable {
         process.standardOutput = stdout
         process.standardError = stderr
 
-        var environment = ProcessInfo.processInfo.environment
-        // Never inherit a different Docker context/host from the GUI process. The
-        // operation must be aimed at the same engine the Morbstack window observes.
-        environment["DOCKER_HOST"] = "unix://\(socketPath)"
-        environment.removeValue(forKey: "DOCKER_CONTEXT")
-        // `DOCKER_TLS`, `DOCKER_TLS_VERIFY`, and `DOCKER_CERT_PATH` are Docker CLI
-        // connection settings, and TLS is enabled implicitly when a TLS option is
-        // present. They make sense for a person's remote-engine shell, but conflict
-        // with this explicit local Unix-socket request. Likewise an inherited API
-        // version can make Buildx negotiate a stale client contract with the engine
-        // this window already talks to. The local-build sheet must not depend on any
-        // of those ambient shell choices.
-        environment.removeValue(forKey: "DOCKER_TLS")
-        environment.removeValue(forKey: "DOCKER_TLS_VERIFY")
-        environment.removeValue(forKey: "DOCKER_CERT_PATH")
-        environment.removeValue(forKey: "DOCKER_API_VERSION")
-        // Use Docker's documented `cliPluginsExtraDirs` configuration rather than a
-        // private environment-variable convention. The temporary config contains only
-        // the reviewed bundled Buildx path and is removed after this one build; no
-        // ~/.docker configuration, plugin symlink, or credential helper is modified.
-        environment["DOCKER_CONFIG"] = dockerConfig.path
-        process.environment = environment
+        process.environment = clientEnvironment.environment
 
         stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
@@ -335,28 +377,6 @@ private final class BuildProcessRun: @unchecked Sendable {
         output.finish(onEvent: onEvent)
         try? stdout.fileHandleForReading.close()
         try? stderr.fileHandleForReading.close()
-    }
-
-    private func makeEphemeralDockerConfig() throws -> URL {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("morbstack-buildx-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: directory,
-            withIntermediateDirectories: false,
-            attributes: [.posixPermissions: 0o700])
-        do {
-            let configuration: [String: Any] = [
-                "cliPluginsExtraDirs": [buildx.deletingLastPathComponent().path],
-            ]
-            let data = try JSONSerialization.data(withJSONObject: configuration, options: [.sortedKeys])
-            try data.write(
-                to: directory.appendingPathComponent("config.json", isDirectory: false),
-                options: .atomic)
-            return directory
-        } catch {
-            try? FileManager.default.removeItem(at: directory)
-            throw error
-        }
     }
 
     private func terminate(_ process: Process?) {

@@ -357,6 +357,31 @@ struct BuildCacheRecord: Identifiable, Sendable, Equatable {
     var shortID: String { String(id.prefix(12)) }
 }
 
+// MARK: - Buildx history
+
+/// One completed-build record reported by `docker buildx history ls --format=json`.
+///
+/// Buildx owns these records, and scopes them to its active builder. They are
+/// deliberately not derived from `/system/df`: a BuildKit cache layer can be shared by
+/// many builds, while a history record identifies one completed build.
+struct BuildxHistoryRecord: Identifiable, Sendable, Equatable, Hashable {
+    var id: String
+    var name: String
+    var status: String
+    var createdAt: Date?
+    /// Docker formats this value (for example `1.4s`). Keeping the CLI's display value
+    /// avoids pretending every Buildx version uses the same duration representation.
+    var duration: String?
+}
+
+/// Loading state for the independent, read-only Buildx history collection.
+enum BuildxHistoryLoadState: Equatable {
+    case idle
+    case loading
+    case loaded
+    case unavailable(String)
+}
+
 // MARK: - Logs and stats
 
 /// Which pipe a log line came out of.

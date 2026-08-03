@@ -77,6 +77,19 @@ public struct MorbPaths {
     /// `~/.morbstack/data` — persistent VM state.
     public static var dataDirectory: URL { root.appendingPathComponent("data", isDirectory: true) }
 
+    /// `~/.morbstack/data/buildx` — Morbstack-owned Buildx client state.
+    ///
+    /// The bundled Docker client receives this directory through `BUILDX_CONFIG` for
+    /// both local builds and read-only history commands. Keeping it separate from the
+    /// temporary `DOCKER_CONFIG` used to discover Morbstack's bundled plugin means a
+    /// completed build can remain visible to the same active builder without reading or
+    /// modifying the person's `~/.docker` configuration, credentials, or Buildx state.
+    /// `ensureDirectories()` creates it owner-only alongside the rest of Morbstack's
+    /// private runtime data.
+    public static var buildxConfigDirectory: URL {
+        dataDirectory.appendingPathComponent("buildx", isDirectory: true)
+    }
+
     /// `~/.morbstack/data/debug-toolbox` — reserved for an explicitly acquired,
     /// verified debug-toolbox asset and its receipt. Merely reading this location must
     /// never create it, pull an image, or contact Docker; that keeps `morb debug check`
@@ -214,7 +227,8 @@ public struct MorbPaths {
         let fm = FileManager.default
         let attributes: [FileAttributeKey: Any] = [.posixPermissions: NSNumber(value: Int16(0o700))]
         for directory in [
-            root, runDirectory, dataDirectory, runtimeArtifactsDirectory, kernelDirectory, logsDirectory,
+            root, runDirectory, dataDirectory, buildxConfigDirectory, runtimeArtifactsDirectory,
+            kernelDirectory, logsDirectory,
         ] {
             do {
                 try fm.createDirectory(at: directory, withIntermediateDirectories: true, attributes: attributes)
