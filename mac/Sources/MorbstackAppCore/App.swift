@@ -164,6 +164,7 @@ struct MorbCommands: Commands {
     @FocusedValue(\.imageArchiveExportAction) private var imageArchiveExportAction
     @FocusedValue(\.runLocalImageAction) private var runLocalImageAction
     @FocusedValue(\.composeFileEditorCommandActions) private var composeFileEditorCommandActions
+    @FocusedValue(\.composeSourceValidationCommandActions) private var composeSourceValidationCommandActions
 
     var body: some Commands {
         // A deferred setup remains available from the standard application menu. This
@@ -233,6 +234,13 @@ struct MorbCommands: Commands {
                 composeFileEditorCommandActions?.discard()
             }
             .disabled(composeFileEditorCommandActions?.canDiscard != true)
+
+            Divider()
+
+            Button("Validate Compose Source…") {
+                composeSourceValidationCommandActions?.validate()
+            }
+            .disabled(composeSourceValidationCommandActions?.canValidate != true)
         }
 
         CommandGroup(after: .newItem) {

@@ -168,6 +168,7 @@ struct StacksRootView: View {
     /// metadata inferred from running containers. Labels can describe a project, but
     /// they never authorize Morbstack to open or write a file from the person's tree.
     @State private var composeFileEditor = ComposeFileEditor()
+    @State private var composeSourceValidation = ComposeSourceValidationModel()
 
     /// Compose projects only. Unmanaged containers belong to the Containers browser.
     private var stacks: [ComposeGroup] {
@@ -294,7 +295,9 @@ struct StacksRootView: View {
                         if !isPresented { composeFileEditor.requestClose() }
                     })
             ) {
-                ComposeFileEditorSheet(editor: composeFileEditor)
+                ComposeFileEditorSheet(
+                    editor: composeFileEditor,
+                    validation: composeSourceValidation)
             }
             .alert(
                 composeFileEditor.openErrorTitle,
@@ -309,6 +312,9 @@ struct StacksRootView: View {
             .focusedSceneValue(
                 \.composeFileEditorCommandActions,
                 composeFileEditor.commandActions)
+            .focusedSceneValue(
+                \.composeSourceValidationCommandActions,
+                composeSourceValidation.commandActions(using: composeFileEditor))
     }
 
     // MARK: Toolbar
@@ -522,6 +528,12 @@ struct StacksRootView: View {
             }
             .width(min: 90, ideal: 150)
         }
+        // The automatic Tahoe table style renders unused rows as rounded, inset bands
+        // in this dense outline. Bordered is the system's native non-inset table
+        // treatment; it retains disclosure, selection, sorting, resizing, and
+        // accessibility without adding a Morbstack row style. It still needs the next
+        // latest-bundle Computer Use pass before this visual hypothesis is accepted.
+        .tableStyle(.bordered)
         .contextMenu(forSelectionType: StackOutlineID.self) { ids in
             contextMenu(for: ids)
         } primaryAction: { ids in

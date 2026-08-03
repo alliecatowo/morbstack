@@ -126,6 +126,25 @@ final class ComposeFileEditor {
         sourceKind == .projectEnvironment ? "Couldn’t Save Environment File" : "Couldn’t Save Compose File"
     }
 
+    /// A validation command is deliberately limited to the exact saved Compose source
+    /// this document session opened. It never validates unsaved in-memory text by
+    /// writing a temporary project file, and it refuses a file another editor changed
+    /// before the person accepted the command's separate trust review.
+    func validationRequest() throws -> ComposeSourceValidationRequest {
+        guard sourceKind == .composeYAML, let fileURL else {
+            throw ComposeFileEditorError("Choose a Compose YAML file before validating source.")
+        }
+        guard !isDirty else {
+            throw ComposeFileEditorError("Save or discard source edits before validating. Morbstack validates only the explicit file on disk.")
+        }
+        try Self.validateSourceFile(fileURL, as: .composeYAML)
+        let currentData = try Self.coordinatedRead(fileURL)
+        guard currentData == originalData else {
+            throw ComposeFileEditorError("This Compose YAML file changed on disk after Morbstack opened it. Reopen it to review the current version before validating.")
+        }
+        return ComposeSourceValidationRequest(sourceURL: fileURL, expectedData: originalData)
+    }
+
     var commandActions: ComposeFileEditorCommandActions? {
         guard isPresented else { return nil }
         return ComposeFileEditorCommandActions(
@@ -225,7 +244,7 @@ final class ComposeFileEditor {
         saveError = nil
     }
 
-    private static func validateSourceFile(_ url: URL, as sourceKind: ComposeProjectSourceKind) throws {
+    nonisolated fileprivate static func validateSourceFile(_ url: URL, as sourceKind: ComposeProjectSourceKind) throws {
         try sourceKind.validateSelectedFileName(url)
         let fileManager = FileManager.default
         var isDirectory = ObjCBool(false)
@@ -241,7 +260,7 @@ final class ComposeFileEditor {
         }
     }
 
-    private static func coordinatedRead(_ url: URL) throws -> Data {
+    nonisolated fileprivate static func coordinatedRead(_ url: URL) throws -> Data {
         let coordinator = NSFileCoordinator()
         var coordinationError: NSError?
         var result: Result<Data, Error>?
@@ -320,6 +339,7 @@ private struct ComposeFileEditorError: LocalizedError {
 /// the source in this sheet; the app never makes an effective-environment claim.
 struct ComposeFileEditorSheet: View {
     @Bindable var editor: ComposeFileEditor
+    @Bindable var validation: ComposeSourceValidationModel
     @State private var environmentValuesAreRevealed = false
 
     var body: some View {
@@ -344,7 +364,7 @@ struct ComposeFileEditorSheet: View {
                         }
                     }
                 }
-                .formStyle(.grouped)
+                .formStyle(.automatic)
                 .frame(maxHeight: editor.isEnvironmentFile ? 194 : 148)
 
                 if editor.isEnvironmentFile && !environmentValuesAreRevealed {
@@ -380,6 +400,7 @@ struct ComposeFileEditorSheet: View {
                     }
                     .accessibilityLabel("Close source file")
                     .help("Close source file")
+                    .disabled(validation.isRunning)
                 }
                 if editor.isEnvironmentFile {
                     ToolbarItem(placement: .secondaryAction) {
@@ -392,6 +413,21 @@ struct ComposeFileEditorSheet: View {
                             environmentValuesAreRevealed ? "Hide environment values" : "Reveal environment values")
                         .help(
                             environmentValuesAreRevealed ? "Hide environment values" : "Reveal environment values")
+                    }
+                }
+                if editor.sourceKind == .composeYAML {
+                    ToolbarItem(placement: .secondaryAction) {
+                        Button {
+                            validation.requestValidation(using: editor)
+                        } label: {
+                            Image(systemName: "checkmark.seal")
+                        }
+                        .disabled(!validation.canRequestValidation || editor.isDirty)
+                        .accessibilityLabel("Validate Compose source")
+                        .help(
+                            editor.isDirty
+                                ? "Save or discard edits before validating Compose source"
+                                : "Validate saved Compose source")
                     }
                 }
                 ToolbarItem(placement: .secondaryAction) {
@@ -435,6 +471,23 @@ struct ComposeFileEditorSheet: View {
             Button("OK", role: .cancel) { editor.saveError = nil }
         } message: {
             Text(editor.saveError ?? "")
+        }
+        .alert(
+            "Couldn’t Validate Compose Source",
+            isPresented: Binding(
+                get: { validation.requestError != nil },
+                set: { if !$0 { validation.requestError = nil } })
+        ) {
+            Button("OK", role: .cancel) { validation.requestError = nil }
+        } message: {
+            Text(validation.requestError ?? "")
+        }
+        .sheet(
+            isPresented: Binding(
+                get: { validation.isPresented },
+                set: { if !$0 { validation.requestDismissal() } })
+        ) {
+            ComposeSourceValidationSheet(validation: validation)
         }
     }
 }
