@@ -11,6 +11,7 @@
 import Darwin
 import Foundation
 import MorbBench
+import MorbExport
 import MorbMCP
 import MorbMigrate
 import MorbScan
@@ -43,6 +44,7 @@ let usage = """
       migrate      Import images, volumes and config from another runtime
       bench        Run the open benchmark suite and report the numbers
       scan         SBOM and CVE scan an image, entirely on this machine
+      export       Write an already-local image archive to a user-selected file
       debug        Inspect safe toolbox availability; does not open a shell yet
       context      Inspect the `morbstack` Docker context and discovery socket
       service      Manage Morbstack's explicit per-user background service
@@ -1821,6 +1823,9 @@ case "bench":
 
 case "scan":
     exit(MorbScanCommand.run(extraArguments, json: wantsJSON))
+
+case "export":
+    exit(MorbExportCommand.run(extraArguments, json: wantsJSON))
 
 case "debug":
     exit(MorbDebugCommand.run(extraArguments, json: wantsJSON))

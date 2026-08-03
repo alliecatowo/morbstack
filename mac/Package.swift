@@ -78,9 +78,17 @@ let package = Package(
             dependencies: ["MorbFeatures", "MorbstackKit"],
             swiftSettings: commonSwiftSettings
         ),
+        // `morb export` — an explicit, local Docker image archive writer. Kept
+        // separate from scan/migration so it owns one current-engine, user-selected
+        // export contract rather than inheriting either feature's broader policy.
+        .target(
+            name: "MorbExport",
+            dependencies: ["MorbFeatures", "MorbstackKit"],
+            swiftSettings: commonSwiftSettings
+        ),
         .executableTarget(
             name: "morb",
-            dependencies: ["MorbstackKit", "MorbMCP", "MorbMigrate", "MorbBench", "MorbScan"],
+            dependencies: ["MorbstackKit", "MorbMCP", "MorbMigrate", "MorbBench", "MorbScan", "MorbExport"],
             swiftSettings: commonSwiftSettings
         ),
         // The SwiftUI app. Same zero-dependency rule as everything else: SwiftUI +
