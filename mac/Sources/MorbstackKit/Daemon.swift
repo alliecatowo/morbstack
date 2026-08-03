@@ -831,8 +831,9 @@ public final class Daemon {
             paths: config.liveSharePaths,
             shares: planned,
             guestShareStates: vm.guestShareStates,
-            guestCapability: MorbLiveShareBridge.GuestCapability(
-                wireValue: vm.guestShareEventBridge))
+            guestAdvertisement: MorbLiveShareBridge.GuestAdvertisement(
+                wireCapability: vm.guestShareEventBridge,
+                contractVersion: vm.guestShareEventBridgeContractVersion))
     }
 
     /// The one-line reason a share is not usable, or `nil` when it is.

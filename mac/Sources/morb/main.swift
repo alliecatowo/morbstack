@@ -687,7 +687,9 @@ case "shares":
             paths: config.liveSharePaths,
             shares: planned,
             guestShareStates: guestStates,
-            guestCapability: .unknown)
+            guestAdvertisement: MorbLiveShareBridge.GuestAdvertisement(
+                capability: .unknown,
+                contractVersion: nil))
         return .object(diagnostic.ipcFields)
     }()
     let liveShareBridge: AnyCodableValue = {

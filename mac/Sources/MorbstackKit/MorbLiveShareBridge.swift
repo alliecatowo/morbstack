@@ -38,6 +38,114 @@ public enum MorbLiveShareBridge {
     /// The version of the future delivery contract, independent of MRB0's framing.
     public static let contractVersion = 1
 
+    // MARK: - Guest advertisement validation
+
+    /// The additive statement a running guest makes about the future synchronized-
+    /// share transport.
+    ///
+    /// This is deliberately an *advertisement*, not a request to start delivery.
+    /// It is decoded from the existing `info` reply and can therefore be checked
+    /// before a future data-plane connection exists. Keeping the capability and its
+    /// schema version together prevents a host from mistaking an older guest's
+    /// omitted version for the current contract, or from treating a coincidental
+    /// version number as proof that a cache, receiver, or watcher exists.
+    public struct GuestAdvertisement: Codable, Equatable, Sendable {
+        /// The receiver capability reported by the guest, if it recognizes the
+        /// additive field at all.
+        public let capability: GuestCapability
+        /// The version reported alongside ``capability``. `nil` is an older or
+        /// incomplete guest and is never promoted to ``contractVersion``.
+        public let contractVersion: Int?
+
+        public init(capability: GuestCapability, contractVersion: Int?) {
+            self.capability = capability
+            self.contractVersion = contractVersion
+        }
+
+        /// Builds the typed advertisement from the flat MRB0 `info` fields.
+        public init(wireCapability: String?, contractVersion: Int?) {
+            self.init(
+                capability: GuestCapability(wireValue: wireCapability),
+                contractVersion: contractVersion)
+        }
+
+        /// Whether this guest describes the exact schema this host understands.
+        ///
+        /// Compatibility alone is intentionally not delivery authorization. A
+        /// matching version plus a future `ready` capability still needs a real
+        /// authenticated transport, synchronized cache, and receiver before any
+        /// source watcher can be constructed.
+        public var compatibility: ContractCompatibility {
+            guard let contractVersion else { return .unknown }
+            return contractVersion == MorbLiveShareBridge.contractVersion
+                ? .exact
+                : .unsupported(actual: contractVersion)
+        }
+    }
+
+    /// The host's verdict on the schema number carried by a
+    /// ``GuestAdvertisement``.
+    ///
+    /// This is separate from ``GuestCapability`` on purpose. An unavailable guest
+    /// can still name the current record shape, while a hypothetical ready guest
+    /// with a different schema must fail closed.
+    public enum ContractCompatibility: Codable, Equatable, Sendable {
+        /// The guest did not report a version. Never assume version 1 by default.
+        case unknown
+        /// The guest and host agree on the versioned record schema.
+        case exact
+        /// The guest reported a different schema. It must not receive records from
+        /// this host, even if it advertises a future `ready` capability.
+        case unsupported(actual: Int)
+
+        /// A stable value for diagnostics and daemon IPC. The detailed observed
+        /// version remains in ``GuestAdvertisement/contractVersion``.
+        public var wireValue: String {
+            switch self {
+            case .unknown:
+                return "unknown"
+            case .exact:
+                return "exact"
+            case .unsupported:
+                return "unsupported"
+            }
+        }
+    }
+
+    /// A fact-only admission verdict for a future synchronized-share transport.
+    ///
+    /// No current case authorizes a watcher or a VM mutation. In particular,
+    /// ``receiverUnavailable`` is the expected answer from today's guest. The
+    /// `ready` case is reserved so that a future implementation has to make its
+    /// transport/cache/receiver check explicit rather than silently broadening this
+    /// diagnostic into an activation path.
+    public enum DeliveryAdmission: Equatable, Sendable {
+        case receiverUnknown
+        case receiverUnavailable
+        case unsupportedContractVersion(actual: Int?)
+        case compatibleReceiverRequiresTransport
+
+        /// Computes the admission verdict from facts already observed by the daemon.
+        /// It starts no FSEvent stream and opens no host↔guest connection.
+        public static func evaluate(_ advertisement: GuestAdvertisement) -> Self {
+            switch advertisement.capability {
+            case .unknown:
+                return .receiverUnknown
+            case .unavailable:
+                return .receiverUnavailable
+            case .ready:
+                switch advertisement.compatibility {
+                case .unknown:
+                    return .unsupportedContractVersion(actual: nil)
+                case .unsupported(let actual):
+                    return .unsupportedContractVersion(actual: actual)
+                case .exact:
+                    return .compatibleReceiverRequiresTransport
+                }
+            }
+        }
+    }
+
     /// One explicitly selected project directory and the VirtioFS root that covers it.
     public struct Root: Codable, Equatable, Hashable, Sendable, Identifiable {
         /// The selected host and guest path. It is always a strict descendant of
@@ -419,6 +527,12 @@ public enum MorbLiveShareBridge {
         public let state: State
         public let roots: [Root]
         public let guestCapability: GuestCapability
+        /// The guest's additive record-schema advertisement, kept beside the
+        /// capability so status can distinguish an old guest from a version mismatch.
+        public let guestContractVersion: Int?
+        /// Whether the guest's advertised schema matches this host's future record
+        /// contract. This remains diagnostic-only until all delivery halves exist.
+        public let contractCompatibility: ContractCompatibility
         public let detail: String
 
         /// Always false in this foundation. Keeping the boolean makes a future UI or
@@ -430,6 +544,9 @@ public enum MorbLiveShareBridge {
                 "state": .string(state.rawValue),
                 "active": .bool(isActive),
                 "guest_capability": .string(guestCapability.rawValue),
+                "guest_contract_version": guestContractVersion.map { .int($0) } ?? .null,
+                "expected_contract_version": .int(MorbLiveShareBridge.contractVersion),
+                "contract_compatibility": .string(contractCompatibility.wireValue),
                 "roots": .array(roots.map { root in
                     .object([
                         "path": .string(root.path),
@@ -447,13 +564,15 @@ public enum MorbLiveShareBridge {
         paths: [String],
         shares: [MorbDirectoryShare],
         guestShareStates: [String: MorbShares.GuestMountState],
-        guestCapability: GuestCapability
+        guestAdvertisement: GuestAdvertisement
     ) -> Diagnostic {
         guard !paths.isEmpty else {
             return Diagnostic(
                 state: .disabled,
                 roots: [],
-                guestCapability: guestCapability,
+                guestCapability: guestAdvertisement.capability,
+                guestContractVersion: guestAdvertisement.contractVersion,
+                contractCompatibility: guestAdvertisement.compatibility,
                 detail: "No live_share_paths are configured; Morbstack does not watch broad VirtioFS roots.")
         }
         let plan: Plan
@@ -463,7 +582,9 @@ public enum MorbLiveShareBridge {
             return Diagnostic(
                 state: .invalidConfiguration,
                 roots: [],
-                guestCapability: guestCapability,
+                guestCapability: guestAdvertisement.capability,
+                guestContractVersion: guestAdvertisement.contractVersion,
+                contractCompatibility: guestAdvertisement.compatibility,
                 detail: (error as? MorbError)?.description ?? error.localizedDescription)
         }
         let unmounted = plan.roots.filter {
@@ -473,24 +594,57 @@ public enum MorbLiveShareBridge {
             return Diagnostic(
                 state: .waitingForGuestMount,
                 roots: plan.roots,
-                guestCapability: guestCapability,
+                guestCapability: guestAdvertisement.capability,
+                guestContractVersion: guestAdvertisement.contractVersion,
+                contractCompatibility: guestAdvertisement.compatibility,
                 detail: "Waiting for the guest to confirm the VirtioFS share(s) covering "
                     + unmounted.map(\.path).joined(separator: ", ") + ".")
         }
         let detail: String
-        switch guestCapability {
-        case .unknown:
+        switch DeliveryAdmission.evaluate(guestAdvertisement) {
+        case .receiverUnknown:
             detail = "The guest has not reported a file-notification capability; no FSEvents watch is started."
-        case .unavailable:
+        case .receiverUnavailable:
             detail = "The guest has no inotify injection endpoint; no FSEvents watch is started."
-        case .ready:
-            detail = "The guest can receive the future contract, but this build has no event-stream transport; no FSEvents watch is started."
+        case .unsupportedContractVersion(let actual):
+            if let actual {
+                detail = "The guest reports share-event contract version \(actual), but this host requires version \(contractVersion); no FSEvents watch is started."
+            } else {
+                detail = "The guest did not report a share-event contract version; no FSEvents watch is started."
+            }
+        case .compatibleReceiverRequiresTransport:
+            detail = "The guest can receive the future contract, but this build has no synchronized cache or event-stream transport; no FSEvents watch is started."
         }
         return Diagnostic(
             state: .deliveryUnavailable,
             roots: plan.roots,
-            guestCapability: guestCapability,
+            guestCapability: guestAdvertisement.capability,
+            guestContractVersion: guestAdvertisement.contractVersion,
+            contractCompatibility: guestAdvertisement.compatibility,
             detail: detail)
+    }
+
+    /// Compatibility entry point for callers that only have the legacy capability
+    /// value. New daemon code must pass ``GuestAdvertisement`` so an omitted or
+    /// mismatched guest schema can fail closed instead of being silently assumed.
+    ///
+    /// The legacy shape predates the version field, so it models only the old
+    /// in-process caller contract—not an observed guest advertisement. It is kept
+    /// for source compatibility while older support surfaces migrate.
+    @available(*, deprecated, message: "Pass GuestAdvertisement so the guest schema version is validated.")
+    public static func diagnose(
+        paths: [String],
+        shares: [MorbDirectoryShare],
+        guestShareStates: [String: MorbShares.GuestMountState],
+        guestCapability: GuestCapability
+    ) -> Diagnostic {
+        diagnose(
+            paths: paths,
+            shares: shares,
+            guestShareStates: guestShareStates,
+            guestAdvertisement: GuestAdvertisement(
+                capability: guestCapability,
+                contractVersion: nil))
     }
 
     private static func isWithin(_ path: String, root: String) -> Bool {
