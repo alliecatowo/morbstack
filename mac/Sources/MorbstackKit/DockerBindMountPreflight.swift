@@ -38,11 +38,12 @@ public enum DockerBindMountPreflight {
         shares: [MorbDirectoryShare],
         guestShareStates: [String: MorbShares.GuestMountState],
         sourceExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
-        sourcePathResolving: (String) -> String = resolveSourcePathThroughExistingAncestor
+        sourcePathResolving: ((String) -> String)? = nil
     ) -> Verdict {
         guard let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else {
             return .allowed
         }
+        let sourcePathResolving = sourcePathResolving ?? resolveSourcePathThroughExistingAncestor
 
         var bindSources: [BindSource] = []
         if let hostConfig = object["HostConfig"] as? [String: Any],

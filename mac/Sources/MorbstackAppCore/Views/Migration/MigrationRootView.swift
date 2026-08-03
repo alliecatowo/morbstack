@@ -291,6 +291,7 @@ struct MigrationRootView: View {
                 } else if runtime.running {
                     Text("Select Refresh to derive a comparison from the two running engines.")
                         .foregroundStyle(.secondary)
+                }
 
                 LabeledContent("Volume Plan", value: "Not available")
                 Text(

@@ -512,7 +512,7 @@ enum StatsMath {
 
     static func sample(_ stats: Wire.Stats, now: Date = Date()) -> StatsSample {
         let network = networkTotals(stats)
-        StatsSample(
+        return StatsSample(
             cpuPercent: cpuPercent(stats),
             memBytes: memoryBytes(stats),
             memLimit: stats.memory_stats?.limit ?? 0,
