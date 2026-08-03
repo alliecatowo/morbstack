@@ -171,7 +171,7 @@ private final class BuildxHistoryCommand: @unchecked Sendable {
             continuation.resume(throwing: BuildxHistoryClientError.failed(
                 failure.isEmpty
                     ? "Buildx history exited with status \(process.terminationStatus)."
-                    : failure)
+                    : failure))
             return
         }
         continuation.resume(returning: stdoutData)
