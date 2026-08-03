@@ -18,6 +18,11 @@ Docker, Compose, Buildx, Testcontainers, Dev Containers, Kubernetes and
 local-service URLs without keeping the app open, exporting variables, or
 following a repo-only setup guide.
 
+The prioritized execution order and non-claims are maintained in
+[`drop-in-delivery-plan.md`](drop-in-delivery-plan.md). It distinguishes the
+historical live parity audit from source that is implemented but still awaiting
+the clean-profile release proof.
+
 ## Product foundation that already exists
 
 - A lightweight Virtualization.framework guest running upstream dockerd and

@@ -29,6 +29,17 @@ new live PASS until the exact #9/#18/#19 commands are run against a freshly
 built guest. Until then, the historical FAIL rows and tally remain the
 audit record rather than a statement about the current implementation.
 
+### Current delivery state (not a replacement for this audit)
+
+The current checkout also packages Buildx and implements a consented
+per-user Docker context/direct-discovery path. Those changes address the
+historical #13 and #17 root causes in source, but have not passed the
+new-account release evidence in
+[`clean-profile-acceptance.md`](clean-profile-acceptance.md). They are therefore
+**implemented pending clean-profile verification**, not retrospective PASS
+results. See [`drop-in-delivery-plan.md`](drop-in-delivery-plan.md) for the
+ordered release blockers and explicit non-claims.
+
 ## Method
 
 Built once (`mise run build && mise run sign`), then copied `morbstackd`/`morb` out
@@ -133,21 +144,19 @@ lease claim. The exact dynamic transaction and unsupported boundary are in
 [`dynamic-port-allocation.md`](dynamic-port-allocation.md); no event-derived endpoint
 is counted as synchronous support.
 
-## Priority list — what to fix first for a credible "drop-in" claim
+## Historical priority list — what the original audit identified
 
 1. **Re-run #9, #18 and #19 against the current guest.** The old failures
    have targeted implementations now; a real VM run is the only evidence
    strong enough to upgrade their results.
-2. **Ship the `docker-buildx` CLI plugin.** Extremely high value for
-   extremely low cost — the engine-side BuildKit is already fully
-   functional (#14), multi-platform builds and cache mounts work
-   perfectly once the client binary exists. This is the single best
-   ROI item in the whole report.
-3. **Zero-config daemon discovery.** Until there's a host app that
-   registers a context automatically (or writes to a conventional socket
-   path), every ecosystem tool that doesn't respect `DOCKER_HOST` will
-   fail to find Morbstack at all. Testcontainers, most IDE integrations,
-   and `docker-py`'s default client all fall into this bucket.
+2. **Ship the `docker-buildx` CLI plugin.** This was the highest-leverage
+   source gap at the audit revision: the guest-side BuildKit was already fully
+   functional (#14), but a stock client had no plugin. The current bundle and
+   installer now carry it; clean-profile CP-01/02/04 evidence remains required.
+3. **Zero-config daemon discovery.** This was the old discovery gap. The
+   current installer has a conflict-preserving context and per-user discovery
+   socket path; CP-02/03/05 plus normal Testcontainers/IDE discovery must prove
+   it before it is called zero-config parity.
 4. **Document the port-conflict and `docker ps` "0.0.0.0" behavioral
    differences explicitly**, since they're the kind of thing that passes
    every manual test and then breaks exactly one person's CI script that
