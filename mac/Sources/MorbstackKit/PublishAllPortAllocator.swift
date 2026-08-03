@@ -53,7 +53,12 @@ final class PublishAllPortAllocator {
         func complete(succeeded: Bool) {
             lock.lock()
             guard !finished else { lock.unlock(); return }
-            finished = true
+            // A durable Engine-restart-policy session remains registered after an
+            // explicit DockerProxy start succeeds. The next policy restart will use
+            // the same host session and request a fresh lease.
+            if !succeeded || !remainsAvailableForRestartPolicy {
+                finished = true
+            }
             let lease = self.lease
             lock.unlock()
             if let lease {
@@ -70,6 +75,12 @@ final class PublishAllPortAllocator {
             finished = true
             lock.unlock()
             _ = Darwin.shutdown(fd, SHUT_RDWR)
+        }
+
+        var isLive: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return !finished
         }
 
         private func serve() {

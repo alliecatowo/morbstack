@@ -488,8 +488,10 @@ public final class DockerProxy {
                         fd: fd,
                         containerID: containerID,
                         forwarder: self.forwarder,
-                        log: self.log)
+                        log: self.log,
+                        remainsAvailableForRestartPolicy: true)
                     try session.start()
+                    self.forwarder.adoptPublishAllSession(session, forContainerID: containerID)
                     self.relayAfterPreflight(
                         clientFD: clientFD,
                         createBody: nil,

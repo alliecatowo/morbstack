@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Build Morbstack's version-pinned, publish-all-aware guest dockerd.
 #
-# Moby's own binary target runs in a Linux build environment. On macOS use a
-# Linux/arm64 builder (for example Docker buildx); this script intentionally
-# fails rather than silently installing a host-architecture daemon.
+# Moby's supported Buildx/Bake path runs its Linux toolchain in BuildKit. This
+# is required on macOS: invoking Moby's internal `hack/make.sh` directly would
+# execute its GNU-userland assumptions (including GNU `date`) on the Mac.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,20 +29,34 @@ if [ ! -f "${PATCH_FILE}" ]; then
 fi
 
 build_dir="$(mktemp -d "${TMPDIR:-/tmp}/morbstack-moby-build.XXXXXX")"
-cleanup() { rm -rf "${build_dir}"; }
+cleanup() {
+	git -C "${MOBY_SOURCE_DIR}" worktree remove --force "${build_dir}" 2>/dev/null || true
+	rm -rf "${build_dir}"
+}
 trap cleanup EXIT
 git -C "${MOBY_SOURCE_DIR}" worktree add --detach -q "${build_dir}" "${MOBY_COMMIT}"
 git -C "${build_dir}" apply --check "${PATCH_FILE}"
 git -C "${build_dir}" apply "${PATCH_FILE}"
 
-# Moby's documented binary target owns its toolchain and output layout. The
-# explicit platform prevents an Apple-host `dockerd` from entering guest-bin.
+# `docker buildx bake binary` is Moby's documented supported build route. The
+# destination is an explicit host directory, while the target platform makes
+# an accidental macOS/arm64 binary impossible. `SOURCE_DATE_EPOCH` comes from
+# Git's commit metadata, not BSD/GNU-incompatible `date` flags on the host.
+if ! docker buildx version >/dev/null 2>&1; then
+	echo "error: Docker Buildx with a usable BuildKit builder is required" >&2
+	echo "       install/enable Docker Buildx, then retry mise run guest-image" >&2
+	exit 1
+fi
+source_date_epoch="$(git -C "${build_dir}" show -s --format=%ct "${MOBY_COMMIT}")"
+output_dir="${build_dir}/morbstack-output"
 (
 	cd "${build_dir}"
-	PLATFORM="linux/arm64" hack/make.sh binary
+	DESTDIR="${output_dir}" \
+		SOURCE_DATE_EPOCH="${source_date_epoch}" \
+		docker buildx bake binary --set "*.platform=linux/arm64"
 )
 
-candidate="${build_dir}/bundles/binary-daemon/dockerd"
+candidate="${output_dir}/dockerd"
 if [ ! -x "${candidate}" ]; then
 	echo "error: Moby binary target completed without ${candidate}" >&2
 	exit 1

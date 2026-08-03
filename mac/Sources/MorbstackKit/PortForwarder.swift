@@ -903,6 +903,19 @@ public final class PortForwarder {
         return record.releaseOnStop
     }
 
+    /// A direct DockerProxy start registers a new guest-broker session for this
+    /// ID. Replace any durable recovery session that registration superseded; a
+    /// dictionary key alone is not evidence that the guest still routes to it.
+    func adoptPublishAllSession(
+        _ session: PublishAllPortAllocator.Session,
+        forContainerID containerID: String
+    ) {
+        lock.lock()
+        let replaced = publishAllRestartSessions.updateValue(session, forKey: containerID)
+        lock.unlock()
+        if let replaced, replaced !== session { replaced.invalidate() }
+    }
+
     /// Promotes a lease after Docker's normal `204` start reply is observed. The
     /// response observer runs before FDRelay writes those bytes to the client, so the
     /// service never sees a successful start while Morbstack has released its host
@@ -1589,7 +1602,7 @@ public final class PortForwarder {
         }
 
         var wanted: Set<String> = []
-        for containerID in identifiers.prefix(DockerPortPublicationPreflight.maximumSynchronousFixedPortBindings) {
+        for containerID in identifiers.sorted() {
             guard let inspect = try? getEngineJSON(
                 path: DockerAPIDecoding.containerInspectPath(containerID: containerID),
                 timeout: 5),
@@ -1601,8 +1614,12 @@ public final class PortForwarder {
         }
 
         lock.lock()
-        let stale = publishAllRestartSessions.filter { !wanted.contains($0.key) }.map(\.value)
-        publishAllRestartSessions = publishAllRestartSessions.filter { wanted.contains($0.key) }
+        let stale = publishAllRestartSessions.filter {
+            !wanted.contains($0.key) || !$0.value.isLive
+        }.map(\.value)
+        publishAllRestartSessions = publishAllRestartSessions.filter {
+            wanted.contains($0.key) && $0.value.isLive
+        }
         let missing = wanted.filter { publishAllRestartSessions[$0] == nil }
         lock.unlock()
         for session in stale { session.invalidate() }
