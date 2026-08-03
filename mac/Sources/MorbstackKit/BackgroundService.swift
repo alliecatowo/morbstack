@@ -319,7 +319,7 @@ public enum MorbBackgroundService {
         } else {
             controlSocketState = .unresponsive
         }
-        Status(
+        return Status(
             registration: registration,
             plistPath: plistPath,
             controlSocketPath: controlSocketPath,
