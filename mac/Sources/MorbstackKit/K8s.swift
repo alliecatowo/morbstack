@@ -246,8 +246,14 @@ public enum K8s {
                 : "The guest reports RAM-backed Docker data, so Kubernetes state will be lost when the engine stops."
 
             let guestMessage = status.message.trimmingCharacters(in: .whitespacesAndNewlines)
-            switch status.phase {
-            case .notInstalled, .stopped:
+
+            // `enabled` is the persisted intent that the guest updates synchronously
+            // for an enable or disable request. `phase`, in contrast, is a monitor
+            // snapshot that is intentionally refreshed later. Do not let a stale
+            // `.ready` snapshot claim a cluster is reachable immediately after it
+            // was disabled, or let a stale `.stopped` snapshot tell someone to enable
+            // a cluster that the guest has already accepted for startup.
+            guard status.enabled else {
                 recommendedAction = .enableKubernetes
                 if status.installed {
                     summary = "Kubernetes is installed but turned off."
@@ -256,6 +262,27 @@ public enum K8s {
                     summary = "Kubernetes is not installed in the guest."
                     guidance = "Enable Kubernetes to transfer Morbstack’s pinned payload and start the local k3s control plane."
                 }
+                return
+            }
+
+            // The enabled flag and the payload inventory normally move together.
+            // Keep a damaged or older guest from being presented as ready when they
+            // disagree, while still recommending the one operation that can repair
+            // the missing, pinned payload.
+            guard status.installed else {
+                recommendedAction = .enableKubernetes
+                summary = "Kubernetes is enabled, but its payload is not installed in the guest."
+                guidance = "Enable Kubernetes again to transfer Morbstack’s pinned payload and start the local k3s control plane."
+                return
+            }
+
+            switch status.phase {
+            case .notInstalled, .stopped:
+                recommendedAction = .refreshStatus
+                summary = "Kubernetes is enabled, but the guest has not reported startup yet."
+                guidance = guestMessage.isEmpty
+                    ? "Wait for the guest monitor to report startup progress, then refresh status."
+                    : guestMessage
 
             case .starting:
                 recommendedAction = .refreshStatus
