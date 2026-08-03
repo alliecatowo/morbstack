@@ -250,6 +250,31 @@ No Compose source sheet capture exists in the saved visual evidence, so full-win
 keyboard, VoiceOver, redaction/reveal, and light/dark acceptance remain pending. This
 source-only correction performed no build, test, Docker/VM action, or live-app launch.
 
+### 2026-08-03 Public-image discovery to pull handoff
+
+Public repository discovery and image pull are distinct user tasks. Discovery is a
+read-only public Docker Hub request shown in its own document-modal `NavigationSplitView`:
+a native `List` selects a reported repository and its detail uses a system `Form` for
+facts, reported context, and the next step. The detail's **Prepare Pull…** button is a
+handoff, not a pull command. It dismisses discovery first, then fills the existing
+standard Pull Image form with exactly the selected public repository. The person can
+review or revise that reference and only the explicit **Pull** button makes the Docker
+request. The pull form starts fresh for each new request, so a prior failed/progress log
+cannot be mistaken for the selected repository's operation. Discovery never sends a
+Docker request or credentials, and the local Images inventory changes only after a
+successful pull followed by its existing Engine refresh.
+
+Consulted: Apple’s [sheets](https://developer.apple.com/design/human-interface-guidelines/sheets),
+[lists and tables](https://developer.apple.com/design/human-interface-guidelines/lists-and-tables),
+and [toolbars](https://developer.apple.com/design/human-interface-guidelines/toolbars), plus
+SwiftUI [`Form`](https://developer.apple.com/documentation/swiftui/form) and
+[`NavigationSplitView`](https://developer.apple.com/documentation/swiftui/navigationsplitview).
+
+Saved real-window evidence covers the local Images table/inspector and an opened Pull
+sheet only. Public discovery, this handoff, pull success/failure, keyboard, VoiceOver,
+and light/dark acceptance remain pending; no build, test, Docker/VM action, or live-app
+launch was performed for this source change.
+
 ## Charts audit: current concrete rule
 
 `ContainerStatsTab` currently contains the only real time-series visualization. It is

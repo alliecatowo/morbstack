@@ -7,7 +7,8 @@
 // table's `.searchable` filter. Local images are an operational inventory; public
 // repository results are a small, narrative collection that a person deliberately
 // asks Docker Hub to search. Selection reveals factual public metadata and can copy a
-// repository name, but cannot pull or contact Docker.
+// repository name or prepare the separate explicit pull form, but cannot pull or
+// contact Docker itself.
 
 import MorbstackKit
 import SwiftUI
@@ -26,6 +27,11 @@ private enum PublicImageDiscoveryPresentation: Equatable {
 /// cannot overwrite the current presentation.
 struct PublicImageDiscoverySheet: View {
     @Environment(\.dismiss) private var dismiss
+
+    /// The parent owns the pull sheet. Discovery passes only the reported public
+    /// repository name back after the person requests the next step; it never asks
+    /// Docker to pull from inside this read-only sheet.
+    let onPreparePull: (String) -> Void
 
     @State private var query = ""
     @State private var presentation: PublicImageDiscoveryPresentation = .ready
@@ -147,7 +153,8 @@ struct PublicImageDiscoverySheet: View {
             if let selectedResult = page.results.first(where: { $0.id == selection }) {
                 PublicImageDiscoveryResultDetail(
                     result: selectedResult,
-                    hasMoreResults: page.hasMoreResults)
+                    hasMoreResults: page.hasMoreResults,
+                    onPreparePull: requestPull)
             } else {
                 ContentUnavailableView {
                     Label("No Repository Selected", systemImage: "magnifyingglass")
@@ -215,6 +222,11 @@ struct PublicImageDiscoverySheet: View {
             presentation = resetPresentation ? .ready : .failure(.cancelled)
         }
     }
+
+    private func requestPull(_ repository: String) {
+        onPreparePull(repository)
+        dismiss()
+    }
 }
 
 /// A `List` row is intentional here. Remote repository search returns a short
@@ -260,6 +272,7 @@ private struct PublicImageDiscoveryResultRow: View {
 private struct PublicImageDiscoveryResultDetail: View {
     let result: RegistryImageSearchResult
     let hasMoreResults: Bool
+    let onPreparePull: (String) -> Void
 
     var body: some View {
         Form {
@@ -293,11 +306,16 @@ private struct PublicImageDiscoveryResultDetail: View {
                 }
             }
 
-            Section {
+            Section("Next Step") {
+                Button("Prepare Pull…", systemImage: "arrow.down.circle") {
+                    onPreparePull(result.repository)
+                }
+                .accessibilityLabel("Prepare pull of \(result.repository)")
+                .help("Open Pull Image with \(result.repository)")
                 Button("Copy Repository", systemImage: "doc.on.doc") {
                     MorbPasteboard.copy(result.repository)
                 }
-                Text("Copying a repository name does not pull or inspect an image.")
+                Text("Preparing a pull opens Pull Image with this repository. Morbstack does not download it until you choose Pull.")
                     .foregroundStyle(.secondary)
             }
 

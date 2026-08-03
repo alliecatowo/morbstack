@@ -79,6 +79,10 @@ struct ImagesRootView: View {
     @State private var isPulling = false
     @State private var showingPull = false
     @State private var showingPublicImageDiscovery = false
+    /// A public discovery result can fill the existing Pull Image form only after its
+    /// read-only discovery sheet has dismissed. This avoids overlapping system sheets
+    /// and keeps the eventual Engine action explicit.
+    @State private var pendingDiscoveredPullReference: String?
     @FocusState private var pullReferenceIsFocused: Bool
     /// Whether the trailing inspector column is open. SwiftUI restores this across
     /// launches for a trailing-column inspector, so it is not persisted here.
@@ -224,8 +228,13 @@ struct ImagesRootView: View {
             .sheet(isPresented: $showingPull) {
                 pullSheet
             }
-            .sheet(isPresented: $showingPublicImageDiscovery) {
-                PublicImageDiscoverySheet()
+            .sheet(
+                isPresented: $showingPublicImageDiscovery,
+                onDismiss: presentDiscoveredPullIfNeeded)
+            {
+                PublicImageDiscoverySheet { repository in
+                    pendingDiscoveredPullReference = repository
+                }
             }
             .sheet(item: $localImageRun) { image in
                 LocalImageRunSheet(image: image, model: model)
@@ -310,7 +319,7 @@ struct ImagesRootView: View {
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(id: "images.pull", placement: .primaryAction) {
             Button {
-                showingPull = true
+                presentPull()
             } label: {
                 Image(systemName: "plus")
             }
@@ -462,7 +471,7 @@ struct ImagesRootView: View {
                 Text("No local Docker images are available yet.")
             } actions: {
                 Button("Pull an Image") {
-                    showingPull = true
+                    presentPull()
                 }
                 Button("Refresh") {
                     Task { await model.refreshAll() }
@@ -719,6 +728,24 @@ struct ImagesRootView: View {
     }
 
     // MARK: Operations
+
+    /// Starts one fresh, explicit pull review. A public discovery result may prefill
+    /// the reference, but no request reaches Docker until the person confirms from the
+    /// standard Pull Image form.
+    @MainActor
+    private func presentPull(reference: String? = nil) {
+        guard !isPulling else { return }
+        pullReference = reference ?? ""
+        pullLines = []
+        showingPull = true
+    }
+
+    @MainActor
+    private func presentDiscoveredPullIfNeeded() {
+        guard let reference = pendingDiscoveredPullReference else { return }
+        pendingDiscoveredPullReference = nil
+        presentPull(reference: reference)
+    }
 
     @MainActor
     private func initializeSelectionIfNeeded() {
