@@ -168,12 +168,13 @@ private final class BuildxHistoryCommand: @unchecked Sendable {
         let failure = String(decoding: stderrData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard process.terminationStatus == 0 else {
-            throw BuildxHistoryClientError.failed(
+            continuation.resume(throwing: BuildxHistoryClientError.failed(
                 failure.isEmpty
                     ? "Buildx history exited with status \(process.terminationStatus)."
                     : failure)
+            return
         }
-        return stdoutData
+        continuation.resume(returning: stdoutData)
     }
 }
 

@@ -489,7 +489,7 @@ public enum DockerPortPublicationPreflight {
                           (1...65535).contains(hostPort)
                     else {
                         unsupportedSiblingMessage = unsupportedSiblingMessage
-                            ?? "published \(protocolName.uppercased()) host port \(rawHostPort) is not a single port; dynamic ranges are not supported yet"
+                            ?? "published \(protocolName.uppercased()) host port \(rawHostPort ?? \"missing\") is not a single port; dynamic ranges are not supported yet"
                         continue
                     }
                     if protocolName != "tcp" { sawNonTCPPublication = true }
