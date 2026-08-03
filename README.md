@@ -83,11 +83,14 @@ clean-profile VM pass is marked that way rather than promoted to a claim.
   `host.docker.internal` and `gateway.docker.internal` are the deliberate
   exception: they resolve to the VM NAT gateway inside containers, so they
   reach services listening on the Mac.
-- **No durable background service yet.** Setup can safely install the
-  conventional per-user discovery link and a context, but a full desktop
-  replacement also needs a user-owned service that keeps the engine available
-  after the app window closes. That is active P0 work; no manual environment
-  variable is required after the consented setup when the daemon is running.
+- **The per-user background service is implemented, but release evidence is
+  pending.** It is an explicit, default-off Login Items choice backed by a
+  signed `SMAppService` LaunchAgent; it never starts the VM or containers on
+  its own. `morb service status`, `enable`, `disable`, and `settings` are
+  available for direct management. The complete clean-profile proof—consented
+  registration, app update, engine reachability after the window closes, and
+  repair/uninstall behavior—remains a release gate. See
+  [`docs/background-service.md`](docs/background-service.md).
 - **Buildx is bundled, pending clean-profile evidence.** The app’s Buildx
   plugin is the unmodified upstream binary and setup installs it in Docker’s
   standard plugin location. Its live clean-machine contract is not claimed
