@@ -245,6 +245,59 @@ final class PortForwardingTests: XCTestCase {
             Set([endpoint("0.0.0.0", 8443), endpoint("::", 8443)]))
     }
 
+    func testHostAndContainerNetworkModesLeavePortPublishingToMoby() {
+        let hostNetwork = Data(
+            #"{"HostConfig":{"NetworkMode":"host","PortBindings":{"80/tcp":[{"HostPort":"8080-8082"}]}}}"#.utf8)
+        let sharedContainerNetwork = Data(
+            #"{"HostConfig":{"NetworkMode":"container:anchor","PortBindings":{"80/tcp":[{"HostPort":"8080"}]}}}"#.utf8)
+
+        // Moby discards `-p`/`-P` for host networking with its standard warning.
+        // The proxy must not create a Mac listener for a publication Moby ignores.
+        XCTAssertEqual(DockerPortPublicationPreflight.inspectContainerCreate(body: hostNetwork), .allowed)
+        guard case .notDynamic = DockerPortPublicationPreflight.dynamicPortCreatePlan(in: hostNetwork) else {
+            return XCTFail("host networking must remain an unmodified Engine create")
+        }
+        XCTAssertNil(DockerPortPublicationPreflight.fixedPortLeasePlan(in: hostNetwork))
+
+        // Moby rejects port publishing when a container shares another
+        // container's network namespace. It must receive that native error
+        // without Morbstack first reserving a temporary host endpoint.
+        XCTAssertEqual(DockerPortPublicationPreflight.inspectContainerCreate(body: sharedContainerNetwork), .allowed)
+        guard case .notDynamic = DockerPortPublicationPreflight.dynamicPortCreatePlan(in: sharedContainerNetwork) else {
+            return XCTFail("container network sharing must remain an unmodified Engine create")
+        }
+        XCTAssertNil(DockerPortPublicationPreflight.fixedPortLeasePlan(in: sharedContainerNetwork))
+    }
+
+    func testCustomBridgeNetworkKeepsTheHostPortReservationPath() {
+        let create = Data(
+            #"{"HostConfig":{"NetworkMode":"project_default","PortBindings":{"80/tcp":[{"HostPort":"8080-8082"}]}}}"#.utf8)
+
+        XCTAssertEqual(DockerPortPublicationPreflight.inspectContainerCreate(body: create), .allowed)
+        guard case .supported = DockerPortPublicationPreflight.dynamicPortCreatePlan(in: create) else {
+            return XCTFail("a custom bridge network must retain normal host port forwarding")
+        }
+    }
+
+    func testHostNetworkDoesNotRecoverAPublishAllAllocator() {
+        let containerID = String(repeating: "f", count: 64)
+        let inspect = Data(
+            """
+            {"Id":"\(containerID)","State":{"Running":false},"HostConfig":{
+              "NetworkMode":"host","PublishAllPorts":true,
+              "RestartPolicy":{"Name":"always"},
+              "PortBindings":{"80/tcp":[{"HostPort":"8080"}]}
+            }}
+            """.utf8)
+
+        XCTAssertFalse(DockerPortPublicationPreflight.stoppedContainerUsesPublishAllPorts(
+            in: inspect, expectedContainerID: containerID))
+        XCTAssertFalse(DockerPortPublicationPreflight.restartPolicyUsesPublishAllPorts(
+            in: inspect, expectedContainerID: containerID))
+        XCTAssertNil(DockerPortPublicationPreflight.stoppedContainerFixedPortLeasePlan(
+            in: inspect, expectedContainerID: containerID))
+    }
+
     // MARK: - Fixed TCP lease recovery after VM loss
 
     func testStoppedFullIDInspectYieldsOnlyConcreteLoopbackTCPLeaseBindings() {

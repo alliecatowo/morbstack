@@ -328,6 +328,7 @@ public enum DockerPortPublicationPreflight {
             let state = object["State"] as? [String: Any],
             (state["Running"] as? Bool) == false,
             let hostConfig = object["HostConfig"] as? [String: Any],
+            !networkModeBypassesHostPortReservation(in: hostConfig),
             (hostConfig["PublishAllPorts"] as? Bool) == true
         else {
             return false
@@ -344,6 +345,7 @@ public enum DockerPortPublicationPreflight {
             let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
             (object["Id"] as? String) == expectedContainerID,
             let hostConfig = object["HostConfig"] as? [String: Any],
+            !networkModeBypassesHostPortReservation(in: hostConfig),
             (hostConfig["PublishAllPorts"] as? Bool) == true,
             let restartPolicy = hostConfig["RestartPolicy"] as? [String: Any],
             let policyName = restartPolicy["Name"] as? String
@@ -376,8 +378,18 @@ public enum DockerPortPublicationPreflight {
     public static func inspectContainerCreate(body: Data) -> Verdict {
         guard
             let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
-            let hostConfig = object["HostConfig"] as? [String: Any],
-            let portBindings = hostConfig["PortBindings"] as? [String: Any]
+            let hostConfig = object["HostConfig"] as? [String: Any]
+        else {
+            return .allowed
+        }
+        // Moby owns both exceptional network-mode outcomes. Host networking
+        // discards `-p`/`-P` with its standard warning, while a container
+        // namespace rejects port publishing. Binding on the Mac before either
+        // outcome would create an observable side effect that the guest never
+        // requested. Bridge and custom bridge networks intentionally continue
+        // through the normal host-reservation path.
+        guard !networkModeBypassesHostPortReservation(in: hostConfig),
+              let portBindings = hostConfig["PortBindings"] as? [String: Any]
         else {
             return .allowed
         }
@@ -600,6 +612,9 @@ public enum DockerPortPublicationPreflight {
         else {
             return nil
         }
+        guard !networkModeBypassesHostPortReservation(in: hostConfig) else {
+            return nil
+        }
         guard (hostConfig["PublishAllPorts"] as? Bool) != true else {
             // The proxy rejects -P before it reaches this parser. Keep the plan
             // independently strict as well: an explicit sibling cannot be held
@@ -733,6 +748,9 @@ public enum DockerPortPublicationPreflight {
               let portBindings = hostConfig["PortBindings"] as? [String: Any],
               !portBindings.isEmpty
         else {
+            return nil
+        }
+        guard !networkModeBypassesHostPortReservation(in: hostConfig) else {
             return nil
         }
         guard (hostConfig["PublishAllPorts"] as? Bool) != true else {
@@ -918,6 +936,9 @@ public enum DockerPortPublicationPreflight {
         // It must not enter this create-time rewrite path: the patched Engine asks
         // the host allocator for the complete effective set atomically instead.
         if let publishAllPorts = hostConfig["PublishAllPorts"] as? Bool, publishAllPorts {
+            return .notDynamic
+        }
+        guard !networkModeBypassesHostPortReservation(in: hostConfig) else {
             return .notDynamic
         }
 
@@ -1133,6 +1154,21 @@ public enum DockerPortPublicationPreflight {
     private static func containerPort(in key: String) -> Int? {
         let raw = key.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false).first ?? ""
         return Int(raw)
+    }
+
+    /// Returns `true` when Moby, not Morbstack's host listener transaction,
+    /// owns the port-publishing outcome for this create document.
+    ///
+    /// `host` shares the guest's network namespace, so Moby discards `-p` and
+    /// `-P` and emits its standard warning. `container:<id-or-name>` shares
+    /// another container's namespace and Moby rejects port publishing. Both are
+    /// intentionally raw relays: reserving a Mac endpoint first would either
+    /// forward a port Moby discarded or momentarily claim a port for a create
+    /// Moby rejects. A normal `bridge` or custom bridge name remains `false` and
+    /// receives the full host-port reservation contract.
+    private static func networkModeBypassesHostPortReservation(in hostConfig: [String: Any]) -> Bool {
+        guard let networkMode = hostConfig["NetworkMode"] as? String else { return false }
+        return networkMode == "host" || networkMode.hasPrefix("container:")
     }
 
     private static func string(_ value: Any?) -> String? {
