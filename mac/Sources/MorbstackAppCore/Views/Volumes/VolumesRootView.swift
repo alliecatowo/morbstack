@@ -437,7 +437,10 @@ struct VolumesRootView: View {
             .disabled(!canExportSelectedVolume)
         }
         if !model.volumes.isEmpty {
-            ToolbarItem(id: "volumes.inspector", placement: .primaryAction) {
+            // The inspector changes the window's navigation layout; it is not the
+            // primary task on a volume inventory screen.  Let the system place it
+            // with other view controls instead of promoting it above record actions.
+            ToolbarItem(id: "volumes.inspector", placement: .automatic) {
                 Button {
                     showsInspector.toggle()
                 } label: {

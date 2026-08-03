@@ -332,7 +332,10 @@ struct NetworksRootView: View {
             }
         }
         if !model.networks.isEmpty {
-            ToolbarItem(id: "networks.inspector", placement: .primaryAction) {
+            // Network inventory has no universal primary task.  Keep the inspector
+            // as a navigation affordance and reserve the primary region for a future
+            // contextual operation rather than turning this toggle into one.
+            ToolbarItem(id: "networks.inspector", placement: .automatic) {
                 Button {
                     showsInspector.toggle()
                 } label: {
