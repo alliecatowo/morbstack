@@ -150,9 +150,11 @@ that would otherwise tell a watcher to re-read it. A process that polls
 instead of watching, or one that is manually restarted after an edit,
 still works exactly as expected. There is no workaround today short of
 polling; do not rely on hot-reload working through a Morbstack bind mount
-until this is closed (tracked as an inotify/FSEvents bridge, see
-[`roadmap.md`](roadmap.md) — a known gap, not a design decision, and nothing
-here should be read as a hot-reload capability claim).
+until this is closed. The planned solution is a guest-local synchronized
+cache—not synthetic inotify—and its explicit privacy, reconciliation, and
+failure contract is in [`live-share-bridge.md`](live-share-bridge.md). It is a
+known gap, not a design decision, and nothing here should be read as a
+hot-reload capability claim.
 
 ## Engine-side bind validation
 

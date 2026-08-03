@@ -136,9 +136,10 @@ server's default: Vite, webpack, nodemon, `cargo watch`, Django's autoreloader �
 Do not describe Morbstack as supporting hot reload today. The workaround is each
 tool's polling mode (`CHOKIDAR_USEPOLLING=1`, `WATCHPACK_POLLING=true`,
 `vite --force` with `server.watch.usePolling`, `cargo watch --poll`), at the cost of
-CPU. The real fix is an FSEvents bridge on the host that injects the corresponding
-inotify events into the guest, or a synced-share tier that keeps a guest-local copy —
-a separate milestone.
+CPU. The real fix is a guest-local synchronized-share filesystem that applies real
+filesystem changes in the guest—not a host FSEvents process that injects invented
+inotify records. That is a separate milestone; its transport, privacy, and recovery
+contract is in [`live-share-bridge.md`](live-share-bridge.md).
 
 ### Scoped event-bridge foundation (not hot reload)
 

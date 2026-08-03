@@ -67,10 +67,10 @@ boot) actually works before investing in the surrounding product.
   in the guest at its identical absolute path, so `-v` needs no
   translation. Roots are configured with `shared_paths` and inspected with
   `morb shares`. See `docs/sharing.md`; tier 2 (synced shares) and the
-  FSEvents→inotify bridge remain M1+. The repository now has an opt-in,
-  bounded event/overflow contract and read-only diagnostic only; it does not
-  create a watcher or claim hot reload before a guest injection endpoint and
-  event transport exist.
+  guest-observable file-change loop remain M1+. The repository now has an
+  opt-in, bounded event/overflow contract and read-only diagnostic only; it
+  does not create a watcher or claim hot reload before a guest-local cache,
+  receiver, and event transport exist.
 - amd64 container images run via Rosetta binfmt. **Done** — also not in
   the original M0 scope. Verified with an image that publishes no arm64
   manifest at all (`mysql:5.7`), computing a hash bit-identical to the
