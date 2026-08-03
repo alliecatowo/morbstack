@@ -441,7 +441,9 @@ public enum MorbDockerContext {
         var metadata = stat()
         let result = url.withUnsafeFileSystemRepresentation { path -> Int32 in
             guard let path else { return -1 }
-            return Darwin.stat(path, &metadata)
+            // `stat(2)`, not `lstat(2)`: the caller has deliberately chosen a
+            // config.json symlink, so preserve the resolved target's mode.
+            return stat(path, &metadata)
         }
         if result == 0 {
             guard (metadata.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG) else {
