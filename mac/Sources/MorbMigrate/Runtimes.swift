@@ -247,7 +247,10 @@ public struct DockerCLIConfig: Sendable {
     public var currentContext: String
     public var credsStore: String?
     public var credHelperRegistries: [String]
-    public var proxies: [String: Any]
+    /// Names of proxy contexts in Docker's configuration. Values are deliberately
+    /// never retained: this report needs to say that proxy configuration exists,
+    /// not read or expose proxy endpoints.
+    public var proxies: [String]
     public var cliPluginsExtraDirs: [String]
     public var registriesWithAuth: [String]
 
@@ -296,7 +299,7 @@ public enum DockerCLIConfigReader {
             currentContext: current,
             credsStore: object["credsStore"] as? String,
             credHelperRegistries: credHelpers,
-            proxies: object["proxies"] as? [String: Any] ?? [:],
+            proxies: (object["proxies"] as? [String: Any])?.keys.sorted() ?? [],
             cliPluginsExtraDirs: pluginDirs,
             registriesWithAuth: auths)
     }

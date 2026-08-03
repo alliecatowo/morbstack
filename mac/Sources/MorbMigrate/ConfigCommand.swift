@@ -34,7 +34,7 @@ enum ConfigCommand {
                 "creds_store_is_desktop_helper": config?.credsStoreIsDesktopHelper ?? false,
                 "cred_helper_registries": config?.credHelperRegistries ?? [],
                 "registries_with_auth": config?.registriesWithAuth ?? [],
-                "proxy_keys": config.map { Array($0.proxies.keys).sorted() } ?? [],
+                "proxy_keys": config?.proxies ?? [],
                 "cli_plugins_extra_dirs": config?.cliPluginsExtraDirs ?? [],
                 "contexts": contexts.map { ["name": $0.name, "host": $0.host ?? NSNull()] as [String: Any] },
             ]) {}
@@ -73,7 +73,7 @@ enum ConfigCommand {
         }
         if !config.proxies.isEmpty {
             out("")
-            out("proxies configured for: \(config.proxies.keys.sorted().joined(separator: ", "))")
+            out("proxies configured for: \(config.proxies.joined(separator: ", "))")
         }
         if !config.cliPluginsExtraDirs.isEmpty {
             out("")

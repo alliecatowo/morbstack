@@ -266,7 +266,7 @@ struct MigrationRootView: View {
 
     @ViewBuilder
     private func transferSection(for runtime: MigrationRuntime) -> some View {
-        Section("Migration") {
+        Section {
             if let source = runtime.transferSourceToken {
                 LabeledContent("Image Plan", value: imagePlanStatus(for: runtime))
                 Button {
@@ -286,6 +286,8 @@ struct MigrationRootView: View {
                     "Morbstack is the migration destination. Select a running Docker Desktop, Colima, or OrbStack source to review its readiness.")
                     .foregroundStyle(.secondary)
             }
+        } header: {
+            Text("Migration")
         } footer: {
             Text(
                 "This app route only inspects local runtimes and configuration. It does not start a runtime, write Docker configuration, or import images or volumes.")

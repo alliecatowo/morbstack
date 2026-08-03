@@ -428,9 +428,9 @@ public enum MorbSetupVerification {
             do {
                 if let parsed = try MinimalHTTP.parseHead(response) {
                     guard parsed.head.statusCode == 200 else {
-                    return .failure("HTTP \(parsed.head.statusCode) \(parsed.head.reason)")
+                        return .failure("HTTP \(parsed.head.statusCode) \(parsed.head.reason)")
                     }
-                    return .success(())
+                    return .success
                 }
             } catch {
                 return .failure(errorDescription(error))
