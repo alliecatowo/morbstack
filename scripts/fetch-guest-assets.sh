@@ -20,21 +20,48 @@
 #                cached -> dist/apks/ (see dist/apks/PROVENANCE.txt for the
 #                full package list and the iptables-legacy vs iptables
 #                rationale).
-#   5. compose:  docker/compose v5.3.1 CLI plugin binary for the HOST Mac
+#   5. cli:      the `docker` client binary itself, HOST darwin-arm64,
+#                version 29.7.1 (matching the guest's dockerd exactly — zero
+#                client/server skew). Docker Inc. does not publish a
+#                standalone macOS CLI binary through its own release
+#                infrastructure (download.docker.com's static tarballs are
+#                Linux-only, and docker/cli's GitHub repo has no Releases at
+#                all) — the only widely-used, independently-auditable build
+#                of just the client for darwin/arm64 is Homebrew core's
+#                `docker` formula (Apache-2.0, same as upstream), whose
+#                bottle this script fetches directly from Homebrew's ghcr.io
+#                mirror. The bottle URL and its expected sha256 are the same
+#                value (ghcr.io blobs are content-addressed by digest), so
+#                verification is: download, hash, compare to the pin below —
+#                see fetch_docker_cli's comments for the full chain.
+#                -> dist/host-bin/docker. This is what turns "install
+#                Morbstack" into a complete Docker CLI + engine on a Mac
+#                that has never had Docker Desktop or Homebrew's docker
+#                installed — see docs/parity.md's zero-config-discovery item.
+#   6. compose:  docker/compose v5.3.1 CLI plugin binary for the HOST Mac
 #                (darwin-aarch64), verified against its GitHub Release
-#                sha256 sidecar -> dist/host-bin/docker-compose.
-#   6. buildx:   docker/buildx v0.36.0 CLI plugin binary for the HOST Mac
+#                sha256 sidecar -> dist/host-bin/cli-plugins/docker-compose.
+#   7. buildx:   docker/buildx v0.36.0 CLI plugin binary for the HOST Mac
 #                (darwin-arm64). Unlike compose, buildx's GitHub Release does
 #                NOT publish darwin binaries in its plain checksums.txt (only
 #                the linux/freebsd/netbsd/openbsd builds are listed there) —
 #                the darwin binaries' hashes live in the separate
 #                checksums-signed.txt asset instead, which this script
 #                fetches and checks the pin against exactly the same way.
-#                -> dist/host-bin/docker-buildx. See #14 in docs/parity.md:
-#                the guest's BuildKit is already fully functional; shipping
-#                this client-side plugin is what turns that into a working
-#                `docker build`/`docker buildx build` out of the box.
-#   7. k8s:      k3s v1.36.2+k3s1 arm64 server binary and cri-dockerd v0.4.4
+#                -> dist/host-bin/cli-plugins/docker-buildx. See #14 in
+#                docs/parity.md: the guest's BuildKit is already fully
+#                functional; shipping this client-side plugin is what turns
+#                that into a working `docker build`/`docker buildx build`
+#                out of the box.
+#
+#   dist/host-bin/ mirrors exactly how Morbstack.app itself bundles these
+#   three (Contents/Resources/host-bin/{docker,cli-plugins/docker-compose,
+#   cli-plugins/docker-buildx}) — one discovery function, two possible
+#   roots (a repo checkout's dist/host-bin/ or a shipped app's
+#   Resources/host-bin/), no path special-casing between them. See
+#   MorbstackKit/CliPlugins.swift.
+#
+#   8. k8s:      k3s v1.36.2+k3s1 arm64 server binary and cri-dockerd v0.4.4
 #                arm64, both hash-pinned -> dist/guest-k8s/ (the repository's
 #                provenance-bearing cache) and $MORBSTACK_HOME/data/k8s/ (the
 #                copy morbstackd actually reads). This is the OPTIONAL
@@ -55,6 +82,7 @@
 #   scripts/fetch-guest-assets.sh --docker-only    # docker binaries only
 #   scripts/fetch-guest-assets.sh --alpine-only    # alpine rootfs only
 #   scripts/fetch-guest-assets.sh --fsutils-only   # btrfs/e2fs/iptables apks only
+#   scripts/fetch-guest-assets.sh --cli-only       # host docker CLI binary only
 #   scripts/fetch-guest-assets.sh --compose-only   # host docker-compose only
 #   scripts/fetch-guest-assets.sh --buildx-only    # host docker-buildx only
 #   scripts/fetch-guest-assets.sh --k8s-only       # k3s + cri-dockerd only
@@ -166,6 +194,24 @@ CRI_DOCKERD_ARCHIVE_SHA256="4f96b4e9b7fcb1c90f78470325c2197a67fa28c0e0c901509437
 CRI_DOCKERD_MEMBER_PATH="cri-dockerd/cri-dockerd"
 CRI_DOCKERD_SHA256="d52b7a79376560d7dcb5490e16dcb78578bd0f040c1e70dec220824fae74ae7e"
 
+# --- cli: the docker client itself, HOST darwin-arm64, via Homebrew core's
+# bottle mirror on ghcr.io (see the header comment for why: Docker Inc.
+# publishes no standalone macOS CLI binary of its own). The bottle version
+# (29.7.1) matches dist/guest-bin/docker's engine version exactly.
+#
+# ghcr.io blobs are addressed by their own sha256 digest, so the "sidecar"
+# here is the digest embedded in the URL itself, cross-checked against
+# Homebrew's formula API (`https://formulae.brew.sh/api/formula/docker.json`,
+# `.bottle.stable.files.arm64_tahoe.sha256`) at pin time — both agreed.
+# `CLI_BOTTLE_SHA256` is what's actually checked at fetch time; the URL
+# containing the same value is corroborating, not load-bearing on its own.
+CLI_VERSION="29.7.1"
+CLI_BOTTLE_SHA256="1bc0f3ce68c682ff23050b964f9a721b15fa1524ae29129c02c96d3966e98dcd"
+CLI_BOTTLE_URL="https://ghcr.io/v2/homebrew/core/docker/blobs/sha256:${CLI_BOTTLE_SHA256}"
+# Path inside the bottle's own tar layout (Cellar-style:
+# <formula>/<version>/bin/<binary>) to the one file this script keeps.
+CLI_BOTTLE_MEMBER="docker/${CLI_VERSION}/bin/docker"
+
 # --- compose: docker/compose v5.3.1 CLI plugin, HOST darwin-aarch64 ---
 COMPOSE_RELEASE_URL="https://github.com/docker/compose/releases/download/v5.3.1/docker-compose-darwin-aarch64"
 COMPOSE_SHA256_SIDECAR_URL="${COMPOSE_RELEASE_URL}.sha256"
@@ -191,15 +237,16 @@ BUILDX_SHA256="82c6a3d9df37790c5bdb0d7ca88986d1d17622fc2b88ebe34b275c6c47acd7a6"
 
 usage() {
 	cat <<EOF
-Usage: $(basename "$0") [--kernel-only|--docker-only|--alpine-only|--fsutils-only|--compose-only|--buildx-only|--k8s-only] [-h]
+Usage: $(basename "$0") [--kernel-only|--docker-only|--alpine-only|--fsutils-only|--cli-only|--compose-only|--buildx-only|--k8s-only] [-h]
 
 Fetch and verify all pinned third-party guest assets:
   kernel   -> ${MORBSTACK_HOME}/data/kernel/vmlinux
   docker   -> ${REPO_ROOT}/dist/guest-bin/
   alpine   -> ${REPO_ROOT}/dist/rootfs/
   fsutils  -> ${REPO_ROOT}/dist/apks/
-  compose  -> ${REPO_ROOT}/dist/host-bin/docker-compose
-  buildx   -> ${REPO_ROOT}/dist/host-bin/docker-buildx
+  cli      -> ${REPO_ROOT}/dist/host-bin/docker
+  compose  -> ${REPO_ROOT}/dist/host-bin/cli-plugins/docker-compose
+  buildx   -> ${REPO_ROOT}/dist/host-bin/cli-plugins/docker-buildx
   k8s      -> ${REPO_ROOT}/dist/guest-k8s/  and  ${MORBSTACK_HOME}/data/k8s/
 
 Options:
@@ -207,6 +254,7 @@ Options:
   --docker-only    Only fetch/verify the Docker engine binaries
   --alpine-only    Only fetch/verify the Alpine minirootfs
   --fsutils-only   Only fetch/verify the btrfs-progs/e2fsprogs/iptables-legacy apks
+  --cli-only       Only fetch/verify the host docker CLI binary
   --compose-only   Only fetch/verify the host docker-compose CLI plugin
   --buildx-only    Only fetch/verify the host docker-buildx CLI plugin
   --k8s-only       Only fetch/verify the k3s + cri-dockerd Kubernetes payload
@@ -537,13 +585,86 @@ fetch_fsutils() {
 }
 
 # ---------------------------------------------------------------------------
+# Step: docker CLI client itself (HOST darwin-arm64), via Homebrew's bottle
+# mirror on ghcr.io — see the header comment and the CLI_* variables above
+# for why there is no official Docker Inc. release to pull this from.
+# ---------------------------------------------------------------------------
+
+fetch_docker_cli() {
+	echo "== cli (docker client ${CLI_VERSION}, HOST darwin-arm64, via Homebrew's ghcr.io bottle mirror) =="
+
+	local dest_dir="${REPO_ROOT}/dist/host-bin"
+	local dest_file="${dest_dir}/docker"
+
+	require_cmd curl
+	require_cmd tar
+
+	if [ -x "${dest_file}" ]; then
+		local have_sha
+		have_sha="$(sha256_of "${dest_file}")"
+		# The extracted binary's own hash is not the bottle archive's hash
+		# (the archive also contains completions, man pages, the formula's
+		# own LICENSE/NOTICE/sbom.spdx.json) — idempotency here checks that
+		# the installed binary still runs and reports the pinned version,
+		# which is the property that actually matters and survives a
+		# `docker --version` sanity check rather than an opaque hash of a
+		# file that was never published as its own artifact.
+		if [ -n "${have_sha}" ] && "${dest_file}" --version 2>/dev/null | grep -q "version ${CLI_VERSION}"; then
+			check "docker CLI already present and verified: ${dest_file} ($(${dest_file} --version))"
+			return 0
+		fi
+		echo "  existing ${dest_file} did not report version ${CLI_VERSION}; re-fetching" >&2
+	fi
+
+	mkdir -p "${dest_dir}"
+
+	local tmp_bottle
+	tmp_bottle="$(mktemp "${TMPDIR:-/tmp}/morbstack-docker-cli-bottle.XXXXXX")"
+	local tmp_extract
+	tmp_extract="$(mktemp -d "${TMPDIR:-/tmp}/morbstack-docker-cli-extract.XXXXXX")"
+	trap 'rm -f "${tmp_bottle}"; rm -rf "${tmp_extract}"' RETURN
+
+	info "downloading ${CLI_BOTTLE_URL}"
+	curl --fail --location --show-error --progress-bar \
+		-H "Authorization: Bearer QQ==" \
+		--output "${tmp_bottle}" "${CLI_BOTTLE_URL}" ||
+		fail "failed to download the docker CLI bottle"
+
+	local got_sha
+	got_sha="$(sha256_of "${tmp_bottle}")"
+	[ "${got_sha}" = "${CLI_BOTTLE_SHA256}" ] ||
+		fail "docker CLI bottle sha256 mismatch: got ${got_sha}, expected ${CLI_BOTTLE_SHA256} (possible corruption or upstream tamper)"
+	check "sha256 verified against the pin (self-describing: the ghcr.io blob URL and this hash are the same value)"
+
+	tar xzf "${tmp_bottle}" -C "${tmp_extract}" "${CLI_BOTTLE_MEMBER}" ||
+		fail "expected member ${CLI_BOTTLE_MEMBER} not found inside the docker CLI bottle"
+
+	local extracted="${tmp_extract}/${CLI_BOTTLE_MEMBER}"
+	[ -f "${extracted}" ] || fail "expected member ${CLI_BOTTLE_MEMBER} not found inside the docker CLI bottle"
+
+	mv "${extracted}" "${dest_file}"
+	chmod 755 "${dest_file}"
+	local got_version
+	got_version="$("${dest_file}" --version 2>&1)"
+	case "${got_version}" in
+	*"version ${CLI_VERSION}"*) ;;
+	*) fail "installed docker CLI reports unexpected version: ${got_version} (expected ${CLI_VERSION})" ;;
+	esac
+	check "installed and verified: ${dest_file} (${got_version})"
+
+	trap - RETURN
+	rm -f "${tmp_bottle}"
+	rm -rf "${tmp_extract}"
+}
+
+# ---------------------------------------------------------------------------
 # Step: docker compose CLI plugin (HOST darwin-aarch64)
 # ---------------------------------------------------------------------------
 
 fetch_compose() {
 	echo "== compose (docker/compose ${COMPOSE_VERSION}, HOST darwin-aarch64) =="
 
-	local dest_dir="${REPO_ROOT}/dist/host-bin"
+	local dest_dir="${REPO_ROOT}/dist/host-bin/cli-plugins"
 	local dest_file="${dest_dir}/docker-compose"
 
 	require_cmd curl
@@ -596,7 +717,7 @@ fetch_compose() {
 fetch_buildx() {
 	echo "== buildx (docker/buildx ${BUILDX_VERSION}, HOST darwin-arm64) =="
 
-	local dest_dir="${REPO_ROOT}/dist/host-bin"
+	local dest_dir="${REPO_ROOT}/dist/host-bin/cli-plugins"
 	local dest_file="${dest_dir}/docker-buildx"
 
 	require_cmd curl
@@ -850,6 +971,7 @@ DO_KERNEL=1
 DO_DOCKER=1
 DO_ALPINE=1
 DO_FSUTILS=1
+DO_CLI=1
 DO_COMPOSE=1
 DO_BUILDX=1
 DO_K8S=1
@@ -860,6 +982,7 @@ while [ $# -gt 0 ]; do
 		DO_DOCKER=0
 		DO_ALPINE=0
 		DO_FSUTILS=0
+		DO_CLI=0
 		DO_COMPOSE=0
 		DO_BUILDX=0
 		DO_K8S=0
@@ -868,6 +991,7 @@ while [ $# -gt 0 ]; do
 		DO_KERNEL=0
 		DO_ALPINE=0
 		DO_FSUTILS=0
+		DO_CLI=0
 		DO_COMPOSE=0
 		DO_BUILDX=0
 		DO_K8S=0
@@ -876,6 +1000,7 @@ while [ $# -gt 0 ]; do
 		DO_KERNEL=0
 		DO_DOCKER=0
 		DO_FSUTILS=0
+		DO_CLI=0
 		DO_COMPOSE=0
 		DO_BUILDX=0
 		DO_K8S=0
@@ -884,6 +1009,16 @@ while [ $# -gt 0 ]; do
 		DO_KERNEL=0
 		DO_DOCKER=0
 		DO_ALPINE=0
+		DO_CLI=0
+		DO_COMPOSE=0
+		DO_BUILDX=0
+		DO_K8S=0
+		;;
+	--cli-only)
+		DO_KERNEL=0
+		DO_DOCKER=0
+		DO_ALPINE=0
+		DO_FSUTILS=0
 		DO_COMPOSE=0
 		DO_BUILDX=0
 		DO_K8S=0
@@ -893,6 +1028,7 @@ while [ $# -gt 0 ]; do
 		DO_DOCKER=0
 		DO_ALPINE=0
 		DO_FSUTILS=0
+		DO_CLI=0
 		DO_BUILDX=0
 		DO_K8S=0
 		;;
@@ -901,6 +1037,7 @@ while [ $# -gt 0 ]; do
 		DO_DOCKER=0
 		DO_ALPINE=0
 		DO_FSUTILS=0
+		DO_CLI=0
 		DO_COMPOSE=0
 		DO_K8S=0
 		;;
@@ -909,6 +1046,7 @@ while [ $# -gt 0 ]; do
 		DO_DOCKER=0
 		DO_ALPINE=0
 		DO_FSUTILS=0
+		DO_CLI=0
 		DO_COMPOSE=0
 		DO_BUILDX=0
 		;;
@@ -929,6 +1067,7 @@ done
 [ "${DO_DOCKER}" -eq 1 ] && fetch_docker
 [ "${DO_ALPINE}" -eq 1 ] && fetch_alpine
 [ "${DO_FSUTILS}" -eq 1 ] && fetch_fsutils
+[ "${DO_CLI}" -eq 1 ] && fetch_docker_cli
 [ "${DO_COMPOSE}" -eq 1 ] && fetch_compose
 [ "${DO_BUILDX}" -eq 1 ] && fetch_buildx
 [ "${DO_K8S}" -eq 1 ] && fetch_k8s

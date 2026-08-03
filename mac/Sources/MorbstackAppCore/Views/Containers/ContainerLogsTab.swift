@@ -60,17 +60,41 @@ struct ContainerLogsTab: View {
     private let bottomAnchor = "trackb.log.bottom"
 
     var body: some View {
-        logSurface
-            .background(Theme.contentBackground)
-            .toolbar { toolbarContent }
-            .searchable(text: $store.query, placement: .toolbar, prompt: "Filter lines")
-            .onAppear { if streamsLive { start() } }
-            .onDisappear { if streamsLive { store.stop() } }
-            .onChange(of: container.isRunning) { _, isRunning in
-                // A container that was restarted has a brand new stream; the old one
-                // ended when the process did.
-                if streamsLive, isRunning, !store.isStreaming { start() }
-            }
+        VStack(spacing: 0) {
+            filterBar
+            MorbRowDivider()
+            logSurface
+        }
+        .background(Theme.contentBackground)
+        .toolbar { toolbarContent }
+        .onAppear { if streamsLive { start() } }
+        .onDisappear { if streamsLive { store.stop() } }
+        .onChange(of: container.isRunning) { _, isRunning in
+            // A container that was restarted has a brand new stream; the old one
+            // ended when the process did.
+            if streamsLive, isRunning, !store.isStreaming { start() }
+        }
+    }
+
+    /// An in-content filter field, not `.searchable(placement: .toolbar)`.
+    ///
+    /// This tab and `ContainersRootView` are visible together — it is the detail pane of
+    /// a split view, not a pushed screen — so both cannot register a toolbar-placed
+    /// search field at once: SwiftUI's `.searchable` inserts a system search item under
+    /// a fixed identifier, and two of them landing in the same `NSToolbar` crashes it
+    /// (`SIGTRAP` in `-[NSToolbar _insertNewItemWithItemIdentifier:...]`). The window's
+    /// one toolbar search belongs to the containers list — it searches the window's
+    /// primary collection. This filters lines *within* the pane already showing one
+    /// container's output, which is a property of the content, not of the window.
+    private var filterBar: some View {
+        HStack {
+            TrackBSearchField(
+                text: $store.query, prompt: "Filter lines", width: 260,
+                caption: store.isFiltering ? "\(store.visibleLines.count) of \(store.lines.count)" : nil)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, Theme.space4)
+        .padding(.vertical, Theme.space2 + 1)
     }
 
     private func start() {

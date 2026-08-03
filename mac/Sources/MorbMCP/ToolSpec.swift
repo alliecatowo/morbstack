@@ -99,6 +99,30 @@ public final class ToolContext {
     }
 }
 
+/// One argument-level guard a tool defines: a grant a tool-level or group-level
+/// grant does not imply, because it gates a specific argument value that does
+/// something a broader grant's author most likely did not mean to authorize —
+/// destroying data that cannot be reproduced (`prune:volumes`), or revealing
+/// secrets rather than changing state (`inspect:env`).
+public struct ToolGuard {
+    /// Fully-qualified permission key, e.g. `"container_remove:force"`.
+    public var key: String
+    /// Shown in `morb mcp permissions`, the generated `mcp.toml` template, and
+    /// the denial text a blocked call returns — this is the *only* place that
+    /// text is written, so it needs to explain the guard on its own.
+    public var description: String
+    /// Whether this call's arguments trigger the guard at all — most calls to
+    /// `container_remove` do not pass `force:true`, and an ungranted guard must
+    /// not block those.
+    public var appliesTo: ([String: Any]) -> Bool
+
+    public init(key: String, description: String, appliesTo: @escaping ([String: Any]) -> Bool) {
+        self.key = key
+        self.description = description
+        self.appliesTo = appliesTo
+    }
+}
+
 /// One tool's complete description and implementation.
 public struct ToolSpec {
     public var name: String
@@ -110,17 +134,19 @@ public struct ToolSpec {
     /// `nil` for read-only tools. Permissions.swift's ``PermissionSubject`` is
     /// derived from this at registration time (ToolRegistry.swift) rather than
     /// stored redundantly here.
+    ///
+    /// Note that "read-only" and "ungated" are not the same thing: a read-only
+    /// tool's own *invocation* never needs a grant, but it can still define
+    /// ``guards`` — `container_inspect`'s `inspect:env` is exactly that, a
+    /// confidentiality gate on a tool with no group at all.
     public var group: ToolGroup?
-    /// Argument-level guard names this tool defines (e.g. `container_remove`
-    /// defines `"force"`). Each guard's predicate decides, from the call's
-    /// arguments, whether the guard applies to *this* call.
-    public var guards: [(name: String, appliesTo: ([String: Any]) -> Bool)]
+    public var guards: [ToolGuard]
     public var handler: (ToolContext, [String: Any]) -> ToolCallResult
 
     public init(
         name: String, summary: String, inputSchema: [String: Any],
         readOnly: Bool, destructive: Bool, group: ToolGroup?,
-        guards: [(name: String, appliesTo: ([String: Any]) -> Bool)] = [],
+        guards: [ToolGuard] = [],
         handler: @escaping (ToolContext, [String: Any]) -> ToolCallResult
     ) {
         self.name = name
@@ -134,7 +160,7 @@ public struct ToolSpec {
     }
 
     public var permissionSubject: PermissionSubject {
-        PermissionSubject(name: name, group: group, guards: guards.map(\.name))
+        PermissionSubject(name: name, group: group, guardKeys: guards.map(\.key))
     }
 }
 

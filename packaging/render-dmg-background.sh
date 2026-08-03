@@ -24,14 +24,23 @@
 # source is scaled to fill the square's full width and top-aligned (verified
 # empirically: a 660x400 source rendered at -s 1320 produces a 1320x1320 PNG
 # whose content occupies rows 0-799, i.e. exactly 1320 * (400/660), with the
-# remainder below transparent). That is deterministic, so the fix is a plain
-# top-left crop back to the source aspect ratio with `sips --cropOffset 0 0`,
-# not a guess.
+# remainder below opaque white). That part is deterministic, so what's left
+# is a plain top-left crop back to the source aspect ratio.
+#
+# That crop is NOT done with `sips -c/--cropOffset`: empirically, on this
+# machine (sips-316, macOS 26), `sips -c H W --cropOffset Y X` silently
+# ignores small offset values and always falls back to a *centered* crop
+# instead of the documented "offset from top left corner" — confirmed by
+# round-tripping known per-row pixel values through it before trusting it.
+# crop-top.swift does the same crop with CoreGraphics instead, which does
+# exactly what it is told; see that file for how its own coordinate-origin
+# assumption was verified the same way.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 SVG_SRC="${SCRIPT_DIR}/dmg-background.svg"
+CROP_TOOL="${SCRIPT_DIR}/crop-top.swift"
 OUT_1X="${SCRIPT_DIR}/dmg-background.png"
 OUT_2X="${SCRIPT_DIR}/dmg-background@2x.png"
 
@@ -72,8 +81,11 @@ if ! command -v qlmanage >/dev/null 2>&1; then
 	exit 1
 fi
 
-if ! command -v sips >/dev/null 2>&1; then
-	echo "error: sips not found (expected at /usr/bin/sips on macOS)" >&2
+if ! command -v swift >/dev/null 2>&1; then
+	echo "error: swift not found on PATH" >&2
+	echo "       needed to run ${CROP_TOOL} (see that file for why sips can't" >&2
+	echo "       be trusted to do this crop); install Xcode / the Xcode" >&2
+	echo "       Command Line Tools" >&2
 	exit 1
 fi
 
@@ -104,11 +116,10 @@ render_scale() {
 	fi
 
 	# Crop the square thumbnail's top-left content_height rows back to the
-	# source aspect ratio. See the header comment for why offset (0,0) is
-	# correct rather than a guess: qlmanage top-aligns, it does not center.
-	if ! sips -c "${content_height}" "${square_side}" --cropOffset 0 0 \
-		"${rendered}" --out "${out_path}" >/dev/null 2>&1; then
-		echo "error: sips failed to crop ${rendered} to ${square_side}x${content_height}" >&2
+	# source aspect ratio. See the header comment for why this is
+	# crop-top.swift and not `sips -c/--cropOffset`.
+	if ! swift "${CROP_TOOL}" "${rendered}" "${square_side}" "${content_height}" "${out_path}" >/dev/null; then
+		echo "error: crop-top.swift failed to crop ${rendered} to ${square_side}x${content_height}" >&2
 		return 1
 	fi
 

@@ -1,20 +1,94 @@
-Morbstack host Docker CLI plugin provenance
-=============================================
+Morbstack host Docker CLI toolchain provenance
+=================================================
 
-Two client-side CLI plugin binaries live here. Both are host Mac (arm64)
-binaries that never enter the VM/initramfs — they run directly under the
-user's own `docker` CLI, which resolves subcommands like `docker compose`
-and `docker buildx` via its cli-plugins mechanism
-(~/.docker/cli-plugins/).
+Three client-side binaries live here, laid out exactly the way
+Morbstack.app itself bundles them (Contents/Resources/host-bin/) and the
+way the `docker` CLI's own cli-plugins resolution expects:
+
+    dist/host-bin/docker                        <- the client itself
+    dist/host-bin/cli-plugins/docker-compose     <- `docker compose` plugin
+    dist/host-bin/cli-plugins/docker-buildx      <- `docker buildx` plugin
+
+All three are host Mac (arm64) binaries that never enter the VM/initramfs.
+`docker` is the main entry point a user's shell resolves; the two plugin
+binaries are resolved by that `docker` binary itself via its cli-plugins
+mechanism, which is why they live one level down in a `cli-plugins/`
+subdirectory rather than beside it.
+
+Together they exist so that installing Morbstack is a complete, working
+Docker CLI + engine on a Mac that has *never* had Docker Desktop, Homebrew's
+`docker`, or anything else Docker-shaped installed — see docs/parity.md's
+zero-config-discovery finding and docs/compat.md. `morb install-cli`
+(mac/Sources/morb/main.swift) is what actually wires these onto a user's
+system, always with explicit consent — see that command's own help text and
+MorbstackKit/CliPlugins.swift/MorbPathSetup.swift for the mechanics.
+
+-----------------------------------------------------------------------
+docker (the client itself)
+-----------------------------------------------------------------------
+
+File: docker
+Version: 29.7.1 (matches dist/guest-bin/dockerd's engine version exactly —
+         zero client/server skew)
+Platform: darwin-arm64
+License: Apache-2.0 (same as upstream docker/cli; this repo redistributes
+         Docker Inc.'s client binary, unmodified, under that license — see
+         the LICENSE/NOTICE/AUTHORS files inside the fetched bottle, not
+         reproduced here, for the full text)
+sha256: 49d98ab806e8678cd6341b09dad6389e5bcd8a46513de7651053bee3d8366e8d
+
+Source and why it isn't a Docker Inc. release: Docker Inc. does not publish
+a standalone macOS CLI-only binary through its own release infrastructure.
+download.docker.com's static tarballs are Linux-only (see the docker/
+dockerd/etc. entries fetched into dist/guest-bin/ from that exact source),
+and the docker/cli GitHub repository has no Releases at all
+(`GET /repos/docker/cli/releases/latest` -> 404, checked directly at pin
+time). The only widely-used, independently-auditable build of just the
+client for darwin/arm64 is Homebrew core's own `docker` formula
+(https://formulae.brew.sh/formula/docker, Apache-2.0), built and bottled by
+Homebrew's own CI, not by Docker Inc. and not extracted from a Docker
+Desktop installer (deliberately: this project replaces Docker Desktop, so
+depending on its distribution channel for even one component would be an
+odd foundation).
+
+Bottle URL:
+  https://ghcr.io/v2/homebrew/core/docker/blobs/sha256:1bc0f3ce68c682ff23050b964f9a721b15fa1524ae29129c02c96d3966e98dcd
+Bottle sha256 (of the whole .tar.gz, before extracting the one member kept):
+  1bc0f3ce68c682ff23050b964f9a721b15fa1524ae29129c02c96d3966e98dcd
+Member extracted: docker/29.7.1/bin/docker
+
+Verification: ghcr.io blobs are content-addressed by their own sha256
+digest, so the URL and the pin above are the same value by construction —
+downloading and independently recomputing the hash (which
+scripts/fetch-guest-assets.sh's fetch_docker_cli does on every fetch) is
+still a real corruption/tamper check, it just isn't a *second independent
+source* the way compose/buildx's GitHub sidecar files are. As a second,
+independent cross-check at pin time, the same digest was confirmed against
+Homebrew's own formula API
+(`https://formulae.brew.sh/api/formula/docker.json`, key
+`.bottle.stable.files.arm64_tahoe.sha256`), which agreed exactly. The
+extracted binary's own hash (above) is checked at pin time but not re-hashed
+on every fetch, because the bottle also carries man pages, shell
+completions, and the formula's own metadata files whose presence/absence
+does not affect the shipped binary's correctness — `fetch_docker_cli`
+instead checks that the installed binary runs and reports exactly
+"version 29.7.1", which is the property that actually matters.
+
+`file` confirms: Mach-O 64-bit executable arm64. Ad-hoc/linker-signed.
+Runs standalone (`./docker --version` -> "Docker version 29.7.1, build
+e9452d6e78") on this host with no other Docker installation present.
+
+Fetched by scripts/fetch-guest-assets.sh (--cli-only).
 
 -----------------------------------------------------------------------
 docker-compose
 -----------------------------------------------------------------------
 
-File: docker-compose
+File: cli-plugins/docker-compose
 Source: https://github.com/docker/compose/releases/download/v5.3.1/docker-compose-darwin-aarch64
 Release: docker/compose v5.3.1 (latest release at time of fetch)
 Platform: darwin-aarch64 (host Mac, arm64)
+License: Apache-2.0
 sha256: 32691ba1196d819fa68cbdc0aad9a5569e730a35ae40c6fdd8458110ecd69488
 
 Verification: sha256 fetched from GitHub Release's own per-asset sidecar
@@ -26,20 +100,17 @@ exactly.
 (`./docker-compose version` -> "Docker Compose version v5.3.1") on this
 host without needing `docker` on PATH first.
 
-Purpose: gate G4 (`docker compose up -d` via the standard compose CLI
-plugin) needs the `docker compose` subcommand, which the docker CLI
-resolves via its cli-plugins mechanism.
-
 Fetched by scripts/fetch-guest-assets.sh (--compose-only).
 
 -----------------------------------------------------------------------
 docker-buildx
 -----------------------------------------------------------------------
 
-File: docker-buildx
+File: cli-plugins/docker-buildx
 Source: https://github.com/docker/buildx/releases/download/v0.36.0/buildx-v0.36.0.darwin-arm64
 Release: docker/buildx v0.36.0 (latest release at time of fetch)
 Platform: darwin-arm64 (host Mac, arm64)
+License: Apache-2.0
 sha256: 82c6a3d9df37790c5bdb0d7ca88986d1d17622fc2b88ebe34b275c6c47acd7a6
 
 Verification: docker/buildx's release does NOT put darwin hashes in its
@@ -67,21 +138,28 @@ a docker command`. This is the single highest-ROI fix identified by that
 audit. Fetched by scripts/fetch-guest-assets.sh (--buildx-only).
 
 -----------------------------------------------------------------------
-Installing either plugin
+Installing the toolchain
 -----------------------------------------------------------------------
 
-Neither binary is installed into ~/.docker/cli-plugins/ by the fetch
-script itself — fetching is a repo-local caching step and must not touch
-the user's dotfiles without being asked. Two supported ways to install:
+None of the three binaries are installed anywhere on `PATH` or into
+~/.docker/cli-plugins/ by the fetch script itself — fetching is a
+repo-local caching step and must not touch the user's dotfiles or shell
+configuration without being asked. Two supported ways to install:
 
-  1. `morb install-cli-plugins` — explains exactly what it will do
-     (symlink docker-compose and docker-buildx from here into
-     ~/.docker/cli-plugins/), asks for confirmation, and does nothing
-     without an explicit yes (or `--force`). See `morb install-cli-plugins
-     --print-plan` to see the plan without being prompted, and `morb
-     install-cli-plugins --json` for scriptable output.
+  1. `morb install-cli` — explains exactly what it will do (symlink
+     `docker` into ~/.morbstack/bin/, symlink docker-compose and
+     docker-buildx from here into ~/.docker/cli-plugins/), asks for
+     confirmation, and does nothing without an explicit yes (or --force).
+     It never shadows an existing, already-resolvable `docker` on PATH
+     unless you separately opt in with `--make-default` (its own,
+     separately-worded confirmation — see `morb install-cli --help`).
+     `morb install-cli --print-plan` shows the plan without prompting;
+     `morb install-cli --json` gives scriptable output.
 
   2. The manual one-liner, if you would rather do it yourself:
-       mkdir -p ~/.docker/cli-plugins
-       ln -sf "$(pwd)/dist/host-bin/docker-compose" ~/.docker/cli-plugins/docker-compose
-       ln -sf "$(pwd)/dist/host-bin/docker-buildx" ~/.docker/cli-plugins/docker-buildx
+       mkdir -p ~/.morbstack/bin ~/.docker/cli-plugins
+       ln -sf "$(pwd)/dist/host-bin/docker" ~/.morbstack/bin/docker
+       ln -sf "$(pwd)/dist/host-bin/cli-plugins/docker-compose" ~/.docker/cli-plugins/docker-compose
+       ln -sf "$(pwd)/dist/host-bin/cli-plugins/docker-buildx" ~/.docker/cli-plugins/docker-buildx
+       # then add ~/.morbstack/bin to PATH yourself, e.g. in ~/.zshrc:
+       #   export PATH="$HOME/.morbstack/bin:$PATH"

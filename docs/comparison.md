@@ -342,14 +342,31 @@ of what its docs say.
   Docker integrations, and `docker-py`'s default client all try
   conventional socket paths first and will simply fail to find Morbstack
   out of the box ([parity.md #17](parity.md)).
-- **`docker build`/`docker buildx` is broken out of the box.** No
-  `docker-buildx` CLI plugin is fetched or installed anywhere in the repo
-  today. The modern default build path (BuildKit-by-default since Docker
-  23+) fails with a stock Docker CLI until a user manually places a
-  `docker-buildx` binary themselves. The underlying engine-side BuildKit
-  is fully functional once that binary exists ([parity.md #13-14](parity.md))
-  — but "the engine works" is not the same claim as "buildx ships," and it
-  does not ship yet.
+- **Morbstack does not install a Docker client. Every product in this
+  document does.** This is the single largest gap in the list and it is
+  structural rather than cosmetic. Installing Docker Desktop, OrbStack,
+  Podman Desktop or Rancher Desktop gives a user a working `docker` (or
+  `podman`) command; installing Morbstack today gives them a daemon and a
+  `morb` CLI and nothing to drive the engine with. Every demonstration of
+  Morbstack to date has silently borrowed Docker Desktop's client — on the
+  development machine, `/usr/local/bin/docker` is a symlink into
+  `/Applications/Docker.app`. On a Mac that has never had Docker, nothing
+  works. "Drop-in replacement" has to include the install path, and until
+  the client toolchain is bundled and put on `PATH` by a consented
+  first-run flow (tracked as the first gate on milestone L1 in
+  [`docs/roadmap.md`](roadmap.md)), Morbstack is honestly an add-on to a
+  Docker Desktop install rather than a replacement for one.
+- **`docker build`/`docker buildx` does not work out of the box.** The
+  modern default build path (BuildKit-by-default since Docker 23+) fails
+  with a stock Docker CLI until a `docker-buildx` binary is in
+  `~/.docker/cli-plugins/`. A pinned, hash-verified darwin/arm64 buildx is
+  now fetched by `scripts/fetch-guest-assets.sh` into `dist/host-bin/`,
+  but fetching is not installing: nothing places it where the Docker CLI's
+  plugin resolver looks, so the user still does it by hand. The underlying
+  engine-side BuildKit is fully functional once the client plugin exists,
+  including multi-platform builds and cache mounts
+  ([parity.md #13-14](parity.md)) — but "the engine works" is not the same
+  claim as "buildx ships," and it does not ship yet.
 - **A genuinely nasty, silent bind-mount corruption bug.** A single-file
   bind mount through an *unresolved* `/tmp/...` path (as opposed to
   `/private/tmp/...`) does not error — it silently creates an empty

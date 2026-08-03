@@ -1,0 +1,427 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Documentation — Morbstack</title>
+<meta name="description" content="Getting started, the morb CLI reference, the Docker compatibility matrix, and troubleshooting for Morbstack.">
+
+<link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="assets/favicon-16.png">
+<link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+
+<meta property="og:type" content="website">
+<meta property="og:title" content="Documentation — Morbstack">
+<meta property="og:description" content="Getting started, the morb CLI reference, the Docker compatibility matrix, and troubleshooting for Morbstack.">
+<!-- TODO(human): og:image/twitter:image need an absolute URL once Morbstack has a real domain. -->
+<meta property="og:image" content="assets/og-image.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Documentation — Morbstack">
+<meta name="twitter:description" content="Getting started, the morb CLI reference, the Docker compatibility matrix, and troubleshooting for Morbstack.">
+<meta name="twitter:image" content="assets/og-image.png">
+
+<link rel="stylesheet" href="style.css">
+<script>
+  (function () {
+    try {
+      var t = localStorage.getItem("morbstack-theme");
+      if (t === "dark" || t === "light") document.documentElement.setAttribute("data-theme", t);
+    } catch (e) {}
+  })();
+</script>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand-lockup" href="index.html">
+      <img class="mark" src="assets/mark.svg" alt="" width="28" height="28">
+      <span>Morbstack</span>
+    </a>
+    <nav class="main-nav" aria-label="Primary">
+      <a href="index.html">Overview</a>
+      <a href="download.html">Download</a>
+      <a href="docs.html" aria-current="page">Docs</a>
+      <a href="comparison.html">Comparison</a>
+    </nav>
+    <div class="header-actions">
+      <button class="theme-toggle" type="button" aria-label="Toggle color theme" aria-pressed="false">
+        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z"/></svg>
+      </button>
+    </div>
+  </div>
+</header>
+
+<main id="main">
+  <section class="section-lg">
+    <div class="wrap">
+      <span class="eyebrow">Documentation</span>
+      <h1>Everything you need to run Morbstack today.</h1>
+      <p class="lede">Prerequisites, the <code class="inline">morb</code> CLI, exactly what "drop-in Docker compatible" means right now, and the gotchas that will otherwise cost you an afternoon.</p>
+
+      <div class="docs-layout mt-6">
+        <nav class="docs-toc" aria-label="On this page">
+          <h2>On this page</h2>
+          <ul>
+            <li><a href="#getting-started">Getting started</a></li>
+            <li><a href="#cli-reference">CLI reference</a></li>
+            <li><a href="#compatibility">Compatibility</a></li>
+            <li><a href="#troubleshooting">Troubleshooting</a></li>
+            <li><a href="#further-reading">Further reading</a></li>
+          </ul>
+        </nav>
+
+        <div class="docs-content">
+
+          <section class="docs-section" id="getting-started">
+            <h2>Getting started</h2>
+
+            <h3>Prerequisites</h3>
+            <p>Apple silicon, macOS 15 (Sequoia) or later to run it, Xcode 26 or later to build it (Swift 6.3, <code class="inline">Virtualization.framework</code>). See <a class="text-link" href="download.html#requirements">system requirements</a> for the full detail and citations.</p>
+
+            <h3 class="mt-5">Build and first run</h3>
+            <p>The full, real build-from-source walkthrough — clone, <code class="inline">mise trust &amp;&amp; mise install</code>, <code class="inline">mise run build</code>, fetching guest assets, assembling the guest image, and starting the daemon — lives on the <a class="text-link" href="download.html#build">Download page</a>, since there is no packaged build to fetch instead. It ends with:</p>
+            <div class="code-block">
+              <pre id="cmd-quickstart">mise run run-daemon
+# in another terminal:
+export DOCKER_HOST=unix://$HOME/.morbstack/run/docker.sock
+docker run --rm hello-world</pre>
+              <button class="copy-btn" type="button" data-copy-target="cmd-quickstart">Copy</button>
+            </div>
+
+            <h3 class="mt-5">Connecting the Docker CLI</h3>
+            <p>Morbstack does not register a Docker context or take over the conventional socket path automatically (that's <a class="text-link" href="#compatibility">tracked as a gap</a>, not an oversight — see <code class="inline">docs/compat.md</code>). Note also that Morbstack does not install a <code class="inline">docker</code> client itself today — the commands below assume one is already on your <code class="inline">PATH</code>; shipping a bundled, hash-verified client is the "single-path install" gate tracked for the first public release (<a class="text-link" href="../docs/roadmap.md">docs/roadmap.md</a>, L1). Point whatever stock <code class="inline">docker</code> client you have at it one of two ways:</p>
+            <div class="code-block">
+              <pre id="cmd-dockerhost"># one-off, per shell session
+export DOCKER_HOST=unix://$HOME/.morbstack/run/docker.sock
+
+# or persistent, via a docker context
+docker context create morbstack --docker host=unix://$HOME/.morbstack/run/docker.sock
+docker context use morbstack</pre>
+              <button class="copy-btn" type="button" data-copy-target="cmd-dockerhost">Copy</button>
+            </div>
+            <p class="text-small">The CLI also has its own context helper: <code class="inline">morb context status</code> / <code class="inline">create</code> / <code class="inline">use</code> — see the <a class="text-link" href="#cli-reference">CLI reference</a> below. <code class="inline">morb context use</code> always asks before changing your default context, and refuses to replace an existing explicit default without <code class="inline">--force</code>.</p>
+
+            <h3 class="mt-5">The Compose plugin</h3>
+            <p>Fetched and hash-verified by <code class="inline">scripts/fetch-guest-assets.sh</code>, but not installed into <code class="inline">~/.docker/cli-plugins</code> automatically:</p>
+            <div class="code-block">
+              <pre id="cmd-compose2">mkdir -p ~/.docker/cli-plugins
+ln -sf "$(pwd)/dist/host-bin/docker-compose" ~/.docker/cli-plugins/docker-compose
+docker compose version</pre>
+              <button class="copy-btn" type="button" data-copy-target="cmd-compose2">Copy</button>
+            </div>
+            <p class="text-small">Or use <code class="inline">morb install-cli-plugins</code>, which symlinks whatever plugin binaries it finds next to the CLI or under <code class="inline">dist/host-bin</code> — it always prints its plan and asks first unless <code class="inline">--force</code> is passed.</p>
+          </section>
+
+          <section class="docs-section" id="cli-reference">
+            <h2>CLI reference</h2>
+            <p>Every command below is read directly from <code class="inline">mac/Sources/morb/main.swift</code>'s own usage text and argument switch. <code class="inline">morb &lt;command&gt; --help</code> prints the canonical version; treat this table as a mirror of it, not a superset.</p>
+
+            <div class="table-scroll mt-5">
+              <table>
+                <caption class="visually-hidden">morb top-level commands</caption>
+                <thead><tr><th>Command</th><th>Description</th></tr></thead>
+                <tbody>
+                  <tr><td><code class="inline">status</code></td><td>Show daemon and VM state, published ports, and any ports that failed to forward.</td></tr>
+                  <tr><td><code class="inline">start</code></td><td>Boot the VM.</td></tr>
+                  <tr><td><code class="inline">stop</code></td><td>Shut the VM down. <code class="inline">--force</code> skips asking the guest first.</td></tr>
+                  <tr><td><code class="inline">suspend</code></td><td>Save the VM to disk and free its memory.</td></tr>
+                  <tr><td><code class="inline">resume</code></td><td>Restore a suspended VM.</td></tr>
+                  <tr><td><code class="inline">shares</code></td><td>List configured shared host paths and whether the guest actually has them mounted. Never starts a daemon.</td></tr>
+                  <tr><td><code class="inline">rosetta</code></td><td>Show Rosetta status. <code class="inline">rosetta install</code> installs and enables it — always asks first, no <code class="inline">--force</code>.</td></tr>
+                  <tr><td><code class="inline">k8s</code></td><td>Run a local Kubernetes cluster, off by default.</td></tr>
+                  <tr><td><code class="inline">version</code></td><td>Print CLI and daemon versions.</td></tr>
+                  <tr><td><code class="inline">doctor</code></td><td>Diagnose host readiness (signing, kernel/initramfs, disk persistence, <code class="inline">docker-credentials</code>). Works without the daemon.</td></tr>
+                  <tr><td><code class="inline">reset-disk</code></td><td>Delete the Docker data disk and start over. Destructive; refuses while the VM is running.</td></tr>
+                  <tr><td><code class="inline">mcp</code></td><td>Model Context Protocol server, read-only unless granted otherwise.</td></tr>
+                  <tr><td><code class="inline">migrate</code></td><td>Import images, volumes, and config from another runtime. Never destructive, never writes to another runtime's state.</td></tr>
+                  <tr><td><code class="inline">bench</code></td><td>Run the open benchmark suite and report the numbers — the <code class="inline">morb bench</code> tool referenced in the roadmap's performance targets.</td></tr>
+                  <tr><td><code class="inline">scan</code></td><td>SBOM and CVE scan an image, entirely on this machine.</td></tr>
+                  <tr><td><code class="inline">debug</code></td><td>Open a toolbox shell in a container, even a distroless one.</td></tr>
+                  <tr><td><code class="inline">context</code></td><td>Manage the <code class="inline">morbstack</code> docker context — <code class="inline">status</code> / <code class="inline">create</code> / <code class="inline">use</code>.</td></tr>
+                  <tr><td><code class="inline">install-cli-plugins</code></td><td>Symlink <code class="inline">docker-compose</code>/<code class="inline">docker-buildx</code> into <code class="inline">~/.docker/cli-plugins</code>.</td></tr>
+                </tbody>
+              </table>
+            </div>
+
+            <h3 class="mt-6">Notable subcommands</h3>
+            <div class="table-scroll mt-4">
+              <table>
+                <caption class="visually-hidden">morb subcommands</caption>
+                <thead><tr><th>Subcommand</th><th>What it does</th></tr></thead>
+                <tbody>
+                  <tr><td><code class="inline">rosetta install --print-plan</code></td><td>Prints exactly what installing Rosetta would do, and stops — no system change.</td></tr>
+                  <tr><td><code class="inline">k8s status</code></td><td>Whether the cluster is installed, on, and Ready.</td></tr>
+                  <tr><td><code class="inline">k8s enable</code></td><td>Installs the payload if needed, then starts the cluster.</td></tr>
+                  <tr><td><code class="inline">k8s disable</code></td><td>Stops the cluster; the payload and its state are kept.</td></tr>
+                  <tr><td><code class="inline">k8s kubeconfig</code></td><td>Writes <code class="inline">~/.morbstack/kubeconfig</code>.</td></tr>
+                  <tr><td><code class="inline">k8s kubeconfig --merge</code></td><td>Merges the <code class="inline">morbstack</code> context into <code class="inline">~/.kube/config</code>, after asking, after a timestamped backup.</td></tr>
+                  <tr><td><code class="inline">context status</code></td><td>Whether the context is registered and current.</td></tr>
+                  <tr><td><code class="inline">context create</code></td><td>Registers the <code class="inline">morbstack</code> docker context. Asks first.</td></tr>
+                  <tr><td><code class="inline">context use</code></td><td>Makes it the default context. Always asks; refuses to replace another explicit default without <code class="inline">--force</code>.</td></tr>
+                </tbody>
+              </table>
+            </div>
+
+            <h3 class="mt-6">Global options</h3>
+            <dl class="kv-list mt-4">
+              <dt><code class="inline">--json</code></dt>
+              <dd>Emit raw JSON instead of human-readable output.</dd>
+              <dt><code class="inline">--force</code></dt>
+              <dd>Skip Morbstack's confirmation prompt (<code class="inline">reset-disk</code>, <code class="inline">context create</code>, <code class="inline">install-cli-plugins</code>), replace another explicit default context (<code class="inline">context use</code>), or stop the VM without asking the guest first (<code class="inline">stop</code>). Deliberately refused by <code class="inline">rosetta install</code> — that installs system software under Apple's licence, so it always asks the person at the keyboard.</dd>
+              <dt><code class="inline">--print-plan</code></dt>
+              <dd>Print what a command would do and exit without doing it (<code class="inline">rosetta install</code>, <code class="inline">install-cli-plugins</code>).</dd>
+              <dt><code class="inline">--help</code></dt>
+              <dd>Print the full usage text.</dd>
+            </dl>
+          </section>
+
+          <section class="docs-section" id="compatibility">
+            <h2>Compatibility</h2>
+
+            <h3>The contract</h3>
+            <p>From <code class="inline">docs/compat.md</code> — the compatibility contract Morbstack commits to, so "does my existing workflow keep working" has a precise answer:</p>
+            <div class="callout callout-good">
+              <ul>
+                <li><strong>Unmodified <code class="inline">docker</code> CLI.</strong> Any stock <code class="inline">docker</code> binary works against Morbstack's relayed Engine API — no patched client, ever.</li>
+                <li><strong>Docker contexts are respected, never stomped.</strong> Morbstack adds itself as a context; it never silently rewrites your existing default.</li>
+                <li><strong>Engine API = upstream moby, verbatim.</strong> No added, removed, or reshaped endpoints — whatever the bundled <code class="inline">dockerd</code> version exposes is what you get.</li>
+                <li><strong>Compose v2 and buildx are bundled</strong>, from M1 onward. As of today, Compose already works end-to-end with a one-time manual plugin symlink; buildx is not fetched or tested yet at any milestone so far.</li>
+                <li><strong><code class="inline">~/.docker/config.json</code> is honored</strong> — credential helpers, the macOS keychain helper, and registry mirrors, the same way stock Docker tooling reads it.</li>
+              </ul>
+            </div>
+
+            <h3 class="mt-5">Explicit non-goals</h3>
+            <p>Stated up front so they are not mistaken for gaps to be filled later — from <code class="inline">docs/compat.md</code>:</p>
+            <div class="callout callout-warn">
+              <ul>
+                <li><strong>Windows containers.</strong> Never supported — Morbstack targets Linux containers only.</li>
+                <li><strong>CRIU (checkpoint/restore).</strong> Off, not a target for 1.0 or the 1.x line as currently scoped.</li>
+                <li><strong>CUDA / GPU passthrough.</strong> Not supported, no commitment to add it.</li>
+                <li><strong>Docker Desktop Extensions.</strong> Not supported and not planned — Extensions are web-view based, which conflicts with Morbstack's zero-web-view host integration principle. A native plugin SDK is a post-1.0 idea, not a compatibility shim for existing Extensions.</li>
+              </ul>
+            </div>
+
+            <h3 class="mt-5">The 29-check parity matrix</h3>
+            <p>Every row below is transcribed directly from <a class="text-link" href="../docs/parity.md">docs/parity.md</a>'s own Result column — a one-time audit run against a real, cold-booted VM, git HEAD <code class="inline">081aa29</code>. Status is shown as colour, shape, and text together, never colour alone.</p>
+
+            <h4 class="mt-5">Core CLI</h4>
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th>#</th><th>Test</th><th>Result</th><th>Notes</th></tr></thead>
+                <tbody>
+                  <tr><td class="num">1</td><td><code class="inline">docker version</code></td><td><span class="pill pill-pass">PASS</span></td><td>Client 27.4.0 talks to Server 29.7.1 over the relay. Cold VM boot to a usable API: 2.16s.</td></tr>
+                  <tr><td class="num">2</td><td><code class="inline">docker info</code></td><td><span class="pill pill-pass">PASS</span></td><td>Full, plausible output — overlay2/extfs, cgroup v2, standard drivers listed.</td></tr>
+                  <tr><td class="num">3</td><td>ps/images/pull/run/exec/logs/inspect/cp/stats/events/rm/rmi</td><td><span class="pill pill-pass">PASS</span></td><td>Every one produced the same shape of output real Docker would.</td></tr>
+                  <tr><td class="num">4</td><td><code class="inline">docker system df</code> / <code class="inline">prune -f</code></td><td><span class="pill pill-pass">PASS</span></td><td>Correct reclaimable accounting; a <code class="inline">-af</code> reclaimed 2.134GB cleanly.</td></tr>
+                </tbody>
+              </table>
+            </div>
+
+            <h4 class="mt-6">Compose</h4>
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th>#</th><th>Test</th><th>Result</th><th>Notes</th></tr></thead>
+                <tbody>
+                  <tr><td class="num">5</td><td>4-service stack: healthchecks, named volume, custom networks</td><td><span class="pill pill-pass">PASS</span></td><td>All services healthy in dependency order; service-name DNS resolved; <code class="inline">down -v</code> cleaned up fully.</td></tr>
+                  <tr><td class="num">6</td><td>WordPress + MySQL, persistent volumes</td><td><span class="pill pill-pass">PASS</span></td><td>Both services healthy in ~24s; the install wizard genuinely rendered.</td></tr>
+                  <tr><td class="num">7</td><td><code class="inline">docker compose build</code></td><td><span class="pill pill-pass">PASS</span></td><td>Multi-stage build ran to completion via the classic (non-BuildKit) builder.</td></tr>
+                </tbody>
+              </table>
+            </div>
+
+            <h4 class="mt-6">Bind mounts</h4>
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th>#</th><th>Test</th><th>Result</th><th>Notes</th></tr></thead>
+                <tbody>
+                  <tr><td class="num">8</td><td>Fresh content on re-read after a host-side edit</td><td><span class="pill pill-pass">PASS</span></td><td>Every re-read reflected new content immediately.</td></tr>
+                  <tr><td class="num">9</td><td>Single-file mount via an unresolved <code class="inline">/tmp/...</code> path</td><td><span class="pill pill-fail">FAIL</span></td><td>Silently creates an empty directory in the guest instead of binding the file. <code class="inline">/private/tmp/...</code> works.</td></tr>
+                  <tr><td class="num">10</td><td>inotify across a VirtioFS mount</td><td><span class="pill pill-fail">FAIL</span></td><td>Documented gap: zero restarts after an 8s wait with a plain <code class="inline">nodemon</code> watch.</td></tr>
+                  <tr><td class="num">11</td><td>Polling-based watch workaround</td><td><span class="pill pill-pass">PASS</span></td><td><code class="inline">nodemon --legacy-watch</code> picked up the change and restarted correctly.</td></tr>
+                </tbody>
+              </table>
+            </div>
+
+            <h4 class="mt-6">Build</h4>
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th>#</th><th>Test</th><th>Result</th><th>Notes</th></tr></thead>
+                <tbody>
+                  <tr><td class="num">12</td><td>Multi-stage Dockerfile, cache reuse on rebuild</td><td><span class="pill pill-pass">PASS</span></td><td>Every step <code class="inline">CACHED</code>; final image built in 0.44s.</td></tr>
+                  <tr><td class="num">13</td><td><code class="inline">docker build</code> / <code class="inline">buildx</code> out of the box</td><td><span class="pill pill-fail">FAIL</span></td><td>No <code class="inline">docker-buildx</code> CLI plugin shipped, so the modern BuildKit-by-default path fails with a stock CLI.</td></tr>
+                  <tr><td class="num">14</td><td>BuildKit itself, once a stock <code class="inline">docker-buildx</code> binary is placed manually</td><td><span class="pill pill-pass">PASS</span></td><td>Multi-platform build, cache mounts, all work perfectly once the client binary exists.</td></tr>
+                </tbody>
+              </table>
+            </div>
+
+            <h4 class="mt-6">AMD64</h4>
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th>#</th><th>Test</th><th>Result</th><th>Notes</th></tr></thead>
+                <tbody>
+                  <tr><td class="num">15</td><td><code class="inline">mysql:5.7</code> (genuinely single-arch) end to end</td><td><span class="pill pill-pass">PASS</span></td><td>SHA-256 computed inside the emulated container is bit-identical to the Mac's own.</td></tr>
+                  <tr><td class="num">16</td><td>Compute-heavy slowdown ratio</td><td><span class="pill pill-pass">PASS</span></td><td>SHA-256 ~5.1x slower, RSA-2048 sign ~3.8x, verify ~2.3x vs native arm64 — matches the documented range.</td></tr>
+                </tbody>
+              </table>
+            </div>
+
+            <h4 class="mt-6">Ecosystem</h4>
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th>#</th><th>Test</th><th>Result</th><th>Notes</th></tr></thead>
+                <tbody>
+                  <tr><td class="num">17</td><td>Zero-config socket discovery at conventional paths</td><td><span class="pill pill-fail">FAIL</span></td><td>None of the three conventional paths point at Morbstack; <code class="inline">DOCKER_HOST</code> or a context must be set by hand.</td></tr>
+                  <tr><td class="num">18</td><td><code class="inline">host.docker.internal</code> resolution</td><td><span class="pill pill-fail">FAIL</span></td><td>No <code class="inline">/etc/hosts</code> entry, no DNS answer — absent, not degraded.</td></tr>
+                  <tr><td class="num">19</td><td><code class="inline">gateway.docker.internal</code> resolution</td><td><span class="pill pill-fail">FAIL</span></td><td>Same as #18.</td></tr>
+                  <tr><td class="num">20</td><td><code class="inline">--network host</code></td><td><span class="pill pill-partial">PARTIAL</span></td><td>Works inside the guest; unreachable from the Mac — matches Docker Desktop's own long-standing behavior.</td></tr>
+                  <tr><td class="num">21</td><td>Docker-in-Docker via the bind-mounted socket</td><td><span class="pill pill-pass">PASS</span></td><td><code class="inline">docker:cli</code> talked straight to the guest's real <code class="inline">dockerd</code>.</td></tr>
+                  <tr><td class="num">22</td><td>Container-to-host connections</td><td><span class="pill pill-partial">PARTIAL</span></td><td>Possible via the guest VM's own gateway IP, but not exposed as any documented hostname.</td></tr>
+                  <tr><td class="num">23</td><td><code class="inline">docker context</code> integration</td><td><span class="pill pill-pass">PASS</span></td><td>Creation, switching, and use all worked exactly like any other Docker host context.</td></tr>
+                </tbody>
+              </table>
+            </div>
+
+            <h4 class="mt-6">Restart / persistence</h4>
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th>#</th><th>Test</th><th>Result</th><th>Notes</th></tr></thead>
+                <tbody>
+                  <tr><td class="num">24</td><td>Restart policy survives <code class="inline">morb stop</code> + <code class="inline">morb start</code></td><td><span class="pill pill-pass">PASS</span></td><td><code class="inline">stop</code> 10.7s; the container came back <code class="inline">Up</code> on its own after <code class="inline">start</code>.</td></tr>
+                  <tr><td class="num">25</td><td>Images and named-volume data survive the same cycle</td><td><span class="pill pill-pass">PASS</span></td><td>Both images and the volume's contents were intact after the restart.</td></tr>
+                </tbody>
+              </table>
+            </div>
+
+            <h4 class="mt-6">Failure modes</h4>
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th>#</th><th>Test</th><th>Result</th><th>Notes</th></tr></thead>
+                <tbody>
+                  <tr><td class="num">26</td><td>Disk full</td><td><span class="pill pill-pass">PASS</span></td><td>Standard <code class="inline">dd: No space left on device</code>; the daemon stayed fully responsive afterward.</td></tr>
+                  <tr><td class="num">27</td><td>Port already bound on the Mac</td><td><span class="pill pill-partial">PARTIAL</span></td><td><code class="inline">docker run</code> succeeds and <code class="inline">docker ps</code> misleadingly shows the port as published; real Docker Desktop fails synchronously instead. Only <code class="inline">morb status</code> reveals the truth.</td></tr>
+                  <tr><td class="num">28</td><td>Image that does not exist</td><td><span class="pill pill-pass">PASS</span></td><td>Byte-identical to real Docker Hub errors.</td></tr>
+                  <tr><td class="num">29</td><td>OOM</td><td><span class="pill pill-pass">PASS</span></td><td><code class="inline">OOMKilled=true</code>, exit code 137 — the standard Docker contract.</td></tr>
+                </tbody>
+              </table>
+            </div>
+
+            <p class="mt-5"><strong>Tally: 20 PASS, 3 PARTIAL, 6 FAIL</strong> out of 29 checks — counted directly from the rows above, matching <a class="text-link" href="../docs/parity.md">docs/parity.md</a>'s own table.</p>
+          </section>
+
+          <section class="docs-section" id="troubleshooting">
+            <h2>Troubleshooting</h2>
+
+            <div class="flow">
+              <div class="callout callout-bad">
+                <div class="callout-title"><code class="inline">docker pull</code>/<code class="inline">docker run</code> hangs with no output for minutes</div>
+                <p class="text-small">Run <code class="inline">morb doctor</code>. This is very likely the <code class="inline">docker-credentials</code> check: Docker Desktop writes <code class="inline">"credsStore": "desktop"</code> into <code class="inline">~/.docker/config.json</code>, and the standard <code class="inline">docker</code> CLI shells out to <code class="inline">docker-credential-desktop</code> for every registry auth lookup — which only answers while Docker Desktop itself is running. With Desktop absent, the CLI hangs waiting on a process that never answers. Fix: remove the <code class="inline">credsStore</code> line from <code class="inline">~/.docker/config.json</code>, or point <code class="inline">DOCKER_CONFIG</code> at a directory with a config that omits it. Morbstack never edits that file for you.</p>
+              </div>
+
+              <div class="callout callout-bad">
+                <div class="callout-title">My bind mount is empty, or a single-file mount reads as a directory</div>
+                <p class="text-small">Run <code class="inline">morb shares</code>. If the path isn't under a listed root, add it to <code class="inline">shared_paths</code> and restart the engine. A specific, nasty case: a bind mount source written as an unresolved <code class="inline">/tmp/...</code> path (macOS symlinks <code class="inline">/tmp</code> → <code class="inline">/private/tmp</code>) silently mounts an <em>empty directory</em> in the guest instead of your file — no error, no warning, just a container that can't find what it expects. Use <code class="inline">/private/tmp/...</code> explicitly. <code class="inline">morb doctor</code> flags this exact gotcha.</p>
+              </div>
+
+              <div class="callout callout-warn">
+                <div class="callout-title">My dev server's hot reload doesn't fire on a host-side edit</div>
+                <p class="text-small">VirtioFS bind mounts don't forward inotify events across the host/guest boundary — a file is correct the instant you read it, but the change-notification event a watcher (<code class="inline">nodemon</code>, <code class="inline">webpack --watch</code>, <code class="inline">vite</code>) depends on never arrives. The working mitigation is a polling watcher: <code class="inline">nodemon --legacy-watch</code> (or your tool's equivalent) picks up changes correctly. There is no fix short of polling today.</p>
+              </div>
+
+              <div class="callout callout-warn">
+                <div class="callout-title">A published port answers nothing, and <code class="inline">docker ps</code> insists it's published</div>
+                <p class="text-small">Something else on the Mac already holds that host port, so the forwarder couldn't bind it — a state <code class="inline">docker ps</code> can't show you, because as far as the engine is concerned the port <em>is</em> published. This is a real behavioral difference from Docker Desktop, which fails <code class="inline">docker run</code> synchronously in this situation; Morbstack's <code class="inline">docker run</code> succeeds instead. Run <code class="inline">morb status</code> — it lists these under "unavailable ports" with the reason, and the forwarder retries on a timer (5s backing off to 60s) once the conflict clears.</p>
+              </div>
+            </div>
+          </section>
+
+          <section class="docs-section" id="further-reading">
+            <h2>Further reading</h2>
+            <p>The deeper design documents, each a primary source for something summarized above:</p>
+            <div class="grid grid-2 mt-4">
+              <div class="card">
+                <h3><a class="text-link" href="../docs/architecture.md">architecture.md</a></h3>
+                <p class="text-small">How the pieces fit together and why the load-bearing decisions were made that way.</p>
+              </div>
+              <div class="card">
+                <h3><a class="text-link" href="../docs/protocol.md">protocol.md</a></h3>
+                <p class="text-small">The vsock wire protocols Morbstack speaks between host and guest.</p>
+              </div>
+              <div class="card">
+                <h3><a class="text-link" href="../docs/sharing.md">sharing.md</a></h3>
+                <p class="text-small">How a directory on your Mac becomes a directory inside the VM, and what to do when it doesn't.</p>
+              </div>
+              <div class="card">
+                <h3><a class="text-link" href="../docs/amd64.md">amd64.md</a></h3>
+                <p class="text-small">How <code class="inline">docker run --platform linux/amd64</code> works, how to turn it on, and what it doesn't cover.</p>
+              </div>
+              <div class="card">
+                <h3><a class="text-link" href="../docs/k8s.md">k8s.md</a></h3>
+                <p class="text-small">The local single-node Kubernetes cluster: how it works and what was measured.</p>
+              </div>
+              <div class="card">
+                <h3><a class="text-link" href="../docs/compat.md">compat.md</a></h3>
+                <p class="text-small">The full compatibility contract and the CI-enforced ecosystem matrix.</p>
+              </div>
+              <div class="card">
+                <h3><a class="text-link" href="../docs/parity.md">parity.md</a></h3>
+                <p class="text-small">The complete 29-check drop-in parity audit this page's matrix is built from.</p>
+              </div>
+            </div>
+          </section>
+
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="footer-grid">
+      <div class="footer-col">
+        <div class="footer-brand">
+          <img class="mark" src="assets/mark.svg" alt="" width="24" height="24">
+          <span>Morbstack</span>
+        </div>
+        <p class="text-small">Everything that runs on your machine is free forever.</p>
+      </div>
+      <div class="footer-col">
+        <h4>Product</h4>
+        <ul>
+          <li><a href="download.html">Download</a></li>
+          <li><a href="docs.html">Documentation</a></li>
+          <li><a href="comparison.html">Comparison</a></li>
+        </ul>
+      </div>
+      <div class="footer-col">
+        <h4>Project</h4>
+        <ul>
+          <li><a href="../docs/roadmap.md">Roadmap</a></li>
+          <li><a href="../docs/parity.md">Parity report</a></li>
+          <li><a href="../LICENSE">License (Apache-2.0)</a></li>
+        </ul>
+      </div>
+      <div class="footer-col">
+        <h4>Source</h4>
+        <ul>
+          <!-- TODO(human): replace with the real GitHub repository URL once this
+               project is published. There is no public repository yet. -->
+          <li><a href="https://github.com/REPLACE_ME/morbstack" target="_blank" rel="noopener">GitHub</a></li>
+          <li><a href="../docs/architecture.md">Architecture</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="footer-bottom">
+      <span>Apache-2.0. Copyright © 2026 The Morbstack Authors.</span>
+      <span>Pre-release software. Nothing here is a shipped product yet.</span>
+    </div>
+  </div>
+</footer>
+
+<script src="site.js"></script>
+</body>
+</html>

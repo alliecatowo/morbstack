@@ -14,6 +14,19 @@ Files:
 - `morb.fish` — fish completion.
 - `morb.1` — man page, section 1.
 
+## A note on how this was built: the source moved while this was in progress
+
+`mac/Sources/morb/main.swift` was actively being edited by another agent
+while this work was done (as flagged in the task brief — "other agents
+are actively editing Swift right now"). Partway through, the file grew
+from 892 lines / 11 top-level commands to 1179 lines / 18 top-level
+commands, adding `context`, `install-cli-plugins`, `mcp`, `migrate`,
+`bench`, `scan`, and `debug`. Everything here reflects a full re-read of
+the file after that growth, at 1179 lines — not the original 892-line
+snapshot. If `main.swift` has changed further since, these files should
+be regenerated rather than trusted as current; there is no way to know
+from inside this task whether it has.
+
 ## Install
 
 ### bash
@@ -71,12 +84,12 @@ cp integrations/shell/morb.fish ~/.config/fish/completions/morb.fish
 ```
 
 **fish was not available on the machine these completions were written
-on** (`command -v fish` found nothing). `morb.fish` was syntax-checked
-with a locally-run `fish -n` if you have fish installed; here it was
-only reviewed by hand against the fish completion documentation and
-against the same command surface as the bash/zsh files. Treat its
-runtime behavior as unverified until it has actually been loaded in a
-real fish session — see "Testing" below.
+on** (`command -v fish` found nothing). `morb.fish` was written by hand
+against fish's `complete`/`__fish_seen_subcommand_from`/
+`__fish_use_subcommand` conventions and kept structurally parallel to
+the bash/zsh files, but it was never actually loaded or exercised in a
+real fish session. Run `fish -n integrations/shell/morb.fish` before
+trusting it, and ideally Tab through a few cases by hand.
 
 ### man page
 
@@ -86,7 +99,9 @@ One-off, without installing anywhere:
 man -l integrations/shell/morb.1
 ```
 
-(if your `man` doesn't support `-l`, `mandoc -T ascii integrations/shell/morb.1 | less` works identically)
+(if your `man` doesn't support `-l` — the one on the machine this was
+written on doesn't — `mandoc -T ascii integrations/shell/morb.1 | less`
+works identically)
 
 To install it properly:
 
@@ -123,25 +138,63 @@ those names are already what each shell's convention expects.
 
 ## The command surface (from `main.swift`, not `--help`)
 
-Top-level commands: `status start stop suspend resume shares rosetta k8s
-version doctor reset-disk`.
+Eighteen top-level commands: `status start stop suspend resume shares
+rosetta k8s version doctor reset-disk context install-cli-plugins mcp
+migrate bench scan debug`.
 
 - `--json` and `--help`/`-h` are recognized **anywhere** on the command
   line — `main.swift` strips `--json` and checks for `--help`/`-h`
   across the *whole* argument list before it even looks at what the
   command is. `morb --json status` and `morb status --json` behave
-  identically.
+  identically, and this holds even for `mcp`/`migrate`/`bench`/`scan`/
+  `debug` below.
 - `rosetta` takes an optional sub-subcommand, `status` (default) or
-  `install`, found as the first non-flag word anywhere after `rosetta`.
+  `install`.
   - `rosetta install` accepts `--print-plan`. It explicitly **refuses**
-    `--force` — passing it is a hard, documented error (exit 2). No
-    completion here offers `--force` for `rosetta install`.
+    `--force` — passing it is a hard, documented error (exit 2).
 - `k8s` takes an optional sub-subcommand, `status` (default), `enable`,
-  `disable`, or `kubeconfig`, found the same way.
+  `disable`, or `kubeconfig`.
   - `k8s kubeconfig` accepts `--merge`, `--switch-context`, `--force`.
   - `k8s status`/`enable`/`disable` accept no command-specific flags.
+- `context` takes an optional sub-subcommand, `status` (default),
+  `create`, or `use`. Never touches the daemon; reads/writes only under
+  the docker CLI's own config directory (`~/.docker`, or `$DOCKER_CONFIG`
+  if set).
+  - `context create` accepts `--force` (skips its confirmation prompt).
+  - `context use` accepts `--force`, but it does **not** skip that
+    command's confirmation prompt — `context use` always asks
+    interactively, no exceptions, per its own error message ("This
+    command has no non-interactive form"). `--force` there only lifts
+    the refusal to replace another *explicit* non-default context.
+  - `context status` accepts no command-specific flags.
+- `install-cli-plugins` (a standalone top-level command, not a
+  subcommand of anything) accepts `--force` and `--print-plan`.
 - `stop` and `reset-disk` accept `--force`.
 - `start`, `suspend`, `resume` accept no command-specific flags.
+- `mcp`, `migrate`, `bench`, `scan`, `debug`: **`main.swift` dispatches
+  to these and stops.** Its own comment: "The feature modules own their
+  own argument parsing, output and exit codes." Each is implemented in
+  a separate Swift module (`MorbMCP`, `MorbMigrate`, `MorbBench`,
+  `MorbScan`, and a debug module) that this task could not read — the
+  hard constraint for this task was read access to
+  `mac/Sources/morb/main.swift` only, and those modules live elsewhere.
+  Consequently: **the completions here only offer the command name
+  itself and the two globally-honored flags (`--json`, `--help`/`-h`)
+  for these five — no sub-subcommands, no command-specific flags.**
+  Nothing was guessed or fabricated for them. Whoever owns those modules
+  should extend `morb.bash`/`_morb`/`morb.fish` with real per-command
+  completions once their grammars are readable, and the man page's
+  `EXIT STATUS` section flags that their exit codes were not verified to
+  follow morb's own 0/1/2 convention, since morb just forwards whatever
+  code each module returns.
+  It was also not safe to execute any of `morb mcp`, `morb migrate`,
+  `morb bench`, `morb scan`, or `morb debug` to reverse-engineer their
+  behavior: the task's explicit safe-command allowlist (`status`,
+  `version`, `doctor`, `shares`, `k8s status`, `--help`) predates these
+  five commands entirely, and several of them sound plausibly
+  side-effecting (`debug` opens a shell in a running container; `bench`
+  runs a benchmark suite; the engine is live and shared with other
+  agents right now), so none were run.
 
 ## Discrepancies between `morb --help` and the actual parser
 
@@ -155,41 +208,61 @@ gaps between the shipped `--help` text and what the binary does:
    `k8s kubeconfig --merge --switch-context`.
 2. **`--force` is honored by `k8s kubeconfig --merge`** (it skips that
    command's confirmation prompt), which the OPTIONS section of the help
-   text does not say — it only documents `--force` for `reset-disk` and
-   `stop`.
-3. **`-h` works as a synonym for `--help`** (`arguments.contains("-h")`),
-   but only `--help` is listed in the OPTIONS section.
-4. **Per-subcommand `--help` does not exist.** `--help`/`-h` is checked
+   text still does not say, even in its current, more detailed form
+   (which now correctly documents `--force` for `reset-disk`, `context
+   create`, `context use`, and `stop`, but omits `k8s kubeconfig
+   --merge`).
+3. **`context use --force` does not do what "skip confirmation" would
+   suggest.** Every other command's `--force` skips an interactive
+   prompt; `context use`'s does not — it always prompts, and `--force`
+   only changes whether it's allowed to replace another explicit
+   non-default context. The current help text's OPTIONS section lumps
+   `context use` in with `reset-disk`/`context create`/`install-cli-
+   plugins` under "Skip Morbstack's confirmation prompt" and then
+   separately says `--force` will "replace another explicit default
+   context (context use)" — technically both are true, but a reader
+   skimming the first clause would reasonably conclude `context use
+   --force` runs non-interactively, and it never does.
+4. **`-h` works as a synonym for `--help`**, but only `--help` is listed
+   in the OPTIONS section.
+5. **Per-subcommand `--help` does not exist.** `--help`/`-h` is checked
    against the entire raw argument list before the command is even read,
-   so `morb rosetta install --help` or `morb k8s kubeconfig --help`
-   print the exact same global usage text as `morb --help`, not
-   anything specific to that subcommand. The task brief's premise here
-   is confirmed: help text is not sufficient (and is actively
-   misleading, since it looks like it's answering the subcommand) to
-   enumerate per-subcommand flags.
-5. **`--force` is silently ignored, not rejected, on commands that don't
-   use it.** `morb start --force`, `morb suspend --force`,
-   `morb k8s status --force`, etc. all run normally with `--force`
-   simply never read by the parser — there is no error, unlike
-   `rosetta install --force`, which is a deliberate, documented
-   rejection. The help text doesn't distinguish "rejected" from
-   "quietly ignored" for the commands it doesn't mention.
-6. **The `rosetta`/`k8s` sub-subcommand can appear anywhere among the
-   trailing arguments**, not just immediately after `rosetta`/`k8s` —
-   both are found via `extraArguments.first { !$0.hasPrefix("-") }`. So
+   so `morb rosetta install --help`, `morb context create --help`, or
+   `morb mcp --help` all print the exact same global usage text as
+   `morb --help`, never anything specific to that command. This also
+   means there is no way to discover `mcp`/`migrate`/`bench`/`scan`/
+   `debug`'s own flags via `--help` either, since it never reaches their
+   modules.
+6. **`--force` is silently ignored, not rejected, on commands that don't
+   use it.** `morb start --force`, `morb suspend --force`, `morb k8s
+   status --force`, `morb context status --force`, etc. all run
+   normally with `--force` simply never read by the parser — no error,
+   unlike `rosetta install --force`, which is a deliberate, documented
+   rejection.
+7. **The `rosetta`/`k8s`/`context` sub-subcommand can appear anywhere
+   among the trailing arguments**, not just immediately after the
+   command word — all three are found via `extraArguments.first {
+   !$0.hasPrefix("-") }` (or the `context`-specific equivalent). So
    `morb k8s --force kubeconfig --merge` resolves the subcommand to
-   `kubeconfig` correctly even though a flag precedes it. Not a
-   documentation gap exactly, but worth knowing since it affects how
-   flags and the subcommand interleave.
+   `kubeconfig` correctly even though a flag precedes it.
+8. **`mcp`, `migrate`, `bench`, `scan`, `debug` exist in the shipped
+   binary but their argument grammar is entirely outside `main.swift`.**
+   Not a gap in the help text exactly (the top-level `--help` does list
+   all five with a one-line description each, accurately), but worth
+   surfacing plainly: nothing in `main.swift` says what subcommands or
+   flags any of them take, so no completion tool built solely from this
+   file can offer more than their bare command names. See the command
+   surface section above.
 
-Nothing found in `main.swift` reads any environment variable (no
-`ProcessInfo.environment` / `getenv` / `MORBSTACK_HOME` anywhere in that
-file); the man page's ENVIRONMENT section says so. This task's brief was
-scoped to reading only `mac/Sources/morb/main.swift` under `mac/` (other
-agents are actively editing Swift elsewhere in the tree), so it's
-possible a lower layer (`MorbstackKit`, not read for this task) honors
-an env var for relocating `~/.morbstack` — that was out of scope to
-verify here.
+Nothing in `main.swift`'s own argument-parsing and dispatch code reads
+any environment variable directly (no `ProcessInfo.environment` /
+`getenv` / `MORBSTACK_HOME` anywhere in it); the man page's ENVIRONMENT
+section says so. `context`'s own code does reference the docker CLI's
+`$DOCKER_CONFIG` convention in a comment ("against ~/.docker (or
+$DOCKER_CONFIG)"), which the man page also notes. This task's brief was
+scoped to reading only `mac/Sources/morb/main.swift`; whether a lower
+layer (`MorbstackKit`, or any of the five feature modules) honors other
+environment variables was out of scope to verify here.
 
 File paths in `morb.1`'s FILES section
 (`~/.morbstack/run/docker.sock`, `~/.morbstack/kubeconfig`,
@@ -202,7 +275,10 @@ written out) but are consistent with the architecture diagram there —
 `morbstackd.sock` living alongside `docker.sock` in `~/.morbstack/run/`,
 and `config.toml` at the root of `~/.morbstack/` alongside `data/` and
 `kubeconfig`. Flagged here rather than silently presented as equally
-certain as the other three.
+certain as the other three. `~/.docker/cli-plugins` and `~/.docker` (or
+`$DOCKER_CONFIG`) come directly from `main.swift` itself (literal string
+`~/.docker/cli-plugins` and the `$DOCKER_CONFIG` comment both appear in
+the source).
 
 ## Testing
 
@@ -219,11 +295,14 @@ arch[:machine]] [-p [eprtv]]`), so `mandoc` was used directly instead.
     only (no Homebrew bash present to cross-check against).
   - Functional test: sourced the file in a bash subshell and called
     `_morb` directly with `COMP_WORDS`/`COMP_CWORD` set, printing
-    `COMPREPLY`, for eight cases (more than the three required):
+    `COMPREPLY`, for twelve cases (more than the three required):
     empty (`morb <TAB>`), `morb k8s <TAB>`, `morb rosetta <TAB>`,
     `morb rosetta install <TAB>` (confirms `--force` is absent),
     `morb k8s kubeconfig <TAB>` (confirms `--merge`/`--switch-context`/
-    `--force` are present), `morb stop <TAB>`, `morb start <TAB>`
+    `--force` are present), `morb context <TAB>`,
+    `morb context use <TAB>`, `morb install-cli-plugins <TAB>`,
+    `morb mcp <TAB>` (confirms only the two global flags are offered,
+    nothing fabricated), `morb stop <TAB>`, `morb start <TAB>`
     (confirms `--force` is absent), and a partial-word case
     `morb st<TAB>`. All returned exactly the expected completion sets.
 - **`_morb` (zsh)**
@@ -247,26 +326,28 @@ arch[:machine]] [-p [eprtv]]`), so `mandoc` was used directly instead.
     claiming more than was actually confirmed.
 - **`morb.fish`**
   - Not tested at all — fish is not installed on this machine
-    (`command -v fish` found nothing). Written by hand against fish's
-    `complete`/`__fish_seen_subcommand_from`/`__fish_use_subcommand`
-    conventions and kept structurally parallel to the bash/zsh files,
-    but unverified. Run `fish -n integrations/shell/morb.fish` before
-    trusting it.
+    (`command -v fish` found nothing). Written by hand, structurally
+    parallel to the bash/zsh files, but unverified. Run
+    `fish -n integrations/shell/morb.fish` before trusting it.
 - **`morb.1`**
-  - `mandoc -T lint integrations/shell/morb.1` — clean except four
+  - `mandoc -T lint integrations/shell/morb.1` — clean except five
     `STYLE: referenced manual not found` notes for `Xr docker 1`,
-    `Xr docker-compose 1`, `Xr kubectl 1`. These are expected and not a
-    defect in the page: this machine doesn't have Docker/kubectl's man
-    pages registered in its local `mandoc.db`, so `mandoc` can't
-    resolve the cross-reference locally, even though the reference
-    itself is syntactically correct and is exactly what the task asked
-    the SEE ALSO section to contain. Two earlier real issues were found
-    and fixed: `.Os Morbstack` was misparsed as an attempt at an OS
-    release string (STYLE warning) and was changed to bare `.Os`; the
-    AUTHORS section needed an `.An` macro rather than plain text and
-    was changed to use one. After those fixes, `mandoc -T lint` has no
-    warnings above STYLE.
+    `Xr docker-buildx 1`, `Xr docker-compose 1`, `Xr kubectl 1`. These
+    are expected and not a defect in the page: this machine doesn't
+    have those tools' man pages registered in its local `mandoc.db`, so
+    `mandoc` can't resolve the cross-reference locally, even though the
+    reference itself is syntactically correct and is exactly what the
+    task asked the SEE ALSO section to contain. Three real issues were
+    found and fixed along the way: `.Os Morbstack` was misparsed as an
+    attempt at an OS release string (STYLE warning) and was changed to
+    bare `.Os`; the AUTHORS section needed an `.An` macro rather than
+    plain text; and the `Xr` list in SEE ALSO needed `docker-buildx`
+    and `docker-compose` in alphabetical order (mandoc's own
+    "unusual Xr order" check). After those fixes, `mandoc -T lint` has
+    no warnings above STYLE.
   - Rendered with `mandoc -T ascii integrations/shell/morb.1` and read
-    through in full: all sections present, no broken macros, no
-    truncated tables, `.Bl -tag` lists render correctly, examples
-    section reads cleanly.
+    through in full, twice (once before and once after adding
+    `context`/`install-cli-plugins`/`mcp`/`migrate`/`bench`/`scan`/
+    `debug`): all sections present, no broken macros, no truncated
+    tables, `.Bl -tag` lists (including the nested one under `--force`
+    in OPTIONS) render correctly, examples section reads cleanly.

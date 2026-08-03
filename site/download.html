@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Download — Morbstack</title>
+<meta name="description" content="There is no signed Morbstack build yet. This page is the real, current build-from-source instructions — and what the planned DMG and Homebrew distribution will look like.">
+
+<link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="assets/favicon-16.png">
+<link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+
+<meta property="og:type" content="website">
+<meta property="og:title" content="Download — Morbstack">
+<meta property="og:description" content="There is no signed build yet. Real build-from-source instructions, system requirements, and the planned DMG/Homebrew distribution.">
+<!-- TODO(human): og:image/twitter:image need an absolute URL once Morbstack has a real domain. -->
+<meta property="og:image" content="assets/og-image.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Download — Morbstack">
+<meta name="twitter:description" content="There is no signed build yet. Real build-from-source instructions, system requirements, and the planned DMG/Homebrew distribution.">
+<meta name="twitter:image" content="assets/og-image.png">
+
+<link rel="stylesheet" href="style.css">
+<script>
+  (function () {
+    try {
+      var t = localStorage.getItem("morbstack-theme");
+      if (t === "dark" || t === "light") document.documentElement.setAttribute("data-theme", t);
+    } catch (e) {}
+  })();
+</script>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand-lockup" href="index.html">
+      <img class="mark" src="assets/mark.svg" alt="" width="28" height="28">
+      <span>Morbstack</span>
+    </a>
+    <nav class="main-nav" aria-label="Primary">
+      <a href="index.html">Overview</a>
+      <a href="download.html" aria-current="page">Download</a>
+      <a href="docs.html">Docs</a>
+      <a href="comparison.html">Comparison</a>
+    </nav>
+    <div class="header-actions">
+      <button class="theme-toggle" type="button" aria-label="Toggle color theme" aria-pressed="false">
+        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z"/></svg>
+      </button>
+    </div>
+  </div>
+</header>
+
+<main id="main">
+
+  <section class="section-lg">
+    <div class="wrap">
+      <span class="eyebrow">Download</span>
+      <h1>There is no binary release yet.</h1>
+      <p class="lede">No signed build, no notarized DMG, no Homebrew cask, no GitHub release. The only way to run Morbstack today is to build it from source — this page is the real command sequence, not a stand-in for a download button.</p>
+
+      <div class="callout callout-warn mt-6">
+        <div class="callout-title">The honest state of distribution</div>
+        <p>Packaging and signed releases are tracked separately from the core engine work. Nothing on this page — or anywhere on this site — should be read as "download a build." There isn't one. If you came here looking for a <code class="inline">.dmg</code>, the instructions below are the actual path to a running Morbstack today.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="requirements">
+    <div class="wrap">
+      <h2>System requirements</h2>
+      <div class="grid grid-3">
+        <div class="card">
+          <h3>Apple silicon</h3>
+          <p class="text-small"><code class="inline">Virtualization.framework</code>'s Rosetta-backed amd64 path and this project's own testing both assume arm64. There is no Intel Mac support story.</p>
+        </div>
+        <div class="card">
+          <h3>macOS 15 (Sequoia) or later</h3>
+          <p class="text-small"><code class="inline">mac/Package.swift</code> declares a <code class="inline">macOS(.v15)</code> deployment target and <code class="inline">Info.plist</code> sets <code class="inline">LSMinimumSystemVersion</code> to <code class="inline">15.0</code>.</p>
+        </div>
+        <div class="card">
+          <h3>Xcode 26 or later, to build it</h3>
+          <p class="text-small">Needed for the Swift 6.3 compiler and the <code class="inline">Virtualization.framework</code> APIs the daemon uses. <a class="text-link" href="https://mise.jdx.dev/" target="_blank" rel="noopener">mise</a> manages the pinned Rust toolchain for the guest-side init binary.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="build">
+    <div class="wrap">
+      <h2>Build from source</h2>
+      <p class="section-intro">The exact command sequence from a fresh clone to a working <code class="inline">docker run</code> / <code class="inline">docker compose</code> setup, taken directly from <code class="inline">README.md</code> and <code class="inline">mise.toml</code>.</p>
+
+      <h3>1. Clone and build</h3>
+      <p class="text-small">mise refuses to even read an untrusted config, so the very first command on a fresh clone must be literal <code class="inline">mise trust</code> before anything else — not a task, since tasks live inside the config that isn't trusted yet.</p>
+      <div class="code-block">
+        <pre id="cmd-clone">git clone &lt;this repository&gt;
+cd morbstack
+mise trust &amp;&amp; mise install   # one-time: pulls the pinned Rust toolchain
+mise run build                # builds morbstackd, morb, and morbinit
+mise run test                 # runs the Swift and Rust test suites</pre>
+        <button class="copy-btn" type="button" data-copy-target="cmd-clone">Copy</button>
+      </div>
+
+      <h3 class="mt-6">2. Check host readiness</h3>
+      <p class="text-small"><code class="inline">morb doctor</code> works without a running daemon — it tells you what setup is still outstanding.</p>
+      <div class="code-block">
+        <pre id="cmd-doctor">./mac/.build/debug/morb doctor</pre>
+        <button class="copy-btn" type="button" data-copy-target="cmd-doctor">Copy</button>
+      </div>
+
+      <h3 class="mt-6">3. Fetch and verify the guest assets</h3>
+      <p class="text-small">Hash-verifies the pinned guest kernel, the static Docker engine binaries, the Alpine minirootfs, the guest fsutils, and the host <code class="inline">docker-compose</code> CLI plugin — see <code class="inline">NOTICE</code> for exactly what these are and where they come from.</p>
+      <div class="code-block">
+        <pre id="cmd-fetch">./scripts/fetch-guest-assets.sh</pre>
+        <button class="copy-btn" type="button" data-copy-target="cmd-fetch">Copy</button>
+      </div>
+
+      <h3 class="mt-6">4. Assemble the bootable guest image</h3>
+      <p class="text-small">Cross-compiles <code class="inline">morbinit</code> and assembles the bootable initramfs (kernel + <code class="inline">morbinit</code>-as-<code class="inline">/init</code> + Alpine rootfs + Docker engine binaries + fsutils).</p>
+      <div class="code-block">
+        <pre id="cmd-image">mise run guest-image</pre>
+        <button class="copy-btn" type="button" data-copy-target="cmd-image">Copy</button>
+      </div>
+
+      <h3 class="mt-6">5. Start the daemon</h3>
+      <p class="text-small">Builds, ad-hoc codesigns <code class="inline">morbstackd</code> with the entitlements it needs to open a VM, and runs it in the foreground. The VM itself doesn't boot until the first client connects — socket activation.</p>
+      <div class="code-block">
+        <pre id="cmd-daemon">mise run run-daemon</pre>
+        <button class="copy-btn" type="button" data-copy-target="cmd-daemon">Copy</button>
+      </div>
+
+      <h3 class="mt-6">6. Point Docker tooling at Morbstack</h3>
+      <p class="text-small">These steps build Morbstack's own binaries; they do not install a <code class="inline">docker</code> client, which the commands below assume is already on your <code class="inline">PATH</code>. Morbstack does not bundle one yet — a pinned, hash-verified <code class="inline">docker</code>/<code class="inline">docker compose</code>/<code class="inline">docker buildx</code> shipped inside the app is tracked as the "single-path install" gate for the first public release (<a class="text-link" href="../docs/roadmap.md">docs/roadmap.md</a>, L1) and is not built yet. In another terminal:</p>
+      <div class="code-block">
+        <pre id="cmd-run">export DOCKER_HOST=unix://$HOME/.morbstack/run/docker.sock
+docker ps
+docker run --rm hello-world
+docker run -d -p 8080:80 nginx
+curl -fsS http://127.0.0.1:8080   # nginx welcome page, from the Mac</pre>
+        <button class="copy-btn" type="button" data-copy-target="cmd-run">Copy</button>
+      </div>
+      <p class="text-small">Or register a persistent <code class="inline">docker context</code> instead of exporting <code class="inline">DOCKER_HOST</code> every time:</p>
+      <div class="code-block">
+        <pre id="cmd-context">docker context create morbstack --docker host=unix://$HOME/.morbstack/run/docker.sock
+docker context use morbstack</pre>
+        <button class="copy-btn" type="button" data-copy-target="cmd-context">Copy</button>
+      </div>
+
+      <h3 class="mt-6">7. Wire up <code class="inline">docker compose</code></h3>
+      <p class="text-small">This repo fetches and verifies the plugin binary but does not install it for you — a one-time symlink:</p>
+      <div class="code-block">
+        <pre id="cmd-compose">mkdir -p ~/.docker/cli-plugins
+ln -sf "$(pwd)/dist/host-bin/docker-compose" ~/.docker/cli-plugins/docker-compose
+docker compose version</pre>
+        <button class="copy-btn" type="button" data-copy-target="cmd-compose">Copy</button>
+      </div>
+
+      <h3 class="mt-6">8. Optional: build the SwiftUI app</h3>
+      <p class="text-small">Assembles and ad-hoc signs <code class="inline">Morbstack.app</code> into <code class="inline">dist/</code>, then launches it. The app bundles <code class="inline">morbstackd</code> and <code class="inline">morb</code> alongside it, so it can start the engine without anything installed on <code class="inline">PATH</code>.</p>
+      <div class="code-block">
+        <pre id="cmd-app">mise run app
+open dist/Morbstack.app</pre>
+        <button class="copy-btn" type="button" data-copy-target="cmd-app">Copy</button>
+      </div>
+
+      <p class="mt-5 text-small">Full detail, including troubleshooting the <code class="inline">credsStore</code>/<code class="inline">docker-credential-desktop</code> hang and the port-forwarder retry behavior, lives in the repository's <code class="inline">CONTRIBUTING.md</code> and <a class="text-link" href="../docs/architecture.md">docs/architecture.md</a>. See also <a class="text-link" href="docs.html#troubleshooting">Troubleshooting</a> on the docs page.</p>
+    </div>
+  </section>
+
+  <section class="section" id="planned">
+    <div class="wrap">
+      <h2>Planned distribution</h2>
+      <p class="section-intro">Packaging and signed releases are being built out separately (see <a class="text-link" href="../docs/RELEASING.md">docs/RELEASING.md</a>). Neither of the commands below works yet — they're shown greyed out, exactly as planned, so this page stays honest about what exists today.</p>
+
+      <div class="grid grid-2">
+        <div class="card">
+          <h3>DMG</h3>
+          <p class="text-small">A notarized, signed <code class="inline">.dmg</code> containing <code class="inline">Morbstack.app</code>.</p>
+          <div class="code-block is-disabled mt-4" aria-disabled="true">
+            <pre aria-hidden="true"># not available yet
+curl -LO https://TODO-real-domain/Morbstack.dmg</pre>
+          </div>
+        </div>
+        <div class="card">
+          <h3>Homebrew cask</h3>
+          <p class="text-small">A cask formula is drafted at <code class="inline">packaging/morbstack.rb</code> by a separate in-progress effort, not yet published to a tap.</p>
+          <div class="code-block is-disabled mt-4" aria-disabled="true">
+            <pre aria-hidden="true"># not available yet
+brew install --cask morbstack</pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="footer-grid">
+      <div class="footer-col">
+        <div class="footer-brand">
+          <img class="mark" src="assets/mark.svg" alt="" width="24" height="24">
+          <span>Morbstack</span>
+        </div>
+        <p class="text-small">Everything that runs on your machine is free forever.</p>
+      </div>
+      <div class="footer-col">
+        <h4>Product</h4>
+        <ul>
+          <li><a href="download.html">Download</a></li>
+          <li><a href="docs.html">Documentation</a></li>
+          <li><a href="comparison.html">Comparison</a></li>
+        </ul>
+      </div>
+      <div class="footer-col">
+        <h4>Project</h4>
+        <ul>
+          <li><a href="../docs/roadmap.md">Roadmap</a></li>
+          <li><a href="../docs/parity.md">Parity report</a></li>
+          <li><a href="../LICENSE">License (Apache-2.0)</a></li>
+        </ul>
+      </div>
+      <div class="footer-col">
+        <h4>Source</h4>
+        <ul>
+          <!-- TODO(human): replace with the real GitHub repository URL once this
+               project is published. There is no public repository yet. -->
+          <li><a href="https://github.com/REPLACE_ME/morbstack" target="_blank" rel="noopener">GitHub</a></li>
+          <li><a href="../docs/architecture.md">Architecture</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="footer-bottom">
+      <span>Apache-2.0. Copyright © 2026 The Morbstack Authors.</span>
+      <span>Pre-release software. Nothing here is a shipped product yet.</span>
+    </div>
+  </div>
+</footer>
+
+<script src="site.js"></script>
+</body>
+</html>

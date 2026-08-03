@@ -42,10 +42,24 @@ pin.
 | `test` | — | Runs the Swift suite (if `mac/Tests` exists) and the Rust suite |
 | `shots-live` | `build-mac` | Self-captures the real `MorbstackApp` window (light + dark) into `dist/shots-live`, using `--tour-fixtures` so no engine/VM is needed |
 | `app-icon` | — | Renders `AppIcon.icns` from `mac/AppResources/make-icon.swift`. Skipped if that script hasn't changed since the last icon build (see "Incrementality" below) |
-| `app` | `app-icon` | Release-builds `MorbstackApp`, `morbstackd`, and `morb` (as three separate `swift build --product` invocations — combining them silently builds only the last one), assembles `dist/Morbstack.app`, stamps the version, and signs inside-out: `morb`, then `morbstackd` with entitlements, then the bundle with no `--deep`. Fails the build if `morbstackd` loses the virtualization entitlement |
-| `run-app` | `app` | Builds and `open`s `dist/Morbstack.app` |
-| `clean-app` | — | Removes the assembled bundle and icon build products |
-| `clean` | `clean-app` | Removes build outputs for both toolchains |
+| `app` | `app-icon` | Release-builds `MorbstackApp`, `morbstackd`, and `morb` (as three separate `swift build --product` invocations — combining them silently builds only the last one), assembles `dist/Morbstack.app`, stamps the version, and signs inside-out: `morb`, then `morbstackd` with entitlements, then the bundle with no `--deep`. Fails the build if `morbstackd` loses the virtualization entitlement. The three-product list is a curated bundle manifest, not derived from `Package.swift` — see the comment on `[tasks.app]` in `mise.toml` before "fixing" it to loop over the package graph |
+| `run-app`\* | `app` | Builds and `open`s `dist/Morbstack.app` |
+| `clean-app`\* | — | Removes the assembled bundle and icon build products |
+| `clean`\* | `clean-app` | Removes build outputs for both toolchains |
+
+\* **Reviewed, not executed, during the mise migration.** `run-daemon` and
+`run-app` start a long-running process (the daemon, and potentially the VM
+behind it via socket activation); `clean` and `clean-app` delete
+`mac/.build` and `guest/morbinit/target` outright. All four were verified
+by reading the generated `run` script and confirming it matches the
+original Makefile recipe line for line, not by running them — the
+migration happened with several other agents mid-build against those same
+directories, and either running the daemon or deleting shared incremental
+build state out from under them would have been actively destructive. If
+you're picking this up later: these four are the ones still worth an
+actual smoke test, ideally when the tree is quiet (no other agent
+mid-build) and you're prepared to lose `mac/.build`/`guest/morbinit/target`
+if `clean`/`clean-app` are what you're testing.
 
 Run `mise tasks ls` at any time for the live list with one-line
 descriptions, or `mise tasks deps <task>` to see a task's dependency tree.

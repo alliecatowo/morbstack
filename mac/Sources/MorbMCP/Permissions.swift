@@ -105,15 +105,23 @@ public struct PermissionSubject: Sendable {
     public var name: String
     /// `nil` for read-only tools, which the resolver never gates.
     public var group: ToolGroup?
-    /// Argument-level guards this tool defines, e.g. `container_remove` defines
-    /// `force`. The qualified key checked against grants/denials is
-    /// `"<name>:<guard>"`, e.g. `"container_remove:force"`.
-    public var guards: [String]
+    /// Fully-qualified guard keys this tool defines, e.g.
+    /// `"container_remove:force"`, `"prune:volumes"`, `"inspect:env"`. Each is
+    /// checked independently of the tool's own grant or group — see
+    /// ``PermissionProfile/decideGuardKey(_:)``.
+    ///
+    /// Most guards follow a `"<tool name>:<argument>"` convention, but that is a
+    /// convention, not a rule the type enforces: `inspect:env` deliberately
+    /// breaks it, because "reveal secrets during inspection" reads as its own
+    /// named capability to a profile author, not as an argument of
+    /// `container_inspect` — see the doc comment where it is defined
+    /// (ReadOnlyTools.swift).
+    public var guardKeys: [String]
 
-    public init(name: String, group: ToolGroup?, guards: [String] = []) {
+    public init(name: String, group: ToolGroup?, guardKeys: [String] = []) {
         self.name = name
         self.group = group
-        self.guards = guards
+        self.guardKeys = guardKeys
     }
 }
 
@@ -171,16 +179,17 @@ public struct PermissionProfile: Sendable {
         return decideKey(exact: subject.name, group: group.rawValue, toolLabel: subject.name)
     }
 
-    /// Decides whether a specific argument-level guard on `subject` may be used.
-    /// Guards are deliberately not covered by the tool's own grant or its group —
-    /// see the doc comment on ``PermissionSubject/guards`` and the guard list in
-    /// the generated `mcp.toml` template for why each one exists.
-    public func decideGuard(_ subject: PermissionSubject, guardName: String) -> PermissionDecision {
-        let qualified = "\(subject.name):\(guardName)"
+    /// Decides whether a specific argument-level guard may be used. `key` is the
+    /// guard's fully-qualified key, e.g. `"container_remove:force"` or
+    /// `"inspect:env"`. Guards are deliberately not covered by the tool's own
+    /// grant or its group — see the doc comment on ``PermissionSubject/guardKeys``
+    /// and the guard list in the generated `mcp.toml` template for why each one
+    /// exists.
+    public func decideGuardKey(_ key: String) -> PermissionDecision {
         // No group fallback: a `containers:write` or even an exact `container_remove`
         // grant must not silently cover `force`. Only the qualified key itself, or
         // the deliberately-everything `all`, reaches this.
-        return decideKey(exact: qualified, group: nil, toolLabel: qualified)
+        return decideKey(exact: key, group: nil, toolLabel: key)
     }
 
     /// Shared precedence: an exact key match beats a group match beats `"all"`,
@@ -239,7 +248,7 @@ public func knownPermissionKeys(subjects: [PermissionSubject]) -> Set<String> {
     for group in ToolGroup.allCases { keys.insert(group.rawValue) }
     for subject in subjects {
         keys.insert(subject.name)
-        for guardName in subject.guards { keys.insert("\(subject.name):\(guardName)") }
+        keys.formUnion(subject.guardKeys)
     }
     return keys
 }

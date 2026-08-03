@@ -31,6 +31,19 @@
 .Op Fl -switch-context
 .Op Fl -force
 .Op Fl -json
+.Nm
+.Cm context
+.Op Cm status | create | use
+.Op Fl -force
+.Op Fl -json
+.Nm
+.Cm install-cli-plugins
+.Op Fl -force
+.Op Fl -print-plan
+.Op Fl -json
+.Nm
+.Cm mcp | migrate | bench | scan | debug
+.Op Ar ...
 .Sh DESCRIPTION
 .Nm
 is the command-line client for
@@ -43,7 +56,7 @@ and forwards the Docker Engine API out of it.
 Most subcommands talk to
 .Nm morbstackd
 over a local Unix-domain socket; a few
-.Pq Cm shares , Cm rosetta status , Cm doctor
+.Pq Cm shares , Cm rosetta status , Cm doctor , Cm context
 answer from host-side state alone and never require the daemon to be
 running.
 .Pp
@@ -67,10 +80,32 @@ Purely observational commands
 .Cm status ,
 .Cm shares ,
 .Cm rosetta status ,
-.Cm doctor
+.Cm doctor ,
+.Cm context status
 .Pc
 never do this: if the daemon is not running they report that fact instead
 of starting one just to ask it a question.
+.Pp
+.Cm mcp ,
+.Cm migrate ,
+.Cm bench ,
+.Cm scan
+and
+.Cm debug
+are each implemented in their own Swift module
+.Pq MorbMCP , MorbMigrate , MorbBench , MorbScan
+that
+.Nm
+dispatches to with the remaining command-line arguments and the global
+.Fl -json
+flag, and nothing else.
+Their own argument grammar, sub-subcommands, and exit codes are defined
+in those modules, not in
+.Nm Ns 's
+own argument parser, and are intentionally not enumerated in this manual
+beyond the one-line summary each gets in
+.Sx COMMANDS
+below.
 .Sh COMMANDS
 .Bl -tag -width Ds
 .It Cm status
@@ -156,6 +191,89 @@ at
 as part of the merge.
 .Fl -force
 skips the merge confirmation prompt.
+.It Cm context Op Cm status
+Show whether a
+.Dq morbstack
+docker context is registered, whether it points at the right socket, and
+what the current default context is.
+This is the default when
+.Cm context
+is given no subcommand.
+Answerable without the daemon; reads/writes only under the docker CLI's
+own config directory
+.Pq Ev DOCKER_CONFIG , or Pa ~/.docker No by default .
+.It Cm context Cm create
+Register a
+.Dq morbstack
+docker context pointing at the Morbstack Docker socket.
+Does not change the current/default context.
+Prompts for confirmation unless
+.Fl -force
+is given.
+.It Cm context Cm use
+Make
+.Dq morbstack
+the current/default docker context.
+Always prompts for interactive confirmation — this command has no
+non-interactive form, regardless of
+.Fl -force ;
+that flag only lifts the refusal to replace another
+.Em explicit
+non-default context.
+Refuses to run if the context is not already registered
+.Pq run Cm context create No first .
+.It Cm install-cli-plugins
+Symlink
+.Pa docker-compose
+and
+.Pa docker-buildx
+CLI plugin binaries into
+.Pa ~/.docker/cli-plugins
+so plain
+.Cm docker compose
+and
+.Cm docker buildx
+work.
+Accepts
+.Fl -print-plan
+to preview without acting, and
+.Fl -force
+to skip the confirmation prompt.
+Fails if no plugin binaries can be found next to the
+.Nm
+executable or under a
+.Pa dist/host-bin
+checkout.
+.It Cm mcp
+Model Context Protocol server; read-only unless explicitly granted more.
+Implemented in the
+.Sy MorbMCP
+module; see
+.Sx DESCRIPTION
+for what that means for this manual's coverage of it.
+.It Cm migrate
+Import images, volumes and configuration from another container runtime.
+Implemented in the
+.Sy MorbMigrate
+module; see
+.Sx DESCRIPTION .
+.It Cm bench
+Run the open benchmark suite and report the numbers.
+Implemented in the
+.Sy MorbBench
+module; see
+.Sx DESCRIPTION .
+.It Cm scan
+SBOM and CVE scan an image, entirely on this machine.
+Implemented in the
+.Sy MorbScan
+module; see
+.Sx DESCRIPTION .
+.It Cm debug
+Open a toolbox shell in a container, even a distroless one that has no
+shell of its own.
+Implemented in its own module; see
+.Sx DESCRIPTION .
 .It Cm version
 Print the CLI version, and the daemon's version if it can be reached.
 Never fails just because nothing is running.
@@ -189,23 +307,47 @@ read, so
 .Nm morb --json status
 and
 .Nm morb status --json
-are identical.
-.It Fl -force
-Skip a confirmation prompt.
-Its meaning depends on the command: for
-.Cm stop
-it skips asking the guest to shut down cleanly first; for
-.Cm reset-disk
+are identical — and this holds even for
+.Cm mcp , migrate , bench , scan
 and
-.Cm k8s kubeconfig --merge
-it skips the interactive
+.Cm debug ,
+whose other arguments are otherwise opaque to this manual.
+.It Fl -force
+Skip a confirmation prompt, with a command-dependent meaning:
+.Bl -tag -width "reset-disk, install-cli-plugins"
+.It Cm stop
+Skip asking the guest to shut down cleanly first.
+.It Cm reset-disk , context create , install-cli-plugins
+Skip the interactive
 .Dq are you sure
 prompt.
-It is silently ignored (not rejected) on every other command, including
-.Cm start , suspend , resume , k8s status , k8s enable
+.It Cm context use
+Does
+.Em not
+skip the confirmation prompt — that command always asks.
+It only lifts the refusal to replace another explicit non-default
+context.
+.It Cm k8s kubeconfig Fl -merge
+Skip that merge's confirmation prompt.
+This is accepted and honored by the parser but, as of this writing, is
+not mentioned by
+.Nm morb --help Ns 's
+own OPTIONS text, which only documents
+.Fl -force
+for
+.Cm reset-disk , context create , context use
 and
-.Cm k8s disable ,
-where it is never read by the parser at all.
+.Cm stop .
+.El
+.Pp
+On every other command
+.Po
+.Cm start , suspend , resume , k8s status , k8s enable , k8s disable ,
+.Cm context status
+.Pc
+.Fl -force
+is silently ignored, not rejected: it is simply never read by the
+parser for those commands, and no error is produced.
 It is deliberately
 .Em refused
 .Pq a hard error, exit 2
@@ -219,10 +361,12 @@ to preview it, or run
 .Fl -install-rosetta
 directly for an unattended install.
 .It Fl -print-plan
-Valid only for
-.Cm rosetta install .
-Prints the exact steps that command would take and exits without taking
-them.
+Print the exact steps a command would take and exit without taking them.
+Valid for
+.Cm rosetta install
+and
+.Cm install-cli-plugins
+only.
 .It Fl -merge
 Valid only for
 .Cm k8s kubeconfig .
@@ -250,7 +394,9 @@ Recognized anywhere on the command line and checked before any
 subcommand is parsed, so it always prints the same global summary rather
 than help for the specific subcommand it follows;
 .Nm morb k8s kubeconfig --help
-prints the same text as
+and
+.Nm morb mcp --help
+both print the exact same text as
 .Nm morb --help .
 .Fl h
 works identically to
@@ -261,14 +407,28 @@ own OPTIONS section.
 .El
 .Sh ENVIRONMENT
 .Nm Ns 's
-argument parser and command dispatch
+own argument parser and command dispatch
 .Pq mac/Sources/morb/main.swift
-do not read any environment variables; every path it uses comes from a
-fixed, compiled-in location under
+do not read any environment variables directly; every path it uses
+itself comes from a fixed, compiled-in location under
 .Pa ~/.morbstack .
 No
 .Ev MORBSTACK_HOME
 or equivalent override is consulted at that layer.
+.Cm context Ns 's
+subcommands do honor the docker CLI's own
+.Ev DOCKER_CONFIG
+convention for locating the docker config directory
+.Pq default Pa ~/.docker ,
+per that command's own implementation.
+Whether
+.Cm mcp , migrate , bench , scan
+or
+.Cm debug
+read any environment variables is not knowable from
+.Nm Ns 's
+own source; each is implemented in a separate module outside the scope
+this manual could verify.
 .Sh FILES
 .Bl -tag -width "~/.morbstack/run/morbstackd.sock"
 .It Pa ~/.morbstack/run/docker.sock
@@ -300,6 +460,21 @@ setting toggled by
 The user's own kubectl config, edited only by
 .Cm k8s kubeconfig --merge ,
 and only after asking and taking a timestamped backup.
+.It Pa ~/.docker/cli-plugins
+Where
+.Cm install-cli-plugins
+symlinks
+.Pa docker-compose
+and
+.Pa docker-buildx .
+.It Pa ~/.docker
+The docker CLI's own config directory
+.Pq or Ev DOCKER_CONFIG , if set ,
+where
+.Cm context
+registers and switches the
+.Dq morbstack
+context.
 .El
 .Sh EXIT STATUS
 .Bl -tag -width Ds
@@ -319,6 +494,17 @@ a cancelled confirmation prompt, a check that
 .Cm doctor
 reports unhealthy, or a daemon-reported failure.
 .El
+.Pp
+This is the convention
+.Nm Ns 's
+own code documents and follows for every command it parses directly.
+.Cm mcp , migrate , bench , scan
+and
+.Cm debug
+each return whatever exit code their own module computes, which
+.Nm
+merely forwards unchanged; that code was not verified here to follow the
+same 0/1/2 convention.
 .Sh EXAMPLES
 .Bl -tag -width Ds
 .It Boot the VM and check on it
@@ -332,6 +518,11 @@ reports unhealthy, or a daemon-reported failure.
 .Dl morb k8s enable
 .Dl morb k8s kubeconfig --merge --switch-context
 .Dl kubectl get nodes
+.It Point the docker CLI at Morbstack with a zero-config context
+.Dl morb context create
+.Dl morb context use
+.It Get docker-compose and docker-buildx working as CLI plugins
+.Dl morb install-cli-plugins
 .It Get machine-readable status for scripting
 .Dl morb status --json
 .It Start over with an empty Docker data disk
@@ -340,6 +531,7 @@ reports unhealthy, or a daemon-reported failure.
 .El
 .Sh SEE ALSO
 .Xr docker 1 ,
+.Xr docker-buildx 1 ,
 .Xr docker-compose 1 ,
 .Xr kubectl 1 ,
 .Xr softwareupdate 8

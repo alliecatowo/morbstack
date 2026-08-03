@@ -94,17 +94,34 @@ included:
    docker context use morbstack
    ```
 
-   `devcontainer up` succeeded identically. Prefer this route: it survives a
-   VS Code launched from the Dock, which does not inherit your shell
-   environment the way one launched by `code .` from a terminal does.
+   `devcontainer up` succeeded identically, with no `DOCKER_HOST` anywhere.
+   Prefer this route. Microsoft's own documentation states that without the
+   Container Tools extension installed, "Dev Containers will use the current
+   context" ([Develop on a remote Docker host](https://code.visualstudio.com/remote/advancedcontainers/develop-remote-host)).
+
+### If you launch VS Code from the Dock
+
+A GUI-launched macOS app inherits its environment from `launchd`, not from your
+shell, so `export DOCKER_HOST=...` in `~/.zshrc` is not reliably enough. Three
+options, most robust first:
+
+- **Use a docker context** (above). It lives in `~/.docker/contexts`, not in an
+  environment variable, so how VS Code was launched stops mattering.
+- **Install the separate Container Tools extension**
+  (`ms-azuretools.vscode-containers`) and set, in `settings.json`:
+  `"containers.environment": {"DOCKER_HOST": "unix:///Users/you/.morbstack/run/docker.sock"}`.
+  This is the documented mechanism for pointing Dev Containers at a non-default
+  daemon from settings rather than the environment.
+- **Launch with `code .` from a terminal** that already has `DOCKER_HOST`
+  exported.
 
 ### The socket-path trap
 
 Do **not** point `dev.containers.dockerSocketPath` at
-`~/.morbstack/run/docker.sock`. That setting is the socket path bind-mounted
-*into* the container for the `docker-in-docker` and `docker-outside-of-docker`
-features, and bind-mount sources are resolved by dockerd **inside the guest VM**,
-not on your Mac. Verified live:
+`~/.morbstack/run/docker.sock`. That setting supplies the socket that the
+`docker-outside-of-docker` feature bind-mounts *into* the container, and
+bind-mount sources are resolved by dockerd **inside the guest VM**, not on your
+Mac. Verified live:
 
 ```
 $ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock docker:cli \
@@ -116,15 +133,37 @@ docker: Error response from daemon: error while creating mount source path
 '/Users/you/.morbstack/run/docker.sock': mkdir ...: operation not supported
 ```
 
-The default `/var/run/docker.sock` is correct on Morbstack and
-docker-outside-of-docker works with it unchanged. The Mac-side path fails
-loudly, which is the good failure mode, but only if you never set it.
+So the default `/var/run/docker.sock` is the correct value on Morbstack and
+`docker-outside-of-docker` works with it unchanged — the guest's dockerd socket
+is exactly where the feature expects to find it. The Mac-side path fails loudly
+rather than silently, which is the good failure mode, but only if you never set
+it.
 
-### Known gap
+The `docker-in-docker` feature is unaffected either way: it starts its own
+nested `dockerd` inside the container and does not bind-mount a host socket at
+all.
 
-Morbstack does not resolve `host.docker.internal` or `gateway.docker.internal`
-inside containers today. A `devcontainer.json` that reaches the host by those
-names will not work. See `docs/parity.md`, findings 18, 19 and 22.
+### Known gaps
+
+- Morbstack does not resolve `host.docker.internal` or
+  `gateway.docker.internal` inside containers today. A `devcontainer.json` that
+  reaches the host by those names will not work. See `docs/parity.md`, findings
+  18, 19 and 22.
+- Dev Containers detects "Docker is not running" by pattern-matching the
+  `docker version` error string, and on macOS may respond by trying to launch
+  Docker Desktop. If you see a confusing Docker-Desktop-flavoured error, check
+  `docker version` directly against the Morbstack socket before believing it.
+  This is reported behaviour from the extension's issue tracker rather than
+  documented behaviour, and it was not reproduced here.
+
+### What was and was not tested
+
+Verified live on this machine: `devcontainer up` via `DOCKER_HOST`,
+`devcontainer up` via a `docker context`, and both socket bind-mount cases
+above. Not tested: the Dev Containers **VS Code extension** driving these paths
+through its own UI. The CLI is the reference implementation the extension
+wraps, so the daemon-facing behaviour is the same, but the extension's
+environment plumbing and error handling are its own and were not exercised.
 
 ## Building from source
 
@@ -156,6 +195,30 @@ is how the client was exercised against a real engine (ping, version, list,
 inspect, lifecycle, stdcopy log demux, interactive exec over the hijacked
 stream, `/events`, and both error paths) without launching an Extension
 Development Host.
+
+### Verification status
+
+Honest accounting of what has and has not been exercised:
+
+- **Verified against a live Morbstack engine** (29.7.1, API 1.55): `/_ping`,
+  `/version`, container/image/volume listing and inspection,
+  start/stop/restart, Compose-label grouping, published-port deduplication
+  across IPv4 and IPv6, log streaming with stdcopy demultiplexing, an
+  interactive `exec` shell over the hijacked upgrade stream including resize
+  and exit-code reporting, the `/events` stream, socket rediscovery from
+  `morb status --json`, and the missing-socket and HTTP 404 error paths.
+- **Verified with a stubbed `vscode` module**: every tree provider's node
+  shapes, labels, descriptions, icons and context values, in both the
+  engine-up and engine-down states, with each grouping setting toggled.
+- **Verified**: `tsc` compiles clean under `strict`; `vsce package` produces a
+  16-file, 46 KB VSIX; that VSIX installs without error into a scratch
+  extensions directory.
+- **Not verified**: the extension has not been run inside a VS Code window.
+  Nothing in the sidebar, status bar, context menus or terminal integration has
+  been seen rendered. Menu `when` clauses, view registration and the welcome
+  view are only exercised by VS Code at runtime and could be wrong in ways
+  compilation cannot catch. Treat the UI layer as unproven until someone opens
+  it.
 
 ## Licence
 

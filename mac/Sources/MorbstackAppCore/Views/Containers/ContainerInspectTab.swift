@@ -143,12 +143,30 @@ struct ContainerInspectTab: View {
     }
 
     var body: some View {
-        content
-            .background(TrackBPalette.logSurface)
-            .toolbar { toolbarContent }
-            .searchable(text: $query, placement: .toolbar, prompt: "Search document")
-            .task(id: json) { prepare() }
-            .onChange(of: query) { _, _ in recomputeMatches() }
+        VStack(spacing: 0) {
+            searchBar
+            MorbRowDivider()
+            content
+        }
+        .background(TrackBPalette.logSurface)
+        .toolbar { toolbarContent }
+        .task(id: json) { prepare() }
+        .onChange(of: query) { _, _ in recomputeMatches() }
+    }
+
+    /// An in-content search field, not `.searchable(placement: .toolbar)` — see the
+    /// identical note on `ContainerLogsTab.filterBar`. This tab and the containers list
+    /// are on screen together in the split view, and only one of them may own the
+    /// window's toolbar-placed search without crashing `NSToolbar`; the list keeps it
+    /// because it searches the window's primary collection, and this searches one
+    /// document already scoped to a single container.
+    private var searchBar: some View {
+        HStack {
+            TrackBSearchField(text: $query, prompt: "Search document", width: 260)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, Theme.space4)
+        .padding(.vertical, Theme.space2 + 1)
     }
 
     // MARK: Toolbar

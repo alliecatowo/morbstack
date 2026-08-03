@@ -42,15 +42,38 @@ enum ReadOnlyTools {
 
     static let containerInspect = ToolSpec(
         name: "container_inspect",
-        summary: "Full inspect document for one container: config, state, mounts, networks.",
+        summary: "Full inspect document for one container: config, state, mounts, networks. "
+            + "Environment variable values and label values are redacted by default (names and "
+            + "value lengths are kept) because Config.Env is where container credentials "
+            + "typically live; pass reveal_secrets:true with the inspect:env grant for the raw document.",
         inputSchema: Schema.object(
-            ["id": Schema.string("Container ID or name.")], required: ["id"]),
-        readOnly: true, destructive: false, group: nil
+            [
+                "id": Schema.string("Container ID or name."),
+                "reveal_secrets": Schema.boolean(
+                    "Return unredacted Env/Label values. Requires the inspect:env grant — this "
+                        + "reveals secrets rather than changing state, and is gated as seriously as "
+                        + "a mutating tool.", defaultValue: false),
+            ], required: ["id"]),
+        readOnly: true, destructive: false, group: nil,
+        guards: [
+            ToolGuard(
+                key: "inspect:env",
+                description: "Return container_inspect's Env/Label values unredacted instead of "
+                    + "as `NAME=<redacted:N chars>`. The one read-only guard in this table: it does "
+                    + "not change anything, but it can reveal every secret a container was started "
+                    + "with, so it is gated exactly like a mutating grant.",
+                appliesTo: { JSONRead.bool($0, "reveal_secrets") == true }),
+        ]
     ) { context, arguments in
         do {
             let id = try Args.requireString(arguments, "id")
+            let revealRequested = Args.optionalBool(arguments, "reveal_secrets", default: false)
             let details = try context.engine.jsonObject("GET", "/containers/\(id)/json")
-            return .text(details)
+            // The permission gate for `reveal_secrets` runs centrally in
+            // Server.swift before this handler is ever invoked — by the time we
+            // are here, a `true` request has already been authorized. Redaction
+            // is therefore simply "did the caller ask for the raw document".
+            return .text(revealRequested ? details : redactedInspect(details))
         } catch let error as ArgError {
             return .errorText(error.description)
         } catch {
@@ -62,7 +85,10 @@ enum ReadOnlyTools {
 
     static let containerLogs = ToolSpec(
         name: "container_logs",
-        summary: "Tail a container's stdout/stderr, demultiplexed.",
+        summary: "Tail a container's stdout/stderr, demultiplexed. High-confidence secret shapes "
+            + "(AWS key ids, bearer tokens, user:pass@ connection strings) are pattern-redacted "
+            + "before being returned; this is a best-effort seatbelt, not a guarantee — an "
+            + "application can log a secret in a shape these patterns do not recognize.",
         inputSchema: Schema.object(
             [
                 "id": Schema.string("Container ID or name."),
@@ -95,21 +121,24 @@ enum ReadOnlyTools {
             }
 
             let cap = 200_000
+            let redactionNote = "best_effort_pattern_match — see docs/mcp.md; not a guarantee"
             if hasTTY {
-                let text = String(decoding: response.body, as: UTF8.self)
+                let text = LogRedactor.redact(String(decoding: response.body, as: UTF8.self))
                 return .text([
                     "stdout": Format.truncate(text, cap), "stderr": "",
                     "truncated": text.utf8.count > cap, "tty": true,
+                    "redaction": redactionNote,
                 ])
             }
             let demuxed = DockerStreamDemux.split(response.body)
-            let stdoutText = String(decoding: demuxed.stdout, as: UTF8.self)
-            let stderrText = String(decoding: demuxed.stderr, as: UTF8.self)
+            let stdoutText = LogRedactor.redact(String(decoding: demuxed.stdout, as: UTF8.self))
+            let stderrText = LogRedactor.redact(String(decoding: demuxed.stderr, as: UTF8.self))
             return .text([
                 "stdout": Format.truncate(stdoutText, cap),
                 "stderr": Format.truncate(stderrText, cap),
                 "truncated": stdoutText.utf8.count > cap || stderrText.utf8.count > cap,
                 "tty": false,
+                "redaction": redactionNote,
             ])
         } catch let error as ArgError {
             return .errorText(error.description)

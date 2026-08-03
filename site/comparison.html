@@ -1,0 +1,504 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Comparison — Morbstack vs. the field</title>
+<meta name="description" content="A cited, white-box comparison of Morbstack against Docker Desktop, OrbStack, Podman Desktop, Rancher Desktop, Colima, and Apple's container — including where Morbstack is worse.">
+
+<link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="assets/favicon-16.png">
+<link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+
+<meta property="og:type" content="website">
+<meta property="og:title" content="Comparison — Morbstack vs. the field">
+<meta property="og:description" content="A cited, white-box comparison against Docker Desktop, OrbStack, Podman Desktop, Rancher Desktop, Colima, and Apple's container — including where Morbstack is worse.">
+<!-- TODO(human): og:image/twitter:image need an absolute URL once Morbstack has a real domain. -->
+<meta property="og:image" content="assets/og-image.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Comparison — Morbstack vs. the field">
+<meta name="twitter:description" content="A cited, white-box comparison against Docker Desktop, OrbStack, Podman Desktop, Rancher Desktop, Colima, and Apple's container — including where Morbstack is worse.">
+<meta name="twitter:image" content="assets/og-image.png">
+
+<link rel="stylesheet" href="style.css">
+<script>
+  (function () {
+    try {
+      var t = localStorage.getItem("morbstack-theme");
+      if (t === "dark" || t === "light") document.documentElement.setAttribute("data-theme", t);
+    } catch (e) {}
+  })();
+</script>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand-lockup" href="index.html">
+      <img class="mark" src="assets/mark.svg" alt="" width="28" height="28">
+      <span>Morbstack</span>
+    </a>
+    <nav class="main-nav" aria-label="Primary">
+      <a href="index.html">Overview</a>
+      <a href="download.html">Download</a>
+      <a href="docs.html">Docs</a>
+      <a href="comparison.html" aria-current="page">Comparison</a>
+    </nav>
+    <div class="header-actions">
+      <button class="theme-toggle" type="button" aria-label="Toggle color theme" aria-pressed="false">
+        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z"/></svg>
+      </button>
+    </div>
+  </div>
+</header>
+
+<main id="main">
+  <section class="section-lg">
+    <div class="wrap">
+      <span class="eyebrow">Comparison</span>
+      <h1>Morbstack vs. the field.</h1>
+      <p class="lede">Status: one-time comparison, written 2026-08-02 against Morbstack git HEAD <code class="inline">ba9afc6</code>. Not CI-enforced, not updated automatically — treat prices, versions, and vendor claims below as accurate as of the access date on each citation and nothing later. Full source: <a class="text-link" href="../docs/comparison.md">docs/comparison.md</a>.</p>
+
+      <div class="docs-layout mt-6">
+        <nav class="docs-toc" aria-label="On this page">
+          <h2>On this page</h2>
+          <ul>
+            <li><a href="#method">Method &amp; honesty</a></li>
+            <li><a href="#architecture">Architecture</a></li>
+            <li><a href="#licensing">Licensing &amp; cost</a></li>
+            <li><a href="#features">Feature matrix</a></li>
+            <li><a href="#performance">Performance</a></li>
+            <li><a href="#worse">Where Morbstack is worse</a></li>
+            <li><a href="#who">Who should use what</a></li>
+            <li><a href="#sources">Sources</a></li>
+          </ul>
+        </nav>
+
+        <div class="docs-content">
+
+          <section class="docs-section" id="method">
+            <h2>1. Purpose, method, and an honesty statement</h2>
+            <p>This page compares Morbstack against six things developers actually reach for on macOS: Docker Desktop, OrbStack, Podman Desktop (+ <code class="inline">podman machine</code>), Rancher Desktop, Colima (+ Lima), and Apple's open-source <code class="inline">container</code> project. It exists to answer, as precisely as the evidence allows, "how does Morbstack actually differ, and where is it actually worse."</p>
+
+            <h3 class="mt-5">Evidence tiers, and what each is worth</h3>
+            <ul class="flow" style="list-style:disc;padding-left:1.2em;">
+              <li><strong>Morbstack's own numbers</strong> come from exactly four places in this repository — <a class="text-link" href="../docs/parity.md">parity.md</a>, <a class="text-link" href="../docs/roadmap.md">roadmap.md</a>, <a class="text-link" href="../docs/compat.md">compat.md</a>, and <a class="text-link" href="../docs/amd64.md">amd64.md</a>/<a class="text-link" href="../docs/k8s.md">k8s.md</a> — and nowhere else. No number about Morbstack below was generated for this page. Where a figure is a <em>target</em> rather than a <em>measurement</em>, it is labeled as such every time it appears.</li>
+              <li><strong>Local, first-hand inspection</strong> covers Docker Desktop, which was installed on the machine this document was written on (bundle timestamps dated December 2024 — an older installed copy, not necessarily the current shipping release). It was inspected read-only: bundle contents, <code class="inline">codesign</code>, <code class="inline">otool</code>, <code class="inline">nm</code>, and a snapshot of already-running processes, nothing started, stopped, or reconfigured. OrbStack, Podman, Rancher Desktop, Colima, and Apple's <code class="inline">container</code> are <strong>not</strong> installed on that machine — every claim about them below is web-sourced, not independently reproduced, and marked accordingly.</li>
+              <li><strong>Vendor and third-party claims from the web</strong> are quoted and attributed, never presented as Morbstack-verified fact.</li>
+              <li>Anywhere research was inconclusive, this document says <strong>"could not verify"</strong> rather than filling the gap from memory.</li>
+            </ul>
+
+            <div class="callout callout-warn mt-5">
+              <div class="callout-title">The honesty statement this page is built to satisfy</div>
+              <p class="text-small">Morbstack is <strong>pre-alpha, unreleased, and has never been used by anyone outside this repository's own test passes.</strong> It has one maintainer, no security audit, no notarized installer, and — per its own <a class="text-link" href="../docs/parity.md">parity audit</a> — 6 outright failures and 3 behavioral gaps out of 29 real drop-in-compatibility checks run against a live build. Every competitor discussed here has shipped, has real users, and in most cases has been hardened by exactly the kind of adversarial and edge-case usage Morbstack has not yet received. Where this page argues Morbstack has a structural advantage (license, VM topology, native UI), that advantage is real and evidenced below — but it is an advantage of <em>design</em>, not of <em>maturity</em>, and §6 exists specifically to keep those two things from blurring together.</p>
+            </div>
+          </section>
+
+          <section class="docs-section" id="architecture">
+            <h2>2. Architecture</h2>
+            <div class="table-scroll">
+              <table>
+                <thead>
+                  <tr><th>Product</th><th>Hypervisor</th><th>VM topology</th><th>Container runtime</th><th>Filesystem sharing</th><th>Networking</th><th>Host UI</th><th>x86 emulation</th></tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><strong>Morbstack</strong></td>
+                    <td><code class="inline">Virtualization.framework</code></td>
+                    <td>one shared VM for all containers</td>
+                    <td>unmodified upstream <code class="inline">dockerd</code> + <code class="inline">containerd</code> (static 29.7.1)</td>
+                    <td>VirtioFS, same-absolute-path bind mounts</td>
+                    <td>outbound NAT only (M0); no <code class="inline">morbnet</code>/DNS/host-routable IPs yet</td>
+                    <td>native SwiftUI, zero web views (planned; not part of M0)</td>
+                    <td>Rosetta binfmt (working); qemu fallback (inert, no binary shipped)</td>
+                  </tr>
+                  <tr>
+                    <td><strong>Docker Desktop</strong></td>
+                    <td><code class="inline">Virtualization.framework</code> — confirmed by local inspection; historically HyperKit on older releases</td>
+                    <td>one shared LinuxKit VM</td>
+                    <td>Moby <code class="inline">dockerd</code> inside the VM (Docker CLI 27.4.0 on the inspected copy)</td>
+                    <td>VirtioFS (<code class="inline">com.docker.osxfs</code> binary present)</td>
+                    <td>own virtual network stack + <code class="inline">vpnkit</code>-descended NAT, <code class="inline">host.docker.internal</code> DNS</td>
+                    <td>Electron (<code class="inline">com.electron.dockerdesktop</code> bundle identifier, confirmed locally)</td>
+                    <td>Rosetta (<code class="inline">VZLinuxRosettaDirectoryShare</code> symbols present) with a bundled <code class="inline">qemu-system-aarch64</code>/<code class="inline">qemu-img</code> as a secondary path</td>
+                  </tr>
+                  <tr>
+                    <td><strong>OrbStack</strong></td>
+                    <td>undisclosed, described only as "a lightweight Linux virtual machine with a shared kernel...similar to WSL 2" — closed source, cannot verify independently (<a class="text-link" href="https://docs.orbstack.dev/architecture" target="_blank" rel="noopener">OrbStack architecture docs</a>)</td>
+                    <td>one shared VM for all containers and "machines"</td>
+                    <td>runs "the Docker engine" per OrbStack's own docs; whether <code class="inline">dockerd</code> itself is patched is unverifiable from outside (closed source)</td>
+                    <td>"VirtioFS with custom dynamic caching and optimizations" (OrbStack docs)</td>
+                    <td>custom userspace network stack with NAT and a custom DNS server (OrbStack docs)</td>
+                    <td>closed-source native app (not Electron, per OrbStack's own marketing; not independently verified here)</td>
+                    <td>Rosetta ("boots an ARM64 Linux kernel, but paired with an x86-64 userspace filesystem, using Rosetta 2" — OrbStack docs)</td>
+                  </tr>
+                  <tr>
+                    <td><strong>Podman Desktop + podman machine</strong></td>
+                    <td>Apple Virtualization Framework (<code class="inline">applehv</code>) is the macOS default as of Podman 5.x, replacing QEMU (<a class="text-link" href="https://deepwiki.com/containers/podman/13.1-machine-providers-and-vm-configuration" target="_blank" rel="noopener">Podman machine providers</a>)</td>
+                    <td>one shared VM (the "machine") per configured machine</td>
+                    <td><code class="inline">podman</code>/<code class="inline">libpod</code> + <code class="inline">crun</code>/<code class="inline">runc</code> — <strong>not</strong> <code class="inline">dockerd</code>; Docker CLI/API compatibility is via <code class="inline">podman-docker</code>/socket emulation, not the real Docker Engine</td>
+                    <td>9p/virtiofs-backed volume mounts</td>
+                    <td>rootless <code class="inline">slirp4netns</code>-derived networking by default</td>
+                    <td>could not fully verify Podman Desktop's UI toolkit from primary sources — treat as unconfirmed</td>
+                    <td>Rosetta supported on Apple silicon machines (<a class="text-link" href="https://podman-desktop.io/docs/podman/rosetta" target="_blank" rel="noopener">Podman Desktop docs</a>)</td>
+                  </tr>
+                  <tr>
+                    <td><strong>Rancher Desktop</strong></td>
+                    <td>Lima-managed VM, using QEMU or <code class="inline">vz</code> depending on Lima's configuration</td>
+                    <td>one shared VM</td>
+                    <td>user's choice: Moby <code class="inline">dockerd</code> or <code class="inline">containerd</code> via <code class="inline">nerdctl</code> (<a class="text-link" href="https://docs.rancherdesktop.io/" target="_blank" rel="noopener">Rancher Desktop docs</a>)</td>
+                    <td>Lima's own 9p/virtiofs mount, <code class="inline">/Users</code>-rooted like Colima</td>
+                    <td>Lima's user-mode networking</td>
+                    <td>Electron, per third-party technical summaries — not independently re-verified in this pass</td>
+                    <td>not confirmed to have a first-class Rosetta/x86 story distinct from Lima's</td>
+                  </tr>
+                  <tr>
+                    <td><strong>Colima + Lima</strong></td>
+                    <td>user-selectable: QEMU (default) or <code class="inline">vz</code> (recommended on macOS 13+); also <code class="inline">krunkit</code> for GPU-accelerated AI workloads (<a class="text-link" href="https://colima.run/docs/faq/" target="_blank" rel="noopener">Colima FAQ</a>)</td>
+                    <td>one shared VM ("the" Colima instance)</td>
+                    <td>user's choice via <code class="inline">--runtime</code>: <code class="inline">docker</code> (default) or <code class="inline">containerd</code></td>
+                    <td>Lima's 9p/virtiofs mount, rooted at <code class="inline">/Users/$USER</code> by default</td>
+                    <td>Lima's user-mode networking</td>
+                    <td><strong>CLI only — no GUI at all.</strong></td>
+                    <td>not a first-class feature; QEMU can software-emulate x86 at a large performance cost</td>
+                  </tr>
+                  <tr>
+                    <td><strong>Apple <code class="inline">container</code></strong></td>
+                    <td><code class="inline">Virtualization.framework</code> via <code class="inline">vmnet</code>/XPC helpers</td>
+                    <td><strong>one dedicated micro-VM per container</strong> — the architectural outlier (<a class="text-link" href="https://github.com/apple/container/blob/main/docs/technical-overview.md" target="_blank" rel="noopener">Apple's own docs</a>)</td>
+                    <td>Apple's own Swift <code class="inline">containerization</code> runtime, OCI-compliant, <strong>not</strong> <code class="inline">dockerd</code> and not Docker-API-compatible</td>
+                    <td>selective per-container host-path mounts, not a shared always-on share set</td>
+                    <td><code class="inline">container-network-vmnet</code>, an XPC helper managing per-VM networking</td>
+                    <td>native, CLI only (no bundled GUI)</td>
+                    <td><strong>none</strong> — Apple silicon only, no x86 container support of any kind</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <p class="mt-5"><strong>Reading this table honestly:</strong> Morbstack, Docker Desktop, OrbStack, Podman machine, Rancher Desktop, and Colima all converge on the same basic shape — one shared Linux VM, <code class="inline">Virtualization.framework</code> (or Lima's abstraction over it) as the hypervisor, VirtioFS-family bind mounts. Morbstack's specific bet inside that shape is being the only one of the six with <strong>zero modification to the actual container engine</strong> verified end-to-end (<a class="text-link" href="../docs/parity.md">parity.md #1-#4, #12-#14</a>) — Podman and Apple's <code class="inline">container</code> aren't running Docker's engine at all, and OrbStack's engine internals are unverifiable because the product is closed source. Apple's <code class="inline">container</code> is architecturally the odd one out entirely: per-container micro-VMs trade away exactly the shared-kernel properties (Compose networks, <code class="inline">--network container:x</code>, shared page cache) that <a class="text-link" href="../docs/architecture.md">architecture.md</a> explains Morbstack deliberately kept a single shared VM to preserve.</p>
+
+            <h3 class="mt-6">Local inspection: what Docker Desktop actually is on this Mac</h3>
+            <p class="text-small">Commands run, 2026-08-02, entirely read-only, Docker Desktop's own state never touched.</p>
+            <div class="code-block">
+<pre>$ du -sh /Applications/Docker.app
+1.7G    /Applications/Docker.app
+
+$ du -sh /Applications/Docker.app/Contents/*/
+1.1G    /Applications/Docker.app/Contents/Resources/
+624M    /Applications/Docker.app/Contents/MacOS/
+7.3M    /Applications/Docker.app/Contents/Library/
+
+$ du -sh "/Applications/Docker.app/Contents/MacOS/Docker Desktop.app"
+261M    .../Docker Desktop.app          # the Electron UI shell alone
+
+$ du -sh /Applications/Docker.app/Contents/Resources/*/
+558M    .../linuxkit/      # boot.img + kernel — the guest VM image
+368M    .../cli-plugins/   # buildx, compose, etc., bundled
+161M    .../bin/           # docker CLI, kubectl, hub-tool, credential helpers</pre>
+            </div>
+            <div class="code-block mt-4">
+<pre>$ codesign -dv --entitlements - "/Applications/Docker.app/Contents/MacOS/Docker Desktop.app"
+Identifier=com.electron.dockerdesktop
+...
+com.apple.security.cs.allow-jit: true
+com.apple.security.cs.allow-unsigned-executable-memory: true</pre>
+            </div>
+            <p class="text-small">The <code class="inline">com.electron.dockerdesktop</code> bundle identifier, plus an on-disk <code class="inline">Electron Framework.framework</code> and <code class="inline">@bugsnag/plugin-electron-app</code> inside <code class="inline">app.asar.unpacked</code>, confirm the management UI is Electron, not native.</p>
+            <div class="code-block mt-4">
+<pre>$ codesign -dv --entitlements - /Applications/Docker.app/Contents/MacOS/com.docker.backend
+com.apple.security.hypervisor: true
+com.apple.security.virtualization: true
+
+$ otool -L /Applications/Docker.app/Contents/MacOS/com.docker.backend | grep -i -E "virtualization|hypervisor"
+/System/Library/Frameworks/Virtualization.framework/Versions/A/Virtualization ...
+/System/Library/Frameworks/Hypervisor.framework/Versions/A/Hypervisor ...
+
+$ nm -g /Applications/Docker.app/Contents/MacOS/com.docker.virtualization | grep -c VZ
+307</pre>
+            </div>
+            <p class="text-small">This settles a question worth settling with evidence rather than reputation: <strong>on this machine, Docker Desktop's backend links and uses Apple's <code class="inline">Virtualization.framework</code> and <code class="inline">Hypervisor.framework</code></strong> — the same family of API Morbstack uses. The 307 <code class="inline">VZ</code>-prefixed symbols include <code class="inline">VZLinuxRosettaDirectoryShare</code>, confirming Rosetta support at the framework level, consistent with the bundled <code class="inline">qemu-system-aarch64</code>/<code class="inline">qemu-img</code> also present. Docker Desktop was running at inspection time: 8 <code class="inline">docker</code>/<code class="inline">com.docker.*</code> processes, combined RSS <strong>89.3 MB</strong> — reported here only as an observed data point, not a performance claim about either product. Notably, the running process was launched with <code class="inline">--analytics-enabled=true</code> — telemetry is on by default on this installed copy.</p>
+          </section>
+
+          <section class="docs-section" id="licensing">
+            <h2>3. Licensing and cost</h2>
+            <p>This is Morbstack's most precise, least hype-dependent differentiator, so it gets stated exactly rather than rhetorically.</p>
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th>Product</th><th>License</th><th>Cost to use</th><th>Commercial-use trigger</th></tr></thead>
+                <tbody>
+                  <tr><td><strong>Morbstack</strong></td><td>Apache-2.0 (<code class="inline">LICENSE</code>, <code class="inline">NOTICE</code>)</td><td><strong>Free</strong>, always, for everyone, at any company size</td><td>none — Apache-2.0 has no commercial-use clause</td></tr>
+                  <tr><td><strong>Docker Desktop</strong></td><td>Proprietary/closed source</td><td>Free only for non-commercial open source, or a commercial undertaking with <strong>fewer than 250 employees AND less than US $10,000,000 annual revenue</strong>. Above that: Pro ~$9/user/mo, Team ~$15/user/mo, Business $24/user/mo (annual billing)</td><td>Exceeding the 250-employee or $10M-revenue threshold — <a class="text-link" href="https://www.docker.com/legal/docker-subscription-service-agreement/" target="_blank" rel="noopener">Docker Subscription Service Agreement §4.2</a></td></tr>
+                  <tr><td><strong>OrbStack</strong></td><td>Proprietary/closed source</td><td>Free for genuinely personal, non-commercial use and non-commercial student use. Commercial: Pro $8/user/mo billed annually, per-user with up to 5 devices/user; Enterprise quote-only</td><td>Professional/commercial/non-profit/government use, or &gt;$10,000/yr generated in connection with work using OrbStack — <a class="text-link" href="https://docs.orbstack.dev/licensing" target="_blank" rel="noopener">OrbStack licensing docs</a></td></tr>
+                  <tr><td><strong>Podman Desktop + podman machine</strong></td><td>Apache-2.0, fully open source</td><td><strong>Free</strong>, always, for everyone</td><td>none</td></tr>
+                  <tr><td><strong>Rancher Desktop</strong></td><td>Apache-2.0, fully open source (Moby, containerd, k3s)</td><td><strong>Free</strong>, always, for everyone</td><td>none</td></tr>
+                  <tr><td><strong>Colima + Lima</strong></td><td>MIT, fully open source</td><td><strong>Free</strong>, always, for everyone</td><td>none</td></tr>
+                  <tr><td><strong>Apple <code class="inline">container</code></strong></td><td>Apache-2.0, fully open source</td><td><strong>Free</strong>, always, for everyone</td><td>none</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <p class="mt-5">Morbstack, Podman Desktop, Rancher Desktop, Colima, and Apple's <code class="inline">container</code> are all genuinely free-forever open source with no commercial trigger — on licensing terms alone, Morbstack is tied with four established projects, not uniquely differentiated from all of them. Its real differentiation is narrower: it is the only one of the six simultaneously (a) free with no commercial-use asterisk, (b) built around an unmodified, off-the-shelf <code class="inline">dockerd</code>/<code class="inline">containerd</code> rather than a different or closed engine, and (c) aimed at drop-in Docker Desktop replacement rather than a CLI-only tool or a different API surface entirely. Whether it <em>achieves</em> that combination today is a feature-completeness and quality question, covered honestly in §5 and §6.</p>
+          </section>
+
+          <section class="docs-section" id="features">
+            <h2>4. Feature matrix</h2>
+            <p>Morbstack rows are marked directly from the 29-check <a class="text-link" href="../docs/parity.md">parity.md</a> audit and the <a class="text-link" href="../docs/compat.md">compatibility contract</a> — <strong>PASS / PARTIAL / FAIL</strong> where parity.md tested it explicitly, <strong>not yet built</strong> where roadmap.md places it at M1 or later, and <strong>not planned</strong> where compat.md states it as an explicit non-goal. Competitor cells are sourced from vendor documentation, cited inline; where a claim could not be confirmed it says so.</p>
+
+            <div class="table-scroll mt-5">
+              <table>
+                <thead><tr><th>Feature</th><th>Morbstack</th><th>Docker Desktop</th><th>OrbStack</th><th>Podman Desktop</th><th>Rancher Desktop</th><th>Colima</th><th>Apple container</th></tr></thead>
+                <tbody>
+                  <tr><td><code class="inline">docker</code> CLI compatibility</td><td><span class="pill pill-pass">PASS</span> unmodified upstream CLI against the relayed Engine API</td><td>native</td><td>full, unmodified against relayed engine</td><td>Docker-CLI-<em>compatible</em> shim, not the real API</td><td>full via bundled Moby, or nerdctl</td><td>full via bundled Docker, or nerdctl</td><td><strong>no</strong> — separate CLI</td></tr>
+                  <tr><td>Compose</td><td><span class="pill pill-pass">PASS</span>, manual one-time plugin install as of M0; auto-bundled targeted for M1</td><td>native</td><td>supported</td><td>via podman compose/docker-compose shim</td><td>supported</td><td>supported</td><td><strong>not supported</strong></td></tr>
+                  <tr><td>BuildKit / buildx</td><td><span class="pill pill-fail">FAIL out of the box today</span> — guest BuildKit fully functional once a client binary is placed, but none ships</td><td>native</td><td>supported</td><td>supported</td><td>supported</td><td>supported</td><td>not applicable — different build model</td></tr>
+                  <tr><td>Kubernetes</td><td>working — <code class="inline">morb k8s</code>, single-node k3s+cri-dockerd, measured 8.3s cold enable</td><td>native (built-in toggle)</td><td>supported (built-in k3s)</td><td>supported (kind/other)</td><td>native — original purpose</td><td>supported via <code class="inline">--kubernetes</code></td><td>not built in</td></tr>
+                  <tr><td>x86-64 emulation</td><td><span class="pill pill-pass">PASS for what's implemented</span> — Rosetta binfmt working, byte-identical; qemu fallback written but inert</td><td>Rosetta + bundled qemu fallback</td><td>Rosetta-based</td><td>Rosetta supported</td><td>not confirmed</td><td>QEMU software emulation; no confirmed Rosetta</td><td><strong>none at all</strong></td></tr>
+                  <tr><td>Bind-mount performance</td><td>VirtioFS tier 1; no published benchmark yet</td><td>VirtioFS (confirmed locally)</td><td>"custom dynamic caching," not independently verified</td><td>9p/virtiofs, no independent benchmark</td><td>Lima's 9p/virtiofs</td><td>Lima's 9p/virtiofs</td><td>selective per-VM mounts, different model</td></tr>
+                  <tr><td>File-watching / inotify</td><td><span class="pill pill-fail">FAIL, documented</span> — zero inotify events; polling is the working mitigation</td><td>works (FSEvents bridge)</td><td>claimed to work, not independently verified</td><td>not confirmed</td><td>not confirmed</td><td>not confirmed</td><td>not confirmed either way</td></tr>
+                  <tr><td><code class="inline">host.docker.internal</code></td><td><span class="pill pill-fail">FAIL</span> — no DNS/hosts entry at all today</td><td>native, this is where the name comes from</td><td>supported</td><td>supported</td><td>not a default; needs manual host networking</td><td>not applicable, different model</td><td>not applicable</td></tr>
+                  <tr><td>Zero-config socket discovery</td><td><span class="pill pill-fail">FAIL</span> — requires manual <code class="inline">DOCKER_HOST</code>/context setup</td><td>native, self-configuring</td><td>supported</td><td>requires <code class="inline">podman machine</code> context setup</td><td>requires context/socket setup</td><td>requires manual <code class="inline">DOCKER_HOST</code></td><td>different CLI, no Docker-socket concept</td></tr>
+                  <tr><td>GUI</td><td><span class="pill pill-neutral">not part of M0</span> — no host app in this repo yet; CLI only today</td><td>Electron, confirmed locally</td><td>native app (closed source, vendor claim)</td><td>Electron-family app</td><td>Electron-based (third-party summaries)</td><td><strong>none — CLI only</strong></td><td>CLI only, no bundled GUI</td></tr>
+                  <tr><td>CLI</td><td><code class="inline">morb</code> — start/stop/status/suspend/resume/shares/rosetta/doctor/k8s/reset-disk</td><td><code class="inline">docker</code> (bundled) + Desktop's own CLI surface</td><td><code class="inline">orb</code>/<code class="inline">orbctl</code></td><td><code class="inline">podman</code></td><td><code class="inline">rdctl</code> + bundled nerdctl/docker</td><td><code class="inline">colima</code> + bundled docker/nerdctl</td><td><code class="inline">container</code></td></tr>
+                  <tr><td>Telemetry</td><td>none observed in the docs; not yet independently audited at scale</td><td><strong>on by default</strong> on the inspected copy</td><td>none today; privacy policy reserves the right to add it</td><td>present, anonymized, enterprise opt-out</td><td>present, admin-configurable</td><td>could not verify</td><td>could not verify</td></tr>
+                  <tr><td>Offline use</td><td>works — no network dependency once assets are fetched; offline hello-world load path tested</td><td>requires periodic license/account checks above free tier</td><td>requires periodic license check for Pro</td><td>fully offline-capable</td><td>fully offline-capable</td><td>fully offline-capable</td><td>fully offline-capable</td></tr>
+                  <tr><td>Extensions / plugins</td><td><span class="pill pill-neutral">not planned</span> as Docker Desktop Extensions compatibility; native plugin SDK is post-1.0</td><td>native Extensions marketplace (web-view based)</td><td>no extension marketplace</td><td>extension/plugin system exists</td><td>extension system exists</td><td>none — CLI tool</td><td>none</td></tr>
+                  <tr><td>GPU</td><td><span class="pill pill-neutral">not supported</span>, explicit non-goal</td><td>exists on some platforms (Windows/WSL primarily)</td><td>not confirmed</td><td>not confirmed for macOS</td><td>documented gaps even on best-supported platform</td><td><code class="inline">krunkit</code> VM type for GPU workloads</td><td>not applicable</td></tr>
+                  <tr><td>Windows containers</td><td><span class="pill pill-neutral">never supported</span>, explicit non-goal</td><td>supported (Windows host only)</td><td>not applicable</td><td>not applicable on macOS</td><td>not applicable on macOS</td><td>not applicable on macOS</td><td>not applicable</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="docs-section" id="performance">
+            <h2>5. Performance: claims vs. measured reality</h2>
+            <p>Kept in three explicitly separate buckets, because blurring them is the single easiest way to lose a skeptical reader's trust.</p>
+
+            <h3 class="mt-5">(a) Vendor claims <span class="tag-claim">— quoted and attributed, not verified here</span></h3>
+            <ul class="flow" style="list-style:disc;padding-left:1.2em;">
+              <li><strong>OrbStack</strong> states, on its own comparison page, "fast startup," "low CPU usage," "low power usage," and "memory on demand" relative to Docker Desktop — presented as a checkmark comparison, not first-party numbers on that page itself (<a class="text-link" href="https://docs.orbstack.dev/compare/docker-desktop" target="_blank" rel="noopener">OrbStack vs. Docker Desktop</a>). Third-party writeups report ~2s OrbStack startup vs. 20-30s for Docker Desktop, and roughly 200MB vs. 4GB idle memory — <strong>third-party numbers, not independently reproduced here</strong> (<a class="text-link" href="https://sliplane.io/blog/orbstack-vs-docker" target="_blank" rel="noopener">sliplane.io comparison</a>).</li>
+              <li><strong>Apple's <code class="inline">container</code></strong> claims its per-container VMs achieve "sub-second startup times through careful kernel optimization," per third-party technical summaries — could not independently verify the underlying Apple source.</li>
+              <li>No performance claims from Podman Desktop, Rancher Desktop, or Colima were found stated as vendor marketing in this research pass.</li>
+            </ul>
+
+            <h3 class="mt-6">(b) Morbstack's own measured numbers <span class="tag-measured">— with conditions, not marketing</span></h3>
+            <p class="text-small">Real, timed, end-to-end runs on one development machine, Apple silicon — from <code class="inline">architecture.md</code>, <code class="inline">parity.md</code>, <code class="inline">amd64.md</code>, and <code class="inline">k8s.md</code> — not the CI-gated <code class="inline">morb bench</code> numbers for M2+.</p>
+            <ul class="flow" style="list-style:disc;padding-left:1.2em;">
+              <li>Cold, socket-activated <code class="inline">docker run --rm hello-world</code>: <strong>2.09s wall clock</strong>, guest MRB0 control socket ready 1.69-2.01s after VM bring-up.</li>
+              <li><code class="inline">morb stop</code>: 0.25-0.40s. A subsequent cold boot to a responsive <code class="inline">docker ps</code>: 1.69-1.73s, repeatable with zero ERROR/WARN log lines.</li>
+              <li>First-boot disk formatting (<code class="inline">mkfs.ext4</code>): 22ms; mount 56ms after that; a real <code class="inline">alpine</code> registry pull: 1.95s.</li>
+              <li>Idle-auto-suspend cycle: guest powered off in 384ms after the idle timer fired; next socket-activated command woke a fresh VM in 2.13s. This is a <strong>graceful stop, not a true suspend-to-zero snapshot/restore</strong> — <code class="inline">Virtualization.framework</code>'s <code class="inline">restoreMachineStateFrom</code> does not work for Morbstack's direct-kernel-boot guest on this development host, a documented API limitation, not a Morbstack bug.</li>
+              <li>amd64-via-Rosetta slowdown, same guest and session: no measurable container-<em>start</em> penalty; general-purpose compute ~1.8-2x slower; SHA-256 at 16KB blocks ~5.1x slower; RSA-2048 sign ~3.8x slower, verify ~2.3x slower.</li>
+              <li>Kubernetes (<code class="inline">morb k8s</code>): cold enable-to-Ready <strong>8.3s</strong> with a full payload transfer; ~4s on a subsequent enable with the payload already present. Idle cost with the cluster on and nothing deployed: guest memory rose from ~137MB to ~617MB, host VM-process CPU rose from ~0.7% to ~20-23%.</li>
+            </ul>
+
+            <h3 class="mt-6">(c) Morbstack's published targets <span class="tag-claim">— not yet measured, do not read as results</span></h3>
+            <p class="text-small"><code class="inline">docs/roadmap.md</code>'s public performance target table commits Morbstack to <em>publishing accurate status against these from M2 onward</em> via <code class="inline">morb bench</code> — goals the project is answerable to, explicitly not claims about the current build.</p>
+            <div class="table-scroll mt-4">
+              <table>
+                <thead><tr><th>Target</th><th>Goal</th></tr></thead>
+                <tbody>
+                  <tr><td>Cold boot</td><td class="num">≤ 2.0s</td></tr>
+                  <tr><td>Resume (from suspend-to-zero)</td><td class="num">≤ 500ms</td></tr>
+                  <tr><td>Idle host CPU</td><td class="num">≤ 0.1%</td></tr>
+                  <tr><td>Idle wakeups</td><td class="num">&lt; 20/s</td></tr>
+                  <tr><td>Host RSS (<code class="inline">morbstackd</code>, idle)</td><td class="num">≤ 120MB</td></tr>
+                  <tr><td>Guest memory floor</td><td class="num">≤ 256MB</td></tr>
+                  <tr><td><code class="inline">git status</code> on a bind-mounted Linux tree, vs. native</td><td class="num">≤ 2x native</td></tr>
+                  <tr><td><code class="inline">npm install</code> on a bind-mounted project, vs. native</td><td class="num">≤ 1.5x native</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <p class="mt-4 text-small">Note the overlap and the gap between (b) and (c): the <em>cold boot</em> measurements in (b) (2.09s, 1.69-1.73s repeat boots) already land close to the ≤2.0s <em>target</em> in (c) — but "resume ≤500ms" is a target with <strong>no real suspend-to-zero implementation to measure yet</strong>, and idle CPU/wakeups/RSS have no reported measurement at all as of this writing. Treat the closeness of the boot numbers as encouraging, not as evidence the harder targets are anywhere near proven.</p>
+          </section>
+
+          <section class="docs-section" id="worse">
+            <h2>6. Where Morbstack is worse — the honest section</h2>
+            <p>This section is deliberately at least as detailed as §§2-5 combined are flattering. Everything here is either a documented <strong>FAIL</strong>/<strong>PARTIAL</strong> from the real 29-check audit, an explicit <strong>not yet built</strong> item from the roadmap, an explicit <strong>non-goal</strong>, or a structural maturity gap that is simply true of a one-maintainer, pre-alpha project regardless of what its docs say.</p>
+
+            <h3 class="mt-5">Things that are broken or absent today, not just "less polished"</h3>
+            <div class="callout callout-bad">
+              <ul>
+                <li><strong>Morbstack does not install a Docker client.</strong> Every other product on this page — Docker Desktop, OrbStack, Podman Desktop, Rancher Desktop, Colima, and Apple's <code class="inline">container</code> — installs a working client as part of installing the product. Morbstack does not yet: today's build-from-source flow depends on whatever <code class="inline">docker</code> binary is already on <code class="inline">PATH</code>. Shipping a bundled, hash-verified <code class="inline">docker</code>/<code class="inline">docker compose</code>/<code class="inline">docker buildx</code> inside the app is tracked as the "single-path install" gate for the first public release (<a class="text-link" href="../docs/roadmap.md">docs/roadmap.md</a>, L1) and is not built yet.</li>
+                <li><strong><code class="inline">host.docker.internal</code> and <code class="inline">gateway.docker.internal</code> do not resolve at all.</strong> Not degraded — completely absent. This is one of the most commonly depended-upon Docker Desktop behaviors in real Compose files, dev tooling, and any pattern where a container needs to reach a host-side service. Every other product here that runs a Docker-compatible engine supports this in some form.</li>
+                <li><strong>No zero-config socket discovery.</strong> A user must manually export <code class="inline">DOCKER_HOST</code> or run <code class="inline">docker context create</code>. Testcontainers, most IDE Docker integrations, and <code class="inline">docker-py</code>'s default client all try conventional socket paths first and will simply fail to find Morbstack out of the box.</li>
+                <li><strong><code class="inline">docker build</code>/<code class="inline">docker buildx</code> is broken out of the box.</strong> No <code class="inline">docker-buildx</code> CLI plugin is fetched or installed anywhere in the repo today. The modern default build path (BuildKit-by-default since Docker 23+) fails with a stock Docker CLI until a user manually places a <code class="inline">docker-buildx</code> binary themselves. The underlying engine-side BuildKit is fully functional once that binary exists — but "the engine works" is not the same claim as "buildx ships."</li>
+                <li><strong>A genuinely nasty, silent bind-mount corruption bug.</strong> A single-file bind mount through an <em>unresolved</em> <code class="inline">/tmp/...</code> path does not error — it silently creates an empty directory in the guest where the file should be. This broke an entire Compose stack during the parity pass with an error message that gave zero indication of the real cause.</li>
+                <li><strong>No inotify across VirtioFS bind mounts, confirmed directly.</strong> A host-side file edit is correct the instant it's read, but the change-notification event a hot-reload watcher depends on never crosses the boundary — confirmed with a live <code class="inline">nodemon</code> test that produced zero restarts after an 8-second wait. The working mitigation (polling) exists and was verified, but it is a workaround, not a fix.</li>
+                <li><strong>Fixed, non-negotiable bind-mount ownership.</strong> Every file inside a VirtioFS bind mount shows up as <code class="inline">root:root</code> in the guest regardless of which host user owns it, and a container-side <code class="inline">chown</code> against it is silently accepted and silently discarded.</li>
+                <li><strong><code class="inline">docker run</code> succeeds where real Docker Desktop would fail synchronously on a taken host port.</strong> If the host port is already bound, Morbstack's <code class="inline">docker run</code> still returns success and <code class="inline">docker ps</code> still <em>shows</em> the port as published — only <code class="inline">morb status</code> reveals the truth.</li>
+                <li><strong>No UDP port forwarding at all.</strong> The published-port forwarder is TCP-only.</li>
+                <li><strong>No qemu fallback for amd64</strong>, despite the plumbing existing — no static <code class="inline">qemu-x86_64</code> ships, so anything Rosetta cannot translate simply fails with no fallback.</li>
+                <li><strong>No <code class="inline">*.morb.local</code> DNS, no <code class="inline">morbnet</code>, no host-routable container IPs, no split-DNS.</strong> Containers get outbound NAT and nothing else today.</li>
+                <li><strong>No synced-share filesystem tier.</strong> VirtioFS (tier 1) is the only option; the opt-in synced-copy mode does not exist yet.</li>
+              </ul>
+            </div>
+
+            <h3 class="mt-6">Things competitors have that Morbstack has chosen never to build</h3>
+            <p class="text-small">Per the explicit non-goals in <code class="inline">docs/compat.md</code> — stated up front so readers don't mistake them for gaps that will eventually close:</p>
+            <div class="callout callout-warn">
+              <ul>
+                <li><strong>Windows containers</strong> — never supported, at any milestone. Docker Desktop on Windows hosts supports this, and it is a real category some users need.</li>
+                <li><strong>CUDA/GPU passthrough</strong> — not supported, no commitment to add it. Colima has a <code class="inline">krunkit</code> VM type specifically for this; Docker Desktop has GPU support on some platforms.</li>
+                <li><strong>Docker Desktop Extensions compatibility</strong> — explicitly not a target. Docker Desktop, Podman Desktop, and Rancher Desktop all have some form of extension ecosystem today; Morbstack's native (non-web-view) plugin SDK is a post-1.0 idea, not a compatibility shim.</li>
+                <li><strong>CRIU (checkpoint/restore)</strong> — off, not a target for 1.0 or the 1.x line as currently scoped.</li>
+              </ul>
+            </div>
+
+            <h3 class="mt-6">Maturity gaps that are just true, regardless of documentation quality</h3>
+            <div class="callout callout-bad">
+              <ul>
+                <li><strong>Pre-alpha, unreleased, no version number a user could install today.</strong> Every other product here has a real release channel; a reader cannot <code class="inline">brew install morbstack</code> right now.</li>
+                <li><strong>One maintainer.</strong> Podman Desktop (Red Hat/CNCF), Rancher Desktop (SUSE), Colima (long-running community), Apple's <code class="inline">container</code> (Apple) all have an organization or sustained community behind them. Morbstack does not yet.</li>
+                <li><strong>No independent security audit.</strong> Explicitly a 1.0 gate, not done yet.</li>
+                <li><strong>No notarized, signed release build; no installer.</strong> Building from source with Xcode 26+ and a Rust cross-toolchain is the only way to run it today.</li>
+                <li><strong>Effectively zero user base outside this repository's own test passes.</strong> No production usage, no bug reports from anyone who wasn't already working on the project.</li>
+                <li><strong>VM suspend/resume is not actually implemented as suspend/resume.</strong> <code class="inline">morb suspend</code> degrades to a graceful stop plus a cold boot on next use. The public "≤500ms resume" target has nothing behind it yet.</li>
+                <li><strong>No public compat-matrix CI.</strong> Everything in this document about Morbstack's ecosystem compatibility rests on one manual audit pass, not continuous verification.</li>
+              </ul>
+            </div>
+
+            <p class="mt-5">Anyone reading this page and concluding "Morbstack is strictly better" has not read it carefully enough — that conclusion isn't supported by the project's own documentation, and this section exists so it doesn't need to be argued with.</p>
+          </section>
+
+          <section class="docs-section" id="who">
+            <h2>7. Who should use what</h2>
+            <p class="section-intro">A recommendation section that doesn't send every reader to Morbstack is the only kind worth writing.</p>
+            <dl class="kv-list">
+              <dt>Use Docker Desktop if:</dt>
+              <dd>you need Windows container support, GPU passthrough that's actually documented and supported, Docker Desktop Extensions, or you're inside an organization already paying for it and the $9-24/user/month is a non-issue. It is also, simply, the thing with the largest install base and the least chance of a workflow-specific surprise.</dd>
+              <dt>Use OrbStack if:</dt>
+              <dd>you're under the $10k/yr or personal-use threshold, want a closed-source but reportedly fast and well-integrated native experience today, and don't need the source to be inspectable or the product free at any company size.</dd>
+              <dt>Use Podman Desktop + podman machine if:</dt>
+              <dd>you specifically want a daemonless/rootless model, need Kubernetes-native tooling, or your organization has policy reasons to avoid a Docker-Engine-shaped daemon — accepting you're not running the actual Docker Engine, only something CLI-compatible with it.</dd>
+              <dt>Use Rancher Desktop if:</dt>
+              <dd>Kubernetes is the primary workload, not an afterthought, and you want first-class <code class="inline">containerd</code>/<code class="inline">nerdctl</code> alongside Moby with a choice between them.</dd>
+              <dt>Use Colima (+ Lima) if:</dt>
+              <dd>you don't want or need a GUI at all, you're comfortable at the command line, and you want the lightest possible free and open-source Docker-API-compatible VM with maximum backend flexibility.</dd>
+              <dt>Use Apple's <code class="inline">container</code> if:</dt>
+              <dd>per-container VM-grade isolation matters more to you than Docker ecosystem compatibility, you're on macOS 26 with Apple silicon, and you're comfortable with a CLI that doesn't speak the Docker API and has no Compose story today.</dd>
+              <dt>Use Morbstack if:</dt>
+              <dd>you want a free-forever, Apache-2.0, source-visible Docker Desktop replacement built around an unmodified upstream Docker Engine — <strong>and</strong> you are comfortable being an early adopter of pre-alpha software with one maintainer, no security audit, missing <code class="inline">host.docker.internal</code>/zero-config discovery/buildx-out-of-the-box, and the specific <code class="inline">/tmp</code> bind-mount and inotify gotchas documented above. If any of those gaps would break your actual workflow today, use one of the other six until Morbstack's roadmap closes them.</dd>
+            </dl>
+          </section>
+
+          <section class="docs-section" id="sources">
+            <h2>8. Sources</h2>
+            <p class="text-small">All accessed 2026-08-02 unless noted.</p>
+
+            <h3 class="mt-5">Morbstack (this repository, git HEAD <code class="inline">ba9afc6</code>)</h3>
+            <ul class="flow" style="list-style:disc;padding-left:1.2em;">
+              <li><a class="text-link" href="../docs/parity.md">docs/parity.md</a> — the 29-check drop-in parity audit</li>
+              <li><a class="text-link" href="../docs/roadmap.md">docs/roadmap.md</a> — milestones and the public performance target table</li>
+              <li><a class="text-link" href="../docs/compat.md">docs/compat.md</a> — the compatibility contract and explicit non-goals</li>
+              <li><a class="text-link" href="../docs/architecture.md">docs/architecture.md</a> — system design and VM-lifecycle measurements</li>
+              <li><a class="text-link" href="../docs/amd64.md">docs/amd64.md</a> — Rosetta translation, measured slowdowns</li>
+              <li><a class="text-link" href="../docs/k8s.md">docs/k8s.md</a> — <code class="inline">morb k8s</code>, measured enable/idle-cost numbers</li>
+              <li><a class="text-link" href="../docs/sharing.md">docs/sharing.md</a> — VirtioFS bind mounts, ownership model, inotify gap</li>
+              <li><a class="text-link" href="../README.md">README.md</a> — status, what works, what doesn't yet</li>
+            </ul>
+
+            <h3 class="mt-5">Local, first-hand inspection (read-only, 2026-08-02)</h3>
+            <p class="text-small"><code class="inline">/Applications/Docker.app</code> via <code class="inline">du</code>, <code class="inline">codesign -dv --entitlements -</code>, <code class="inline">otool -L</code>, <code class="inline">nm -g</code>, <code class="inline">ps aux</code>; <code class="inline">ls /Applications</code>, <code class="inline">which colima podman nerdctl rdctl container</code>, <code class="inline">brew list --cask</code> for competitor presence.</p>
+
+            <h3 class="mt-5">Docker Desktop / Docker Inc.</h3>
+            <ul class="flow" style="list-style:disc;padding-left:1.2em;">
+              <li><a class="text-link" href="https://www.docker.com/legal/docker-subscription-service-agreement/" target="_blank" rel="noopener">Docker Subscription Service Agreement</a> — free-use thresholds (§4.2)</li>
+              <li><a class="text-link" href="https://www.docker.com/pricing/" target="_blank" rel="noopener">Docker pricing</a> — plan prices</li>
+              <li><a class="text-link" href="https://docs.docker.com/desktop/release-notes/" target="_blank" rel="noopener">Docker Desktop release notes</a> — current version context (4.83.0, July 20 2026)</li>
+            </ul>
+
+            <h3 class="mt-5">OrbStack</h3>
+            <ul class="flow" style="list-style:disc;padding-left:1.2em;">
+              <li><a class="text-link" href="https://docs.orbstack.dev/licensing" target="_blank" rel="noopener">Licensing</a></li>
+              <li><a class="text-link" href="https://docs.orbstack.dev/architecture" target="_blank" rel="noopener">Architecture</a></li>
+              <li><a class="text-link" href="https://orbstack.dev/pricing" target="_blank" rel="noopener">Pricing</a></li>
+              <li><a class="text-link" href="https://orbstack.dev/terms" target="_blank" rel="noopener">Terms of Service</a></li>
+              <li><a class="text-link" href="https://docs.orbstack.dev/legal/privacy" target="_blank" rel="noopener">Privacy policy</a></li>
+              <li><a class="text-link" href="https://docs.orbstack.dev/compare/docker-desktop" target="_blank" rel="noopener">OrbStack vs. Docker Desktop</a></li>
+              <li><a class="text-link" href="https://sliplane.io/blog/orbstack-vs-docker" target="_blank" rel="noopener">sliplane.io — OrbStack vs Docker Desktop in 2026</a> (third-party benchmark summary, not independently reproduced)</li>
+            </ul>
+
+            <h3 class="mt-5">Podman / Podman Desktop</h3>
+            <ul class="flow" style="list-style:disc;padding-left:1.2em;">
+              <li><a class="text-link" href="https://github.com/containers/podman-desktop/blob/main/LICENSE" target="_blank" rel="noopener">podman-desktop LICENSE</a></li>
+              <li><a class="text-link" href="https://deepwiki.com/containers/podman/13.1-machine-providers-and-vm-configuration" target="_blank" rel="noopener">Podman machine providers (DeepWiki summary)</a></li>
+              <li><a class="text-link" href="https://podman-desktop.io/docs/podman/rosetta" target="_blank" rel="noopener">Podman Desktop — Rosetta support</a></li>
+              <li><a class="text-link" href="https://github.com/podman-desktop/telemetry" target="_blank" rel="noopener">podman-desktop/telemetry</a></li>
+            </ul>
+
+            <h3 class="mt-5">Rancher Desktop</h3>
+            <ul class="flow" style="list-style:disc;padding-left:1.2em;">
+              <li><a class="text-link" href="https://github.com/rancher-sandbox/rancher-desktop/blob/main/LICENSE" target="_blank" rel="noopener">Rancher Desktop LICENSE</a></li>
+              <li><a class="text-link" href="https://docs.rancherdesktop.io/" target="_blank" rel="noopener">Rancher Desktop docs</a></li>
+              <li><a class="text-link" href="https://github.com/rancher-sandbox/rancher-desktop/issues/8487" target="_blank" rel="noopener">GPU/CUDA limitation discussion</a></li>
+              <li><a class="text-link" href="https://documentation.suse.com/cloudnative/rancher-manager/v2.10/en/faq/telemetry.html" target="_blank" rel="noopener">Rancher (Manager) telemetry FAQ</a> — concerns Rancher Manager, not confirmed identical to Rancher Desktop's own telemetry</li>
+            </ul>
+
+            <h3 class="mt-5">Colima / Lima</h3>
+            <ul class="flow" style="list-style:disc;padding-left:1.2em;">
+              <li><a class="text-link" href="https://github.com/abiosoft/colima" target="_blank" rel="noopener">abiosoft/colima</a></li>
+              <li><a class="text-link" href="https://colima.run/docs/faq/" target="_blank" rel="noopener">Colima FAQ</a></li>
+            </ul>
+
+            <h3 class="mt-5">Apple <code class="inline">container</code></h3>
+            <ul class="flow" style="list-style:disc;padding-left:1.2em;">
+              <li><a class="text-link" href="https://github.com/apple/container" target="_blank" rel="noopener">apple/container</a></li>
+              <li><a class="text-link" href="https://github.com/apple/container/blob/main/docs/technical-overview.md" target="_blank" rel="noopener">apple/container technical overview</a></li>
+            </ul>
+          </section>
+
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="footer-grid">
+      <div class="footer-col">
+        <div class="footer-brand">
+          <img class="mark" src="assets/mark.svg" alt="" width="24" height="24">
+          <span>Morbstack</span>
+        </div>
+        <p class="text-small">Everything that runs on your machine is free forever.</p>
+      </div>
+      <div class="footer-col">
+        <h4>Product</h4>
+        <ul>
+          <li><a href="download.html">Download</a></li>
+          <li><a href="docs.html">Documentation</a></li>
+          <li><a href="comparison.html">Comparison</a></li>
+        </ul>
+      </div>
+      <div class="footer-col">
+        <h4>Project</h4>
+        <ul>
+          <li><a href="../docs/roadmap.md">Roadmap</a></li>
+          <li><a href="../docs/parity.md">Parity report</a></li>
+          <li><a href="../LICENSE">License (Apache-2.0)</a></li>
+        </ul>
+      </div>
+      <div class="footer-col">
+        <h4>Source</h4>
+        <ul>
+          <!-- TODO(human): replace with the real GitHub repository URL once this
+               project is published. There is no public repository yet. -->
+          <li><a href="https://github.com/REPLACE_ME/morbstack" target="_blank" rel="noopener">GitHub</a></li>
+          <li><a href="../docs/architecture.md">Architecture</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="footer-bottom">
+      <span>Apache-2.0. Copyright © 2026 The Morbstack Authors.</span>
+      <span>Pre-release software. Nothing here is a shipped product yet.</span>
+    </div>
+  </div>
+</footer>
+
+<script src="site.js"></script>
+</body>
+</html>

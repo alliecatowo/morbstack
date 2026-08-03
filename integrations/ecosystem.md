@@ -29,9 +29,11 @@ not a path any Docker tool guesses by default:
   that falls through to them doesn't error — it silently connects to the
   wrong daemon (see the Testcontainers section below for a live
   reproduction of exactly this).
-- There is no Morbstack-registered `docker context`. Morbstack creates
-  nothing in `~/.docker/contexts` on its own today; a context only
-  exists if the user runs `docker context create` by hand.
+- There is no Morbstack-registered `docker context` until someone asks
+  for one. As of this pass `morb context create` exists and is the
+  supported way to register it, but nothing registers it automatically at
+  install or first launch, so the default state of a fresh machine is
+  still "no context".
 
 Every tool in this document either (a) reads `DOCKER_HOST`, (b) reads a
 `docker context`, (c) reads both, or (d) reads neither and hard-codes a
@@ -43,9 +45,9 @@ var or context), or not at all.
 
 | Tool | Works today | Minimum config | Zero-config blocker |
 |---|---|---|---|
-| `docker` CLI / `docker context` | **Works** (VERIFIED) | `docker context create morbstack --docker "host=unix://$HOME/.morbstack/run/docker.sock"` once, or `DOCKER_HOST` per-shell | No context is auto-registered on install/first-run |
-| `docker compose` (bundled plugin) | **Works** (VERIFIED) | Plugin installed into a `cli-plugins` dir on `PATH` for the active `DOCKER_CONFIG`; inherits whatever `DOCKER_HOST`/context the `docker` CLI resolves | Plugin isn't auto-installed into `~/.docker/cli-plugins/` yet (fetched to `dist/host-bin/docker-compose` only) |
-| `docker buildx` (bundled plugin) | **Works** (VERIFIED) | Same as Compose — plugin binary now exists at `dist/host-bin/docker-buildx` (fetched by `scripts/fetch-guest-assets.sh`, landed already) | Same as Compose: not auto-installed into `~/.docker/cli-plugins/` yet |
+| `docker` CLI / `docker context` | **Works** (VERIFIED) | `morb context create && morb context use` once, or `DOCKER_HOST` per-shell | Nothing registers the context at install or first launch |
+| `docker compose` (bundled plugin) | **Works** (VERIFIED) | `morb install-cli-plugins`; inherits whatever `DOCKER_HOST`/context the `docker` CLI resolves | The install command exists but is not run automatically |
+| `docker buildx` (bundled plugin) | **Works** (VERIFIED) | Same as Compose — `morb install-cli-plugins` covers both; binary at `dist/host-bin/docker-buildx` | Same as Compose |
 | Testcontainers — Node | **Works with one env var** (VERIFIED) | `DOCKER_HOST` + `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock` | Does not read `docker context` at all; without `DOCKER_HOST` it silently falls through to a stale Docker Desktop socket if one exists (see below) |
 | Testcontainers — Python | **Works, context-aware** (VERIFIED) | `DOCKER_HOST` (or a `docker context`) + `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock` | Ryuk/socket-mount override still required; everything else is zero-config once a context exists |
 | Testcontainers — Java/Go | Not tested here (no JDK/Go installed) | Same env vars as Node/Python per the shared testcontainers spec (DOCUMENTED) | Same shape of gap expected; unverified in this session |
@@ -107,23 +109,60 @@ this pass:
   (DOCUMENTED, open feature request), `act` and GitLab Runner's docker
   executor (DOCUMENTED, config-key/env-var only).
 
-**Coordination note:** another agent in this session is adding a
-`morbstack` docker context automatically and shipping the `buildx` CLI
-plugin. The exact invocation above is what that work should produce (or
-run on the user's behalf) — it already works by hand today, verified in
-this pass. What's still open, and what the in-flight work presumably
-closes: (1) nothing runs this for the user today — `morb doctor`
-currently only checks whether `~/.docker/contexts` exists at all
-(`mac/Sources/MorbstackKit/Doctor.swift:281-290`), it does not create or
-offer to create the `morbstack` context itself; (2) the `docker-buildx`
-plugin binary already exists at `dist/host-bin/docker-buildx` (fetched
-by `scripts/fetch-guest-assets.sh`, confirmed present and dated this
-session) and **works** when manually placed in `cli-plugins/` — VERIFIED
-below — but nothing installs it into `~/.docker/cli-plugins/`
-automatically, same gap as Compose. Every recommendation in this
-document that says "once a context exists" is written to be correct
-either way — whether the user runs the command by hand per the block
-above, or the in-flight work makes it automatic.
+### `morb context` — the supported front end (landed mid-pass)
+
+The `docker context create` invocation above is still exactly what happens
+under the hood, but as of this pass `morb` wraps it, and that is now the
+recommended route:
+
+```
+morb context status    # is it registered? is it current? what is current now?
+morb context create    # register the `morbstack` context. Asks first.
+morb context use       # make it the default. Always asks.
+```
+
+VERIFIED against the built binary: `morb context status` and
+`morb context status --json` both work and report `registered`,
+`is_current`, `matches_socket`, `current_context`, `registered_host`,
+`socket_path` and `docker_config_directory`. On this machine it correctly
+reported the context as unregistered with `desktop-linux` current, and
+refused to plan a switch:
+
+> `morb context use` will refuse to switch: "desktop-linux" is an explicit
+> non-default context, and Morbstack never stomps one.
+
+That refusal is the `docs/compat.md` "contexts are respected, never
+stomped" contract being enforced in code rather than asserted in prose.
+`--force` overrides it; there is no silent path.
+
+`morb context status` also surfaces, without performing it, the
+`/var/run/docker.sock` symlink that closes the remaining zero-config gap
+for tools that probe the conventional path before consulting a context or
+`DOCKER_HOST`:
+
+```
+sudo ln -sf $HOME/.morbstack/run/docker.sock /var/run/docker.sock
+```
+
+Morbstack will not create that itself — it is a system path outside
+`~/.morbstack` and it may already be owned by another Docker install.
+Deciding to run it is the user's call. It is the single highest-leverage
+thing a user can do for Testcontainers **Node**, whose discovery never
+consults contexts at all (see below).
+
+`morb install-cli-plugins` (also landed this pass; `--print-plan` and
+`--force` supported) symlinks `docker-compose` and `docker-buildx` into
+`~/.docker/cli-plugins/`, closing the plugin-install gap described in the
+Compose section. Not executed here: it writes into `~/.docker`, which this
+pass deliberately never touched.
+
+**Status of the coordination:** the context registration and buildx
+shipping that were in flight during this pass have landed. The remaining
+gap is narrower than it was: a context now exists behind one supported
+command, but nothing registers it *automatically* at install or first
+launch the way a real Docker Desktop install does, so a user who never
+runs `morb context create` is still undiscoverable. Every recommendation
+below that says "once a context exists" holds either way.
 
 ## Testcontainers (all languages)
 
@@ -549,25 +588,25 @@ specifically.
 
 ## What Morbstack should do, in priority order
 
-1. **Auto-register a `docker context` on install/first daemon start,
-   the same way Docker Desktop writes `desktop-linux`.** This is the
-   single highest-leverage fix, because it's the one thing that makes
-   `docker` CLI, Compose, buildx, and `docker-py`/Testcontainers-Python
-   all work with **zero** user action. It does nothing for
-   Tilt/Skaffold/the Go SDK/act/GitLab Runner, which need `DOCKER_HOST`
-   regardless — but those tools are a smaller slice of the ecosystem
-   than "anything that shells out to the `docker` CLI or uses
-   `docker-py`." (Coordinated: this is exactly what the in-flight
-   context-automation work in this session should deliver; the exact
-   command it needs to run is verified above.)
+1. **Offer context registration during install or first launch, not only
+   behind a command the user has to know exists.** `morb context create`
+   landed during this pass and is the right mechanism — but a user who
+   never runs it is still exactly as undiscoverable as before. Docker
+   Desktop writes `desktop-linux` without being asked. The remaining work
+   is a first-run prompt in the app (and a line in `morb doctor`'s
+   output), not new plumbing. This is the highest-leverage item left,
+   because it is the one thing that makes the `docker` CLI, Compose,
+   buildx, and `docker-py`/Testcontainers-Python all work with zero user
+   action. It does nothing for Tilt/Skaffold/the Go SDK/act/GitLab
+   Runner, which need `DOCKER_HOST` regardless — but those are a smaller
+   slice of the ecosystem than "anything that shells out to the `docker`
+   CLI or uses `docker-py`."
 
-2. **Auto-install `docker-compose` and `docker-buildx` into
-   `~/.docker/cli-plugins/`** (or into whatever `cli-plugins` directory
-   the active `DOCKER_CONFIG` resolves to). Both binaries already exist
-   in `dist/host-bin/` and both were verified working in this pass —
-   this is pure plumbing, not an engineering gap. (Also in-flight per
-   this session's coordination note for buildx specifically; Compose has
-   the identical gap and should land the same way.)
+2. **Run `install-cli-plugins` as part of install or first launch.**
+   The command landed this pass and symlinks both `docker-compose` and
+   `docker-buildx` into `~/.docker/cli-plugins/`; both binaries exist in
+   `dist/host-bin/` and both were verified working here. Same shape as
+   item 1: the mechanism exists, the discovery of it does not.
 
 3. **Document `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock`
    prominently**, ideally right next to wherever the project documents
@@ -602,6 +641,16 @@ specifically.
 For anything that reads `docker context` (the `docker` CLI itself,
 Compose, buildx, `docker-py`, Testcontainers Python), this is the
 one-time, durable fix:
+
+```sh
+morb context create        # register the `morbstack` context. Asks first.
+morb context use           # make it the default. Asks; never stomps.
+morb install-cli-plugins   # symlink docker-compose and docker-buildx
+```
+
+`morb context status` tells you where you stand at any point, and
+`--json` on any of them gives a machine-readable answer. The equivalent
+by hand, if you would rather not go through `morb`, is:
 
 ```sh
 docker context create morbstack --docker "host=unix://$HOME/.morbstack/run/docker.sock"

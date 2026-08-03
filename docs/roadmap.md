@@ -131,7 +131,12 @@ Morbstack to make specific, checkable performance claims publicly.
   [`protocol.md`](protocol.md) §3.3 for the payload-install wire
   protocol (vsock port 2377).
 - `syft`/`grype` integration for image scanning.
-- `morb debug` — a bundle-the-diagnostics command for bug reports.
+- `morb diagnose` — a bundle-the-diagnostics command for bug reports.
+  (Named `diagnose`, not `debug`: `morb debug <container>` is the toolbox
+  shell that attaches to a running container, including a distroless one
+  with no shell of its own. Two legitimate commands, one name, and the
+  one that takes a container argument has the better claim to it.
+  `diagnose` also sits naturally beside the existing `morb doctor`.)
 - MCP server ships (host integration domain).
 - Public compat-matrix CI stood up and green, plus `morb bench` as a
   user-runnable perf-target checker (see table below).
@@ -256,6 +261,23 @@ Gated on the human blockers above **and** on the subset of M1 that
 `docs/parity.md` shows a first-day user hits immediately. Shipping before
 these is shipping something that breaks on first contact:
 
+- **The single-path install.** *Installing Morbstack.app, and nothing
+  else, must give a user a working `docker`, `docker compose`,
+  `docker buildx` and `morb` on a Mac that has never had Docker.* This is
+  the hardest gate on the list and the one the project has been quietly
+  failing: every demonstration to date has borrowed Docker Desktop's
+  client, because on this development machine `/usr/local/bin/docker` is
+  a symlink into `/Applications/Docker.app`. On a clean Mac there is no
+  `docker` binary at all. "Drop-in replacement" has to mean the install
+  path too — a first-run experience that says "now go install the Docker
+  CLI" is not a replacement for Docker Desktop, it is an add-on to it.
+  Requires: the darwin/arm64 `docker` client and both CLI plugins
+  pinned, hash-verified, redistributed inside the app bundle and recorded
+  in `NOTICE`; a consented, terminal-free first-run flow that puts them
+  on `PATH` and registers the context (`docs/first-run.md`); and a clean
+  scripted uninstall, because a tool that cannot be removed does not earn
+  trust. Verified the only way that means anything: against a `PATH`
+  scrubbed of Docker Desktop and Homebrew.
 - **`docker-buildx` shipped.** `docs/parity.md` #13/#14: the guest's
   BuildKit is completely functional, multi-platform builds and cache
   mounts included; the only missing piece is the client-side plugin
@@ -322,7 +344,7 @@ a different mechanism.
 
 Goal: the project survives contact with users.
 
-- `morb debug` (M2) wired into the issue templates, so a bug report
+- `morb diagnose` (M2) wired into the issue templates, so a bug report
   arrives with a diagnostics bundle attached.
 - The compat matrix (M2) published on the website, generated from CI
   rather than hand-maintained.

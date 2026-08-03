@@ -205,7 +205,7 @@ fn real_init() {
     let guest_ip = net::guest_ipv4();
     let host_gateway_ip = net::default_gateway();
     match (guest_ip, host_gateway_ip) {
-        (Some(guest_ip), Some(gateway_ip)) => {
+        (Some(_), Some(gateway_ip)) => {
             if let Err(e) = dns::spawn_split_dns(gateway_ip, gateway_ip) {
                 log::log(&format!(
                     "WARNING: could not start the split DNS stub: {} — \
