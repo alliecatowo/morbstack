@@ -429,12 +429,14 @@ at "idle for 86s; suspending," the guest acknowledged and powered off in
 
 Three tiers, increasing in ambition:
 
-- **Tier 1 (M0/M1): tuned VirtioFS + FSEvents -> inotify bridge.** Bind
-  mounts (`-v /host/path:/container/path`) go over VirtioFS, tuned for
-  the common case (source code trees, node_modules, build caches). The
-  FSEvents bridge translates macOS filesystem change notifications into
-  guest-side `inotify` events so tools relying on file watching (webpack,
-  nodemon, etc.) work without polling.
+- **Tier 1 (current): tuned VirtioFS.** Bind mounts
+  (`-v /host/path:/container/path`) go over VirtioFS, tuned for the common
+  case (source code trees, node_modules, build caches). Host-written bytes are
+  coherent, but host-originated Linux watch notifications are not implemented:
+  the guest has no receiver/kernel delivery mechanism and the host does not
+  start FSEvents. Tools that require notifications still need polling. See
+  [`live-share-bridge.md`](live-share-bridge.md) for the bounded transport
+  design and unblock criteria.
 - **Tier 2 (M1/M2): free synced shares.** An opt-in synced-copy mode
   (rather than live-mount) for workloads where VirtioFS's consistency
   model or performance profile doesn't fit, modeled on (but not identical
