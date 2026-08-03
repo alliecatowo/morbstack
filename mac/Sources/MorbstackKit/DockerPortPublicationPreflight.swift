@@ -222,7 +222,7 @@ struct DockerDynamicPortCreatePlan {
             } else {
                 requestedRange = nil
             }
-            DockerDynamicPortPublication(
+            return DockerDynamicPortPublication(
                 transport: entry.transport,
                 hostIP: entry.hostIP,
                 hostPort: 0,
