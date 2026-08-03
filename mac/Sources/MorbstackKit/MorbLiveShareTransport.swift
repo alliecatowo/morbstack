@@ -198,7 +198,7 @@ public final class MorbLiveShareTransport: @unchecked Sendable {
             timeout: Self.eventAckTimeout
         ) {
         case .success(let fd): descriptor = fd
-        case .failure(let error):
+        case .failure:
             setState(.waitingForGuest)
             retry(generation: generation)
             return
@@ -390,31 +390,31 @@ private extension MorbLiveShareTransport {
             plan: MorbLiveShareBridge.Plan,
             shares: [MorbDirectoryShare]
         ) throws -> Session {
-            let boot = try readLine(fd: descriptor)
+            let boot = try Self.readLine(fd: descriptor)
             let bootFields = boot.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
             guard bootFields.count == 2, bootFields[0] == "BOOT",
                   let bootData = Data(hexadecimal: String(bootFields[1])), bootData.count == 16
             else {
                 throw MorbError.protocolViolation("live-share receiver did not present a 128-bit guest boot identity")
             }
-            let capability = try randomBytes(count: 32)
+            let capability = try Self.randomBytes(count: 32)
             let session = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
-            let epoch = epochFromCapability(capability)
-            let claims = try makeClaims(plan: plan, shares: shares, epoch: epoch)
+            let epoch = Self.epochFromCapability(capability)
+            let claims = try Self.makeClaims(plan: plan, shares: shares, epoch: epoch)
             let hello = "HELLO 1 \(session) \(bootFields[1]) \(capability.hexadecimalString) \(claims.count)"
             var transcript = Data((hello + "\n").utf8)
-            sendLine(fd: descriptor, hello)
+            try Self.sendLine(fd: descriptor, hello)
             for claim in claims.sorted(by: { $0.rootPath < $1.rootPath }) {
-                let line = "ROOT \(claim.rootID) \(claim.tag) \(percentEncode(claim.rootPath)) \(percentEncode(claim.backingPath)) \(claim.readOnly ? "1" : "0") \(claim.epoch)"
+                let line = "ROOT \(claim.rootID) \(claim.tag) \(Self.percentEncode(claim.rootPath)) \(Self.percentEncode(claim.backingPath)) \(claim.readOnly ? "1" : "0") \(claim.epoch)"
                 transcript.append(Data((line + "\n").utf8))
-                sendLine(fd: descriptor, line)
+                try Self.sendLine(fd: descriptor, line)
             }
-            sendLine(fd: descriptor, "COMMIT \(hmacHex(key: capability, message: transcript))")
-            let ready = try readLine(fd: descriptor).trimmingCharacters(in: .whitespacesAndNewlines)
+            try Self.sendLine(fd: descriptor, "COMMIT \(Self.hmacHex(key: capability, message: transcript))")
+            let ready = try Self.readLine(fd: descriptor).trimmingCharacters(in: .whitespacesAndNewlines)
             let expectedReadyBody = "READY \(session) \(bootFields[1])"
             let readyFields = ready.split(separator: " ")
             guard readyFields.count == 4,
-                  ready == "\(expectedReadyBody) \(hmacHex(key: capability, message: Data(expectedReadyBody.utf8)))"
+                  ready == "\(expectedReadyBody) \(Self.hmacHex(key: capability, message: Data(expectedReadyBody.utf8)))"
             else {
                 throw MorbError.protocolViolation("live-share receiver authentication failed")
             }
@@ -452,15 +452,15 @@ private extension MorbLiveShareTransport {
                 guard event.path.hasPrefix(claim.rootPath + "/") else {
                     throw MorbError.protocolViolation("live-share invalidation was not strictly inside its root")
                 }
-                path = percentEncode(String(event.path.dropFirst(claim.rootPath.count + 1)))
+                path = Self.percentEncode(String(event.path.dropFirst(claim.rootPath.count + 1)))
                 kind = "i"
             case .rescan:
                 path = "-"
                 kind = "r"
             }
             let body = "EVENT \(nextSequence) \(claim.rootID) \(kind) \(path)"
-            sendLine(fd: fd, "\(body) \(hmacHex(key: capability, message: Data(body.utf8)))")
-            let acknowledgement = try readLine(fd: fd)
+            try Self.sendLine(fd: fd, "\(body) \(Self.hmacHex(key: capability, message: Data(body.utf8)))")
+            let acknowledgement = try Self.readLine(fd: fd)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let expectedPrefix = "ACK \(sessionHex) \(bootHex) \(nextSequence) "
             let fields = acknowledgement.split(separator: " ")
@@ -469,9 +469,9 @@ private extension MorbLiveShareTransport {
             }
             let disposition = String(fields[4])
             let acknowledgementBody = fields.dropLast().joined(separator: " ")
-            guard constantTimeEqual(
+            guard Self.constantTimeEqual(
                 String(fields[5]),
-                hmacHex(key: capability, message: Data(acknowledgementBody.utf8)))
+                Self.hmacHex(key: capability, message: Data(acknowledgementBody.utf8)))
             else {
                 throw MorbError.protocolViolation("live-share acknowledgement HMAC failed")
             }
@@ -488,7 +488,7 @@ private extension MorbLiveShareTransport {
             guard !closed else { return }
             closed = true
             let body = "CLOSE \(nextSequence)"
-            _ = try? sendLine(fd: fd, "\(body) \(hmacHex(key: capability, message: Data(body.utf8)))")
+            _ = try? Self.sendLine(fd: fd, "\(body) \(Self.hmacHex(key: capability, message: Data(body.utf8)))")
             _ = Darwin.shutdown(fd, SHUT_RDWR)
             Darwin.close(fd)
         }
