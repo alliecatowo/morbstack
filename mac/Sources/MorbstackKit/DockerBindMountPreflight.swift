@@ -23,7 +23,8 @@ public enum DockerBindMountPreflight {
     /// remains the authority for Docker's full create grammar. A legacy `Binds`
     /// source may be absent, because Docker's `-v` form creates that directory. An
     /// explicit `Mounts` bind source must already exist, matching Docker's `--mount`
-    /// behavior.
+    /// behavior. Read-only, recursive, propagation, and volume options remain opaque
+    /// to this host-share check and are relayed unchanged for dockerd to implement.
     ///
     /// - Parameters:
     ///   - body: The JSON document from `POST /containers/create`.
@@ -78,6 +79,17 @@ public enum DockerBindMountPreflight {
             guard bindSource.path.hasPrefix("/") else {
                 return .rejected(
                     message: "invalid mount config for type \"bind\": bind source path must be absolute: \(bindSource.path)")
+            }
+
+            // `docker-outside-of-docker` and ordinary Docker-in-Docker tooling bind
+            // the daemon host's standard socket into a container. Here the daemon
+            // host is the guest, not macOS: `/var/run` resolves there to `/run`, where
+            // dockerd owns the socket. Do not reinterpret this exact guest resource as
+            // the Mac's `/private/var` alias or demand a VirtioFS share/source file on
+            // the Mac. Every other `/var` source remains below the explicit alias
+            // rejection, so this does not create a general guest-system escape hatch.
+            if isGuestDockerSocket(bindSource.path) {
+                continue
             }
 
             // `/tmp` is a macOS symlink to `/private/tmp`, while the guest starts
@@ -160,6 +172,10 @@ public enum DockerBindMountPreflight {
 
     private static func isBareTmpAlias(_ source: String) -> Bool {
         source == "/tmp" || source.hasPrefix("/tmp/")
+    }
+
+    private static func isGuestDockerSocket(_ source: String) -> Bool {
+        source == "/var/run/docker.sock" || source == "/run/docker.sock"
     }
 
     private static func unsupportedBareSystemAlias(_ source: String) -> String? {

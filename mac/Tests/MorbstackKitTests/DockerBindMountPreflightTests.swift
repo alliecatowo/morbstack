@@ -75,6 +75,51 @@ final class DockerBindMountPreflightTests: XCTestCase {
                 message: "invalid mount config for type \"bind\": bind source path uses the macOS /var alias, but /var is a guest system path; use the explicit /private/var source path after sharing it"))
     }
 
+    func testGuestDockerSocketBindIsAllowedWithoutAMacShare() {
+        XCTAssertEqual(
+            inspect(
+                #"{"HostConfig":{"Binds":["/var/run/docker.sock:/var/run/docker.sock:ro"]}}"#,
+                shares: [],
+                states: [:],
+                sourceExists: { _ in false }),
+            .allowed)
+    }
+
+    func testExplicitGuestDockerSocketBindIsAllowedWithoutAMacSourceCheck() {
+        XCTAssertEqual(
+            inspect(
+                #"{"HostConfig":{"Mounts":[{"Type":"bind","Source":"/run/docker.sock","Target":"/var/run/docker.sock","ReadOnly":true}]}}"#,
+                shares: [],
+                states: [:],
+                sourceExists: { _ in false }),
+            .allowed)
+    }
+
+    func testAdvancedBindOptionsRemainTheEnginesResponsibility() {
+        XCTAssertEqual(
+            inspect(
+                #"{"HostConfig":{"Mounts":[{"Type":"bind","Source":"/Users/allie/project","Target":"/workspace","ReadOnly":true,"BindOptions":{"Propagation":"rslave","NonRecursive":true,"ReadOnlyNonRecursive":true}}]}}"#),
+            .allowed)
+    }
+
+    func testNamedVolumeOptionsBypassHostShareAdmission() {
+        XCTAssertEqual(
+            inspect(
+                #"{"HostConfig":{"Mounts":[{"Type":"volume","Source":"workspace-cache","Target":"/cache","ReadOnly":false,"VolumeOptions":{"NoCopy":true,"Subpath":"npm"}}]}}"#,
+                shares: [],
+                states: [:],
+                sourceExists: { _ in false }),
+            .allowed)
+    }
+
+    func testOnlyTheExactGuestDockerSocketBypassesTheBareVarAliasCheck() {
+        let result = inspect(#"{"HostConfig":{"Binds":["/var/run/docker.sock/child:/workspace"]}}"#)
+        XCTAssertEqual(
+            result,
+            .rejected(
+                message: "invalid mount config for type \"bind\": bind source path uses the macOS /var alias, but /var is a guest system path; use the explicit /private/var source path after sharing it"))
+    }
+
     func testUnsharedLegacyBindIsRejectedBeforeGuestDirectoryCanBeCreated() {
         let result = inspect(#"{"HostConfig":{"Binds":["/opt/secret:/run/secret"]}}"#)
         XCTAssertEqual(

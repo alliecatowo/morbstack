@@ -539,9 +539,13 @@ bytes are never rewritten: `/tmp` is compared to `/private/tmp` only for host-sh
 coverage, while source existence and symlink resolution use the original spelling.
 The other macOS `/private` aliases, bare `/var` and `/etc`, are rejected because those
 literal paths are guest system paths that cannot safely be mirrored; callers can use a
-shared explicit `/private/var/...` or `/private/etc/...` source instead. It rejects an
-unshared source, a failed/unreported VirtioFS root, or a source (including a missing
-legacy `-v` child) whose existing symlink ancestor resolves outside a live share with a
+shared explicit `/private/var/...` or `/private/etc/...` source instead. The exact
+guest Docker-socket spellings `/var/run/docker.sock` and `/run/docker.sock` are the
+intentional exception: they are guest-owned daemon resources, not Mac paths, so normal
+Docker-in-Docker and Dev Containers socket mounts pass unchanged without a VirtioFS
+share or a Mac-side existence check. It rejects an unshared source, a failed/unreported
+VirtioFS root, or a source (including a missing legacy `-v` child) whose existing
+symlink ancestor resolves outside a live share with a
 Docker-style HTTP 400 `invalid mount config for type "bind": ...` response. Explicit
 `--mount type=bind` sources must exist; legacy `-v` sources retain Docker's normal
 missing-directory creation behavior only under a verified live share. Named volumes

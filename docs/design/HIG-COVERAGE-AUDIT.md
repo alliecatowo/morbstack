@@ -225,6 +225,31 @@ and VoiceOver behavior, long-name truncation/copy, secret reveal/copy, mount act
 and lifecycle acceptance remain required; no build, test, Docker/VM action, or live-app
 interaction was performed for this source change.
 
+### 2026-08-03 Compose source review hierarchy correction
+
+The selected-source task is to review one explicitly chosen document and then decide
+whether to reveal or edit it. It is not a dashboard of every environment declaration.
+The editor sheet therefore uses a standard `Form` for source identity, provenance, scope,
+and redaction state; a count-labelled standard `DisclosureGroup` for declaration names
+and source-line provenance; and a `ContentUnavailableView` only while the selected `.env`
+source remains deliberately redacted. Its declaration disclosure starts collapsed for each
+document. This leaves the source identity and redaction boundary legible before a large
+declaration set can consume the sheet, while keeping the exact count and a native,
+keyboard-accessible path to the bounded metadata. No source value appears in the summary,
+its accessibility label, or its help text. The explicit reveal action remains the only way
+to put the selected document text in the editor for that sheet session; save remains a
+separate standard confirmation.
+
+Consulted: Apple’s [sheets](https://developer.apple.com/design/human-interface-guidelines/sheets),
+SwiftUI [`Form`](https://developer.apple.com/documentation/swiftui/form),
+[`DisclosureGroup`](https://developer.apple.com/documentation/swiftui/disclosuregroup),
+[`ContentUnavailableView`](https://developer.apple.com/documentation/swiftui/contentunavailableview),
+and [`TextEditor`](https://developer.apple.com/documentation/swiftui/texteditor).
+
+No Compose source sheet capture exists in the saved visual evidence, so full-window,
+keyboard, VoiceOver, redaction/reveal, and light/dark acceptance remain pending. This
+source-only correction performed no build, test, Docker/VM action, or live-app launch.
+
 ## Charts audit: current concrete rule
 
 `ContainerStatsTab` currently contains the only real time-series visualization. It is

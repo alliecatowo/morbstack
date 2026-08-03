@@ -361,7 +361,10 @@ struct ComposeFileEditorSheet: View {
     @Bindable var editor: ComposeFileEditor
     @Bindable var validation: ComposeSourceValidationModel
     @State private var environmentValuesAreRevealed = false
-    @State private var environmentDeclarationsExpanded = true
+    // A declaration list can be large. Keep it as requested metadata so the document
+    // sheet first communicates source provenance and the redaction boundary instead
+    // of turning its Form into a dense property grid.
+    @State private var environmentDeclarationsExpanded = false
     @State private var sourceSecretsExpanded = false
 
     private var sourceInspection: ComposeProjectSourceInspection? {
@@ -535,7 +538,7 @@ struct ComposeFileEditorSheet: View {
         }
         .onChange(of: editor.fileURL) { _, _ in
             environmentValuesAreRevealed = false
-            environmentDeclarationsExpanded = true
+            environmentDeclarationsExpanded = false
             sourceSecretsExpanded = false
         }
     }
