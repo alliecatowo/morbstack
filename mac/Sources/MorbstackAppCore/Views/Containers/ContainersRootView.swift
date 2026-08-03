@@ -354,9 +354,6 @@ struct ContainersRootView: View {
                 container: selected,
                 model: model,
                 hub: hub,
-                isBusy: busy.contains(selected.id),
-                onAction: { perform($0, on: selected.id) },
-                onRequestRemove: { removalTarget = selected },
                 initialTab: initialDetailTab)
             .id(selected.id)
         } else {

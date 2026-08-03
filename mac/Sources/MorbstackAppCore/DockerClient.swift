@@ -442,7 +442,8 @@ struct LogLineAssembler {
 
 // MARK: - Stats maths
 
-/// The CPU/memory arithmetic from `docker stats`, isolated so it can be tested.
+/// The CPU, memory, and network accounting from `docker stats`, isolated so it can be
+/// tested before it becomes a number or line in the inspector.
 enum StatsMath {
 
     /// Container CPU as a percentage of one host core × the number of online cores.
@@ -484,11 +485,39 @@ enum StatsMath {
         return max(0, usage - Int64(extra))
     }
 
+    /// Totals Docker's cumulative per-interface counters.
+    ///
+    /// The Engine API reports a dictionary because a container may be attached to more
+    /// than one network. Returning `nil` when any interface lacks either counter is
+    /// intentional: presenting a partial sum as the container's traffic would be less
+    /// honest than saying that the engine did not provide a complete total.
+    static func networkTotals(_ stats: Wire.Stats) -> (received: Int64?, transmitted: Int64?) {
+        guard let interfaces = stats.networks, !interfaces.isEmpty else { return (nil, nil) }
+
+        var received: Int64 = 0
+        var transmitted: Int64 = 0
+        for interface in interfaces.values {
+            guard let rx = interface.rx_bytes, let tx = interface.tx_bytes,
+                  rx >= 0, tx >= 0
+            else { return (nil, nil) }
+
+            let receivedSum = received.addingReportingOverflow(rx)
+            let transmittedSum = transmitted.addingReportingOverflow(tx)
+            guard !receivedSum.overflow, !transmittedSum.overflow else { return (nil, nil) }
+            received = receivedSum.partialValue
+            transmitted = transmittedSum.partialValue
+        }
+        return (received, transmitted)
+    }
+
     static func sample(_ stats: Wire.Stats, now: Date = Date()) -> StatsSample {
+        let network = networkTotals(stats)
         StatsSample(
             cpuPercent: cpuPercent(stats),
             memBytes: memoryBytes(stats),
             memLimit: stats.memory_stats?.limit ?? 0,
+            networkReceivedBytes: network.received,
+            networkTransmittedBytes: network.transmitted,
             ts: stats.read.flatMap(LogLineAssembler.parseRFC3339) ?? now)
     }
 

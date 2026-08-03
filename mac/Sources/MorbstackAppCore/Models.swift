@@ -366,6 +366,12 @@ struct StatsSample: Sendable, Hashable {
     var cpuPercent: Double
     var memBytes: Int64
     var memLimit: Int64
+    /// Cumulative bytes received across all interfaces the engine reports. `nil` means
+    /// the stats response did not contain a complete receive counter, not zero traffic.
+    var networkReceivedBytes: Int64? = nil
+    /// Cumulative bytes sent across all interfaces the engine reports. `nil` means the
+    /// stats response did not contain a complete transmit counter, not zero traffic.
+    var networkTransmittedBytes: Int64? = nil
     var ts: Date
 
     static let empty = StatsSample(cpuPercent: 0, memBytes: 0, memLimit: 0, ts: .distantPast)
@@ -375,6 +381,53 @@ struct StatsSample: Sendable, Hashable {
         guard memLimit > 0 else { return 0 }
         return min(1, max(0, Double(memBytes) / Double(memLimit)))
     }
+
+    /// Derives interval throughput from Docker's cumulative interface counters.
+    ///
+    /// A counter that goes backwards is a reset, not a negative transfer. Omitting that
+    /// interval preserves the distinction between an unavailable reading and no traffic.
+    static func networkRates(in samples: [StatsSample]) -> [NetworkRateSample] {
+        guard samples.count > 1 else { return [] }
+
+        return zip(samples, samples.dropFirst()).enumerated().compactMap { offset, pair in
+            let previous = pair.0
+            let current = pair.1
+            let elapsed = current.ts.timeIntervalSince(previous.ts)
+            guard elapsed > 0 else { return nil }
+
+            func rate(from oldCounter: Int64?, to newCounter: Int64?) -> Double? {
+                guard let oldCounter, let newCounter,
+                      oldCounter >= 0, newCounter >= oldCounter
+                else { return nil }
+                let value = Double(newCounter - oldCounter) / elapsed
+                return value.isFinite && value >= 0 ? value : nil
+            }
+
+            let received = rate(from: previous.networkReceivedBytes, to: current.networkReceivedBytes)
+            let transmitted = rate(from: previous.networkTransmittedBytes, to: current.networkTransmittedBytes)
+            guard received != nil || transmitted != nil else { return nil }
+
+            return NetworkRateSample(
+                sequence: offset + 1,
+                timestamp: current.ts,
+                receivedBytesPerSecond: received,
+                transmittedBytesPerSecond: transmitted)
+        }
+    }
+}
+
+/// One rate interval truthfully derived from two Docker stats documents.
+///
+/// Docker reports cumulative bytes per interface, rather than throughput. This model is
+/// deliberately optional per direction so a missing/reset counter never becomes a
+/// plausible-looking zero in the inspector chart or its textual table.
+struct NetworkRateSample: Identifiable, Sendable, Hashable {
+    let sequence: Int
+    let timestamp: Date
+    let receivedBytesPerSecond: Double?
+    let transmittedBytesPerSecond: Double?
+
+    var id: Int { sequence }
 }
 
 // MARK: - Events
@@ -562,11 +615,21 @@ enum Wire {
         var stats: [String: Double]?
     }
 
+    /// One interface entry from `/containers/{id}/stats`. Docker's network counters
+    /// are cumulative, and a container can have more than one interface, so callers
+    /// must aggregate the entries rather than presenting a convenient but incomplete
+    /// `eth0` reading.
+    struct NetworkStats: Codable, Sendable {
+        var rx_bytes: Int64?
+        var tx_bytes: Int64?
+    }
+
     struct Stats: Codable, Sendable {
         var read: String?
         var cpu_stats: CPUStats?
         var precpu_stats: CPUStats?
         var memory_stats: MemoryStats?
+        var networks: [String: NetworkStats]?
     }
 
     struct PullProgress: Codable, Sendable {

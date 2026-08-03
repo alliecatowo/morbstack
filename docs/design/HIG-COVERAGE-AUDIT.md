@@ -56,7 +56,7 @@ evidence, or proof that a real daemon workflow works.
 | `Settings/**` | Settings, forms, text fields, pickers, toggles, sliders, toolbar panes, keyboard | Native rewrite staged — live-window verification pending | Use stable settings panes/toolbar and real preferences; audit every control and disabled state |
 | `MenuBar/**` | Menus, menu-bar extras, popovers, commands, accessibility | Native rewrite staged — live-window verification pending | Compact information and actual actions in a system-owned presentation |
 | `Palette/**` | Search, menus/commands, sheets or panel modality, keyboard focus, accessibility | Native rewrite staged — live-window verification pending | A standard sheet is acceptable when a global command has no stable popover anchor; avoid a decorative Raycast clone. A destructive result never executes from a single Return: it must pass through a system confirmation dialog. |
-| `Views/Containers/**` | Tables, inspector, forms, logs/text, context menus, toolbar/search, Charts, progress, unavailable states, destructive actions | Native rewrite staged — live-window verification pending | Main list/detail is table + inspector; Stats needs the full Swift Charts HIG pass, not merely a native `Chart` type |
+| `Views/Containers/**` | Tables, inspector, forms, logs/text, context menus, toolbar/search, Charts, progress, unavailable states, destructive actions | Native rewrite staged — live-window verification pending | Main list/detail is table + inspector. Statistics is read-only: CPU/memory history and network throughput use real `/containers/{id}/stats` values, with `LabeledContent`, Swift Charts, Audio Graphs, and exact sample tables. Network throughput is derived only from complete monotonic counters; stopped, priming, missing, and reset data use system unavailable/progress states rather than placeholder values or a start action. |
 | `Views/Images/**` | Tables, inspector, search, pull popover, destructive image actions | Native rewrite staged — live-window verification pending | Native table/inspector path; review pull as a small scoped presentation, not content chrome |
 | `Views/Builds/**` | Tables, inspector, search, build/clear actions, empty states | Native rewrite staged — live-window verification pending | Native table/inspector path. Docker only exposes a broad build-cache prune, not per-record deletion, so the app does not offer a count-only removal command it cannot constrain to the reviewed records. |
 | `Views/Volumes/**`, `Views/Networks/**` | Tables, inspectors, context menu, search, destructive confirmation | Native rewrite staged — live-window verification pending | Retain native record behavior without visual wrappers. Multi-volume and multi-network removal reviews enumerate the exact captured names or IDs and execute only those individual Docker deletes; a count-only confirmation is not sufficient. |
@@ -70,8 +70,9 @@ evidence, or proof that a real daemon workflow works.
 ## Charts audit: current concrete rule
 
 `ContainerStatsTab` currently contains the only real time-series visualization. It is
-allowed to use Swift Charts because CPU and memory history answer a temporal question.
-It still requires a separate HIG pass before acceptance:
+allowed to use Swift Charts because CPU and memory history answer a temporal question;
+network throughput is likewise derived from consecutive Docker interface counters, not
+invented samples. It still requires a separate HIG pass before acceptance:
 
 1. State the user question in its title/subtitle (for example, current CPU with recent
    history), not just “CPU.”
@@ -82,7 +83,10 @@ It still requires a separate HIG pass before acceptance:
 4. Avoid a decorative colored area fill or arbitrary brand color. Color must distinguish
    meaningful series, not make the chart look branded.
 5. Keep the latest precise values/limits in `LabeledContent` and never require chart
-   interaction to reveal critical state.
+   interaction to reveal critical state. Network counters must remain explicitly
+   unavailable when an Engine response omits an interface value, and an interval that
+   resets a cumulative counter must be omitted rather than rendered as negative or zero
+   traffic.
 
 Disk storage has no time-series model today, so it does **not** earn a chart. A native
 table plus the one capacity `ProgressView` answers its actual task more truthfully.

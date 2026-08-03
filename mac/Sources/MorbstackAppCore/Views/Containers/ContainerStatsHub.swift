@@ -75,6 +75,7 @@ final class TrackBStatsProbe {
 
     var cpuSeries: [Double] { history.map(\.cpuPercent) }
     var memorySeries: [Double] { history.map { Double($0.memBytes) } }
+    var networkRates: [NetworkRateSample] { StatsSample.networkRates(in: history) }
 }
 
 /// Owns the stats streams and hands out probes.
@@ -177,6 +178,13 @@ final class TrackBStatsHub {
         tasks[id]?.cancel()
         tasks[id] = nil
         probes[id] = nil
+    }
+
+    /// Drops a process's old history before subscribing after a stop/restart. The
+    /// Docker counters and CPU baseline are tied to that process lifetime, so joining
+    /// the old series to the new one would fabricate a continuous trend.
+    func reset(_ id: String) {
+        probes[id]?.reset()
     }
 
     /// Cancels everything. Called when the Containers screen goes away.

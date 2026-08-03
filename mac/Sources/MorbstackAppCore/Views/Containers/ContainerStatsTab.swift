@@ -17,8 +17,6 @@ struct ContainerStatsTab: View {
     let container: ContainerSummary
     let hub: TrackBStatsHub
     let client: DockerClient
-    let onStart: () -> Void
-    let isActionInProgress: Bool
 
     @State private var probe: TrackBStatsProbe?
 
@@ -32,10 +30,7 @@ struct ContainerStatsTab: View {
                 ContentUnavailableView {
                     Label("No Live Statistics", systemImage: "waveform.path.ecg")
                 } description: {
-                    Text("Start this container to monitor CPU and memory.")
-                } actions: {
-                    Button("Start Container", action: onStart)
-                        .disabled(isActionInProgress)
+                    Text("This container is not running. Its resource history is available only while it runs.")
                 }
             } else if let probe = activeProbe {
                 content(probe)
@@ -47,7 +42,12 @@ struct ContainerStatsTab: View {
         .task(id: container.id) { subscribe() }
         .onDisappear { unsubscribe() }
         .onChange(of: container.isRunning) { _, running in
-            if running { subscribe() } else { unsubscribe() }
+            if running {
+                hub.reset(container.id)
+                subscribe()
+            } else {
+                unsubscribe()
+            }
         }
     }
 
@@ -74,7 +74,7 @@ struct ContainerStatsTab: View {
                 StatsChartSection(
                     title: "CPU Usage",
                     symbol: "cpu",
-                    currentValue: Formatters.percent(probe.latest?.cpuPercent ?? 0),
+                    currentValue: probe.latest.map { Formatters.percent($0.cpuPercent) },
                     samples: samples,
                     yAxisTitle: "CPU (%)",
                     yAxisRange: 0...cpuUpperBound(probe),
@@ -90,7 +90,7 @@ struct ContainerStatsTab: View {
                 StatsChartSection(
                     title: "Memory Usage",
                     symbol: "memorychip",
-                    currentValue: memoryValueLabel(Double(probe.latest?.memBytes ?? 0)),
+                    currentValue: probe.latest.map { memoryValueLabel(Double($0.memBytes)) },
                     samples: memorySamples,
                     yAxisTitle: "Memory",
                     yAxisRange: 0...memoryUpperBound(probe),
@@ -99,6 +99,14 @@ struct ContainerStatsTab: View {
                     reference: memoryLimit > 0
                         ? StatsChartReference(value: Double(memoryLimit), label: "Memory limit")
                         : nil)
+
+                if let latest = probe.latest {
+                    Divider()
+
+                    NetworkActivitySection(
+                        latest: latest,
+                        samples: probe.networkRates)
+                }
 
                 if let sample = probe.latest, sample.memLimit > 0 {
                     Divider()
@@ -187,6 +195,234 @@ struct ContainerStatsTab: View {
     }
 }
 
+/// The Engine API gives the app cumulative counters for every container interface, not
+/// a ready-made throughput measurement. This section keeps the two facts distinct:
+/// totals are shown as reported, while the chart and its table only show rates that can
+/// be derived from a pair of complete, monotonic readings.
+private struct NetworkActivitySection: View {
+    let latest: StatsSample
+    let samples: [NetworkRateSample]
+
+    private var receivedRates: [Double] { samples.compactMap(\.receivedBytesPerSecond) }
+    private var transmittedRates: [Double] { samples.compactMap(\.transmittedBytesPerSecond) }
+    private var hasTrend: Bool { receivedRates.count >= 2 || transmittedRates.count >= 2 }
+
+    private var latestReceivedRate: Double? {
+        guard samples.last?.timestamp == latest.ts else { return nil }
+        return samples.last?.receivedBytesPerSecond
+    }
+
+    private var latestTransmittedRate: Double? {
+        guard samples.last?.timestamp == latest.ts else { return nil }
+        return samples.last?.transmittedBytesPerSecond
+    }
+
+    private var yAxisRange: ClosedRange<Double> {
+        let peak = (receivedRates + transmittedRates).max() ?? 0
+        return 0...roundedUpperBound(max(1_024, peak * 1.2))
+    }
+
+    private var chartSummary: String {
+        let intervalDescription = samples.count == 1 ? "1 interval" : "\(samples.count) intervals"
+        return "\(intervalDescription) calculated from Docker's cumulative interface counters. "
+            + "Current receive rate is \(spokenNetworkRateLabel(latestReceivedRate)). "
+            + "Current send rate is \(spokenNetworkRateLabel(latestTransmittedRate))."
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Label("Network Activity", systemImage: "network")
+                    .font(.headline)
+                    .accessibilityHeading(.h2)
+                Text("Recent receive and send rates derived from Docker interface counters.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if let received = latest.networkReceivedBytes,
+               let transmitted = latest.networkTransmittedBytes
+            {
+                LabeledContent("Received") {
+                    Text(Formatters.bytesString(received))
+                        .monospacedDigit()
+                        .textSelection(.enabled)
+                }
+                LabeledContent("Sent") {
+                    Text(Formatters.bytesString(transmitted))
+                        .monospacedDigit()
+                        .textSelection(.enabled)
+                }
+                LabeledContent("Receive Rate") {
+                    Text(networkRateLabel(latestReceivedRate))
+                        .monospacedDigit()
+                }
+                LabeledContent("Send Rate") {
+                    Text(networkRateLabel(latestTransmittedRate))
+                        .monospacedDigit()
+                }
+
+                Text("Received and sent are cumulative values reported by the Docker Engine.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                if hasTrend {
+                    Chart {
+                        ForEach(samples) { sample in
+                            if let received = sample.receivedBytesPerSecond {
+                                PointMark(
+                                    x: .value("Time", sample.timestamp),
+                                    y: .value("Throughput", received))
+                                    .foregroundStyle(by: .value("Direction", "Received"))
+                            }
+                            if let transmitted = sample.transmittedBytesPerSecond {
+                                PointMark(
+                                    x: .value("Time", sample.timestamp),
+                                    y: .value("Throughput", transmitted))
+                                    .foregroundStyle(by: .value("Direction", "Sent"))
+                            }
+                        }
+                    }
+                    .chartXScale(domain: samples.first!.timestamp...samples.last!.timestamp)
+                    .chartYScale(domain: yAxisRange)
+                    .chartLegend(position: .bottom)
+                    .chartXAxis {
+                        AxisMarks(values: .automatic(desiredCount: 4)) { _ in
+                            AxisGridLine()
+                            AxisTick()
+                            AxisValueLabel(format: .dateTime.hour().minute())
+                        }
+                    }
+                    .chartYAxis {
+                        AxisMarks(position: .leading, values: .automatic(desiredCount: 4)) { value in
+                            AxisGridLine()
+                            AxisTick()
+                            AxisValueLabel {
+                                if let number = value.as(Double.self) {
+                                    Text(networkRateLabel(number))
+                                }
+                            }
+                        }
+                    }
+                    .frame(height: 180)
+                    // Each mark is one exact interval derived from the Engine counters.
+                    // Points deliberately do not connect across an omitted reset/missing
+                    // interval. The category colour and legend distinguish receive from
+                    // send, rather than supplying dashboard decoration.
+                    .accessibilityChartDescriptor(
+                        NetworkActivityChartDescriptor(
+                            samples: samples,
+                            yAxisRange: yAxisRange,
+                            summary: chartSummary))
+                } else {
+                    ProgressView("Collecting another complete network reading")
+                        .controlSize(.small)
+                }
+
+                if !samples.isEmpty {
+                    DisclosureGroup("Network Rate Samples") {
+                        Table(samples) {
+                            TableColumn("Time") { sample in
+                                Text(sample.timestamp, format: .dateTime.hour().minute().second())
+                                    .monospacedDigit()
+                            }
+                            TableColumn("Received") { sample in
+                                Text(networkRateLabel(sample.receivedBytesPerSecond))
+                                    .monospacedDigit()
+                            }
+                            TableColumn("Sent") { sample in
+                                Text(networkRateLabel(sample.transmittedBytesPerSecond))
+                                    .monospacedDigit()
+                            }
+                        }
+                        .frame(height: min(max(CGFloat(samples.count) * 24 + 28, 96), 220))
+                        .accessibilityLabel("Network activity sample values")
+                    }
+                }
+            } else {
+                ContentUnavailableView {
+                    Label("Network Statistics Unavailable", systemImage: "network.slash")
+                } description: {
+                    Text("The Docker Engine did not report complete interface counters for this container.")
+                }
+                .frame(maxWidth: .infinity)
+            }
+        }
+        .padding(.vertical)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func roundedUpperBound(_ value: Double) -> Double {
+        let magnitude = pow(10, floor(log10(value)))
+        let normalized = value / magnitude
+        let step: Double
+        switch normalized {
+        case ...1: step = 1
+        case ...2: step = 2
+        case ...5: step = 5
+        default: step = 10
+        }
+        return step * magnitude
+    }
+}
+
+/// A two-series Audio Graph and VoiceOver representation of the exact rate samples in
+/// `NetworkActivitySection`. It gives the category colours a textual meaning too.
+private struct NetworkActivityChartDescriptor: AXChartDescriptorRepresentable {
+    let samples: [NetworkRateSample]
+    let yAxisRange: ClosedRange<Double>
+    let summary: String
+
+    func makeChartDescriptor() -> AXChartDescriptor {
+        let first = samples.first?.timestamp ?? .now
+        let last = samples.last?.timestamp ?? first.addingTimeInterval(1)
+        let xLowerBound = first.timeIntervalSinceReferenceDate
+        let xUpperBound = max(last.timeIntervalSinceReferenceDate, xLowerBound + 1)
+        let xAxis = AXNumericDataAxisDescriptor(
+            title: "Time",
+            range: xLowerBound...xUpperBound,
+            gridlinePositions: [],
+            valueDescriptionProvider: { value in
+                Date(timeIntervalSinceReferenceDate: value)
+                    .formatted(.dateTime.hour().minute().second())
+            })
+        let yAxis = AXNumericDataAxisDescriptor(
+            title: "Throughput",
+            range: yAxisRange,
+            gridlinePositions: [],
+            valueDescriptionProvider: { spokenNetworkRateLabel($0) })
+
+        func makeSeries(
+            _ name: String,
+            values: (NetworkRateSample) -> Double?
+        ) -> AXDataSeriesDescriptor? {
+            let points = samples.compactMap { sample -> AXDataPoint? in
+                guard let value = values(sample) else { return nil }
+                return AXDataPoint(
+                    x: sample.timestamp.timeIntervalSinceReferenceDate,
+                    y: value,
+                    label: "\(sample.timestamp.formatted(.dateTime.hour().minute().second())): \(spokenNetworkRateLabel(value))")
+            }
+            guard !points.isEmpty else { return nil }
+            return AXDataSeriesDescriptor(name: name, isContinuous: true, dataPoints: points)
+        }
+
+        let chartSeries = [
+            makeSeries("Received", values: \.receivedBytesPerSecond),
+            makeSeries("Sent", values: \.transmittedBytesPerSecond),
+        ].compactMap { $0 }
+
+        let descriptor = AXChartDescriptor(
+            title: "Network Activity",
+            summary: summary,
+            xAxis: xAxis,
+            yAxis: yAxis,
+            series: chartSeries)
+        descriptor.contentDirection = .leftToRight
+        return descriptor
+    }
+}
+
 private struct StatsChartSample: Identifiable {
     let index: Int
     let timestamp: Date
@@ -202,7 +438,7 @@ private struct StatsChartReference {
 private struct StatsChartSection: View {
     let title: String
     let symbol: String
-    let currentValue: String
+    let currentValue: String?
     let samples: [StatsChartSample]
     let yAxisTitle: String
     let yAxisRange: ClosedRange<Double>
@@ -243,7 +479,7 @@ private struct StatsChartSection: View {
             }
 
             LabeledContent("Current") {
-                Text(currentValue)
+                Text(currentValue ?? "—")
                     .monospacedDigit()
                     .textSelection(.enabled)
             }
@@ -408,4 +644,14 @@ private func memoryValueLabel(_ value: Double) -> String {
 private func spokenMemoryValueLabel(_ value: Double) -> String {
     let bytes = Int64(value.rounded())
     return "\(Formatters.bytesString(bytes)), \(bytes.formatted()) bytes"
+}
+
+private func networkRateLabel(_ value: Double?) -> String {
+    guard let value, value.isFinite, value >= 0 else { return "—" }
+    return "\(Formatters.bytesString(Int64(value.rounded())))/s"
+}
+
+private func spokenNetworkRateLabel(_ value: Double?) -> String {
+    guard let value, value.isFinite, value >= 0 else { return "unavailable" }
+    return "\(Formatters.bytesString(Int64(value.rounded()))) per second"
 }

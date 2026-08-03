@@ -36,9 +36,6 @@ struct ContainerDetailView: View {
     let container: ContainerSummary
     let model: AppModel
     let hub: TrackBStatsHub
-    let isBusy: Bool
-    let onAction: (ContainerAction) -> Void
-    let onRequestRemove: () -> Void
 
     @State private var tab: TrackBDetailTab
     @State private var inspectJSON: String
@@ -52,9 +49,6 @@ struct ContainerDetailView: View {
         container: ContainerSummary,
         model: AppModel,
         hub: TrackBStatsHub,
-        isBusy: Bool,
-        onAction: @escaping (ContainerAction) -> Void,
-        onRequestRemove: @escaping () -> Void,
         initialTab: TrackBDetailTab = .overview,
         preloadedInspectJSON: String? = nil,
         preloadedLogs: TrackBLogStore? = nil
@@ -62,9 +56,6 @@ struct ContainerDetailView: View {
         self.container = container
         self.model = model
         self.hub = hub
-        self.isBusy = isBusy
-        self.onAction = onAction
-        self.onRequestRemove = onRequestRemove
         self.preloadedLogs = preloadedLogs
         _tab = State(initialValue: initialTab)
         _inspectJSON = State(initialValue: preloadedInspectJSON ?? "")
@@ -138,9 +129,7 @@ struct ContainerDetailView: View {
             ContainerStatsTab(
                 container: container,
                 hub: hub,
-                client: model.client,
-                onStart: { onAction(.start) },
-                isActionInProgress: isBusy)
+                client: model.client)
         case .inspect:
             ContainerInspectTab(json: inspectJSON, isLoading: isLoadingInspect, errorText: inspectError)
         }
