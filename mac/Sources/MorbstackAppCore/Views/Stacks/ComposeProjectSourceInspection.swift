@@ -110,7 +110,7 @@ struct ComposeProjectSourceInspection: Equatable {
     static func inspect(text: String, sourceKind: ComposeProjectSourceKind) -> Self {
         switch sourceKind {
         case .projectEnvironment:
-            Self(
+            return Self(
                 environmentDeclarations: environmentDeclarations(in: text),
                 serviceEnvironmentDeclarations: [],
                 environmentFileDeclarations: [],
@@ -119,7 +119,7 @@ struct ComposeProjectSourceInspection: Equatable {
                 secretGrants: [])
         case .composeYAML:
             let lines = sourceLines(in: text)
-            Self(
+            return Self(
                 environmentDeclarations: [],
                 serviceEnvironmentDeclarations: serviceEnvironmentDeclarations(in: lines),
                 environmentFileDeclarations: environmentFileDeclarations(in: lines),

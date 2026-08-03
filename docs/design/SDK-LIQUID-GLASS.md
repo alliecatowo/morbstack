@@ -40,33 +40,14 @@ Sources, by short name used in the "Source" column:
 `mac/Package.swift` declares:
 
 ```swift
-platforms: [ .macOS(.v15) ]
+platforms: [ .macOS(.v26) ]
 ```
 
-**Every Liquid Glass API in this document is `macOS 26.0`.** At a `.v15` deployment target
-the compiler will reject an ungated call. There are exactly two legal shapes:
-
-```swift
-// A. Runtime branch — required whenever there is a sensible pre-26 fallback.
-if #available(macOS 26.0, *) {
-    content.glassEffect(.regular, in: .rect(cornerRadius: 12, style: .continuous))
-} else {
-    content.background(.regularMaterial, in: .rect(cornerRadius: 12, style: .continuous))
-}
-
-// B. Annotated helper — for a whole view that only exists on 26.
-@available(macOS 26.0, *)
-struct GlassOnlyThing: View { … }
-```
-
-Because shape B poisons every call site, **the reference implementation in
-`MorbstackAppCore/Design/` uses shape A exclusively**, wrapped once per surface in
-`MorbGlass.swift` so that no feature file ever writes `#available` itself. Implementation
-agents must call the wrappers. **An agent that writes a bare `.glassEffect(…)` in a feature
-file has broken the build for anyone on macOS 15 and will be reverted.**
-
-Raising the floor to `.macOS(.v26)` is a separate decision with release-engineering
-consequences and is **not** in scope for this redesign.
+Morbstack is a Tahoe-only app. Its package deployment target and bundle minimum system
+version are both macOS 26, so AppKit and SwiftUI use their current native window, toolbar,
+sidebar, inspector, and Liquid Glass behavior. New code does not need a macOS 15 fallback
+or availability wrapper for a macOS 26 API. It should still prefer the system containers
+and controls over authoring custom glass.
 
 ---
 

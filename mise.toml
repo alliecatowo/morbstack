@@ -193,7 +193,7 @@ iconutil --convert icns --output mac/.build/AppIcon.icns mac/.build/AppIcon.icon
 #
 # Ad-hoc signing (`--sign -`) is the last step because every earlier step
 # mutates the bundle, and a signature only covers what was there when it was
-# made. Unsigned, macOS 15 refuses to launch the bundle at all.
+# made. Unsigned, macOS 26 refuses to launch the bundle at all.
 [tasks.app]
 description = "Build, assemble, and sign Morbstack.app into dist/"
 depends = ["app-icon"]

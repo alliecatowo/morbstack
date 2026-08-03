@@ -29,7 +29,7 @@ the right native structure.
 
 The current source already gets the shell mostly right:
 
-- `App.swift` uses a real `WindowGroup`, `.windowToolbarStyle(.unified)`, a two-column
+- `App.swift` uses a real `WindowGroup`, `.windowToolbarStyle(.automatic)`, a two-column
   `NavigationSplitView`, and `List(selection:)` with `.sidebar`.
 - The sidebar's default selection and its system-managed collapse interaction are
   intentionally retained. They are the successful reference behavior for the rest of
@@ -57,7 +57,8 @@ are accepted.
 
 ### 1. Keep the native frame native
 
-- Use `WindowGroup` plus `.windowToolbarStyle(.unified)`.
+- Use `WindowGroup` plus `.windowToolbarStyle(.automatic)` so Tahoe selects the current
+  titlebar and toolbar metrics.
 - Keep `NavigationSplitView` for primary navigation and default `.sidebar` `List` for
   the navigation column. Never override its selection color or animate a replacement.
 - Use `.inspector(isPresented:)` for a selected record's optional trailing details.

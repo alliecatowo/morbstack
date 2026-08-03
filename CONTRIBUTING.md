@@ -81,7 +81,7 @@ for the guest PID 1 under `guest/morbinit/`).
 
 - **Xcode 26 or later** — installs the Swift 6.3 compiler and
   `Virtualization.framework`, both required. `mac/Package.swift` declares
-  `swift-tools-version: 6.0` and a `macOS(.v15)` deployment target.
+  `swift-tools-version: 6.2` and a `macOS(.v26)` deployment target.
 - **[mise](https://mise.jdx.dev/)** — pins the Rust toolchain
   (`mise.toml`: `rust = "stable"`) so every contributor and CI build
   against the same compiler. Swift is not mise-managed; it comes from

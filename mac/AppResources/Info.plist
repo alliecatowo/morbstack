@@ -47,7 +47,7 @@
 	<string>AppIcon</string>
 
 	<key>LSMinimumSystemVersion</key>
-	<string>15.0</string>
+	<string>26.0</string>
 
 	<!-- Morbstack has a real main window and belongs in the Dock and the app
 	     switcher. The MenuBarExtra is an addition to that, not a replacement for

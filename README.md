@@ -18,7 +18,7 @@ glue.
 -->
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![CI](https://github.com/morbstack/morbstack/actions/workflows/ci.yml/badge.svg)](https://github.com/morbstack/morbstack/actions/workflows/ci.yml)
-![macOS 15+](https://img.shields.io/badge/macOS-15%2B-lightgrey)
+![macOS 26+](https://img.shields.io/badge/macOS-26%2B-lightgrey)
 ![Apple Silicon](https://img.shields.io/badge/arch-Apple%20Silicon-lightgrey)
 
 - **Free forever**, Apache-2.0 — no license nags, no seat count, no
@@ -135,9 +135,10 @@ authorize Xcode Helper under Accessibility before it can drive the app. See
 - **Apple silicon.** `Virtualization.framework`'s Rosetta-backed amd64
   path and this project's own testing both assume arm64; there is no
   Intel Mac support story.
-- **macOS 15 (Sequoia) or later** to run Morbstack — `mac/Package.swift`
-  declares a `macOS(.v15)` deployment target and `Info.plist` sets
-  `LSMinimumSystemVersion` to `15.0`.
+- **macOS 26 (Tahoe) or later** to run Morbstack — `mac/Package.swift`
+  declares a `macOS(.v26)` deployment target and `Info.plist` sets
+  `LSMinimumSystemVersion` to `26.0`, so the app adopts Tahoe’s native window
+  and Liquid Glass behavior rather than compatibility metrics.
 - **Xcode 26 or later** to build it — needed for the Swift 6.3 compiler
   and `Virtualization.framework`.
 

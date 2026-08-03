@@ -1,4 +1,4 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.2
 //
 // Morbstack — a Docker Desktop replacement for macOS.
 // Copyright 2026 The Morbstack Authors. Licensed under the Apache License, Version 2.0.
@@ -18,7 +18,7 @@ let commonSwiftSettings: [SwiftSetting] = [
 let package = Package(
     name: "morbstack",
     platforms: [
-        .macOS(.v15)
+        .macOS(.v26)
     ],
     products: [
         .library(name: "MorbstackKit", targets: ["MorbstackKit"]),

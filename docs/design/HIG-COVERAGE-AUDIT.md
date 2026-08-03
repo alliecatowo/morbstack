@@ -21,7 +21,7 @@ and Apple's [design principles](https://developer.apple.com/design/human-interfa
 
 | Semantic need | Apple guidance to read | Default native implementation | Explicitly reject |
 | --- | --- | --- | --- |
-| Window frame, resizing, active/inactive state | [Windows](https://developer.apple.com/design/human-interface-guidelines/windows) | `WindowGroup`, unified toolbar, system window background | Painted titlebars, content pretending to be chrome |
+| Window frame, resizing, active/inactive state | [Windows](https://developer.apple.com/design/human-interface-guidelines/windows) | `WindowGroup`, automatic system toolbar, system window background | Painted titlebars, content pretending to be chrome |
 | Top-level navigation | [Sidebars](https://developer.apple.com/design/human-interface-guidelines/sidebars), [NavigationSplitView](https://developer.apple.com/documentation/swiftui/navigationsplitview) | `NavigationSplitView` + `List(.sidebar)` | Custom left rail, custom selection, sidebar overlay button |
 | Dense operational records | [Lists and tables](https://developer.apple.com/design/human-interface-guidelines/lists-and-tables), [Table](https://developer.apple.com/documentation/swiftui/table) | Sortable/selectable `Table`, native columns/context menu | ScrollView of cards, hard-positioned `HStack` rows, fake table header |
 | Actual hierarchy | [Outline views](https://developer.apple.com/design/human-interface-guidelines/outline-views) | `Table(children:)`/`OutlineGroup`; narrow `NSOutlineView` bridge only if required | Nested cards or custom disclosure layout |
@@ -64,6 +64,29 @@ normal-width dark-mode application window displayed the named native system patt
 against local data; they do not approve unexercised actions or substitute for light,
 narrow-width, keyboard, VoiceOver, contrast/transparency, motion, XCUITest, or mutation
 evidence.
+
+### 2026-08-03 Tahoe window-target correction
+
+**User task:** make the main window use the current macOS-native titlebar and
+standard-window control metrics rather than the compact compatibility frame.
+
+**Apple sources consulted:** [Windows](https://developer.apple.com/design/human-interface-guidelines/windows),
+[NSWindow toolbar styles](https://developer.apple.com/documentation/appkit/nswindow/toolbarstyle),
+and [SwiftUI automatic window toolbar style](https://developer.apple.com/documentation/swiftui/windowtoolbarstyle/automatic).
+
+**Native choice:** `Package.swift` now uses PackageDescription 6.2 and
+`.macOS(.v26)`; `Info.plist` declares 26.0 as the matching runtime floor. The
+main `WindowGroup` requests `.windowToolbarStyle(.automatic)`, so AppKit owns
+Tahoe's titlebar height, traffic-light sizing, toolbar placement, and
+active/inactive treatment. No AppKit bridge or manual control scaling was added.
+
+**Evidence:** the clean `mise run --raw app` bundle reports Mach-O `minos 26.0`
+and `sdk 26.0`, with `LSMinimumSystemVersion` 26.0; its signature passed
+`codesign --verify --deep --strict`. Computer Use launched that exact bundle in
+dark appearance and compared its full WindowServer frame with Finder on the same
+macOS 26.4 host. The standard controls now use the same larger system metric.
+This narrow check does not replace the outstanding full light/narrow/focus and
+route-interaction acceptance pass.
 
 ### 2026-08-03 WindowServer review: visual acceptance remains rejected
 

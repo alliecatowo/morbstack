@@ -105,16 +105,13 @@ public struct MorbstackMainApp: App {
                 isPalettePresented: $isPalettePresented,
                 isCLISetupPresented: $isCLISetupPresented)
         }
-        // `.unified`, and emphatically **not** `.unifiedCompact(showsTitle: false)`,
-        // which is what shipped before this pass.
-        //
-        // Measured on the real window rather than inferred: `showsTitle: false` sets
-        // `NSWindow.titleVisibility = .hidden`, and that suppresses the *subtitle* as
-        // well as the title. Every screen was dutifully setting `.navigationTitle` and
-        // `.navigationSubtitle` and the window was throwing both away, which is the
-        // whole reason the titlebar read as empty. `.unified` is what Finder, Mail and
-        // System Settings use: one bar carrying title, subtitle and toolbar items.
-        .windowToolbarStyle(.unified)
+        // Tahoe owns the titlebar and the standard-window controls.  Request its
+        // automatic toolbar style rather than freezing the app into a pre-Tahoe
+        // unified metric: AppKit can then select the system's current titlebar height,
+        // traffic-light sizing, title/subtitle treatment, and toolbar arrangement.
+        // This still deliberately avoids `.unifiedCompact(showsTitle: false)`, whose
+        // hidden title also suppresses the route subtitle.
+        .windowToolbarStyle(.automatic)
 
         // `.window` rather than the default `.menu`: the popover is a laid-out SwiftUI
         // view with its own header, rows and footer, and `.menu` would try to render it
