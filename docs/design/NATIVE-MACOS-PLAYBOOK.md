@@ -201,6 +201,40 @@ bad native frame behind a plausible inner-content PNG.
    behavior, a native floating presentation only when required, and concise menu-bar
    rows. These are part of the app frame and get a separate real-window review.
 
+## Choose the content form, not a house style
+
+Native macOS is not a mandate to put every route in a table. The application should
+feel like a coherent workstation, not an Activity Monitor clone. Start from the
+person's immediate task and the shape of the information, then choose the smallest
+system presentation that lets them complete it.
+
+| User task and data shape | Native presentation | Morbstack examples | Avoid |
+| --- | --- | --- | --- |
+| Scan and compare many peer records across stable attributes | Sortable, resizable `Table` | Containers, local images, volumes, networks, build-cache entries | Cards, arbitrary row fills, or a table whose columns do not answer a comparison question |
+| Work through an actual parent → child structure | Outline/table with disclosure or a purpose-built detail split | Compose project → service → container; Kubernetes hierarchy | Flattening relationships into repeated tables or nested cards |
+| Create or revise a focused configuration | `Form` in a sheet/window; standard controls and clear apply/revert semantics | Resources, file sharing, CLI setup, future run/configuration flow | Dashboard controls, giant toggles, or an always-visible configuration column |
+| Edit source text that must retain user fidelity | Document-oriented `TextEditor`/AppKit text view with Save, Revert, dirty state, and a plain source preview | Compose YAML and `.env` workflows | Lossy “visual YAML” builders, autosave-to-deployment, cards pretending to be an editor |
+| Review one selected operational object | System trailing `.inspector` with `Form` and `LabeledContent` | Image facts, container overview, volume/network properties | A permanent hand-painted right panel or a metric-card grid |
+| Read an evolving command/result stream | Monospaced scrolling text viewport with selection, search, copy, and clear lifecycle state | Container logs, build progress, inspect JSON | Decorative terminal chrome, tinted panels, fake streaming or a chart without a question |
+| Understand a real trend, comparison, or capacity question over time | Swift Charts plus an accessible textual/table equivalent | Container statistics, build-duration trend, measured storage history | A colored “health” dashboard or progress bar used as decoration |
+| Begin with nothing, a failed query, or unavailable capability | `ContentUnavailableView` with one honest, safe next action | No local images, no Compose document selected, unavailable registry query | Blank panes, motivational copy, fabricated counts, or disabled fake buttons |
+
+The main window can mix these presentations. A Compose route, for example, should
+combine an outline for project hierarchy, a source editor for selected YAML, and an
+inspector only for metadata; forcing all three into a table loses the user's mental
+model. Conversely, Containers is a natural table because the default task is comparing
+many peer processes by name, image, state, ports, and age. Apple's table guidance
+supports tables for sortable multi-attribute productivity data and recommends a
+collection when items vary widely in size or imagery; that distinction is binding for
+future routes. [Lists and tables](https://developer.apple.com/design/human-interface-guidelines/lists-and-tables)
+
+Real-window review must reject a route when it has become visually repetitive: a field
+of uniform rows, rectangular bands, or empty stripes is not justified merely because
+it uses `Table`. Confirm that row count and background follow the system's table
+behavior at the current OS release, that empty space reads as a content surface rather
+than skeleton UI, and that the route could not be explained more clearly by an outline,
+form, editor, inspector, or unavailable state.
+
 ## Migration sequence
 
 1. **Freeze custom visual expansion.** No new `Morb*` visual component, custom fill,
