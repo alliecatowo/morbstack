@@ -67,6 +67,22 @@ pub const AF_VSOCK: c_int = 40;
 pub const SOCK_STREAM: c_int = 1;
 pub const VMADDR_CID_ANY: u32 = 0xffffffff;
 
+// ---- descriptor-confined filesystem operations ----------------------------
+
+/// `openat(2)`'s pseudo-directory descriptor for an absolute path.
+pub const AT_FDCWD: c_int = -100;
+/// Refuse a final symlink rather than letting a selected share point at an
+/// arbitrary guest pathname.
+pub const O_NOFOLLOW: c_int = 0o400_000;
+/// Never let a FIFO in a shared project make the notification receiver block.
+pub const O_NONBLOCK: c_int = 0o4_000;
+/// Open only a directory; used for every interior component while resolving a
+/// selected-root-relative notification path.
+pub const O_DIRECTORY: c_int = 0o200_000;
+/// A receiver never writes file contents, so an ordinary read-only descriptor
+/// is enough for metadata + fchmod operations.
+pub const O_RDONLY: c_int = 0;
+
 // ---- shutdown(2) "how" values, from sys/socket.h ---------------------------
 
 pub const SHUT_RD: c_int = 0;
@@ -160,6 +176,8 @@ mod raw {
         pub fn signal(signum: c_int, handler: usize) -> usize;
         pub fn getpid() -> i32;
         pub fn socket(domain: c_int, ty: c_int, protocol: c_int) -> c_int;
+        pub fn openat(dirfd: c_int, pathname: *const c_char, flags: c_int, mode: c_int) -> c_int;
+        pub fn fchmod(fd: c_int, mode: u32) -> c_int;
         pub fn bind(sockfd: c_int, addr: *const c_void, addrlen: u32) -> c_int;
         pub fn listen(sockfd: c_int, backlog: c_int) -> c_int;
         pub fn accept(sockfd: c_int, addr: *mut c_void, addrlen: *mut u32) -> c_int;
@@ -167,6 +185,49 @@ mod raw {
         pub fn shutdown(sockfd: c_int, how: c_int) -> c_int;
         pub fn poll(fds: *mut PollFd, nfds: c_ulong, timeout: c_int) -> c_int;
         pub fn uname(buf: *mut Utsname) -> c_int;
+    }
+}
+
+/// Opens either an absolute selected root or one component below an already
+/// opened root.  `O_NOFOLLOW` is deliberate: live-share events are hints from
+/// the host, never authority to traverse a project symlink into another guest
+/// path.
+pub fn openat_readonly_no_follow(
+    parent: RawFd,
+    path: &str,
+    require_directory: bool,
+) -> io::Result<std::fs::File> {
+    let path = CString::new(path).map_err(invalid_input)?;
+    let mut flags = O_RDONLY | O_NOFOLLOW | O_NONBLOCK;
+    if require_directory {
+        flags |= O_DIRECTORY;
+    }
+    let fd = unsafe { raw::openat(parent, path.as_ptr(), flags, 0) };
+    if fd < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        // SAFETY: `openat` returned one owned descriptor and every error path
+        // above leaves no descriptor to clean up.
+        Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+    }
+}
+
+/// Makes a no-content, no-permission-bit-change metadata operation through
+/// the guest VFS.  The kernel's fsnotify path emits an attribute notification
+/// for the watched object, while the mode bits remain exactly as they were.
+///
+/// The caller must supply a descriptor opened with
+/// ``openat_readonly_no_follow``; this function never accepts a path.
+pub fn nudge_metadata(file: &std::fs::File) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    use std::os::unix::fs::MetadataExt;
+
+    let mode = file.metadata()?.mode() & 0o7777;
+    let result = unsafe { raw::fchmod(file.as_raw_fd(), mode) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
     }
 }
 

@@ -1,24 +1,25 @@
-//! Validation boundary for a future guest-local synchronized-share receiver.
+//! Validation boundary for the live VirtioFS notification receiver.
 //!
-//! This module is intentionally inert. It binds no vsock port, opens no cache,
-//! mounts no replacement filesystem, watches no directory, and sends no reply.
-//! The current control-plane advertisement remains `"unavailable"`. The purpose
-//! of keeping the validation vocabulary in the guest now is to make a later
-//! authenticated transport fail closed instead of turning a host path or an
-//! FSEvent hint into an authority to operate on an arbitrary guest path.
+//! The receiver in `live_share_receiver.rs` consumes the typed session and
+//! record values in this module.  It deliberately does not claim to inject a
+//! synthetic record into another process's inotify descriptor: Linux owns
+//! those descriptors.  Instead, after this validation boundary has admitted a
+//! host invalidation for an exact selected root, the receiver performs a
+//! descriptor-confined, same-mode metadata operation on the existing VirtioFS
+//! object.  That operation runs through the guest kernel and therefore emits a
+//! normal filesystem notification to workloads which watch that object.
 //!
-//! A future implementation must not make the capability `"ready"` merely
-//! because [`validate_hello`] accepted a syntactically valid message. It must
-//! additionally establish an authenticated host peer, complete and durably
-//! acknowledge initial synchronization of every selected root, create the
-//! guest-local cache, and mount it at the selected path. Those mechanisms do
-//! not exist in this checkout.
+//! This module remains the authority boundary.  A host pathname, FSEvents hint,
+//! or arbitrary guest path cannot become a receiver operation without an
+//! authenticated session, an exact live backing share, an immutable root claim,
+//! and a monotonically ordered record.
 
 use std::collections::HashSet;
 use std::fmt;
 
-/// The only capability currently exposed through MRB0 `info`.
-pub const ADVERTISED_CAPABILITY: &str = "unavailable";
+/// The capability exposed through MRB0 `info` when this initramfs contains the
+/// dedicated authenticated receiver.
+pub const ADVERTISED_CAPABILITY: &str = "ready";
 
 /// The reserved synchronized-share record schema. A peer must match this
 /// value exactly; absent and newer versions are both rejected rather than
@@ -38,7 +39,7 @@ pub const MAX_PATH_BYTES: usize = 4_096;
 pub const MAX_ROOT_ID_BYTES: usize = 64;
 
 /// VirtioFS tags are protocol labels, not mount paths. Keeping the same tight
-/// syntax as root identifiers means a future guest can compare an immutable
+/// syntax as root identifiers means the guest can compare an immutable
 /// host claim to the actual mount it created without accepting separators or
 /// control characters.
 pub const MAX_SHARE_TAG_BYTES: usize = 64;
@@ -54,7 +55,7 @@ pub const CAPABILITY_BYTES: usize = 32;
 /// the receiver must never accept a record from an earlier guest process.
 pub const GUEST_BOOT_ID_BYTES: usize = 16;
 
-/// One actual VirtioFS mount the future lifecycle owner has verified. This is
+/// One actual VirtioFS mount the lifecycle owner has verified. This is
 /// deliberately passed in rather than read from a configuration file: a
 /// selected root is valid only while the exact backing mount exists.
 #[derive(Clone, PartialEq, Eq)]
@@ -64,11 +65,11 @@ pub struct MountedShare {
     pub read_only: bool,
 }
 
-/// The future host's immutable description of one selected project root.
+/// The host's immutable description of one selected project root.
 ///
 /// `guest_path` and `backing_share_path` use the same absolute spelling. The
-/// guest applies the cache at `guest_path`; it must never infer another path
-/// from a Docker bind request or a broad parent share.
+/// receiver operates below `guest_path`; it must never infer another path from
+/// a Docker bind request or a broad parent share.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RootClaim {
     pub root_id: String,
@@ -79,11 +80,9 @@ pub struct RootClaim {
     pub epoch: u64,
 }
 
-/// The first message of a future dedicated data-plane connection.
-///
-/// This is a typed representation only. There is deliberately no decoder or
-/// listener in M0: MRB0 remains the request/reply control channel and must not
-/// be repurposed as a long-lived synchronized-share stream.
+/// The first message of the dedicated data-plane connection. It is decoded by
+/// the guest receiver on its own vsock port; MRB0 remains request/reply control
+/// traffic and is never repurposed as the event stream.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Hello {
     pub contract_version: i64,
@@ -94,7 +93,7 @@ pub struct Hello {
 }
 
 /// The two durable synchronization directions. The guest-side receiver only
-/// accepts `HostToGuest`; outbound guest changes require their own future
+/// accepts `HostToGuest`; outbound guest changes require their own separate
 /// authenticated sender and never re-enter this receive path.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
@@ -102,8 +101,10 @@ pub enum Direction {
     GuestToHost,
 }
 
-/// Every future content, operation, manifest, commit, or rescan record must
-/// carry this header before its payload is interpreted.
+/// Internal validation header for each accepted host-to-guest invalidation.
+/// The line protocol authenticates its immutable session/root claims during
+/// hello; the receiver materializes those claims in this value before it
+/// accepts a later record.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RecordHeader {
     pub contract_version: i64,
@@ -118,7 +119,7 @@ pub struct RecordHeader {
 
 /// A relative cache entry that has passed lexical containment checks.
 ///
-/// Its field is private so a future filesystem applier cannot accidentally
+/// Its field is private so a filesystem applier cannot accidentally
 /// receive an unchecked path from a decoder.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RelativePath(String);
@@ -131,9 +132,8 @@ impl RelativePath {
 
 /// The result of validating a `hello`. It is deliberately not a ready cache,
 /// a mount token, or an authentication result. The opaque peer capability is
-/// intentionally discarded after its structural validation; an actual
-/// transport must verify possession without exposing that secret in logs or
-/// diagnostics.
+/// intentionally discarded after structural validation; the receiver verifies
+/// possession separately without exposing that secret in logs or diagnostics.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ValidatedSession {
     session_id: [u8; SESSION_ID_BYTES],
@@ -149,9 +149,9 @@ struct ValidatedRoot {
     read_only: bool,
 }
 
-/// Tracks the next host-to-guest sequence the future receiver expects. This
-/// has no persistence and must not be mistaken for the future durable cache
-/// journal; it only makes an eventual receiver reject replayed, skipped, and
+/// Tracks the next host-to-guest sequence the receiver expects. This
+/// has no persistence and must not be mistaken for a durable cache
+/// journal; it only makes the receiver reject replayed, skipped, and
 /// out-of-order records before looking at their payload.
 #[derive(Clone, PartialEq, Eq)]
 pub struct SequenceCursor {
@@ -166,7 +166,7 @@ impl Default for SequenceCursor {
     }
 }
 
-/// A validation failure safe to surface to a future peer. It deliberately
+/// A validation failure safe to surface to a peer. It deliberately
 /// contains no capability bytes or file contents.
 #[derive(Clone, PartialEq, Eq)]
 pub enum ValidationError {
@@ -306,9 +306,9 @@ impl fmt::Display for ValidationError {
 impl std::error::Error for ValidationError {}
 
 /// Validates the initial typed message against the exact currently mounted
-/// shares. It performs no authentication, I/O, cache creation, or mount. An
-/// eventual data-plane owner must first authenticate the peer and then use the
-/// returned session only while the mount generation remains unchanged.
+/// shares. It performs no authentication, I/O, cache creation, or mount. The
+/// data-plane receiver authenticates the peer separately and uses the returned
+/// session only while the mount generation remains unchanged.
 pub fn validate_hello(
     hello: Hello,
     mounted_shares: &[MountedShare],
@@ -448,7 +448,7 @@ impl ValidatedSession {
     }
 
     /// Validates an entry path for an already-authorized root. It returns only
-    /// a lexically constrained relative path; a future applier must still use
+    /// a lexically constrained relative path; the receiver must still use
     /// descriptor-relative filesystem operations and refuse symlink escapes.
     pub fn validate_entry_path(
         &self,
@@ -461,7 +461,7 @@ impl ValidatedSession {
         validate_relative_path(path)
     }
 
-    /// Reports whether a root was declared read-only. A future receiver uses
+    /// Reports whether a root was declared read-only. The receiver uses
     /// this only to reject guest-to-host mutations; it does not grant host
     /// writes until the authenticated initial-sync lifecycle exists.
     pub fn root_is_read_only(&self, root_id: &str) -> Result<bool, ValidationError> {
@@ -471,11 +471,34 @@ impl ValidatedSession {
             .map(|root| root.read_only)
             .ok_or_else(|| ValidationError::UnknownRoot(root_id.to_string()))
     }
+
+    /// Resolves an already-authorized root identifier to its immutable guest
+    /// mount-relative path.  The returned path must still be opened with
+    /// descriptor-relative, no-follow operations by a receiver; exposing the
+    /// string here is not authority to concatenate an untrusted suffix.
+    pub fn guest_path_for_root(&self, root_id: &str) -> Result<&str, ValidationError> {
+        self.roots
+            .iter()
+            .find(|root| root.root_id == root_id)
+            .map(|root| root.guest_path.as_str())
+            .ok_or_else(|| ValidationError::UnknownRoot(root_id.to_string()))
+    }
+
+    /// Immutable epoch from the exact accepted root claim.  A receiver must
+    /// place this value in every record header instead of inventing a default;
+    /// doing so makes a reconnect or mount-generation change fail closed.
+    pub fn epoch_for_root(&self, root_id: &str) -> Result<u64, ValidationError> {
+        self.roots
+            .iter()
+            .find(|root| root.root_id == root_id)
+            .map(|root| root.epoch)
+            .ok_or_else(|| ValidationError::UnknownRoot(root_id.to_string()))
+    }
 }
 
 /// Validates a nonempty relative entry path. It is deliberately stricter than
 /// a generic filesystem API: no leading slash, empty component, dot segment,
-/// parent traversal, or NUL can reach a future cache applier.
+/// parent traversal, or NUL can reach the filesystem applier.
 pub fn validate_relative_path(path: &str) -> Result<RelativePath, ValidationError> {
     if path.is_empty()
         || path.len() > MAX_PATH_BYTES

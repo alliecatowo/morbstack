@@ -321,6 +321,7 @@ Failure:
 | 2378 | Datagram-dial: framed UDP relay for published container ports |
 | 2379 | Publish-all allocator: patched Moby asks the host to reserve `docker -P` endpoints |
 | 2380 | Listener probe: host verifies a Docker-exposed guest host-network TCP/UDP listener |
+| 2381 | Live-share receiver: authenticated host FSEvents invalidations for explicitly selected VirtioFS project roots |
 
 Port 2375 is the conventional plaintext Docker Engine API port; it is used
 here only on the host<->guest vsock link, which is not reachable from the
@@ -344,7 +345,7 @@ persistent ext4 disk keeps the cost proportional to the feature's use. See
 §3.5.
 
 New ports must be added to this table before use. Do not reuse 1024, 2375,
-2376, 2377, 2378, 2379, or 2380 for anything else.
+2376, 2377, 2378, 2379, 2380, or 2381 for anything else.
 
 ### 3.1 The vsock 2375 <-> `docker.sock` relay, end to end
 
@@ -697,6 +698,71 @@ has written, and the guest publishes its own received-byte count through the
 throughout — so a UI can render a progress bar without either side having to
 interleave control messages into a bulk stream.
 
+### 3.6 The vsock 2381 live-share notification protocol
+
+Transport: vsock, port 2381. This channel exists only when `live_share_paths`
+contains one or more explicit project directories. It is not a Docker API, a
+general host file server, or a way for a container to ask for an arbitrary
+Mac path.
+
+VirtioFS already provides the changed bytes. The receiver's job is narrower:
+after it verifies a host invalidation belongs to an exact mounted root, it
+performs a descriptor-confined same-mode metadata operation on that existing
+guest object. That guest VFS operation emits a normal Linux filesystem
+attribute notification to watchers of the bind-mounted path. The protocol
+therefore carries invalidations, not invented `IN_MODIFY`/`IN_DELETE` masks.
+
+Every connection begins with a fresh guest boot ID and a fresh host capability:
+
+```text
+guest -> host  BOOT <32 lowercase hex>
+host  -> guest HELLO 1 <session-32hex> <boot-32hex> <capability-64hex> <root-count>
+host  -> guest ROOT <root-id> <virtiofs-tag> <pct-root> <pct-backing> <0|1> <epoch>
+                 # repeated exactly <root-count> times, 1...8
+host  -> guest COMMIT <hmac-sha256-hex of every HELLO/ROOT line including LF>
+guest -> host  READY <session-32hex> <boot-32hex> <hmac-sha256-hex>
+```
+
+The guest accepts `HELLO` only when the guest boot ID matches the current Linux
+boot, each root is a strict descendant of an actually mounted VirtioFS share
+with the exact advertised tag/access mode, roots do not overlap, all IDs and
+paths are bounded, and the commitment verifies. The capability becomes the
+per-session HMAC-SHA256 key. It is generated fresh in host memory, never
+written to configuration or diagnostics, and becomes invalid when either side
+closes the session.
+
+After `READY`, one host record is in flight at a time:
+
+```text
+host  -> guest EVENT <sequence> <root-id> <i|r> <pct-relative-path|-> <hmac-hex>
+guest -> host  ACK <session-32hex> <boot-32hex> <sequence> <applied|rescan-required|rejected> <hmac-hex>
+host  -> guest CLOSE <sequence> <hmac-hex>
+guest -> host  STOPPED
+```
+
+`i` is a scoped invalidation; the relative path is lexically constrained before
+the guest opens it below a no-follow descriptor for the immutable root. If the
+path disappeared before delivery, the nearest existing parent is nudged so a
+directory watcher still observes the namespace change. `r` is a root rescan.
+The guest walks no more than 65,536 non-symlink objects and 64 directory levels
+through descriptor-relative no-follow opens. It returns `rescan-required` on
+that bound rather than following a link or reporting a partial root rescan as
+complete; the host closes the session and reports a terminal failure instead
+of retrying the same oversized root. Any bad HMAC, mismatched authenticated hello claim (including its
+boot/session/root/epoch), bad sequence or path, or rejected acknowledgement
+closes the session.
+
+The macOS FSEvent stream is scoped to the selected roots, starts only after
+`READY`, and stops before its transport is released. The host sends an initial
+bounded `r` for every selected root before it calls the session active, so an
+edit in the `READY`-to-stream setup interval cannot be silently missed. Its
+1,024-record buffer maps `MustScanSubDirs`, drop flags, ID wrap, root change,
+overlong paths, and queue overflow to `r`; a dropped/wrapped stream requests
+one rescan for every selected root. A short matching-path echo coalescing
+window prevents the guest's metadata nudge from recursively re-entering the
+host stream. A disconnect tears down both the stream and capability before a
+new connection attempts a fresh boot/session handshake.
+
 ## 4. Versioning and compatibility rules
 
 M0 is unversioned at the protocol level beyond the implicit "MRB0" magic
@@ -882,78 +948,24 @@ to a live `/private/tmp` share. The Docker proxy accepts a bare macOS `/tmp` bin
 source only when this value is exactly `true`; an absent field from an older guest is
 not evidence that the alias exists.
 
-### 5.4 Future scoped file-event contract
+### 5.4 Scoped live-share notifications
 
-VirtioFS gives the guest coherent host bytes but does not generate a Linux inotify
-notification when a Mac editor changes a shared file. This is not something the host
-can solve by inventing an inotify mask: inotify queues are kernel-owned, and Linux has
-no userspace operation that inserts an event into an arbitrary watcher. The present
-guest reports this explicit additive `info` capability:
+`live_share_paths` is opt-in and empty by default. Every selected root must be
+a real, existing directory that is a strict descendant of one configured,
+writable VirtioFS share; a broad share such as `/Users` is rejected as a live
+root. The daemon validates the guest's matching mounted-share report and the
+receiver's versioned `info` advertisement before it starts a host FSEvent
+stream.
 
 ```text
-share_event_bridge: "unavailable"
+share_event_bridge: "ready"
 share_event_bridge_contract_version: 1
 ```
 
-`"unavailable"` means there is no guest filesystem/kernel injection endpoint. An
-absent field means an older guest did not report a capability. Neither value authorizes
-the host to start FSEvents or claim hot reload.
-
-`share_event_bridge_contract_version` is additive metadata that reserves the shape of
-the future acknowledged delivery records below. It is **not** receiver negotiation:
-the current guest reports version `1` while `share_event_bridge` remains
-`"unavailable"`. A future host must require both an exact version it implements and
-an explicit `"ready"` receiver capability with a separately documented duplex,
-acknowledged transport before constructing an FSEvent stream. An absent version from an
-older guest is unsupported, not version `1` by default.
-
-The guest now compiles a validation-only schema boundary in
-`guest/morbinit/src/live_share.rs`. It rejects a wrong schema version, zero session,
-boot, or capability values, malformed IDs and paths, roots outside or equal to their
-actually mounted backing share, access-mode changes, overlapping roots, stale epochs,
-wrong sessions or boot IDs, wrong-direction records, and skipped or replayed sequence
-numbers. It neither binds a new vsock port nor authenticates a peer, creates a cache,
-mounts a filesystem, processes payloads, sends acknowledgements, or starts a watcher.
-In particular, structural validation of an opaque capability is not authentication. The
-future receiver remains unavailable until an authenticated dedicated transport and a
-durably acknowledged initial synchronization are implemented; no port is reserved by
-this scaffolding.
-
-`MorbLiveShareBridge` defines the preparatory host contract. It is deliberately
-opt-in through `live_share_paths = []`, separate from broad `shared_paths` defaults.
-Each selected root must be a strict descendant of an actually configured VirtioFS
-root: `/Users/you/project` under `/Users` is valid; `/Users` itself is rejected. This
-keeps a future subscription scoped to the named project rather than watching a whole
-home directory or mounted-volume tree.
-
-The eventual source adapter hands the bounded queue one flat record at a time:
-
-```text
-contract_version: 1
-source_event_id: uint64       # FSEvent ID; monotonic, not consecutive
-root_path: string             # selected live_share_paths root
-path: string                  # invalidated path, or root_path for rescan
-kind: "invalidated" | "rescan"
-rescan_reason: string?        # required when kind = rescan
-```
-
-This shape remains compatible with MRB0's flat JSON subset, but **is not sent over
-MRB0 today**. The M0 control client is single-flight request/reply and has no
-long-lived event receiver; a later transport must provide explicit bounded delivery
-and acknowledgement semantics rather than making `info` polling pretend to be a
-stream.
-
-The queue contains at most 1,024 records and never drops silently. A normal FSEvents
-callback becomes `invalidated`, deliberately not a fake create/write/delete inotify
-mask because FSEvents is directory-granular and coalescing. The following conditions
-replace incremental records with a `rescan` for the affected root: a
-`MustScanSubDirs` callback, root change, an overlong path, or host queue overflow.
-`UserDropped`, `KernelDropped`, and FSEvent-ID wrap replace the queue with one rescan
-for **every** selected root, matching Apple's full-rescan requirement for a
-multi-root stream. A future receiver must recursively rebuild its state for each
-`rescan`; it must never continue incrementally past one.
-
-No FSEvent stream is constructed while the guest capability is unavailable. That
-avoids watching user paths with no consumer, keeps `morb shares` and `status`
-observational, and makes the current acceptance boundary unambiguous: the contract
-and diagnostics are present; host-originated inotify and hot reload are not.
+The operational wire, acknowledgement, root authority, and overflow behavior
+are §3.6. `morb status` reports `waiting-for-session`, `active`, or `failed`
+from the daemon-owned transport; compatibility alone is not active delivery.
+The implementation provides a host-edit-to-guest filesystem notification
+bridge for the selected VirtioFS objects. It does not reinterpret a host
+event as a fabricated inotify mask, and it does not make a selected root a
+general-purpose host filesystem API.

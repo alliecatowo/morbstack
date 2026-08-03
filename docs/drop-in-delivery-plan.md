@@ -30,10 +30,10 @@ This plan keeps three kinds of evidence separate:
   Containers CLI/editor fixture and lockfile. Add those immutable fixtures
   before anyone runs or relies on the matrix.
 - A product action is only available when its service boundary is real. For
-  example, `morb debug` is an inspection plan, not a shell; current domains
-  are inactive claim models, not hostname routing; and the share-event
-  contract reports `unavailable`, not hot reload. The guest's retained
-  version-1 record shape is compatibility metadata, not an event receiver.
+  example, `morb debug` is an inspection plan and current domains are inactive
+  claim models, not hostname routing. Live-share now has a bounded,
+  authenticated host/guest implementation; its VM/container developer-loop
+  acceptance remains a release gate rather than a completed product claim.
 
 ## Product direction
 

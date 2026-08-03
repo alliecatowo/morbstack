@@ -58,6 +58,7 @@ mod netaddr;
 mod publish_all;
 mod k8s;
 mod live_share;
+mod live_share_receiver;
 mod listen_probe;
 mod proxy;
 mod sha256;
@@ -185,7 +186,8 @@ fn real_init() {
     // off /proc/cmdline, which needs /proc and nothing else — and because a
     // failure here is worth seeing at the top of the console log rather than
     // buried between dockerd's startup lines.
-    let share_results = mounts::mount_shares(&mounts::advertised_shares());
+    let advertised_shares = mounts::advertised_shares();
+    let share_results = mounts::mount_shares(&advertised_shares);
     // docs/parity.md #9: alias the guest's own /tmp onto the same content as
     // a live /private/tmp share, so a bind mount source under the bare,
     // unresolved /tmp a Mac user naturally types (macOS itself resolves it
@@ -379,6 +381,21 @@ fn real_init() {
         log::log(&format!(
             "FATAL: could not bind vsock listener probe port {}: host-network auto-discovery will be unavailable ({})",
             listen_probe::VSOCK_LISTEN_PROBE_PORT,
+            e
+        ));
+    }
+
+    // Host edits under explicitly opted-in live-share roots arrive over this
+    // separate, authenticated vsock channel.  The receiver has authority only
+    // over shares that mounted during this boot and turns invalidations into
+    // guest-kernel metadata notifications; it never accepts an arbitrary path.
+    if let Err(e) = live_share_receiver::spawn_live_share_receiver(
+        &advertised_shares,
+        &share_results,
+    ) {
+        log::log(&format!(
+            "ERROR: could not bind live-share receiver port {}: host file notifications will be unavailable ({})",
+            live_share_receiver::VSOCK_LIVE_SHARE_PORT,
             e
         ));
     }

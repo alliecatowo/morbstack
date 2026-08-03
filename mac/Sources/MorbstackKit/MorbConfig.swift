@@ -62,7 +62,7 @@ public struct MorbConfig: Equatable, Codable, Sendable {
     /// configuration: bind mounts then only see paths that exist inside the guest.
     public var sharedPaths: [String]
 
-    /// Narrow host subdirectories that are eligible for a future file-event bridge.
+    /// Narrow host subdirectories eligible for the live-share notification bridge.
     ///
     /// This is intentionally empty by default, and it is deliberately distinct from
     /// ``sharedPaths``: the default VirtioFS roots include `/Users` and `/Volumes`,
@@ -548,8 +548,8 @@ public struct MorbConfig: Equatable, Codable, Sendable {
         out += "# turn directory sharing off. Must be written on one line.\n"
         out += "shared_paths = \(MorbConfig.quoteArray(sharedPaths))\n"
         out += "\n"
-        out += "# Narrow project directories eligible for the future file-event bridge. This is\n"
-        out += "# off by default and does not enable hot reload today. Each path must be a\n"
+        out += "# Narrow project directories eligible for live-share notifications. This is\n"
+        out += "# off by default; each path must be a\n"
         out += "# strict descendant of one shared_paths root. Must be written on one line.\n"
         out += "live_share_paths = \(MorbConfig.quoteArray(liveSharePaths))\n"
         return out
@@ -635,7 +635,7 @@ public struct MorbConfig: Equatable, Codable, Sendable {
                 config.sharedPaths = try requireStringArray(value, key: key, line: lineNumber)
             case .liveSharePaths:
                 // This remains opt-in even though shared_paths has broad defaults. A
-                // future event bridge validates strict containment before it creates a
+                // live-share bridge validates strict containment before it creates a
                 // watcher; parsing only preserves the person's declared selection.
                 config.liveSharePaths = try requireStringArray(value, key: key, line: lineNumber)
             }

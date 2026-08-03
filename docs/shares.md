@@ -117,65 +117,34 @@ The corollary is that ownership is not *enforced* inside a share:
   correctly on the Mac.
 * `mtime` propagates in both directions.
 
-### File-change notification does NOT work — no hot reload
+### Scoped live-share notifications
 
-**This is the headline limitation and it is not fixable with plain VirtioFS.**
-
-Measured with `inotifyd` watching a shared directory inside a container:
-
-| Change origin | Container sees new content? | inotify event? |
-|---|---|---|
-| Edited **on the Mac** | Yes, immediately | **No — zero events** |
-| Edited **inside the container** | Yes | Yes (`n`, `c`, `w`) |
-
-So a watcher that *polls* (`mtime` is accurate, and content is coherent immediately)
-works fine, while a watcher that relies on inotify — which is every modern dev
-server's default: Vite, webpack, nodemon, `cargo watch`, Django's autoreloader — will
-**not** notice a file you edited in your editor.
-
-Do not describe Morbstack as supporting hot reload today. The workaround is each
-tool's polling mode (`CHOKIDAR_USEPOLLING=1`, `WATCHPACK_POLLING=true`,
-`vite --force` with `server.watch.usePolling`, `cargo watch --poll`), at the cost of
-CPU. The real fix is a guest-local synchronized-share filesystem that applies real
-filesystem changes in the guest—not a host FSEvents process that injects invented
-inotify records. That is a separate milestone; its transport, privacy, and recovery
-contract is in [`live-share-bridge.md`](live-share-bridge.md).
-
-### Scoped event-bridge foundation (not hot reload)
-
-The codebase now has the **contract and diagnostics** for a future FSEvents bridge,
-but it intentionally creates no FSEvent stream and delivers no notifications. The
-current guest reports `share_event_bridge = "unavailable"`: Linux inotify queues are
-kernel-owned, and there is no userspace API that can inject synthetic events into
-arbitrary container watchers. The current MRB0 channel is also single-flight
-host-request/guest-reply, not an event stream. A future implementation therefore
-needs both a guest filesystem/kernel delivery endpoint and a bounded transport before
-it can truthfully say that hot reload works.
-
-The only opt-in selection is empty by default:
+Plain VirtioFS makes changed host bytes visible, but a host editor write does
+not itself create a Linux watcher event. Morbstack’s opt-in live-share bridge
+adds a guest-kernel notification operation for explicit project roots:
 
 ```toml
-# This does not enable hot reload in the current build.
-live_share_paths = []
+live_share_paths = ["/Users/you/work/project"]
 ```
 
-When the delivery endpoint exists, every path must be a **strict descendant** of one
-configured `shared_paths` root. `/Users` and `/Volumes` are normal VirtioFS roots but
-are rejected as event-watch roots: watching them would collect far more of a person's
-filesystem than a named project needs. A narrow root such as
-`/Users/you/work/project` below a `/Users` share is the intended shape. `morb shares`
-reports whether this selection is disabled, malformed, waiting for its backing share
-to mount, or blocked on the guest capability; none of those states starts the engine
-or a watcher.
+The selected root must be a real strict descendant of a configured, writable
+`shared_paths` root. The daemon never watches a broad default such as `/Users`
+or `/Volumes`, and it does not infer a root from a Docker bind request. Once
+the guest has confirmed the matching VirtioFS share, the daemon opens a scoped
+FSEvent stream and sends authenticated invalidations to the guest over vsock.
+The guest maps an accepted invalidation to a descriptor-confined same-mode
+metadata operation on that exact VirtioFS object, producing a normal Linux
+filesystem attribute notification without changing the object’s bytes or mode
+bits.
 
-The future callback-to-guest contract is deliberately lossy and bounded. FSEvents is
-directory-granular and may coalesce changes, so normal records are called
-`invalidated`, not fabricated create/write/delete inotify masks. A 1,024-record host
-buffer converts a queue overflow, FSEvents dropped records, event-ID wrap, root move,
-or `MustScanSubDirs` into an explicit root `rescan` marker. A receiver must discard
-incremental state and recursively rescan that root; it may never treat the marker as
-an ordinary event. The selected roots, event shape, flags, and overflow rule are
-documented in [`protocol.md`](protocol.md#54-future-scoped-file-event-contract).
+FSEvents is still lossy and coalescing, so records are invalidations rather
+than invented create/write/delete masks. `MustScanSubDirs`, dropped events,
+ID wrap, root changes, long paths, and bounded-queue overflow become an
+acknowledged recursive root rescan. See
+[`live-share-bridge.md`](live-share-bridge.md) for root authority, reconnect,
+security, and release-acceptance details, and
+[`protocol.md`](protocol.md#36-the-vsock-2381-live-share-notification-protocol)
+for the wire contract.
 
 The acceptance boundary remains unchanged: until the guest endpoint, transport, and
 real-container tests prove the behavior, **VirtioFS content coherence works but

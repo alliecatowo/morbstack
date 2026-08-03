@@ -1,54 +1,52 @@
 // Copyright 2026 The Morbstack Authors.
 // Licensed under the Apache License, Version 2.0 (the "License").
 //
-// The bounded contract for a future FSEvents -> guest file-notification bridge.
+// The bounded host-side contract for the FSEvents -> guest notification bridge.
 //
-// This is deliberately *not* a hot-reload implementation. VirtioFS propagates bytes
-// but not host-originated inotify events, and Linux offers no userspace API that can
-// inject synthetic events into another process's inotify descriptor. The current MRB0
-// channel is also request/reply only, so there is no event receiver to drain a queue.
-// Keep the selection, FSEvents interpretation, overflow rule, and diagnostics here so
-// the eventual transport/kernel endpoint has one truthful contract to implement.
+// VirtioFS propagates bytes but cannot receive a synthetic inotify record from macOS.
+// ``MorbLiveShareTransport`` owns the dedicated authenticated receiver session and
+// turns these scoped invalidations into real guest-VFS metadata notifications.  This
+// type remains pure so selection, FSEvent overflow, and status admission stay
+// independently auditable and testable.
 
 import Foundation
 
-/// Plans and records scoped host file-system invalidations for a future live-share
-/// bridge.
+/// Plans and records scoped host file-system invalidations for live-share.
 ///
 /// A live-share root is never inferred from the broad VirtioFS defaults. It must be
 /// explicitly named in `live_share_paths` and be a strict descendant of a configured
-/// share. No FSEvent stream is created by this type today: there is no guest delivery
-/// endpoint and keeping an unconsumed watch queue alive would be both wasteful and a
-/// false hot-reload claim.
+/// share. This type remains pure and creates no stream itself; the daemon-owned
+/// transport starts a scoped FSEvent stream only after its guest receiver is
+/// authenticated and the exact shares are confirmed mounted.
 public enum MorbLiveShareBridge {
 
-    /// No more than this many narrow roots may be selected for the future bridge.
+    /// No more than this many narrow roots may be selected for one session.
     /// This is separate from `MorbShares.maximumShares`: one broad VirtioFS share can
     /// cover several explicitly selected development projects.
     public static let maximumRoots = 8
 
     /// Maximum number of pending event records. Overflow is never hidden; it replaces
-    /// affected records with a `rescan` marker that a future receiver must honor.
+    /// affected records with a `rescan` marker that the receiver must honor.
     public static let defaultBufferCapacity = 1_024
 
     /// A defensive upper bound beneath MRB0's 1 MiB frame limit. A path bigger than
     /// this is represented as a root rescan, not queued as an arbitrarily large event.
     public static let maximumEventPathUTF8Bytes = 4_096
 
-    /// The version of the future delivery contract, independent of MRB0's framing.
+    /// The version of the dedicated delivery contract, independent of MRB0 framing.
     public static let contractVersion = 1
 
     // MARK: - Guest advertisement validation
 
-    /// The additive statement a running guest makes about the future synchronized-
-    /// share transport.
+    /// The additive statement a running guest makes about the dedicated live-share
+    /// receiver.
     ///
     /// This is deliberately an *advertisement*, not a request to start delivery.
     /// It is decoded from the existing `info` reply and can therefore be checked
-    /// before a future data-plane connection exists. Keeping the capability and its
+    /// before a dedicated data-plane connection exists. Keeping the capability and its
     /// schema version together prevents a host from mistaking an older guest's
     /// omitted version for the current contract, or from treating a coincidental
-    /// version number as proof that a cache, receiver, or watcher exists.
+    /// version number as proof that a receiver session or watcher is active.
     public struct GuestAdvertisement: Codable, Equatable, Sendable {
         /// The receiver capability reported by the guest, if it recognizes the
         /// additive field at all.
@@ -72,9 +70,8 @@ public enum MorbLiveShareBridge {
         /// Whether this guest describes the exact schema this host understands.
         ///
         /// Compatibility alone is intentionally not delivery authorization. A
-        /// matching version plus a future `ready` capability still needs a real
-        /// authenticated transport, synchronized cache, and receiver before any
-        /// source watcher can be constructed.
+        /// matching `ready` receiver still needs a fresh authenticated session and
+        /// mounted exact roots before the daemon starts FSEvents.
         public var compatibility: ContractCompatibility {
             guard let contractVersion else { return .unknown }
             return contractVersion == MorbLiveShareBridge.contractVersion
@@ -95,7 +92,7 @@ public enum MorbLiveShareBridge {
         /// The guest and host agree on the versioned record schema.
         case exact
         /// The guest reported a different schema. It must not receive records from
-        /// this host, even if it advertises a future `ready` capability.
+        /// this host, even if it advertises an unrecognized `ready` capability.
         case unsupported(actual: Int)
 
         /// A stable value for diagnostics and daemon IPC. The detailed observed
@@ -112,13 +109,9 @@ public enum MorbLiveShareBridge {
         }
     }
 
-    /// A fact-only admission verdict for a future synchronized-share transport.
-    ///
-    /// No current case authorizes a watcher or a VM mutation. In particular,
-    /// ``receiverUnavailable`` is the expected answer from today's guest. The
-    /// `ready` case is reserved so that a future implementation has to make its
-    /// transport/cache/receiver check explicit rather than silently broadening this
-    /// diagnostic into an activation path.
+    /// A fact-only admission verdict for the daemon-owned live-share transport.
+    /// The verdict does not itself authorize a watcher: the transport additionally
+    /// establishes an authenticated session and verifies the mounted root snapshot.
     public enum DeliveryAdmission: Equatable, Sendable {
         case receiverUnknown
         case receiverUnavailable
@@ -217,7 +210,7 @@ public enum MorbLiveShareBridge {
         return Plan(roots: roots)
     }
 
-    /// The only two payload forms a future guest receiver may observe.
+    /// The only two payload forms the guest receiver observes.
     ///
     /// `invalidated` deliberately is not named after an inotify mask. FSEvents is
     /// directory-granular and coalescing, so claiming create/write/delete fidelity here
@@ -238,7 +231,7 @@ public enum MorbLiveShareBridge {
         case invalidPath = "invalid-path"
     }
 
-    /// A normalized record from the future host event source.
+    /// A normalized record from the host event source.
     public struct Event: Codable, Equatable, Sendable, Identifiable {
         /// FSEvent stream ID when one exists. IDs are monotonic but not consecutive.
         public let sourceEventID: UInt64
@@ -277,8 +270,8 @@ public enum MorbLiveShareBridge {
     ///
     /// The values mirror `FSEventStreamEventFlags`. They live as raw values so the
     /// pure queue can be tested without creating an FSEvent stream or touching the
-    /// user's filesystem. The eventual CoreServices adapter must pass the flag word
-    /// through unchanged.
+    /// user's filesystem. The CoreServices adapter passes the flag word through
+    /// unchanged.
     public enum FSEventFlag {
         public static let mustScanSubdirectories: UInt32 = 0x00000001
         public static let userDropped: UInt32 = 0x00000002
@@ -288,7 +281,7 @@ public enum MorbLiveShareBridge {
     }
 
     /// Result of admitting one host event. A coalesced/overflow result is still a
-    /// useful event: the future receiver must honor the queued root rescan.
+    /// useful event: the receiver must honor the queued root rescan.
     public enum RecordResult: Equatable, Sendable {
         case enqueued
         case rescanQueued
@@ -297,7 +290,7 @@ public enum MorbLiveShareBridge {
     }
 
     /// A thread-safe, bounded event queue. It owns no FSEvent stream and starts no
-    /// background work; the future daemon-owned adapter will feed it only after the
+    /// background work; the daemon-owned adapter feeds it only after the
     /// guest confirms both a mounted share and a real delivery endpoint.
     public final class EventBuffer: @unchecked Sendable {
         private struct Pending {
@@ -372,7 +365,7 @@ public enum MorbLiveShareBridge {
         }
 
         /// Records a normalized contract event. Events whose root/path escapes the
-        /// selected plan are rejected rather than allowing a future stream to leak
+        /// selected plan are rejected rather than allowing an event stream to leak
         /// host path names beyond the explicitly configured projects.
         @discardableResult
         public func record(_ event: Event) -> RecordResult {
@@ -394,7 +387,7 @@ public enum MorbLiveShareBridge {
             return result
         }
 
-        /// Number of bounded records awaiting a future delivery transport.
+        /// Number of bounded records awaiting delivery.
         public var pendingCount: Int {
             lock.lock()
             defer { lock.unlock() }
@@ -501,9 +494,9 @@ public enum MorbLiveShareBridge {
         }
     }
 
-    /// What the currently running guest says about future event delivery.
+    /// What the currently running guest says about event delivery.
     /// `unknown` is intentionally distinct from `unavailable`: an older or stopped
-    /// guest has not answered, while the current guest positively has no injection
+    /// guest has not answered, while the current guest positively has no delivery
     /// endpoint.
     public enum GuestCapability: String, Codable, Equatable, Sendable {
         case unknown
@@ -522,6 +515,16 @@ public enum MorbLiveShareBridge {
             case invalidConfiguration = "invalid-configuration"
             case waitingForGuestMount = "waiting-for-guest-mount"
             case deliveryUnavailable = "delivery-unavailable"
+            /// The guest advertises the exact receiver contract and the daemon can
+            /// now attempt its authenticated vsock session.  This is not active
+            /// until the transport has completed hello/ready and started FSEvents.
+            case waitingForSession = "waiting-for-session"
+            /// The daemon has an authenticated receiver session and an active,
+            /// scoped FSEvent stream for every listed root.
+            case active
+            /// A post-admission receiver or transport failure.  The daemon stops
+            /// the stream before reconnecting so a failed session retains no watch.
+            case failed
         }
 
         public let state: State
@@ -530,14 +533,15 @@ public enum MorbLiveShareBridge {
         /// The guest's additive record-schema advertisement, kept beside the
         /// capability so status can distinguish an old guest from a version mismatch.
         public let guestContractVersion: Int?
-        /// Whether the guest's advertised schema matches this host's future record
-        /// contract. This remains diagnostic-only until all delivery halves exist.
+        /// Whether the guest's advertised schema matches this host's record
+        /// contract. It remains distinct from the transport's active-session state.
         public let contractCompatibility: ContractCompatibility
         public let detail: String
 
-        /// Always false in this foundation. Keeping the boolean makes a future UI or
-        /// CLI avoid inferring active delivery merely from selected roots.
-        public var isActive: Bool { false }
+        /// `true` only after the daemon's authenticated data-plane owner reports an
+        /// active session.  Configuration, a compatible guest, or root selection
+        /// alone must never infer this state.
+        public var isActive: Bool { state == .active }
 
         public var ipcFields: [String: AnyCodableValue] {
             [
@@ -605,7 +609,7 @@ public enum MorbLiveShareBridge {
         case .receiverUnknown:
             detail = "The guest has not reported a file-notification capability; no FSEvents watch is started."
         case .receiverUnavailable:
-            detail = "The guest has no inotify injection endpoint; no FSEvents watch is started."
+            detail = "The guest has no inotify injection endpoint or compatible live-share receiver; no FSEvents watch is started."
         case .unsupportedContractVersion(let actual):
             if let actual {
                 detail = "The guest reports share-event contract version \(actual), but this host requires version \(contractVersion); no FSEvents watch is started."
@@ -613,7 +617,13 @@ public enum MorbLiveShareBridge {
                 detail = "The guest did not report a share-event contract version; no FSEvents watch is started."
             }
         case .compatibleReceiverRequiresTransport:
-            detail = "The guest can receive the future contract, but this build has no synchronized cache or event-stream transport; no FSEvents watch is started."
+            return Diagnostic(
+                state: .waitingForSession,
+                roots: plan.roots,
+                guestCapability: guestAdvertisement.capability,
+                guestContractVersion: guestAdvertisement.contractVersion,
+                contractCompatibility: guestAdvertisement.compatibility,
+                detail: "The guest receiver is compatible; waiting for morbstackd to establish its authenticated live-share session.")
         }
         return Diagnostic(
             state: .deliveryUnavailable,
