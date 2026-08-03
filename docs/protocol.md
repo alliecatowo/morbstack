@@ -462,14 +462,35 @@ guest -> host:  "OK\n"              connection established; splice begins
 
 Before relaying an ordinary fixed-length `POST .../containers/create`, the
 host-side `DockerProxy` takes a bounded non-consuming `MSG_PEEK` of the request.
-For an explicit single TCP host port in `HostConfig.PortBindings`, it takes the
-same short loopback snapshot as `morb ports check`. A port already held by another
-Mac process is rejected with a Docker-style HTTP 500 error *before the request
-reaches the guest Engine*, so the usual `docker run -p 8080:80 ...` path does not
-create a container and then claim its unavailable host port is usable. The same
-preflight rejects explicit UDP publications (there is no UDP relay) and host
-addresses outside the loopback-only forwarder's supported set rather than letting
-them become a successful-looking but unreachable publish.
+For every fixed, supported TCP publication in `HostConfig.PortBindings` that maps
+unambiguously to one Mac loopback listener, it first takes the same short
+availability snapshot as `morb ports check`, then **binds and retains the actual
+`TCPListener` before the request reaches the guest Engine**. A failed real bind is
+reported as a Docker-style HTTP 500 before any guest side effect. The retained
+descriptor, rather than the snapshot, closes the host-port race.
+
+The proxy still passes the original Docker request and response bytes untouched
+through `FDRelay`. It only observes a bounded, nonchunked 2xx create response with
+an identity-bearing JSON body (at most 64 KiB of headers and 128 KiB of body) to
+associate that held listener with the returned full container ID. It similarly
+recognizes only a bodyless `POST /containers/<full-id-or-unique-prefix>/start`.
+On an **exact HTTP 204** response to that request, the same listener changes from
+its lease handler to the normal forwarder handler *before the 204 bytes are written
+to the Docker client*; it is never closed and rebound during the handoff. This also
+works across a cold VM start: early connections are closed until the forwarder enters
+its matching running generation, but the port remains continuously bound.
+
+The held listener remains reserved for a stopped-but-not-destroyed container, so a
+later recognized start can reuse it. A destroy event releases it immediately. While
+there are associated leases, a `containers/json?all=1` reconciliation additionally
+reclaims identities absent from Docker's snapshot, covering an event missed during
+reconnect. Daemon or VM-forwarder shutdown deliberately releases all leases: they
+cannot survive a VM-unavailable interval, and only normal running-container
+discovery is rebuilt after the VM returns.
+
+The same admission path rejects explicit UDP publications (there is no UDP relay)
+and host addresses outside the loopback-only forwarder's supported set rather than
+letting them become a successful-looking but unreachable publish.
 
 Once the VM is ready, the same preserved request body is also checked for bind
 sources in `HostConfig.Binds` and top-level `Mounts`. The check uses the directory
@@ -483,16 +504,17 @@ HTTP 400 `invalid mount config for type "bind": ...` response. Explicit
 missing-directory creation behavior only under a verified live share. Named volumes
 and malformed shapes remain dockerd's responsibility.
 
-This is deliberately an admission check, **not a lease or a filesystem sandbox**.
-The peek does not remove any bytes, and chunked, oversized, or otherwise unrecognized
-create requests remain opaque byte streams for the Engine. Dynamic (`-P`/empty host
-port) and range publication requests receive no port availability verdict. The port
-probe socket is closed immediately, so another process can still claim the port before
-Docker starts the container; a separately-created container can also be started after
-the snapshot. Likewise, a source path can change after its share/symlink snapshot.
-Full Docker-compatible publication still requires a create/start response-aware TCP
-lease ledger, listener handoff, rollback/expiry, a guest allocation protocol for
-dynamic ports, and a real UDP data plane.
+This is deliberately a narrow lease protocol, **not a generic HTTP proxy, dynamic
+port allocator, or filesystem sandbox**. The peek does not remove any bytes, and a
+chunked, oversized, malformed, pipelined, or otherwise unrecognized create response
+causes its provisional lease to be released rather than guessed. Dynamic
+(`-P`/empty host port), ranges, UDP, unsupported addresses, opaque creates, start by
+name, and nonstandard start framing have no synchronous create/start lease guarantee.
+An event-driven running-container snapshot can still promote an already-associated
+lease after an opaque or name-based start, but that happens after the Engine reply and
+is not equivalent to the 204 handoff guarantee. Dynamic publication needs a real
+guest-to-host allocation-and-response contract; UDP needs a real UDP data plane.
+Likewise, a bind source can change after its share/symlink snapshot.
 
 ---
 

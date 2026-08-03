@@ -387,12 +387,13 @@ of what its docs say.
   workload that refuses to start unless a config file has a specific
   non-root owner will not work against a Morbstack bind mount today
   ([sharing.md](sharing.md)).
-- **Published-port collision handling is only a partial compatibility layer.** A
-  conventional fixed TCP `docker run -p <port>:...` now rejects a host port that is
-  already occupied before the create reaches the guest. That closes the common
-  success-with-no-listener failure, but it is a non-reserving snapshot: a later race,
-  dynamic/ranged allocation, or a separately-created container started later can
-  still diverge from Docker Desktop's synchronous port-lease contract.
+- **Published-port collision handling is intentionally narrow.** A conventional,
+  fixed supported TCP `docker run -p <port>:...` now retains a real Mac listener
+  before create, identifies it from a bounded standard create response, and hands it
+  to forwarding before the exact `docker start` 204 reaches the client. That closes
+  the host-port race for that exchange. Dynamic/ranged allocation, chunked or opaque
+  create responses, name-based/nonstandard start handoff, VM-stop persistence, and
+  UDP remain outside that synchronous contract.
 - **No UDP port forwarding at all.** The published-port forwarder is
   TCP-only.
 - **No qemu fallback for amd64**, despite the plumbing existing — no

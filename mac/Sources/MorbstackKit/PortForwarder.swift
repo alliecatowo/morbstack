@@ -21,7 +21,9 @@ import Foundation
 /// 3. **Splicing.** Each accepted connection opens a vsock stream-dial (2376), names
 ///    the port, and hands both descriptors to an ``FDRelay``.
 ///
-/// The forwarder is owned by ``Daemon`` and is active only while the VM is running.
+/// The forwarder is owned by ``Daemon``. Its event stream is active only while the VM
+/// is running; a fixed-TCP lease may bind just before a cold VM starts so the Engine
+/// can never win a host-port race during a recognized create/start exchange.
 public final class PortForwarder {
 
     /// How long an accepted connection will wait for the VM to be usable.
@@ -65,8 +67,41 @@ public final class PortForwarder {
 
     /// One active mapping: the Docker binding and the Mac-side listener serving it.
     private struct Forward {
-        let binding: DockerPortBinding
+        var binding: DockerPortBinding
         let listener: TCPListener
+        /// A listener pre-bound by DockerProxy before the Engine saw its create
+        /// request. Normal event-discovered forwards have no lease identity.
+        let leaseID: UUID?
+    }
+
+    /// Opaque ownership of listeners reserved before a recognized Docker create
+    /// request is relayed. A token has no meaning outside this daemon process; the
+    /// listeners are the actual exclusion mechanism.
+    struct TCPPortLease: Hashable, Sendable {
+        let identifier: UUID
+        let publications: [DockerExplicitTCPPortBinding]
+    }
+
+    private struct LeaseRecord {
+        let lease: TCPPortLease
+        var listeners: [Int: TCPListener]
+        var containerID: String?
+        var startClaimed = false
+        var isForwarding = false
+    }
+
+    enum TCPPortLeaseError: LocalizedError {
+        case addressInUse(port: Int)
+        case unavailable(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .addressInUse(let port):
+                "driver failed programming external connectivity: Bind for 127.0.0.1:\(port) failed: port is already allocated"
+            case .unavailable(let message):
+                message
+            }
+        }
     }
 
     /// A host port we wanted but could not bind, and when to try it again.
@@ -108,6 +143,10 @@ public final class PortForwarder {
     /// launched with and exit as soon as it goes stale.
     private var generation = 0
     private var forwards: [Int: Forward] = [:]
+    /// Fixed TCP listeners held continuously from a recognized create through a
+    /// matching start handoff (or container destruction/daemon stop).
+    private var leases: [UUID: LeaseRecord] = [:]
+    private var leaseByContainerID: [String: UUID] = [:]
     private var relays: [UInt64: FDRelay] = [:]
     private var relaySequence: UInt64 = 0
     /// Live forwarded connections, counted **per generation**.
@@ -174,6 +213,244 @@ public final class PortForwarder {
         return running
     }
 
+    // MARK: - Fixed TCP create/start leases
+
+    /// Binds real loopback listeners before a recognized Docker create reaches the
+    /// guest. The returned token is later associated with the Engine's container ID
+    /// and promoted into `forwards` without ever closing and reopening its sockets.
+    ///
+    /// Dynamic host ports, ranges, UDP, and unsupported host addresses never reach
+    /// this method. A conflict here is definitive: unlike HostPortPreflight, the
+    /// listener remains open after this method returns.
+    func reserveExplicitTCPPorts(
+        _ publications: [DockerExplicitTCPPortBinding]
+    ) throws -> TCPPortLease {
+        precondition(!publications.isEmpty, "a TCP lease needs at least one fixed publication")
+        let lease = TCPPortLease(identifier: UUID(), publications: publications)
+        var listeners: [Int: TCPListener] = [:]
+
+        // Hold the ledger lock across the actual binds and insertion. Otherwise a
+        // concurrent stop could clear the ledger between these two steps, leaving an
+        // anonymous descriptor alive with no owner that can release it.
+        lock.lock()
+        do {
+            for publication in publications {
+                let listener = TCPListener(port: publication.hostPort, queue: acceptQueue)
+                do {
+                    try listener.start()
+                } catch TCPListenerError.addressInUse {
+                    throw TCPPortLeaseError.addressInUse(port: publication.hostPort)
+                } catch {
+                    throw TCPPortLeaseError.unavailable(
+                        "could not reserve published TCP port 127.0.0.1:\(publication.hostPort): \(error.localizedDescription)")
+                }
+                listeners[publication.hostPort] = listener
+            }
+            leases[lease.identifier] = LeaseRecord(lease: lease, listeners: listeners)
+            lock.unlock()
+        } catch {
+            lock.unlock()
+            for listener in listeners.values { listener.stop() }
+            throw error
+        }
+
+        let ports = publications.map(\.hostPort).map(String.init).joined(separator: ", ")
+        log.info("reserved fixed TCP port\(publications.count == 1 ? "" : "s") \(ports) for Docker create")
+        return lease
+    }
+
+    /// Records the only stable identity returned by Docker's create response.
+    ///
+    /// The response observer calls this before the bytes reach the Docker client, so
+    /// a following `start` can claim the already-bound listener rather than probing a
+    /// port a second time.
+    func associate(_ lease: TCPPortLease, withContainerID containerID: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard var record = leases[lease.identifier], record.containerID == nil,
+              leaseByContainerID[containerID] == nil
+        else {
+            return false
+        }
+        record.containerID = containerID
+        leases[lease.identifier] = record
+        leaseByContainerID[containerID] = lease.identifier
+        return true
+    }
+
+    /// Claims a created lease for a start response observer. Docker accepts a unique
+    /// ID prefix in this route, so support that exact unambiguous case too; container
+    /// *names* are intentionally not guessed from a create response.
+    func claimStartLease(containerIdentifier: String) -> TCPPortLease? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let identifier = matchingLeaseIdentifier(for: containerIdentifier),
+              var record = leases[identifier], !record.startClaimed
+        else {
+            return nil
+        }
+        record.startClaimed = true
+        leases[identifier] = record
+        return record.lease
+    }
+
+    /// Promotes a lease after Docker's normal `204` start reply is observed. The
+    /// response observer runs before FDRelay writes those bytes to the client, so the
+    /// service never sees a successful start while Morbstack has released its host
+    /// port in between.
+    @discardableResult
+    func completeStart(_ lease: TCPPortLease, succeeded: Bool) -> Bool {
+        guard succeeded else {
+            releaseStartClaim(lease)
+            return false
+        }
+        return promoteLease(lease.identifier)
+    }
+
+    /// Releases a provisional lease when create failed, its response was not in the
+    /// bounded shape this protocol can prove, or the client connection ended first.
+    func abandon(_ lease: TCPPortLease, reason: String) {
+        releaseLease(lease.identifier, reason: reason)
+    }
+
+    /// The event stream gives a full ID on `destroy`; this removes a lease even for a
+    /// container that was created but never started and therefore never appeared in
+    /// the running-container port snapshot.
+    func releaseLease(forContainerID containerID: String, reason: String) {
+        lock.lock()
+        let identifier = leaseByContainerID[containerID]
+        lock.unlock()
+        guard let identifier else { return }
+        releaseLease(identifier, reason: reason)
+    }
+
+    private func releaseStartClaim(_ lease: TCPPortLease) {
+        lock.lock()
+        guard var record = leases[lease.identifier] else {
+            lock.unlock()
+            return
+        }
+        record.startClaimed = false
+        leases[lease.identifier] = record
+        lock.unlock()
+    }
+
+    /// Finds the one associated lease that Docker's `/containers/<id>/start` path can
+    /// name. A non-unique short ID is deliberately left to event reconciliation.
+    private func matchingLeaseIdentifier(for containerIdentifier: String) -> UUID? {
+        if let exact = leaseByContainerID[containerIdentifier] { return exact }
+        let candidates = leaseByContainerID.compactMap { id, leaseID in
+            id.hasPrefix(containerIdentifier) ? leaseID : nil
+        }
+        return candidates.count == 1 ? candidates[0] : nil
+    }
+
+    /// Transfers continuously-held listener ownership into the active forward map.
+    /// `TCPListener` never stops here; only its handler changes from the lease's
+    /// intentional close-on-connect state to the ordinary stream-dial handler.
+    @discardableResult
+    private func promoteLease(_ identifier: UUID) -> Bool {
+        lock.lock()
+        guard var record = leases[identifier], let containerID = record.containerID else {
+            lock.unlock()
+            return false
+        }
+        if record.isForwarding {
+            record.startClaimed = false
+            leases[identifier] = record
+            lock.unlock()
+            return true
+        }
+        // A create can cold-boot the VM. In that small interval `Daemon` has not yet
+        // started the event stream, but the guest may already return the start `204`.
+        // Arm the listener for the generation `start()` is about to publish, so the
+        // response still has the no-gap handoff contract. Connections accepted before
+        // `running` becomes true are conservatively closed by `handleAccepted`.
+        let generation = running ? self.generation : self.generation + 1
+        for publication in record.lease.publications {
+            guard let listener = record.listeners[publication.hostPort] else {
+                record.startClaimed = false
+                leases[identifier] = record
+                lock.unlock()
+                return false
+            }
+            let binding = DockerPortBinding(
+                hostIP: publication.hostIP,
+                hostPort: publication.hostPort,
+                containerPort: publication.containerPort,
+                networkProtocol: "tcp",
+                containerID: containerID,
+                containerName: String(containerID.prefix(12)))
+            listener.setConnectionHandler { [weak self] fd in
+                self?.handleAccepted(clientFD: fd, binding: binding, generation: generation)
+            }
+            forwards[publication.hostPort] = Forward(
+                binding: binding, listener: listener, leaseID: identifier)
+        }
+        record.isForwarding = true
+        record.startClaimed = false
+        leases[identifier] = record
+        lock.unlock()
+
+        for publication in record.lease.publications {
+            log.info(
+                "port lease activated: \(publication.hostPort) -> \(String(containerID.prefix(12))):\(publication.containerPort)/tcp")
+        }
+        return true
+    }
+
+    /// Promotes an already-associated lease when the event-driven Docker snapshot
+    /// sees its real binding first (for example a start by container name).
+    private func promoteLeaseIfMatching(_ binding: DockerPortBinding) -> Bool {
+        lock.lock()
+        let identifier = leaseByContainerID[binding.containerID]
+        let matches = identifier.flatMap { leases[$0] }.map { record in
+            record.lease.publications.contains {
+                $0.hostPort == binding.hostPort && $0.containerPort == binding.containerPort
+            }
+        } ?? false
+        lock.unlock()
+        guard matches, let identifier else { return false }
+        return promoteLease(identifier)
+    }
+
+    /// Removes the listener from the forwarding map while retaining the actual socket
+    /// for a stopped (but not destroyed) created container. A later start can reuse it
+    /// without reopening a race window.
+    private func deactivateLeaseForward(_ forward: Forward, reason: String) {
+        guard let identifier = forward.leaseID else { return }
+        forward.listener.setConnectionHandler(nil)
+        lock.lock()
+        if var record = leases[identifier] {
+            record.isForwarding = false
+            record.startClaimed = false
+            leases[identifier] = record
+        }
+        lock.unlock()
+        log.info("port lease paused: \(forward.binding.description) — after \(reason)")
+    }
+
+    private func releaseLease(_ identifier: UUID, reason: String) {
+        lock.lock()
+        guard let record = leases.removeValue(forKey: identifier) else {
+            lock.unlock()
+            return
+        }
+        if let containerID = record.containerID {
+            leaseByContainerID.removeValue(forKey: containerID)
+        }
+        for publication in record.lease.publications {
+            if forwards[publication.hostPort]?.leaseID == identifier {
+                forwards.removeValue(forKey: publication.hostPort)
+            }
+        }
+        lock.unlock()
+
+        for listener in record.listeners.values { listener.stop() }
+        let ports = record.lease.publications.map(\.hostPort).map(String.init).joined(separator: ", ")
+        log.info("released fixed TCP lease \(ports) — \(reason)")
+    }
+
     // MARK: - Lifecycle
 
     /// Begins watching the Docker event stream and publishing ports. Idempotent.
@@ -205,7 +482,7 @@ public final class PortForwarder {
     ///   once you know the guest went with them.
     public func stop(reason: String? = nil) {
         lock.lock()
-        guard running else {
+        guard running || !leases.isEmpty else {
             lock.unlock()
             return
         }
@@ -213,6 +490,9 @@ public final class PortForwarder {
         generation &+= 1
         let closing = forwards
         forwards.removeAll()
+        let closingLeases = leases.values
+        leases.removeAll()
+        leaseByContainerID.removeAll()
         let inFlight = Array(relays.values)
         relays.removeAll()
         // Stale completions are allowed to arrive; they find no entry for their
@@ -224,18 +504,27 @@ public final class PortForwarder {
         lock.unlock()
 
         timer?.cancel()
-        for forward in closing.values { forward.listener.stop() }
+        var listeners: [ObjectIdentifier: TCPListener] = [:]
+        for forward in closing.values { listeners[ObjectIdentifier(forward.listener)] = forward.listener }
+        for lease in closingLeases {
+            for listener in lease.listeners.values {
+                listeners[ObjectIdentifier(listener)] = listener
+            }
+        }
+        for listener in listeners.values { listener.stop() }
         for relay in inFlight { relay.cancel() }
 
         let because = reason.map { " (\($0))" } ?? ""
-        if closing.isEmpty {
+        if closing.isEmpty, closingLeases.isEmpty {
             log.info("port forwarding stopped\(because)")
         } else {
             // Named individually: this is the line a user greps for when
             // `curl 127.0.0.1:8080` stops answering, and "3 listener(s)" does not
             // tell them which three.
-            let ports = closing.keys.sorted().map(String.init).joined(separator: ", ")
-            let subject = closing.count == 1 ? "port \(ports) is" : "ports \(ports) are"
+            let ports = Set(closing.keys).union(closingLeases.flatMap { $0.lease.publications.map(\.hostPort) })
+                .sorted().map(String.init).joined(separator: ", ")
+            let count = Set(closing.keys).union(closingLeases.flatMap { $0.lease.publications.map(\.hostPort) }).count
+            let subject = count == 1 ? "port \(ports) is" : "ports \(ports) are"
             log.info(
                 "port forwarding stopped\(because); 127.0.0.1 \(subject) no longer "
                     + "published and will be republished when the guest is running again")
@@ -392,6 +681,12 @@ public final class PortForwarder {
 
             for line in lines.feed(body) {
                 guard let event = DockerAPIDecoding.containerEvent(line: line) else { continue }
+                if event.action == "destroy" {
+                    // A never-started container never appears in the normal running
+                    // port snapshot, so its destroy event is the direct cleanup path
+                    // for a lease that intentionally kept its host port reserved.
+                    releaseLease(forContainerID: event.containerID, reason: "container destroyed")
+                }
                 guard event.affectsPublishedPorts else { continue }
                 let who = event.containerName ?? String(event.containerID.prefix(12))
                 scheduleRefresh(reason: "container \(who) \(event.action)")
@@ -449,6 +744,15 @@ public final class PortForwarder {
             do {
                 let bindings = try self.fetchPublishedPorts()
                 guard self.isCurrent(generation) else { return }
+                do {
+                    try self.reconcileAssociatedLeases()
+                } catch {
+                    // Do not turn a successful running-port refresh into a failure
+                    // merely because the slower all-container cleanup snapshot is
+                    // unavailable. The held listener remains conservative until a
+                    // future refresh or daemon stop can prove its owner is gone.
+                    self.log.warn("could not reconcile fixed TCP leases: \(error)")
+                }
                 self.apply(bindings: bindings, generation: generation, reason: reason)
             } catch {
                 guard self.isCurrent(generation) else { return }
@@ -464,6 +768,23 @@ public final class PortForwarder {
         // it can afford to be patient with a busy engine.
         let body = try getEngineJSON(path: DockerAPIDecoding.containersPath, timeout: 20)
         return try DockerAPIDecoding.publishedPorts(containersJSON: body)
+    }
+
+    /// Reclaims leases belonging to containers that no longer exist, including a
+    /// destroy event missed while the event stream was reconnecting. This deliberately
+    /// asks `all=1`: a stopped but still-created container must keep its lease so a
+    /// later `docker start` cannot lose the port to another Mac process.
+    private func reconcileAssociatedLeases() throws {
+        lock.lock()
+        let associated = leaseByContainerID
+        lock.unlock()
+        guard !associated.isEmpty else { return }
+
+        let body = try getEngineJSON(path: DockerAPIDecoding.allContainersPath, timeout: 20)
+        let existing = try DockerAPIDecoding.containerIDs(containersJSON: body)
+        for (containerID, identifier) in associated where !existing.contains(containerID) {
+            releaseLease(identifier, reason: "container is absent from Docker's all-container snapshot")
+        }
     }
 
     /// How many containers the engine currently reports as running. Blocking.
@@ -559,11 +880,28 @@ public final class PortForwarder {
                     + "Mac; Morbstack forwards TCP only for now")
         }
 
+        let desired = PortForwardPlan.desiredListeners(bindings)
+
+        // A start by container name or an opaque client can bypass DockerProxy's
+        // start-response observer. The event snapshot is still a guest-authored
+        // confirmation of the exact binding, so it is safe to promote its held
+        // listener here without ever reopening the host port.
+        for binding in desired.values {
+            _ = promoteLeaseIfMatching(binding)
+        }
+
         lock.lock()
+        for (port, desiredBinding) in desired {
+            guard var forward = forwards[port], forwardTargetMatches(forward.binding, desiredBinding) else {
+                continue
+            }
+            // Preserve a pre-bound listener while replacing only the presentation
+            // metadata (most notably Docker's real container name).
+            forward.binding = desiredBinding
+            forwards[port] = forward
+        }
         let current = forwards.mapValues(\.binding)
         lock.unlock()
-
-        let desired = PortForwardPlan.desiredListeners(bindings)
 
         // Ports nobody publishes any more must stop being retried, and a container
         // that was replaced changes the binding a retry should carry. Both are
@@ -585,14 +923,17 @@ public final class PortForwarder {
         // rebinding it while the old listener still holds it would fail EADDRINUSE
         // against ourselves.
         for port in plan.close {
-            closeForward(port: port, reason: reason)
+            let replacementOwnsPort = desired[port].map { desiredBinding in
+                current[port].map { $0.containerID != desiredBinding.containerID } ?? false
+            } ?? false
+            closeForward(port: port, reason: reason, preserveLease: !replacementOwnsPort)
         }
         for binding in plan.open {
             openForward(binding, generation: generation)
         }
     }
 
-    private func closeForward(port: Int, reason: String) {
+    private func closeForward(port: Int, reason: String, preserveLease: Bool = true) {
         lock.lock()
         let forward = forwards.removeValue(forKey: port)
         // The port is no longer wanted, so a pending retry for it is no longer wanted
@@ -600,8 +941,14 @@ public final class PortForwarder {
         failedBinds.removeValue(forKey: port)
         lock.unlock()
         guard let forward else { return }
-        forward.listener.stop()
-        log.info("port forward removed: \(forward.binding.description) — after \(reason)")
+        if let identifier = forward.leaseID, !preserveLease {
+            releaseLease(identifier, reason: "the port was reassigned after \(reason)")
+        } else if forward.leaseID != nil {
+            deactivateLeaseForward(forward, reason: reason)
+        } else {
+            forward.listener.stop()
+            log.info("port forward removed: \(forward.binding.description) — after \(reason)")
+        }
     }
 
     /// Binds one host port, or records the failure and schedules a retry.
@@ -621,7 +968,7 @@ public final class PortForwarder {
         if deferred { return }
 
         let listener = TCPListener(port: port, queue: acceptQueue)
-        listener.onConnection = { [weak self] fd in
+        listener.setConnectionHandler { [weak self] fd in
             self?.handleAccepted(clientFD: fd, binding: binding, generation: generation)
         }
 
@@ -640,7 +987,7 @@ public final class PortForwarder {
         lock.lock()
         let accepted = running && self.generation == generation
         if accepted {
-            forwards[port] = Forward(binding: binding, listener: listener)
+            forwards[port] = Forward(binding: binding, listener: listener, leaseID: nil)
             failedBinds.removeValue(forKey: port)
         }
         lock.unlock()
@@ -650,6 +997,17 @@ public final class PortForwarder {
             return
         }
         log.info("port forward added: \(binding.description) on 127.0.0.1:\(port)")
+    }
+
+    /// The actual host listener is keyed by port, container identity, and its guest
+    /// target. Docker's `Ports` response may normalize `0.0.0.0` to an empty address
+    /// or finally reveal the human-readable name; neither difference requires a
+    /// close/rebind of a lease that already owns the same endpoint.
+    private func forwardTargetMatches(_ lhs: DockerPortBinding, _ rhs: DockerPortBinding) -> Bool {
+        lhs.hostPort == rhs.hostPort
+            && lhs.containerPort == rhs.containerPort
+            && lhs.networkProtocol == rhs.networkProtocol
+            && lhs.containerID == rhs.containerID
     }
 
     /// Remembers a bind that failed and schedules the next attempt.

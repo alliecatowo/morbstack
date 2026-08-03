@@ -132,16 +132,13 @@ public enum HostPortPreflight {
 
     /// The boundary of the Engine-facing create preflight.
     ///
-    /// ``DockerProxy`` uses this snapshot to reject a recognizable, fixed-length
-    /// `POST /containers/create` with an explicitly occupied TCP loopback port before
-    /// the Engine sees it. That covers the ordinary `docker run -p 8080:80` path, but
-    /// it is not a reservation: the descriptor closes before Docker starts, and a
-    /// later process can still win the port. Chunked/oversized creates, pre-existing
-    /// containers started later, `-P`, ranges, and omitted host ports remain outside
-    /// this check. A race-free feature still needs (1) request/response framing for
-    /// create and start, (2) a reservation ledger keyed to the returned container ID,
-    /// (3) held TCP descriptors promoted into ``PortForwarder`` only after the guest
-    /// reports the matching binding, plus expiry/rollback for failed or never-started
-    /// containers, and (4) a guest-to-host allocation contract for dynamic bindings.
-    public static let reservationDesign = "Explicit create preflight rejects known conflicts; host port probes are still advisory snapshots until a TCP lease protocol exists."
+    /// ``DockerProxy`` uses this snapshot as an early diagnostic for a recognizable,
+    /// fixed-length `POST /containers/create`, then takes a real ``TCPListener``
+    /// lease for its fixed, supported TCP publications before forwarding the request.
+    /// The lease is associated only with a bounded identity-bearing create response
+    /// and is handed to ``PortForwarder`` without rebinding after a normal `204`
+    /// start response. This API itself remains a snapshot: callers of `morb ports
+    /// check`, dynamic (`-P`/omitted host port), range, UDP, malformed, chunked, and
+    /// oversized shapes must not infer a reservation from its result.
+    public static let reservationDesign = "HostPortPreflight is advisory; recognized fixed-TCP Docker creates take a continuously held listener lease before reaching the Engine."
 }

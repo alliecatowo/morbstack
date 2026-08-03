@@ -46,7 +46,7 @@ guarantee.
 | Direct Docker discovery and durable ownership | `e329140` creates `~/.docker/run/docker.sock` only when it is safely absent; `1dda777` adds an explicit signed per-user `SMAppService` LaunchAgent; `ddac4a3` offers it default-off in first run. | Implemented; registration and clean-profile live verification pending. |
 | Diagnostics and recovery | `e329140` adds an offline, bounded, redacted `morb diagnose`; `cacda50` exposes actual Kubernetes startup diagnostics and an escape path. | Implemented; support-bundle smoke checked; full real-VM recovery matrix pending. |
 | Operational UI | `0c45d08` makes BuildKit cache pruning a real engine-wide confirmed action; `317785f` makes disk-capacity states truthful; `51519d5`, `b63c813`, and `c39cf04` record full-window table readability repairs. | Implemented; real-window Computer Use review completed for these routes. |
-| Port behavior | `c04e343` provides an explicit advisory TCP/UDP loopback preflight and records the protocol required for race-free create/start rejection. | Implemented as a diagnostic; synchronous reservation remains P1. |
+| Port behavior | The fixed-TCP Docker create/start path now retains a real loopback listener through a bounded create-ID response and exact-204 start handoff; the CLI preflight remains an advisory diagnostic. | Fixed supported TCP publications are race-resistant through the recognized exchange. Dynamic/range ports, UDP, opaque/name-based start handoff, and VM-stop persistence remain incomplete. |
 
 ## The parity program
 
@@ -73,11 +73,10 @@ guarantee.
 
 ### P1 — make the daily development loop reliable
 
-1. Extend the current explicit-create port preflight into a create/start TCP lease
-   protocol, then add UDP forwarding while preserving loopback-safe defaults. The
-   preflight rejects known fixed TCP conflicts before an ordinary create reaches the
-   guest, but it is intentionally not a reservation and does not cover dynamic/range
-   ports or later starts.
+1. Complete Docker publication parity beyond the fixed-TCP create/start lease: add a
+   guest allocation-and-response contract for dynamic/range ports, a real UDP data
+   plane, and a persistence/recovery design for VM-unavailable intervals while
+   preserving loopback-safe defaults.
 2. Turn unshared/misresolved bind sources into clear Docker errors, then
    ship FSEvents-to-inotify forwarding or an explicit synced-share tier.
 3. Add grow-only disk expansion, truthful idle-stop wording until genuine

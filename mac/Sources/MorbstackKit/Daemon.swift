@@ -183,8 +183,9 @@ public final class Daemon {
                     + "at \(runtime.directory.path)")
         }
         self.vm = VMManager(config: config, log: logger)
-        self.proxy = DockerProxy(vm: vm, log: logger)
-        self.forwarder = PortForwarder(vm: vm, log: logger)
+        let portForwarder = PortForwarder(vm: vm, log: logger)
+        self.forwarder = portForwarder
+        self.proxy = DockerProxy(vm: vm, log: logger, forwarder: portForwarder)
         self.k8s = K8sManager(vm: vm, log: logger)
         self.controlServer = UnixSocketServer(path: MorbPaths.controlSocket.path, queue: controlQueue)
         self.instanceLock = FileLock(path: MorbPaths.lockFile.path)

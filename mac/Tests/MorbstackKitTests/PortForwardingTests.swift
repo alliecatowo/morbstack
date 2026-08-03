@@ -93,6 +93,34 @@ final class PortForwardingTests: XCTestCase {
         XCTAssertTrue(PortForwardPlan.desiredListeners(bindings).isEmpty)
     }
 
+    // MARK: - Fixed TCP create leases
+
+    func testExplicitTCPCreateBindingsCollapseAddressFamiliesForOneMacLease() {
+        let create = Data(
+            """
+            {"HostConfig":{"PortBindings":{
+              "80/tcp":[
+                {"HostIp":"0.0.0.0","HostPort":"8080"},
+                {"HostIp":"::","HostPort":"8080"}
+              ]
+            }}}
+            """.utf8)
+
+        XCTAssertEqual(DockerPortPublicationPreflight.inspectContainerCreate(body: create), .allowed)
+        XCTAssertEqual(
+            DockerPortPublicationPreflight.explicitTCPBindings(in: create),
+            [DockerExplicitTCPPortBinding(hostIP: "0.0.0.0", hostPort: 8080, containerPort: 80)])
+    }
+
+    func testExplicitTCPCreateBindingsDoNotGuessDynamicOrAmbiguousTargets() {
+        let dynamic = Data(#"{"HostConfig":{"PortBindings":{"80/tcp":[{"HostPort":""}]}}}"#.utf8)
+        let ambiguous = Data(
+            #"{"HostConfig":{"PortBindings":{"80/tcp":[{"HostPort":"8080"}],"81/tcp":[{"HostPort":"8080"}]}}}"#.utf8)
+
+        XCTAssertTrue(DockerPortPublicationPreflight.explicitTCPBindings(in: dynamic).isEmpty)
+        XCTAssertTrue(DockerPortPublicationPreflight.explicitTCPBindings(in: ambiguous).isEmpty)
+    }
+
     // MARK: - Running containers (the auto-suspend interlock)
 
     /// The idle timer asks the engine this question before it is allowed to tear the

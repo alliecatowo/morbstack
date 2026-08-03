@@ -112,6 +112,14 @@ public enum DockerAPIDecoding {
         return containersPath + "?filters=" + MinimalHTTP.percentEncodeQueryValue(filters)
     }
 
+    /// Includes stopped containers as well as running ones. The normal forward set
+    /// must remain based on `containersPath` (stopped containers have no service to
+    /// reach), but the create/start lease ledger uses this only to prove a created
+    /// container was destroyed and can release its held host listener.
+    public static var allContainersPath: String {
+        containersPath + "?all=1"
+    }
+
     /// Counts the entries in a `GET /containers/json` response body.
     ///
     /// - Throws: ``MorbError/protocolViolation(_:)`` when the document is not an array.
@@ -121,6 +129,23 @@ public enum DockerAPIDecoding {
             throw MorbError.protocolViolation("containers/json did not return a JSON array")
         }
         return containers.count
+    }
+
+    /// The full IDs in a `containers/json?all=1` response.
+    ///
+    /// Missing IDs are ignored rather than converted to an empty string, because an
+    /// empty value must never match a held lease by accident.
+    public static func containerIDs(containersJSON data: Data) throws -> Set<String> {
+        let root = try JSONSerialization.jsonObject(with: data, options: [])
+        guard let containers = root as? [Any] else {
+            throw MorbError.protocolViolation("containers/json did not return a JSON array")
+        }
+        return Set(containers.compactMap { entry in
+            guard let object = entry as? [String: Any], let id = object["Id"] as? String,
+                  !id.isEmpty
+            else { return nil }
+            return id
+        })
     }
 
     /// Extracts every published port from a `GET /containers/json` response body.

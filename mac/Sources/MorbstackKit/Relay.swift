@@ -68,8 +68,19 @@ final class RelayDescriptors {
 /// The relay owns both descriptors and closes each exactly once.
 public final class FDRelay {
 
+    /// Direction metadata for an optional passive byte observer.
+    ///
+    /// Observers are notification-only: they receive a copy of bytes immediately
+    /// before the relay writes them and have no way to alter or suppress the
+    /// stream. DockerProxy uses this narrow hook to recognize normal create/start
+    /// responses while preserving every Engine byte for the client.
+    public enum Direction: Sendable {
+        case firstToSecond
+        case secondToFirst
+    }
+
     /// Per-direction bookkeeping, indexed by the *sink* channel.
-    private struct Direction {
+    private struct FlowState {
         /// The source for this direction has reached EOF.
         var sourceAtEOF = false
         /// Writes issued towards the sink that have not completed yet.
@@ -80,6 +91,7 @@ public final class FDRelay {
 
     private let queue: DispatchQueue
     private let owned: RelayDescriptors
+    private let observer: ((Direction, Data) -> Void)?
     private var channels: [DispatchIO] = []
 
     private var completion: (() -> Void)?
@@ -87,7 +99,7 @@ public final class FDRelay {
     private var openChannels = 2
 
     /// `directions[i]` describes the flow whose **sink** is channel `i`.
-    private var directions: [Direction] = [Direction(), Direction()]
+    private var directions: [FlowState] = [FlowState(), FlowState()]
 
     /// Creates a relay. Call ``start()`` to begin pumping.
     ///
@@ -95,11 +107,19 @@ public final class FDRelay {
     ///   - fdA: First descriptor; ownership transfers to the relay.
     ///   - fdB: Second descriptor; ownership transfers to the relay.
     ///   - queue: Serial queue used for all I/O callbacks and internal state.
+    ///   - observer: Optional notification of each byte chunk before its relay write.
     ///   - completion: Called once, on `queue`, after both descriptors are closed.
-    public init(fdA: Int32, fdB: Int32, queue: DispatchQueue, completion: @escaping () -> Void) {
+    public init(
+        fdA: Int32,
+        fdB: Int32,
+        queue: DispatchQueue,
+        observer: ((Direction, Data) -> Void)? = nil,
+        completion: @escaping () -> Void
+    ) {
         self.queue = queue
         self.completion = completion
         self.owned = RelayDescriptors(fdA, fdB)
+        self.observer = observer
 
         // Every stored property now has a value, so `self` may be captured below.
         for (index, fd) in [fdA, fdB].enumerated() {
@@ -147,6 +167,9 @@ public final class FDRelay {
             guard let self, !self.finished else { return }
 
             if let data, !data.isEmpty {
+                self.observer?(
+                    sourceIndex == 0 ? .firstToSecond : .secondToFirst,
+                    Data(data))
                 self.directions[sinkIndex].pendingWrites += 1
                 sink.write(offset: 0, data: data, queue: self.queue) { [weak self] writeDone, _, writeError in
                     // The handler is called repeatedly as the write drains; only the

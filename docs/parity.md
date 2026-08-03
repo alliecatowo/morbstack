@@ -115,20 +115,15 @@ the user to run `docker context create` by hand. #18/#19's DNS/host-gateway
 implementation is described in the follow-up above and needs a fresh live
 run, not more design work.
 
-**#27 — `docker run` succeeds where Docker Desktop would fail on a taken port.**
-Root cause: architectural, not a bug — the Mac-side `PortForwarder` binds
-the host listener asynchronously, after the Engine API call to create/start
-the container has already returned, because the port-forwarding decision
-lives entirely on the host side of the vsock boundary and dockerd itself
-has no visibility into Mac-side port availability. A full fix (synchronous
-pre-flight check before the container start ACKs) would require the relay
-to intercept and block on port availability before forwarding the
-container-start call to the guest, which is a real design change, not a
-quick patch. Short of that: document the difference explicitly (this
-report, and ideally `docs/compat.md`), and make sure `docker ps`/`docker
-compose ps` output is not the only signal — consider whether `docker
-events` could emit something watchable for scripts that need to detect
-this synchronously today.
+**#27 — fixed-TCP host-port admission is now synchronous on the recognized path.**
+For an ordinary fixed, loopback-supported TCP create, the host retains a real
+listener before forwarding create, associates it from a bounded normal create
+response, and activates that same descriptor before an exact start `204` reaches
+the client. This removes the prior success-with-no-listener race without changing
+Docker request/response bytes. The claim is intentionally narrower than complete
+Docker Desktop parity: dynamic/ranged allocation, UDP, opaque or chunked response
+framing, name-based/nonstandard start handoff, and lease survival across VM/daemon
+shutdown still need their own data-plane or lifecycle contract.
 
 ## Priority list — what to fix first for a credible "drop-in" claim
 

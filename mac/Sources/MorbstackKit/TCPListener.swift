@@ -124,6 +124,19 @@ public final class TCPListener {
         return running
     }
 
+    /// Changes where newly accepted connections go without giving up the bound port.
+    ///
+    /// A create/start lease starts as a real listener with no forwarding handler, then
+    /// PortForwarder installs its stream-dial handler only after Docker acknowledges a
+    /// successful start. Serializing this with the accept loop prevents a lease
+    /// handoff from racing an accepted connection against a plain stored-property
+    /// write.
+    public func setConnectionHandler(_ handler: ((Int32) -> Void)?) {
+        lock.lock()
+        onConnection = handler
+        lock.unlock()
+    }
+
     /// Binds `127.0.0.1:port` and starts accepting.
     ///
     /// - Throws: ``TCPListenerError/addressInUse(port:)`` when the port is taken.

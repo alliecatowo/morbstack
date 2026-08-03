@@ -28,6 +28,7 @@ public final class DockerProxy {
 
     private let vm: VMManager
     private let log: MorbLog
+    private let forwarder: PortForwarder
     private let server: UnixSocketServer
     private let queue = DispatchQueue(label: "dev.morbstack.dockerproxy")
     private let relayQueue = DispatchQueue(label: "dev.morbstack.dockerproxy.relay", attributes: .concurrent)
@@ -37,7 +38,7 @@ public final class DockerProxy {
     /// Set by ``Daemon`` around a deliberate shutdown; see ``beginOrderlyShutdown()``.
     private var _orderlyShutdown = false
     /// Live relays, keyed by a sequence number rather than by object identity so the
-    /// key exists *before* the relay does — see ``startRelay(clientFD:guestFD:)``.
+    /// key exists *before* the relay does — see ``startRelay(clientFD:guestFD:leaseObservation:)``.
     private var relays: [UInt64: FDRelay] = [:]
     private var relaySequence: UInt64 = 0
 
@@ -45,9 +46,15 @@ public final class DockerProxy {
     public var idleHandler: (() -> Void)?
 
     /// Creates a proxy bound to `socketPath` (defaults to ``MorbPaths/dockerSocket``).
-    public init(vm: VMManager, log: MorbLog, socketPath: String = MorbPaths.dockerSocket.path) {
+    public init(
+        vm: VMManager,
+        log: MorbLog,
+        forwarder: PortForwarder,
+        socketPath: String = MorbPaths.dockerSocket.path
+    ) {
         self.vm = vm
         self.log = log
+        self.forwarder = forwarder
         self.server = UnixSocketServer(path: socketPath, queue: queue)
         self.server.onConnection = { [weak self] fd in
             self?.handle(clientFD: fd)
@@ -137,30 +144,66 @@ public final class DockerProxy {
     }
 
     private func preflightThenRelay(clientFD: Int32) {
-        guard let createBody = inspectContainerCreate(in: clientFD) else {
-            relayAfterCreatePreflight(clientFD: clientFD, createBody: nil)
-            return
-        }
+        switch inspectDockerRequest(in: clientFD) {
+        case .other:
+            relayAfterPreflight(clientFD: clientFD, createBody: nil, leaseObservation: nil)
 
-        switch DockerPortPublicationPreflight.inspectContainerCreate(body: createBody) {
-        case .allowed:
-            // Bind validation needs the VM's actual attached share list and the
-            // guest's post-boot mount report, so it runs after `ensureRunning`.
-            relayAfterCreatePreflight(clientFD: clientFD, createBody: createBody)
-        case .rejected(let message):
-            rejectContainerCreate(
-                clientFD: clientFD,
-                statusCode: 500,
-                reason: "Internal Server Error",
-                message: message)
+        case .create(let createBody):
+            switch DockerPortPublicationPreflight.inspectContainerCreate(body: createBody) {
+            case .rejected(let message):
+                rejectContainerCreate(
+                    clientFD: clientFD,
+                    statusCode: 500,
+                    reason: "Internal Server Error",
+                    message: message)
+
+            case .allowed:
+                // A successful snapshot is still not enough. Hold the real listeners
+                // before the create reaches dockerd; a failed bind here has the same
+                // Docker-style error, but no guest side effect to roll back.
+                let publications = DockerPortPublicationPreflight.explicitTCPBindings(in: createBody)
+                let lease: PortForwarder.TCPPortLease?
+                do {
+                    lease = publications.isEmpty ? nil : try forwarder.reserveExplicitTCPPorts(publications)
+                } catch {
+                    rejectContainerCreate(
+                        clientFD: clientFD,
+                        statusCode: 500,
+                        reason: "Internal Server Error",
+                        message: error.localizedDescription)
+                    return
+                }
+                // Bind validation needs the VM's actual attached share list and the
+                // guest's post-boot mount report, so it runs after `ensureRunning`.
+                relayAfterPreflight(
+                    clientFD: clientFD,
+                    createBody: createBody,
+                    leaseObservation: lease.map(PortLeaseObservation.create))
+            }
+
+        case .start(let containerIdentifier):
+            let observation = forwarder.claimStartLease(containerIdentifier: containerIdentifier)
+                .map(PortLeaseObservation.start)
+            relayAfterPreflight(clientFD: clientFD, createBody: nil, leaseObservation: observation)
         }
     }
 
-    /// Performs a bounded `MSG_PEEK` only for a normal fixed-length Docker create
-    /// request. No bytes are removed from `clientFD`; the original stream remains
-    /// intact for ``FDRelay``. That is what lets the normal proxy preserve upgraded,
-    /// chunked, and otherwise opaque Engine traffic without a second HTTP proxy.
-    private func inspectContainerCreate(in clientFD: Int32) -> Data? {
+    private enum DockerRequestInspection {
+        case other
+        case create(Data)
+        case start(String)
+    }
+
+    private enum PortLeaseObservation {
+        case create(PortForwarder.TCPPortLease)
+        case start(PortForwarder.TCPPortLease)
+    }
+
+    /// Performs a bounded `MSG_PEEK` for only the normal fixed-length create and
+    /// bodyless start shapes this lease protocol can prove. No bytes are removed from
+    /// `clientFD`; every other request remains intact for ``FDRelay``, including
+    /// upgraded, chunked, and otherwise opaque Engine traffic.
+    private func inspectDockerRequest(in clientFD: Int32) -> DockerRequestInspection {
         let deadline = Date().addingTimeInterval(DockerProxy.createPreflightPeekBudget)
 
         while Date() < deadline {
@@ -169,19 +212,19 @@ public final class DockerProxy {
             let polled = POSIXSocketSupport.retryOnInterrupt {
                 withUnsafeMutablePointer(to: &descriptor) { poll($0, 1, remainingMilliseconds) }
             }
-            guard polled > 0 else { return nil }
+            guard polled > 0 else { return .other }
 
-            guard let bytes = peekClientBytes(clientFD) else { return nil }
+            guard let bytes = peekClientBytes(clientFD) else { return .other }
             let parsed: (head: HTTPRequestHead, consumed: Int)?
             do {
                 parsed = try MinimalHTTP.parseRequestHead(bytes)
             } catch {
-                return nil
+                return .other
             }
             guard let parsed else {
                 // The complete header is not visible yet. Keep waiting only while it
                 // can still fit in the bounded peek buffer.
-                guard bytes.count < DockerProxy.createPreflightPeekLimit else { return nil }
+                guard bytes.count < DockerProxy.createPreflightPeekLimit else { return .other }
                 // `MSG_PEEK` leaves the partial head readable, so `poll` would wake
                 // immediately again. Yield briefly rather than spinning a relay worker
                 // while the local client finishes writing its request.
@@ -189,14 +232,29 @@ public final class DockerProxy {
                 continue
             }
 
-            guard isContainerCreate(parsed.head) else { return nil }
+            if let containerIdentifier = containerStartIdentifier(in: parsed.head) {
+                let transferEncoding = parsed.head.headers["transfer-encoding"] ?? ""
+                let contentLength: Int
+                if let rawLength = parsed.head.headers["content-length"] {
+                    guard let parsedLength = Int(rawLength) else { return .other }
+                    contentLength = parsedLength
+                } else {
+                    contentLength = 0
+                }
+                guard !transferEncoding.lowercased().contains("chunked"), contentLength == 0 else {
+                    return .other
+                }
+                return .start(containerIdentifier)
+            }
+
+            guard isContainerCreate(parsed.head) else { return .other }
             guard
                 !(parsed.head.headers["transfer-encoding"] ?? "").lowercased().contains("chunked"),
                 let contentLength = parsed.head.headers["content-length"].flatMap(Int.init),
                 contentLength >= 0,
                 contentLength <= DockerProxy.createPreflightPeekLimit - parsed.consumed
             else {
-                return nil
+                return .other
             }
 
             let bodyEnd = parsed.consumed + contentLength
@@ -204,9 +262,9 @@ public final class DockerProxy {
                 usleep(1_000)
                 continue
             }
-            return Data(bytes[parsed.consumed..<bodyEnd])
+            return .create(Data(bytes[parsed.consumed..<bodyEnd]))
         }
-        return nil
+        return .other
     }
 
     private func peekClientBytes(_ clientFD: Int32) -> Data? {
@@ -226,7 +284,25 @@ public final class DockerProxy {
         return components.suffix(2).map(String.init) == ["containers", "create"]
     }
 
-    private func relayAfterCreatePreflight(clientFD: Int32, createBody: Data?) {
+    private func containerStartIdentifier(in request: HTTPRequestHead) -> String? {
+        guard request.method.uppercased() == "POST" else { return nil }
+        let path = request.target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first ?? ""
+        let components = path.split(separator: "/", omittingEmptySubsequences: true)
+        guard components.count >= 3,
+              components[components.count - 3] == "containers",
+              components.last == "start"
+        else {
+            return nil
+        }
+        let identifier = String(components[components.count - 2])
+        return identifier.isEmpty ? nil : identifier
+    }
+
+    private func relayAfterPreflight(
+        clientFD: Int32,
+        createBody: Data?,
+        leaseObservation: PortLeaseObservation?
+    ) {
 
         vm.ensureRunning(timeout: DockerProxy.bootTimeout) { [weak self] result in
             guard let self else {
@@ -242,6 +318,7 @@ public final class DockerProxy {
                 }
                 self.writeGatewayError(to: clientFD, message: "\(error)")
                 Darwin.close(clientFD)
+                self.finishLeaseObservation(leaseObservation, reason: "the VM was unavailable before Docker create/start could be relayed")
                 self.connectionFinished()
             case .success:
                 if let createBody {
@@ -258,6 +335,7 @@ public final class DockerProxy {
                             statusCode: 400,
                             reason: "Bad Request",
                             message: message)
+                        self.finishLeaseObservation(leaseObservation, reason: "bind source validation rejected the create")
                         return
                     }
                 }
@@ -277,16 +355,24 @@ public final class DockerProxy {
                         }
                         self.writeGatewayError(to: clientFD, message: "\(error)")
                         Darwin.close(clientFD)
+                        self.finishLeaseObservation(leaseObservation, reason: "the Docker API vsock connection failed")
                         self.connectionFinished()
                     case .success(let guestFD):
-                        self.startRelay(clientFD: clientFD, guestFD: guestFD)
+                        self.startRelay(
+                            clientFD: clientFD,
+                            guestFD: guestFD,
+                            leaseObservation: leaseObservation)
                     }
                 }
             }
         }
     }
 
-    private func startRelay(clientFD: Int32, guestFD: Int32) {
+    private func startRelay(
+        clientFD: Int32,
+        guestFD: Int32,
+        leaseObservation: PortLeaseObservation?
+    ) {
         // Each relay gets its own serial queue; the concurrent parent lets many
         // Docker connections make progress at once.
         let perRelayQueue = DispatchQueue(label: "dev.morbstack.relay", target: relayQueue)
@@ -302,10 +388,20 @@ public final class DockerProxy {
         // it makes an early completion block until the dictionary is consistent,
         // rather than racing the insert. `FDRelay.init` never takes `countLock`, so
         // this cannot deadlock.
+        let responseObserver = makeLeaseResponseObserver(for: leaseObservation)
         countLock.lock()
         relaySequence &+= 1
         let key = relaySequence
-        let relay = FDRelay(fdA: clientFD, fdB: guestFD, queue: perRelayQueue) { [weak self] in
+        let relay = FDRelay(
+            fdA: clientFD,
+            fdB: guestFD,
+            queue: perRelayQueue,
+            observer: { direction, data in
+                guard direction == .secondToFirst else { return }
+                responseObserver?.receive(data)
+            }
+        ) { [weak self] in
+            responseObserver?.relayFinished()
             guard let self else { return }
             self.countLock.lock()
             self.relays.removeValue(forKey: key)  // tolerates an entry stop() already took
@@ -316,6 +412,52 @@ public final class DockerProxy {
         countLock.unlock()
 
         relay.start()
+    }
+
+    private func makeLeaseResponseObserver(
+        for observation: PortLeaseObservation?
+    ) -> DockerPortLeaseResponseObserver? {
+        guard let observation else { return nil }
+        switch observation {
+        case .create(let lease):
+            return DockerPortLeaseResponseObserver(kind: .create) { [forwarder] outcome in
+                switch outcome {
+                case .created(let containerID):
+                    guard forwarder.associate(lease, withContainerID: containerID) else {
+                        forwarder.abandon(lease, reason: "Docker create returned an already-leased or unusable container identity")
+                        return
+                    }
+                case .failed:
+                    forwarder.abandon(lease, reason: "Docker create returned an error response")
+                case .unrecognized:
+                    forwarder.abandon(lease, reason: "Docker create response was not a bounded identity-bearing HTTP response")
+                case .startSucceeded:
+                    break
+                }
+            }
+
+        case .start(let lease):
+            return DockerPortLeaseResponseObserver(kind: .start) { [forwarder] outcome in
+                let succeeded: Bool
+                if case .startSucceeded = outcome {
+                    succeeded = true
+                } else {
+                    succeeded = false
+                }
+                _ = forwarder.completeStart(lease, succeeded: succeeded)
+            }
+        }
+    }
+
+    /// The response observer owns create/start cleanup once a relay exists. These
+    /// earlier error branches have no guest response to observe, so they must retire
+    /// the provisional reservation explicitly.
+    private func finishLeaseObservation(_ observation: PortLeaseObservation?, reason: String) {
+        guard let observation else { return }
+        switch observation {
+        case .create(let lease): forwarder.abandon(lease, reason: reason)
+        case .start(let lease): _ = forwarder.completeStart(lease, succeeded: false)
+        }
     }
 
     private func connectionFinished() {
