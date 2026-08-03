@@ -183,6 +183,28 @@ has explicit revocation/removal, and file operations cannot corrupt Docker
 storage. A machine can be created, stopped, reached over SSH, exported, and
 deleted without changing the container engine's state.
 
+### Current OrbStack capability map — what to copy, what to avoid
+
+This map is a design input, not a claim of feature parity. It was refreshed
+against OrbStack's own documentation on 2026-08-03. Its purpose is to keep
+Morbstack's feature work anchored in concrete developer workflows while
+preserving the project's open, least-privilege contract.
+
+| Workflow OrbStack documents | Morbstack delivery response | Priority and boundary |
+| --- | --- | --- |
+| Container and Compose service domains, detected HTTP routing, explicit port labels, and a local service index ([domains](https://docs.orbstack.dev/docker/domains)) | `service.project.morb.local` should be driven only by observed running containers, Compose labels, and an explicit user opt-in. A first version must have exact collision, stop, DNS/VPN, and port-selection semantics; it must not scrape the host network or silently route arbitrary names. | Highest differentiator after R0/R1. |
+| HTTPS backed by a local CA, Keychain-protected keys, explicit first-use trust, and name-constrained certificates ([HTTPS](https://docs.orbstack.dev/features/https)) | Keep the CA, trust request, names, revocation, and proxy lifecycle separate from ordinary Docker setup. A self-contained status/repair surface comes before a toggle. No broad CA, global resolver file, or undocumented certificate injection. | Build only with a macOS security design and explicit consent. |
+| Debugging an image with no shell without modifying the target container ([Debug Shell](https://docs.orbstack.dev/features/debug)) | The pinned-asset/provenance/compatibility contract precedes any executor. A future toolbox must have an isolated namespace, exact target/permission disclosure, cleanup receipt, live cancellation, and a proper PTY bridge. | R3; no placeholder shell. |
+| Finder/editor access to container, image, and volume files ([native files](https://docs.orbstack.dev/features/native-files)) | Start with an explicit read-only image inspection/export path, then a separately proven volume export/import transaction. A Finder filesystem mount is later because locking, consistency, durability, and lifecycle errors must be truthful before writable access exists. | R4; preserve Docker-storage integrity over convenience. |
+| Separate Linux machines, isolated sandboxes, cloud-init, and SSH ([machines](https://docs.orbstack.dev/machines/), [isolated machines](https://docs.orbstack.dev/machines/isolated), [cloud-init](https://docs.orbstack.dev/machines/cloud-init), [SSH](https://docs.orbstack.dev/machines/ssh)) | A machine is a separate product abstraction and persistent disk, never an escape hatch that mutates the Docker VM. Image provenance, SSH key ownership, cloud-init retention, export/delete, and isolation must be designed together. | R4, after Docker compatibility and local-service fundamentals. |
+| Host networking, direct container access, USB passthrough, sound, and a menu-bar workflow ([network](https://docs.orbstack.dev/docker/network), [host networking](https://docs.orbstack.dev/docker/host-networking), [USB](https://docs.orbstack.dev/features/usb), [menu bar](https://docs.orbstack.dev/menu-bar)) | Keep the existing native menu bar as the operational entry point. Treat direct networking, USB, and sound as separate entitlement/threat-model projects: each needs an opt-in capability, narrow discovery surface, clean detach/recovery, and no privileged helper shortcut. | Do not block the replacement on these; never imply parity before the security model is proven. |
+
+The ordering is intentional: first make a normal Docker project boringly
+compatible; then remove daily friction with domains, HTTPS, debug, and safe
+file work; only then widen the trusted hardware/network surface or add Linux
+machines. That produces a stronger free replacement than copying a closed
+product's broad permissions or web-extension model.
+
 ## Authority and security boundary
 
 | Category | Work | Policy |
