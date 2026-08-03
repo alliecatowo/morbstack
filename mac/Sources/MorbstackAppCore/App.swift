@@ -362,55 +362,25 @@ struct Sidebar: View {
 
 // MARK: - Engine footer
 
-/// The status command in the sidebar's system-owned bottom bar.
+/// Concise engine status in the sidebar's system-owned bottom bar.
 ///
-/// This is deliberately a native `Menu`, not a custom status pill. The label gives the
-/// current engine state a concise, textual representation; the menu is the appropriate
-/// home for secondary lifecycle actions and the sharing warning. `safeAreaBar` supplies
-/// the Tahoe bar treatment, and `safeAreaInset` is the native fallback on older macOS.
+/// The native bar supplies Tahoe's presentation and the sidebar's collapse behavior;
+/// this view supplies only truthful, noninteractive status. Engine lifecycle commands
+/// live in the app's Engine menu, where they remain available when the sidebar's bottom
+/// edge is not visible. `safeAreaInset` is the native fallback on older macOS.
 struct EngineFooter: View {
 
-    @Bindable var model: AppModel
+    let model: AppModel
 
     var body: some View {
-        Menu {
-            Text(subtitle)
-
-            if let chip = model.fileSharingChip {
-                Divider()
-                SettingsLink {
-                    Text(chip.text)
-                }
-            }
-
-            if !availableActions.isEmpty {
-                Divider()
-                ForEach(availableActions, id: \.rawValue) { action in
-                    Button(engineActionTitle(action)) {
-                        Task { await model.engineAction(action) }
-                    }
-                    .disabled(model.isEngineBusy)
-                }
-            }
-        } label: {
-            Label(model.engine.headline, systemImage: statusSymbol)
-                .lineLimit(1)
-                .monospacedDigit()
-        }
-        .menuStyle(.borderlessButton)
-        .controlSize(.small)
-        .help(tooltip)
-        .accessibilityHint("Shows engine details and actions")
-    }
-
-    private var availableActions: [EngineAction] {
-        guard model.engine.reachable else { return [.start] }
-        switch model.engine.state {
-        case "running": return [.suspend, .stop]
-        case "suspended": return [.start, .stop]
-        case "starting", "stopping", "pausing": return []
-        default: return [.start]
-        }
+        Label(model.engine.headline, systemImage: statusSymbol)
+            .lineLimit(1)
+            .monospacedDigit()
+            .controlSize(.small)
+            .help(tooltip)
+            .accessibilityLabel(model.engine.headline)
+            .accessibilityValue(subtitle)
+            .accessibilityHint("Engine status")
     }
 
     private var statusSymbol: String {
@@ -420,14 +390,6 @@ struct EngineFooter: View {
         case "starting", "stopping", "pausing": return "arrow.triangle.2.circlepath.circle"
         case "error": return "exclamationmark.triangle"
         default: return "stop.circle"
-        }
-    }
-
-    private func engineActionTitle(_ action: EngineAction) -> String {
-        switch action {
-        case .start: return "Start Engine"
-        case .suspend: return "Free Engine Memory"
-        case .stop: return "Stop Engine"
         }
     }
 
