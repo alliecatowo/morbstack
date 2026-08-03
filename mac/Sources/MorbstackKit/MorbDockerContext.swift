@@ -501,12 +501,52 @@ public enum MorbDockerContext {
         case .unavailable(let reason):
             return .unavailable(reason)
         case .correct:
-            do {
-                try FileManager.default.removeItem(at: discovery)
-            } catch {
-                throw MorbError.io("could not remove \(discovery.path): \(error.localizedDescription)")
+            // `removeItem` also supports directories. The status above deliberately
+            // accepted only a symbolic link, but another tool can replace a pathname
+            // between that inspection and this operation. `unlink` removes one
+            // non-directory entry and fails for a raced-in directory, so cleanup can
+            // never turn a stale inspection into a directory-removal operation.
+            let immediatelyBeforeRemoval = directSocketStatus(
+                socketPath: socketPath, discoverySocketPath: discoverySocketPath, environment: environment)
+            guard case .correct = immediatelyBeforeRemoval.state else {
+                return directSocketRemoveResult(for: immediatelyBeforeRemoval.state)
+            }
+
+            let unlinkResult = discovery.withUnsafeFileSystemRepresentation { path -> Int32 in
+                guard let path else { return -1 }
+                return unlink(path)
+            }
+            if unlinkResult != 0 {
+                let removalError = errno
+                // A competing tool may have removed or replaced the entry after our
+                // final read. Report the current, preserved state instead of claiming
+                // that Morbstack removed its link.
+                let afterFailure = directSocketStatus(
+                    socketPath: socketPath, discoverySocketPath: discoverySocketPath, environment: environment)
+                if case .correct = afterFailure.state {
+                    throw MorbError.io(
+                        "could not remove \(discovery.path): \(String(cString: strerror(removalError)))")
+                }
+                return directSocketRemoveResult(for: afterFailure.state)
             }
             return .removed
+        }
+    }
+
+    private static func directSocketRemoveResult(for state: DirectSocketStatus.State) -> DirectSocketRemoveResult {
+        switch state {
+        case .missing:
+            return .notPresent
+        case .correct:
+            // This case is only used after a caller has already decided to remove a
+            // managed link. Keep it distinct from an unrelated occupied node.
+            return .unavailable("the Morbstack discovery link changed while it was being removed")
+        case .pointsElsewhere(let destination):
+            return .pointsElsewhere(destination)
+        case .occupied(let kind):
+            return .occupied(kind)
+        case .unavailable(let reason):
+            return .unavailable(reason)
         }
     }
 
