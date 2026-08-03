@@ -309,13 +309,22 @@ struct StacksRootView: View {
             if let service = selectedService,
                 isServiceBusy(service) || isProjectBusy(for: service)
             {
-                ToolbarItem(id: "stacks.progress", placement: .secondaryAction) {
+                ToolbarItem(id: "stacks.primaryLifecycle", placement: .primaryAction) {
                     ProgressView()
                         .controlSize(.small)
                         .accessibilityLabel("Updating \(service.composeService ?? service.displayName)")
                         .help("Updating \(service.composeService ?? service.displayName)")
                 }
             } else if let service = selectedService {
+                if let action = primaryLifecycleAction(for: service) {
+                    ToolbarItem(id: "stacks.primaryLifecycle", placement: .primaryAction) {
+                        Button { perform(action, on: service) } label: {
+                            Image(systemName: action.symbol)
+                        }
+                        .accessibilityLabel(action.title)
+                        .help("\(action.title) \(service.composeService ?? service.displayName)")
+                    }
+                }
                 ToolbarItem(id: "stacks.actions", placement: .secondaryAction) {
                     selectionActionsMenu(service: service, stack: stack)
                 }
@@ -331,6 +340,21 @@ struct StacksRootView: View {
                     projectActionsMenu(for: stack)
                 }
             }
+        }
+    }
+
+    /// A selected service gets the same single, state-appropriate lifecycle command
+    /// as its container record. Other lifecycle and project operations remain in the
+    /// system-managed secondary menu, so they do not crowd search or the inspector
+    /// control at narrow widths.
+    private func primaryLifecycleAction(for service: ContainerSummary) -> ContainerAction? {
+        switch service.state {
+        case "running", "restarting":
+            return service.availableActions.contains(.stop) ? .stop : nil
+        case "paused":
+            return service.availableActions.contains(.unpause) ? .unpause : nil
+        default:
+            return service.availableActions.contains(.start) ? .start : nil
         }
     }
 
