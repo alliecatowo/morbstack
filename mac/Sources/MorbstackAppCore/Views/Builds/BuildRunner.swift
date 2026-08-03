@@ -186,21 +186,53 @@ struct BuildxClientEnvironment {
         try MorbPaths.ensureDirectories()
 
         let temporaryDockerConfig = try makeTemporaryDockerConfig(buildx: buildx)
-        var environment = ProcessInfo.processInfo.environment
-        // Do not inherit a remote engine or a named context from the GUI process. Both
-        // local builds and history reads must address the engine this window observes.
-        environment["DOCKER_HOST"] = "unix://\(socketPath)"
-        environment.removeValue(forKey: "DOCKER_CONTEXT")
-        // TLS settings, a remote cert path, or a pinned API version turn this explicit
-        // local Unix-socket request back into a person's ambient shell configuration.
-        for key in ["DOCKER_TLS", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "DOCKER_API_VERSION"] {
-            environment.removeValue(forKey: key)
-        }
-        environment["DOCKER_CONFIG"] = temporaryDockerConfig.path
-        environment["BUILDX_CONFIG"] = MorbPaths.buildxConfigDirectory.path
+        let environment = isolatedEnvironment(
+            inherited: ProcessInfo.processInfo.environment,
+            socketPath: socketPath,
+            dockerConfigDirectory: temporaryDockerConfig,
+            buildxConfigDirectory: MorbPaths.buildxConfigDirectory)
         return BuildxClientEnvironment(
             environment: environment,
             temporaryDockerConfig: temporaryDockerConfig)
+    }
+
+    /// Produces the environment for a build the app has explicitly confirmed against
+    /// its local Engine. Buildx documents both `BUILDX_BUILDER` and `BUILDKIT_HOST`
+    /// as builder-selection overrides; inheriting either could send `--load` to a
+    /// remote builder (or make a local build fail because that builder is unavailable).
+    /// Keep the app's selection local and make the raw-JSON progress contract stable.
+    static func isolatedEnvironment(
+        inherited: [String: String],
+        socketPath: String,
+        dockerConfigDirectory: URL,
+        buildxConfigDirectory: URL
+    ) -> [String: String] {
+        var environment = inherited
+        // Do not inherit a remote engine or a named context from the GUI process. Both
+        // local builds and history reads must address the engine this window observes.
+        for key in [
+            "DOCKER_CONTEXT",
+            "DOCKER_TLS",
+            "DOCKER_TLS_VERIFY",
+            "DOCKER_CERT_PATH",
+            "DOCKER_API_VERSION",
+            // These select or reconfigure a Buildx builder independently of
+            // DOCKER_HOST. A local app build must not inherit a shell's remote or
+            // alternate builder selection.
+            "BUILDKIT_HOST",
+            "BUILDX_BUILDER",
+            "BUILDX_CONFIG",
+            "BUILDKIT_PROGRESS",
+            "BUILDX_NO_DEFAULT_LOAD",
+        ] {
+            environment.removeValue(forKey: key)
+        }
+        // TLS settings, a remote cert path, or a pinned API version turn this explicit
+        // local Unix-socket request back into a person's ambient shell configuration.
+        environment["DOCKER_HOST"] = "unix://\(socketPath)"
+        environment["DOCKER_CONFIG"] = dockerConfigDirectory.path
+        environment["BUILDX_CONFIG"] = buildxConfigDirectory.path
+        return environment
     }
 
     func cleanUp() {
