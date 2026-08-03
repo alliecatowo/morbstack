@@ -1,9 +1,10 @@
 # Competitive capability roadmap
 
-**Status:** active implementation guide. Researched 2026-08-03. This narrows
-[`product-audit.md`](product-audit.md) into capability slices that make
-Morbstack a free, open, genuinely drop-in macOS Docker Desktop replacement
-rather than merely a Docker client with a VM.
+**Status:** active experience-bar and source audit, reconciled 2026-08-03.
+The executable sequence, owners, authority boundaries, and live gates live in
+the canonical [`drop-in delivery plan`](drop-in-delivery-plan.md). This document
+keeps that work anchored to the experience Morbstack must exceed, rather than
+turning an implementation detail into a marketing claim.
 
 ## How to read this document
 
@@ -38,7 +39,7 @@ larger feature checklist.
 | --- | --- | --- |
 | Upstream Docker runtime | `RuntimeArtifacts.swift`, `VMManager.swift`, `guest/morbinit`, and the dated checks in [`parity.md`](parity.md). | Implemented foundation. The historical live matrix is useful evidence, but must be rerun on a clean profile before release claims. |
 | Native operations app | `MorbstackAppCore` has real containers, stacks, images, volumes, networks, builds, Kubernetes, disk, and migration routes; `DockerClient.swift` performs real lifecycle, log, stats, inspection, and prune API calls. | Implemented surface. It is not a reason to defer behavioral gaps below. |
-| Self-contained CLI, standard plugins, context, direct discovery, and opt-in service | `CliPlugins.swift`, `MorbCliInstallation.swift`, `MorbDockerContext.swift`, `BackgroundService.swift`, and `MorbSetupVerification.swift`. The service is a signed per-user `SMAppService` LaunchAgent, not a root daemon; a current `morbstack` context must also name this runtime's socket. | Implemented pending one complete, fresh-user proof: install → selected integrations → service → engine start → Docker `/_ping` → Compose/buildx/Testcontainers/IDE discovery. |
+| Self-contained CLI, standard plugins, context, direct discovery, and opt-in service | `CliPlugins.swift`, `MorbCliInstallation.swift`, `MorbDockerContext.swift`, `BackgroundService.swift`, and `MorbSetupVerification.swift`. The service is a signed per-user `SMAppService` LaunchAgent, not a root daemon; a current `morbstack` context must also name this runtime's socket. | Implemented pending one complete, fresh-user proof: install → selected integrations → service → engine start → Docker `/_ping` → Compose/buildx/Testcontainers/IDE discovery. No pinned Testcontainers or Dev Containers fixture/lockfile is currently tracked, so those must be added before the clean-profile matrix can be run. |
 | Kubernetes and recovery | `guest/morbinit/src/k8s.rs`, `K8sRuntime.swift`, the Kubernetes route, and `k8s-diagnose`. | Opt-in cluster and diagnosis exist. Missing are safe workload-level logs, events, exec, and port-forward operations with clear cancellation/recovery. |
 | Diagnostics-bundle recovery | `MorbDiagnostics` and `morb diagnose` collect a bounded, redacted local bundle. `DiagnosticsBundleWorkflow` makes the same collector a native engine-error recovery action: a person picks the parent folder, collection does not start or contact Docker/the daemon, and success points them to the reviewable bundle in Finder. | Implemented mechanics and local smoke evidence exist; full real-VM recovery and real-window acceptance remain pending. The app does not upload, share, or claim an in-flight cancel contract. |
 | Migration | `MigrationReadOnlyPlanner` derives independent read-only image and named-volume comparisons. The native Migration inspector shows eligible, existing-destination, and unsupported-driver volume results without a helper container. `ImageMigrationTransaction` backs the reviewed native selected-image flow and `morb migrate run`; `VolumeMigrationTransaction` backs separately confirmed CLI and native selected-volume flows. | Implemented pending clean source/destination-engine acceptance. Volume execution is limited to selected missing `local` volumes: it re-prepares selected names before review, performs one final Transfer-click reprepare, returns any changed source/destination/item/helper/safety fact to review, and rechecks before each creation. It never reads/merges/replaces/deletes an existing destination, needs separate consent before a missing helper image is pulled, and writes a durable report. Bind mounts, containers, credentials/provenance policy, resumable cancellation, and automatic rollback remain out of scope. |
@@ -46,158 +47,25 @@ larger feature checklist.
 | Published ports | `PortForwarder.swift` forwards TCP loopback and event-confirmed UDP. For a normally encoded fixed supported TCP `docker run -p <port>:...`, `DockerProxy` binds and retains the listener before create, associates it from a bounded standard create response, and hands it off before an exact start `204` reaches the client. A narrow, bounded explicit-empty TCP `HostPort` create transaction instead allocates a real loopback listener, rewrites that exact create body with its concrete port, and retains the same lease. A VM/daemon stop deliberately releases listeners while no guest service exists; after recovery, a bodyless start by the canonical full container ID can inspect the same stopped container's fixed loopback TCP `HostConfig.PortBindings` and atomically rebuild/associate its lease before the unchanged start reaches dockerd. Reconciliation withholds any TCP or UDP endpoint that Docker reports with competing targets rather than choosing one by list order. | The narrow dynamic path excludes `-P`, ranges, `HostPort: "0"`, missing/opaque dynamic bindings, mixed non-TCP documents, non-loopback addresses, and opaque/chunked framing. UDP has no synchronous held dynamic lease. Starts by name/ID prefix, unsupported inspect documents, and live VM/Docker acceptance evidence remain incomplete. |
 | Disk management | `DiskCapacity.swift` supplies the RAW-image facts. `MorbDiskResize` combines those facts with VM state and the guest's explicit `disk_resize` capability; the current guest reports `unavailable`. | No host image mutation occurs. A grow transaction still needs an explicit target, stopped-VM ownership, retained prior-capacity journal, guest filesystem identity/resize, and post-resize proof. Shrinking remains unsupported. |
 | Debug toolbox | `MorbScan/DebugToolboxPlan.swift` and `morb debug check` expose static readiness; `morb debug [plan] <container>` makes only `GET /containers/{id}/json` and reports its non-actions. | Read-only foundation. A verified pinned asset, consented acquisition/update policy, isolated namespace/cleanup policy, and interactive PTY bridge are still required before an executor or app action exists. |
-| Local domains, HTTPS, Finder-native files, Linux machines | Explicitly absent from current runtime/app implementation; see [`product-audit.md`](product-audit.md). | Differentiators, not P0 compatibility gates. They need a security and macOS-capability design before UI work. |
+| Local domains, HTTPS, Finder-native files, Linux machines | `MorbLocalDomain` and `LocalDomainClaimReconciler` provide a pure, inactive, fail-closed exact-claim boundary tied to a running-container list and atomic `PortForwarder` snapshot. They do not bind, resolve, route, issue a certificate, watch Docker, or present a URL. Native files and machines have no shipped service surface. | Prospective local-domain claims are implementation groundwork, not a user-visible domain capability. DNS/router/HTTPS and native files/machines remain differentiators that need a security and macOS-capability design before UI work. |
 
 ### Documentation reconciliation is a release prerequisite
 
-**Repository evidence:** the current `README.md` still says there is no durable
-background service, while `BackgroundService.swift` implements the consented
-per-user service; older comparison text also describes an app state that has
-since changed. **Inference:** after every capability below passes live
-acceptance, reconcile README, comparison, compatibility, roadmap, and
-release notes in the same change. A replacement cannot ask users to guess
-which of its own documents is current.
+The initial source audit once incorrectly said `README.md` denied a background
+service and that local-domain groundwork was absent. Neither statement is true:
+the README describes the consented Login Item, and the current source has an
+inactive domain-claim boundary. After every accepted slice, reconcile README,
+comparison, compatibility, the delivery plan, and release notes in the same
+change. All public statuses must remain *planned*, *implemented pending live
+verification*, or *released*; the clean-profile matrix has not run.
 
-## Priority order: implementation slices, not a feature wish list
+## Execution order
 
-### R0 — prove the first ten minutes on a clean Mac profile
-
-**Why now (inference):** every competing option in the sources above makes
-ordinary Docker workflow available immediately. This is the binary release
-gate and the highest-value free/open differentiator.
-
-**Slice:** make first-run one resumable, explicit transaction with a durable
-result record: install only approved user-owned links/plugins/context/direct
-socket; optionally register the per-user service; start the engine only after
-confirmation; then verify `/_ping`, `docker version`, Compose, buildx, direct
-socket discovery, Testcontainers, Dev Containers, and one IDE integration.
-Show the exact item that failed and a repair action; never replace another
-runtime's socket, context, PATH entry, or credentials.
-
-**Acceptance:** a new macOS user with Docker Desktop/Homebrew Docker absent can
-install Morbstack, close its window, open a new shell/IDE, run a Compose build,
-and have Docker auto-discovered. Re-run must be idempotent and uninstall must
-remove only Morbstack-owned state.
-
-**Authority:** **no elevated privilege.** Home-directory links, a per-user
-`SMAppService` agent, and loopback sockets are sufficient. Keep it that way.
-
-### R1 — make Docker-visible failures truthful
-
-**Why now (repository evidence):** port publication and bind mounts are the
-two places where a successful Docker command can currently describe a state
-that is not actually usable.
-
-**Slice A — publication contract:** reserve fixed TCP host endpoints and the
-narrow explicit-empty TCP allocation shape transactionally against Docker
-create/start, retain the listener/lease until container removal or failed
-start, and relay UDP as bounded event-confirmed datagram flows. A listener is
-deliberately released while the VM is down; the next bodyless canonical-full-ID
-start can inspect and atomically reconstruct a fully understood stopped-container
-TCP lease before the unchanged request reaches dockerd. Withhold a conflicting
-TCP or UDP endpoint rather than routing it by daemon-list order. Return a
-Docker-compatible conflict before a supported TCP container is reported
-running; retain a readable diagnostic for the app and `morb status`.
-
-**Slice B — share contract:** canonicalize macOS source paths before guest
-mapping, validate them against the configured share set, and reject a missing
-or unshared bind source through the Engine-facing path. The result must be a
-clear error, never an empty guest directory.
-
-**Acceptance:** race a bound fixed TCP loopback port against a container start;
-it must either forward or fail synchronously. Verify fixed UDP only after Docker
-reports its concrete endpoint, with real datagram request/reply behavior rather than
-a TCP approximation. Stop the VM after a fixed TCP container stops, restart it, then
-start by canonical full ID: the host listener must be reclaimed before the Engine
-returns `204`, work immediately afterwards, and release on destroy. Exercise a file bind
-under `/tmp`, `/private/tmp`, a symlinked source, and an unshared source; each
-must bind the intended file or fail plainly.
-
-**Authority:** **no elevated privilege.** This is daemon/relay protocol work
-on Morbstack-owned loopback listeners and user-selected paths.
-
-### R2 — restore the Mac edit → container watch loop
-
-**Why now:** Docker Desktop's synchronized-file-sharing feature and
-OrbStack's documented two-way sharing make hot reload table stakes; polling
-is a mitigation, not parity.
-
-**Slice:** build a guest-local synchronized filesystem or other guest-side
-observable mechanism for explicitly shared roots. A bounded, canonicalized
-host observation stream may be an input only after that guest receiver has
-defined rescan, move/rename, overflow, and reconnect semantics. The outcome
-must be ordinary observer-visible kernel behavior in the guest—not a claim
-that host FSEvents or synthetic inotify injection alone restores hot reload.
-Make the status visible in Sharing settings and diagnostics.
-
-**Acceptance:** Node/Vite, Python, Go, and a rename-heavy watcher test observe
-host edits through a bind mount; reconnect, overflow, stop/start, and a
-non-shared path have deterministic outcomes. Benchmark against a native Linux
-tree and publish the result instead of borrowing competitor performance claims.
-
-**Authority:** **no elevated privilege.** FSEvents observes directories the
-user selected/shared; it must not watch the whole disk or install a helper.
-
-### R3 — complete the operations people use to escape Docker Desktop
-
-**Why now (repository evidence):** the native app already has authentic
-lists, inspection, logs, stats, lifecycle, and destructive confirmations.
-Finish workflows rather than adding dashboard panels.
-
-1. **Migration transaction:** selected local-image planning, confirmation,
-   typed progress, report, and image-ID verification exist in `MorbMigrate`.
-   The selected-volume CLI transaction is also implemented for missing
-   local-driver volumes, with fresh preflight, explicit helper-image network consent,
-   durable per-volume results, and no overwrite/merge path. Run its real two-engine
-   acceptance matrix before widening it; bind-mount transfer, resumable cancellation,
-   credential/provenance remediation, and rollback *guidance* that never destroys
-   the source runtime remain. The app's reviewed transfer flow now has the same
-   final reprepare boundary; keep its scope narrow until it passes that real
-   two-engine acceptance.
-2. **Debug toolbox:** the read-only readiness and target-plan boundary exists;
-   ship its executor only with a pinned, signed toolbox image, provenance,
-   expiry/update policy, namespace/cleanup rules, and a real interactive PTY
-   bridge. Keep `morb debug` unavailable whenever any safety primitive is missing.
-3. **Kubernetes operations:** add selected-resource events/logs/describe,
-   cancellable port forward, and guarded exec; retain `k8s-diagnose` as the
-   first recovery action. Do not create/delete workloads behind a decorative
-   control.
-4. **Capacity recovery:** replace the current negative guest capability with a
-   stop-only grow-only disk expansion transaction: explicit target, retained
-   prior-capacity journal, in-guest filesystem resize, post-resize verification, and
-   a hard no-shrink invariant.
-
-**Acceptance:** each action has live progress, cancellation/failure state,
-exact effects, and a test against a real engine/cluster. No one-click action
-may alter the source runtime, active containers, or user data unexpectedly.
-
-**Authority:** **no elevated privilege.** These operate through Docker/Kubernetes
-APIs and Morbstack-owned VM storage. Registry access and a toolbox image pull
-need user-visible network/provenance policy, not administrator rights.
-
-### R4 — earn the OrbStack-style local-service advantage
-
-**Why next (competitor evidence):** readable service domains, zero-setup
-HTTPS, and native file access remove daily friction once compatibility is
-solid. They are more compelling than imitating a Docker Desktop extension
-marketplace.
-
-1. **Domains and HTTPS:** implement `service.project.morb.local`, collision
-   handling, listener/HTTP detection, a local reverse proxy, and an opt-in
-   narrowly scoped CA. Do not auto-trust a broad CA or silently claim every
-   domain. Support explicit labels for ambiguous ports and explain VPN/DNS
-   state in diagnostics.
-2. **Native file access:** start with explicit read-only image inspection and
-   controlled volume/container export/import. Only add Finder mounts once
-   their read/write, lifecycle, locking, and failure semantics are proven.
-3. **Linux machines:** build a separate machine abstraction—image provenance,
-   cloud-init, SSH/editor integration, deletion/export—rather than turning the
-   shared Docker VM into a mutable general-purpose machine.
-
-**Acceptance:** domains resolve only while their service is valid, HTTPS trust
-has explicit revocation/removal, and file operations cannot corrupt Docker
-storage. A machine can be created, stopped, reached over SSH, exported, and
-deleted without changing the container engine's state.
+The delivery plan’s S0–S6 order is intentional: first make normal Docker
+projects boringly compatible; then repair the edit/watch loop and operational
+escape hatches; then add local-service and native-file/machine advantages. That
+sequence gives a better free replacement than copying a closed product’s broad
+permissions or web-extension marketplace.
 
 ### Current OrbStack capability map — what to copy, what to avoid
 
@@ -208,11 +76,11 @@ preserving the project's open, least-privilege contract.
 
 | Workflow OrbStack documents | Morbstack delivery response | Priority and boundary |
 | --- | --- | --- |
-| Container and Compose service domains, detected HTTP routing, explicit port labels, and a local service index ([domains](https://docs.orbstack.dev/docker/domains)) | `service.project.morb.local` should be driven only by observed running containers, Compose labels, and an explicit user opt-in. A first version must have exact collision, stop, DNS/VPN, and port-selection semantics; it must not scrape the host network or silently route arbitrary names. | Highest differentiator after R0/R1. |
+| Container and Compose service domains, detected HTTP routing, explicit port labels, and a local service index ([domains](https://docs.orbstack.dev/docker/domains)) | `service.project.morb.local` should be driven only by observed running containers, Compose labels, and an explicit user opt-in. A first version must have exact collision, stop, DNS/VPN, and port-selection semantics; it must not scrape the host network or silently route arbitrary names. | S5, after S0–S4. |
 | HTTPS backed by a local CA, Keychain-protected keys, explicit first-use trust, and name-constrained certificates ([HTTPS](https://docs.orbstack.dev/features/https)) | Keep the CA, trust request, names, revocation, and proxy lifecycle separate from ordinary Docker setup. A self-contained status/repair surface comes before a toggle. No broad CA, global resolver file, or undocumented certificate injection. | Build only with a macOS security design and explicit consent. |
-| Debugging an image with no shell without modifying the target container ([Debug Shell](https://docs.orbstack.dev/features/debug)) | The pinned-asset/provenance/compatibility contract precedes any executor. A future toolbox must have an isolated namespace, exact target/permission disclosure, cleanup receipt, live cancellation, and a proper PTY bridge. | R3; no placeholder shell. |
-| Finder/editor access to container, image, and volume files ([native files](https://docs.orbstack.dev/features/native-files)) | Start with an explicit read-only image inspection/export path, then a separately proven volume export/import transaction. A Finder filesystem mount is later because locking, consistency, durability, and lifecycle errors must be truthful before writable access exists. | R4; preserve Docker-storage integrity over convenience. |
-| Separate Linux machines, isolated sandboxes, cloud-init, and SSH ([machines](https://docs.orbstack.dev/machines/), [isolated machines](https://docs.orbstack.dev/machines/isolated), [cloud-init](https://docs.orbstack.dev/machines/cloud-init), [SSH](https://docs.orbstack.dev/machines/ssh)) | A machine is a separate product abstraction and persistent disk, never an escape hatch that mutates the Docker VM. Image provenance, SSH key ownership, cloud-init retention, export/delete, and isolation must be designed together. | R4, after Docker compatibility and local-service fundamentals. |
+| Debugging an image with no shell without modifying the target container ([Debug Shell](https://docs.orbstack.dev/features/debug)) | The pinned-asset/provenance/compatibility contract precedes any executor. A future toolbox must have an isolated namespace, exact target/permission disclosure, cleanup receipt, live cancellation, and a proper PTY bridge. | S4; no placeholder shell. |
+| Finder/editor access to container, image, and volume files ([native files](https://docs.orbstack.dev/features/native-files)) | Start with an explicit read-only image inspection/export path, then a separately proven volume export/import transaction. A Finder filesystem mount is later because locking, consistency, durability, and lifecycle errors must be truthful before writable access exists. | S6; preserve Docker-storage integrity over convenience. |
+| Separate Linux machines, isolated sandboxes, cloud-init, and SSH ([machines](https://docs.orbstack.dev/machines/), [isolated machines](https://docs.orbstack.dev/machines/isolated), [cloud-init](https://docs.orbstack.dev/machines/cloud-init), [SSH](https://docs.orbstack.dev/machines/ssh)) | A machine is a separate product abstraction and persistent disk, never an escape hatch that mutates the Docker VM. Image provenance, SSH key ownership, cloud-init retention, export/delete, and isolation must be designed together. | S6, after Docker compatibility and local-service fundamentals. |
 | Host networking, direct container access, USB passthrough, sound, and a menu-bar workflow ([network](https://docs.orbstack.dev/docker/network), [host networking](https://docs.orbstack.dev/docker/host-networking), [USB](https://docs.orbstack.dev/features/usb), [menu bar](https://docs.orbstack.dev/menu-bar)) | Keep the existing native menu bar as the operational entry point. Treat direct networking, USB, and sound as separate entitlement/threat-model projects: each needs an opt-in capability, narrow discovery surface, clean detach/recovery, and no privileged helper shortcut. | Do not block the replacement on these; never imply parity before the security model is proven. |
 
 The ordering is intentional: first make a normal Docker project boringly
@@ -225,9 +93,9 @@ product's broad permissions or web-extension model.
 
 | Category | Work | Policy |
 | --- | --- | --- |
-| **No elevated privilege** | R0–R3, FSEvents bridge, Docker/Kubernetes actions, direct Docker discovery, per-user service, loopback TCP/UDP relay, user-selected shares. | This is the default. All normal Docker replacement work should remain here. |
+| **No macOS administrator privilege** | S0–S5 installation/service, Docker/Kubernetes actions, loopback TCP/UDP relay, user-selected shares, and an eventual local router. | This is the default. It does not lessen Docker-socket authority: only the signed-in user and explicitly trusted local processes may reach that socket. |
 | **User approval / Apple capability feasibility spike** | Local CA trust, system-visible DNS via a Network Extension, and Finder integration such as FSKit. | These are not root-helper work by default, but may require explicit keychain consent, signed entitlements, user approval, or Apple distribution approval. Prove the exact macOS deployment path before promising the feature. Relevant platform references: [NetworkExtension](https://developer.apple.com/documentation/networkextension) and [FSKit](https://developer.apple.com/documentation/fskit). |
-| **Privileged or system-wide mutation — avoid for 1.0** | Writing `/etc/resolver`, installing global routes or packet-filter rules, a privileged LaunchDaemon/helper, broad certificate trust, unrestricted filesystem access, USB/GPU forwarding. | Do not use these as a shortcut. They need a separate threat model, least-privilege command allowlist, install/uninstall story, and explicit user authorization. No current R0–R4 acceptance depends on them. |
+| **Privileged or system-wide mutation — avoid for 1.0** | Writing `/etc/resolver`, installing global routes or packet-filter rules, a privileged LaunchDaemon/helper, broad certificate trust, unrestricted filesystem access, USB/GPU forwarding. | Do not use these as a shortcut. They need a separate threat model, least-privilege command allowlist, install/uninstall story, and explicit user authorization. No current S0–S6 acceptance depends on them. |
 
 Docker Desktop's own Extensions documentation is an important negative lesson:
 it says extensions receive elevated host, Docker Engine, filesystem, and native
@@ -242,7 +110,7 @@ sake.
 - GPUs, USB, host/LAN-routable container addresses, and broad hardware
   forwarding: valuable only after the core compatibility contract and security
   boundary are demonstrably reliable.
-- General Linux machines: an R4 differentiator, never an excuse to delay R0–R2.
+- General Linux machines: an S6 differentiator, never an excuse to delay S0–S3.
 
 ## Source register
 
@@ -251,6 +119,7 @@ their publishers' statements; no performance, privacy, or security claim here
 is inferred solely from a feature page.
 
 - OrbStack: [Docker Desktop comparison](https://docs.orbstack.dev/compare/docker-desktop), [domains](https://docs.orbstack.dev/docker/domains), [HTTPS](https://docs.orbstack.dev/features/https), [native files](https://docs.orbstack.dev/features/native-files), [Debug Shell](https://docs.orbstack.dev/features/debug), [Linux machines](https://docs.orbstack.dev/machines/).
-- Docker: [Desktop networking](https://docs.docker.com/desktop/features/networking/), [Desktop Kubernetes](https://docs.docker.com/desktop/use-desktop/kubernetes/), [Extensions and security boundary](https://docs.docker.com/extensions/).
+- Docker: [Desktop networking](https://docs.docker.com/desktop/features/networking/), [Desktop Kubernetes](https://docs.docker.com/desktop/use-desktop/kubernetes/), [contexts](https://docs.docker.com/engine/manage-resources/contexts/), [daemon-socket security](https://docs.docker.com/engine/security/protect-access/), [synchronized file shares](https://docs.docker.com/desktop/features/synchronized-file-sharing/), [Buildx history](https://docs.docker.com/reference/cli/docker/buildx/history/), and [Extensions and security boundary](https://docs.docker.com/extensions/).
 - Open-source alternatives: [Colima README](https://github.com/abiosoft/colima#features), [Rancher Desktop introduction](https://docs.rancherdesktop.io/).
+- Ecosystem compatibility: [Testcontainers Java runtime requirements](https://java.testcontainers.org/supported_docker_environment/), [Testcontainers Go discovery](https://golang.testcontainers.org/features/configuration/), [Dev Container supporting tools](https://containers.dev/supporting.html), and [Kubernetes port-forward](https://kubernetes.io/docs/reference/kubectl/generated/kubectl_port-forward/).
 - Apple platform feasibility references: [NetworkExtension](https://developer.apple.com/documentation/networkextension), [FSKit](https://developer.apple.com/documentation/fskit).
