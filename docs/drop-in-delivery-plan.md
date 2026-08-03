@@ -35,6 +35,29 @@ This plan keeps three kinds of evidence separate:
   contract reports `unavailable`, not hot reload. The guest's retained
   version-1 record shape is compatibility metadata, not an event receiver.
 
+## Product direction
+
+Morbstack is intended to be the best default Docker experience on macOS, not
+merely a compatible implementation or a cheaper Docker Desktop tier. That
+means the ordinary path must be faster to understand, safer to repair, and
+more pleasant to use than Docker Desktop, while the local-development
+advantages people value in OrbStack are earned as open, inspectable features.
+
+The non-negotiable product constraints are Apache-2.0 licensing for commercial
+and personal use, no account requirement, no feature gate, no telemetry, no
+web-extension marketplace, and no hidden privileged helper. Those constraints
+do not lower the compatibility bar: normal Docker CLI clients, Compose,
+Buildx, IDEs, Testcontainers, published ports, project files, and the local
+Kubernetes workflow must work through their standard contracts. A future
+convenience feature is valuable only when it has an explicit authority model,
+reversible lifecycle, truthful unavailable state, and a real recovery path.
+
+The delivery order below therefore starts with boring compatibility, then
+removes daily workflow friction, then adds the differentiated local-service,
+data-access, and machine experiences. No marketing copy, route, control, or
+setting may imply an operation exists before its boundary and acceptance proof
+exist.
+
 ## Canonical sequenced capability backlog
 
 Each row is a shippable slice, not a promise that its foundation is already
