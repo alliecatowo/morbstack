@@ -401,6 +401,17 @@ public final class Daemon {
     /// while `k8s-status` and `k8s-describe` must never create the thing they were
     /// asked to describe.
     private func handleK8s(_ request: DaemonRequest) -> DaemonResponse {
+        // `k8s-enable` is the one Kubernetes command whose explicit meaning includes
+        // making an engine available.  The CLI is consequently allowed to launch a
+        // stopped daemon for it.  Starting the daemon alone does not start its VM,
+        // though; rejecting the very first request with "run morb start first" left
+        // a new but idle daemon behind and contradicted that command policy.  Bring
+        // the guest-control channel up before asking it to install or enable k3s.
+        // The remaining `k8s-*` requests stay observations (or an explicit disable)
+        // and must never make a VM appear merely to answer them.
+        if request.cmd == "k8s-enable" {
+            return enableKubernetes()
+        }
         guard vm.state == .running else {
             return .failure(
                 "the VM is \(vm.state.token). Kubernetes needs a running engine — "
@@ -442,11 +453,6 @@ public final class Daemon {
                 }
                 let reference = K8s.ResourceReference(kind: kind, name: name, namespace: namespace)
                 return .success(try k8s.describe(reference).ipcFields)
-            case "k8s-enable":
-                markBusy()
-                let status = try k8s.enable()
-                beginKubernetesAPIServerReconciliation()
-                return .success(status.ipcFields)
             case "k8s-disable":
                 markBusy()
                 let status = try k8s.disable()
@@ -480,6 +486,63 @@ public final class Daemon {
         } catch {
             return .failure("\(error)")
         }
+    }
+
+    /// Makes the engine control-ready, then performs the user-requested Kubernetes
+    /// enablement.  This is intentionally not used for status, diagnosis, describe,
+    /// disable, or kubeconfig requests: those remain non-starting observations or
+    /// actions against an already-running engine.
+    ///
+    /// `VMManager.start` completes when the hypervisor starts, which is earlier than
+    /// the guest control endpoint.  `ensureRunning` is the stronger contract needed
+    /// here: the subsequent `K8sManager.enable` can safely query/install the payload
+    /// rather than racing a just-booted guest and reporting a misleading failure.
+    private func enableKubernetes() -> DaemonResponse {
+        markBusy()
+
+        let semaphore = DispatchSemaphore(value: 0)
+        final class ResultBox: @unchecked Sendable {
+            var response: DaemonResponse?
+        }
+        let box = ResultBox()
+
+        vm.ensureRunning(timeout: Daemon.clientTimeout) { [weak self] result in
+            guard let self else {
+                box.response = .failure("Morbstack service stopped while enabling Kubernetes")
+                semaphore.signal()
+                return
+            }
+
+            // `ensureRunning` completes on the VM queue.  Payload hashing and the
+            // install protocol can wait on guest I/O, so move that work off the
+            // lifecycle queue before synchronously replying to the control client.
+            self.kubernetesQueue.async {
+                let response: DaemonResponse
+                switch result {
+                case .failure(let error):
+                    response = .failure("could not start the engine for Kubernetes: \(error)")
+                case .success:
+                    do {
+                        let status = try self.k8s.enable()
+                        self.beginKubernetesAPIServerReconciliation()
+                        response = .success(status.ipcFields)
+                    } catch {
+                        response = .failure("could not enable Kubernetes: \(error)")
+                    }
+                }
+                box.response = response
+                semaphore.signal()
+            }
+        }
+
+        // The outer CLI budget for `k8s enable` is five minutes: one bounded guest
+        // boot plus a one-time, digest-verified payload transfer may legitimately
+        // take longer than an ordinary lifecycle operation.  If a caller gave up,
+        // returning an error here remains truthful; no success is fabricated.
+        if semaphore.wait(timeout: .now() + 300) == .timedOut {
+            return .failure("Kubernetes enablement did not complete within 300s")
+        }
+        return box.response ?? .failure("Kubernetes enablement ended without a result")
     }
 
     @discardableResult
