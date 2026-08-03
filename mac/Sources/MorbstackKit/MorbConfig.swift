@@ -41,6 +41,11 @@ public struct MorbConfig: Equatable, Codable, Sendable {
     /// Idle minutes before the VM is suspended to disk. `0` disables auto-suspend.
     public var autoSuspendMinutes: Int
 
+    /// Whether a Docker wildcard or non-loopback `HostIp` binds that same address on
+    /// the Mac. Docker-compatible by default: `docker run -p 8080:80` publishes on
+    /// `0.0.0.0`, while people who need local-only development can opt out.
+    public var allowLANPortPublishing: Bool
+
     /// Host directories exposed to the guest over VirtioFS, each mounted inside the
     /// guest at its own absolute path so that `docker run -v <hostpath>:...` resolves
     /// identically on both sides.
@@ -91,6 +96,7 @@ public struct MorbConfig: Equatable, Codable, Sendable {
         kernelCmdline: String? = nil,
         rosetta: Bool = true,
         autoSuspendMinutes: Int = 5,
+        allowLANPortPublishing: Bool = true,
         sharedPaths: [String] = MorbShares.defaultSharedPaths,
         liveSharePaths: [String] = []
     ) {
@@ -102,6 +108,7 @@ public struct MorbConfig: Equatable, Codable, Sendable {
         self.kernelCmdline = kernelCmdline
         self.rosetta = rosetta
         self.autoSuspendMinutes = autoSuspendMinutes
+        self.allowLANPortPublishing = allowLANPortPublishing
         self.sharedPaths = sharedPaths
         self.liveSharePaths = liveSharePaths
     }
@@ -187,6 +194,7 @@ public struct MorbConfig: Equatable, Codable, Sendable {
         case kernelCmdline = "kernel_cmdline"
         case rosetta
         case autoSuspendMinutes = "auto_suspend_minutes"
+        case allowLANPortPublishing = "allow_lan_port_publishing"
         case sharedPaths = "shared_paths"
         case liveSharePaths = "live_share_paths"
     }
@@ -233,6 +241,7 @@ public struct MorbConfig: Equatable, Codable, Sendable {
         if baseline.kernelCmdline != candidate.kernelCmdline { changed.insert(.kernelCmdline) }
         if baseline.rosetta != candidate.rosetta { changed.insert(.rosetta) }
         if baseline.autoSuspendMinutes != candidate.autoSuspendMinutes { changed.insert(.autoSuspendMinutes) }
+        if baseline.allowLANPortPublishing != candidate.allowLANPortPublishing { changed.insert(.allowLANPortPublishing) }
         if baseline.sharedPaths != candidate.sharedPaths { changed.insert(.sharedPaths) }
         if baseline.liveSharePaths != candidate.liveSharePaths { changed.insert(.liveSharePaths) }
         return changed
@@ -316,6 +325,7 @@ public struct MorbConfig: Equatable, Codable, Sendable {
         case .kernelCmdline: .string(kernelCmdline ?? "")
         case .rosetta: .boolean(rosetta)
         case .autoSuspendMinutes: .integer(autoSuspendMinutes)
+        case .allowLANPortPublishing: .boolean(allowLANPortPublishing)
         case .sharedPaths: .stringArray(sharedPaths)
         case .liveSharePaths: .stringArray(liveSharePaths)
         }
@@ -331,6 +341,7 @@ public struct MorbConfig: Equatable, Codable, Sendable {
         case (.kernelCmdline, .string(let value)): kernelCmdline = value.isEmpty ? nil : value
         case (.rosetta, .boolean(let value)): rosetta = value
         case (.autoSuspendMinutes, .integer(let value)): autoSuspendMinutes = value
+        case (.allowLANPortPublishing, .boolean(let value)): allowLANPortPublishing = value
         case (.sharedPaths, .stringArray(let value)): sharedPaths = value
         case (.liveSharePaths, .stringArray(let value)): liveSharePaths = value
         default:
@@ -507,6 +518,10 @@ public struct MorbConfig: Equatable, Codable, Sendable {
         out += "# Suspend the VM after this many idle minutes; 0 disables auto-suspend.\n"
         out += "auto_suspend_minutes = \(autoSuspendMinutes)\n"
         out += "\n"
+        out += "# Let Docker wildcard and non-loopback published ports accept local-network traffic.\n"
+        out += "# Set false to keep container ports on loopback only.\n"
+        out += "allow_lan_port_publishing = \(allowLANPortPublishing)\n"
+        out += "\n"
         out += "# Host directories exposed to the guest over VirtioFS. Each one is mounted\n"
         out += "# inside the guest at the same absolute path, so `docker run -v /Users/me/app:/app`\n"
         out += "# sees the real directory. Paths that do not exist are skipped. Set to [] to\n"
@@ -590,6 +605,8 @@ public struct MorbConfig: Equatable, Codable, Sendable {
                 config.rosetta = try requireBool(value, key: key, line: lineNumber)
             case .autoSuspendMinutes:
                 config.autoSuspendMinutes = try requireInt(value, key: key, line: lineNumber, minimum: 0)
+            case .allowLANPortPublishing:
+                config.allowLANPortPublishing = try requireBool(value, key: key, line: lineNumber)
             case .sharedPaths:
                 // An explicit `[]` really does mean "share nothing"; only an absent key
                 // falls back to the defaults, which `MorbConfig()` already installed.

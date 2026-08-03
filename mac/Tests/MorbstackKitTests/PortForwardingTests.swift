@@ -49,29 +49,29 @@ final class PortForwardingTests: XCTestCase {
         XCTAssertFalse(bindings.contains { $0.containerPort == 9000 })
     }
 
-    /// The duplicate IPv4/IPv6 entries dockerd emits must collapse to one listener,
-    /// and the recorded address should be the IPv4 one the user actually asked for.
-    func testDuplicateAddressFamiliesCollapseToASingleListener() throws {
+    /// Native IPv4 and IPv6 sockets retain their independent Docker endpoints even
+    /// when dockerd reports the same numeric port for both families.
+    func testDuplicateAddressFamiliesRetainTwoNativeListeners() throws {
         let bindings = try DockerAPIDecoding.publishedPorts(containersJSON: containersJSON)
-        let desired = PortForwardPlan.desiredListeners(bindings)
-        XCTAssertEqual(Array(desired.keys), [8080])
-        XCTAssertEqual(desired[8080]?.hostIP, "0.0.0.0")
+        let desired = PortForwardPlan.desiredListeners(bindings, exposure: .localNetwork)
+        XCTAssertEqual(desired.count, 2)
+        XCTAssertEqual(desired[endpoint("0.0.0.0", 8080)]?.hostIP, "0.0.0.0")
+        XCTAssertEqual(desired[endpoint("::", 8080)]?.hostIP, "::")
     }
 
-    /// A binding to a specific guest interface address means nothing on the Mac.
-    func testOnlyLoopbackAndWildcardBindingsAreForwarded() {
+    func testNumericHostAddressesHonorTheExposurePolicy() {
         func binding(ip: String, proto: String = "tcp") -> DockerPortBinding {
             DockerPortBinding(
                 hostIP: ip, hostPort: 8080, containerPort: 80, networkProtocol: proto,
                 containerID: "abc", containerName: "web")
         }
-        XCTAssertTrue(PortForwardPlan.isForwardable(binding(ip: "0.0.0.0")))
-        XCTAssertTrue(PortForwardPlan.isForwardable(binding(ip: "127.0.0.1")))
-        XCTAssertTrue(PortForwardPlan.isForwardable(binding(ip: "")))
-        XCTAssertFalse(PortForwardPlan.isForwardable(binding(ip: "192.168.65.3")))
-        XCTAssertFalse(PortForwardPlan.isForwardable(binding(ip: "0.0.0.0", proto: "udp")))
-        XCTAssertTrue(PortForwardPlan.isForwardableUDP(binding(ip: "0.0.0.0", proto: "udp")))
-        XCTAssertFalse(PortForwardPlan.isForwardableUDP(binding(ip: "192.168.65.3", proto: "udp")))
+        XCTAssertTrue(PortForwardPlan.isForwardable(binding(ip: "0.0.0.0"), exposure: .localNetwork))
+        XCTAssertTrue(PortForwardPlan.isForwardable(binding(ip: "127.0.0.1"), exposure: .loopbackOnly))
+        XCTAssertTrue(PortForwardPlan.isForwardable(binding(ip: ""), exposure: .localNetwork))
+        XCTAssertTrue(PortForwardPlan.isForwardable(binding(ip: "192.168.65.3"), exposure: .localNetwork))
+        XCTAssertFalse(PortForwardPlan.isForwardable(binding(ip: "192.168.65.3"), exposure: .loopbackOnly))
+        XCTAssertTrue(PortForwardPlan.isForwardable(binding(ip: "::", proto: "udp"), exposure: .localNetwork))
+        XCTAssertFalse(PortForwardPlan.isForwardable(binding(ip: "not-an-ip"), exposure: .localNetwork))
     }
 
     func testUDPPortsGetTheirOwnConcreteListenerPlan() throws {
@@ -81,8 +81,10 @@ final class PortForwardingTests: XCTestCase {
               {"IP":"0.0.0.0","PrivatePort":53,"PublicPort":5353,"Type":"udp"}]}]
             """.utf8)
         let bindings = try DockerAPIDecoding.publishedPorts(containersJSON: json)
-        XCTAssertTrue(PortForwardPlan.desiredListeners(bindings).isEmpty)
-        XCTAssertEqual(PortForwardPlan.desiredUDPListeners(bindings).keys.sorted(), [5353])
+        XCTAssertTrue(PortForwardPlan.desiredListeners(bindings, exposure: .localNetwork).isEmpty)
+        XCTAssertEqual(
+            Array(PortForwardPlan.desiredUDPListeners(bindings, exposure: .localNetwork).keys),
+            [endpoint("0.0.0.0", 5353)])
     }
 
     func testRejectsANonArrayContainersDocument() {
@@ -92,7 +94,7 @@ final class PortForwardingTests: XCTestCase {
 
     func testAnEmptyContainerListYieldsNoForwards() throws {
         let bindings = try DockerAPIDecoding.publishedPorts(containersJSON: Data("[]".utf8))
-        XCTAssertTrue(PortForwardPlan.desiredListeners(bindings).isEmpty)
+        XCTAssertTrue(PortForwardPlan.desiredListeners(bindings, exposure: .localNetwork).isEmpty)
     }
 
     // MARK: - Fixed TCP create leases
@@ -122,12 +124,12 @@ final class PortForwardingTests: XCTestCase {
 
     func testPreflightRejectsOneHostEndpointWithMultipleContainerTargets() {
         let ambiguous = Data(
-            #"{"HostConfig":{"PortBindings":{"80/tcp":[{"HostIp":"0.0.0.0","HostPort":"8080"}],"81/tcp":[{"HostIp":"::","HostPort":"8080"}]}}}"#.utf8)
+            #"{"HostConfig":{"PortBindings":{"80/tcp":[{"HostIp":"0.0.0.0","HostPort":"8080"}],"81/tcp":[{"HostIp":"0.0.0.0","HostPort":"8080"}]}}}"#.utf8)
 
         guard case .rejected(let message) =
             DockerPortPublicationPreflight.inspectContainerCreate(body: ambiguous)
         else {
-            return XCTFail("one loopback listener cannot safely represent two TCP targets")
+            return XCTFail("one host listener cannot safely represent two TCP targets")
         }
         XCTAssertTrue(message.contains("more than one container port"), message)
         XCTAssertTrue(DockerPortPublicationPreflight.explicitTCPBindings(in: ambiguous).isEmpty)
@@ -219,7 +221,6 @@ final class PortForwardingTests: XCTestCase {
             #"{"80/tcp":[{"HostPort":"0"}]}"#,
             #"{"80/tcp":[{"HostPort":"8080-8081"}]}"#,
             #"{"53/udp":[{"HostPort":"5353"}]}"#,
-            #"{"80/tcp":[{"HostIp":"192.168.65.3","HostPort":"8080"}]}"#,
             #"{"80/tcp":[{"HostPort":"8080"}],"81/tcp":[{"HostPort":"8080"}]}"#
         ] {
             XCTAssertNil(
@@ -265,16 +266,20 @@ final class PortForwardingTests: XCTestCase {
             containerID: id, containerName: container)
     }
 
+    private func endpoint(_ hostIP: String, _ port: Int) -> DockerHostEndpoint {
+        DockerHostEndpoint(hostIP: hostIP, port: port)!
+    }
+
     func testDiffOpensNewPortsAndClosesRetiredOnes() {
-        let current = [8080: binding(8080, container: "web")]
-        let desired = [9090: binding(9090, container: "api")]
+        let current = [endpoint("0.0.0.0", 8080): binding(8080, container: "web")]
+        let desired = [endpoint("0.0.0.0", 9090): binding(9090, container: "api")]
         let plan = PortForwardPlan.diff(current: current, desired: desired)
-        XCTAssertEqual(plan.close, [8080])
+        XCTAssertEqual(plan.close, [endpoint("0.0.0.0", 8080)])
         XCTAssertEqual(plan.open.map(\.hostPort), [9090])
     }
 
     func testDiffIsEmptyWhenNothingChanged() {
-        let same = [8080: binding(8080, container: "web")]
+        let same = [endpoint("0.0.0.0", 8080): binding(8080, container: "web")]
         let plan = PortForwardPlan.diff(current: same, desired: same)
         XCTAssertTrue(plan.close.isEmpty)
         XCTAssertTrue(plan.open.isEmpty)
@@ -284,10 +289,10 @@ final class PortForwardingTests: XCTestCase {
     /// listener has to be rebuilt, and the close must be planned so it can happen
     /// before the open — otherwise the rebind hits EADDRINUSE against ourselves.
     func testAReplacedContainerOnTheSamePortIsClosedAndReopened() {
-        let current = [8080: binding(8080, container: "web", id: "old")]
-        let desired = [8080: binding(8080, container: "web", id: "new")]
+        let current = [endpoint("0.0.0.0", 8080): binding(8080, container: "web", id: "old")]
+        let desired = [endpoint("0.0.0.0", 8080): binding(8080, container: "web", id: "new")]
         let plan = PortForwardPlan.diff(current: current, desired: desired)
-        XCTAssertEqual(plan.close, [8080])
+        XCTAssertEqual(plan.close, [endpoint("0.0.0.0", 8080)])
         XCTAssertEqual(plan.open.map(\.containerID), ["new"])
     }
 

@@ -25,6 +25,8 @@ public struct DockerExplicitTCPPortBinding: Hashable, Sendable {
         self.hostPort = hostPort
         self.containerPort = containerPort
     }
+
+    var endpoint: DockerHostEndpoint? { DockerHostEndpoint(hostIP: hostIP, port: hostPort) }
 }
 
 /// One fixed IPv4/default UDP publication that is safe to retain on the Mac's
@@ -41,6 +43,8 @@ public struct DockerExplicitUDPPortBinding: Hashable, Sendable {
         self.hostPort = hostPort
         self.containerPort = containerPort
     }
+
+    var endpoint: DockerHostEndpoint? { DockerHostEndpoint(hostIP: hostIP, port: hostPort) }
 }
 
 /// The complete fixed publication set that one Docker create/start lifecycle owns.
@@ -307,12 +311,9 @@ public enum DockerPortPublicationPreflight {
 
         var examined: Set<String> = []
         var fixedHostEndpoints: Set<String> = []
-        // Morbstack has exactly one safe loopback listener per transport/host-port
-        // pair. Docker can describe its dual-stack representation more than once,
-        // but two different container targets cannot both be delivered through that
-        // one listener. Detect the latter before a recognized create reaches the
-        // Engine rather than allowing a successful create followed by a lossy event
-        // reconciliation that picks an arbitrary target.
+        // Morbstack has exactly one listener per transport/address/port endpoint.
+        // IPv4 and IPv6 each keep their own endpoint key, so native Docker dual-stack
+        // publications do not overwrite each other.
         var containerTargetByEndpoint: [String: Int] = [:]
         for containerPort in portBindings.keys.sorted() {
             let protocolName = networkProtocol(in: containerPort)
@@ -344,40 +345,36 @@ public enum DockerPortPublicationPreflight {
                         message: "published \(protocolName.uppercased()) port \(hostPort) is not supported by Morbstack's host forwarder")
                 }
 
-                let forwardableAddresses = protocolName == "udp"
-                    ? PortForwardPlan.forwardableUDPHostAddresses
-                    : PortForwardPlan.forwardableHostAddresses
-                guard forwardableAddresses.contains(hostIP) else {
+                guard let address = DockerHostAddress(dockerHostIP: hostIP) else {
                     return .rejected(
-                        message: "published host address \(hostIP) is not supported by Morbstack's \(protocolName.uppercased()) loopback forwarder")
+                        message: "published host address \(hostIP) is not a numeric IPv4 or IPv6 address")
                 }
                 guard let port = Int(hostPort) else {
                     return .rejected(
                         message: "published \(protocolName.uppercased()) host port \(hostPort) is not a concrete port; dynamic host-port ranges are not supported")
                 }
 
-                if fixedHostEndpoints.insert("\(protocolName)|\(port)").inserted,
+                let endpoint = DockerHostEndpoint(hostIP: hostIP, port: port)!
+                if fixedHostEndpoints.insert("\(protocolName)|\(endpoint.description)").inserted,
                    fixedHostEndpoints.count > maximumSynchronousFixedPortBindings {
                     return .rejected(
                         message: "published mapping has more than \(maximumSynchronousFixedPortBindings) concrete fixed host endpoints; Morbstack refuses a partial port lease")
                 }
 
                 if let targetPort = Self.containerPort(in: containerPort) {
-                    let endpoint = "\(protocolName)|\(port)"
-                    if let existingTarget = containerTargetByEndpoint[endpoint], existingTarget != targetPort {
+                    let targetEndpoint = "\(protocolName)|\(endpoint.description)"
+                    if let existingTarget = containerTargetByEndpoint[targetEndpoint], existingTarget != targetPort {
                         return .rejected(
-                            message: "published \(protocolName.uppercased()) host port \(hostPort) maps to more than one container port; Morbstack cannot deliver one loopback listener to multiple targets")
+                            message: "published \(protocolName.uppercased()) endpoint \(endpoint.description) maps to more than one container port")
                     }
-                    containerTargetByEndpoint[endpoint] = targetPort
+                    containerTargetByEndpoint[targetEndpoint] = targetPort
                 }
 
                 let transport: HostPortPreflight.Transport = protocolName == "tcp" ? .tcp : .udp
-                let tcpLoopbackAddress = TCPListener.LoopbackAddress
-                    .forDockerHostAddress(hostIP)
                 let result = HostPortPreflight.check(
                     port: port,
                     transport: transport,
-                    tcpLoopbackAddress: tcpLoopbackAddress)
+                    hostAddress: address)
                 switch result.availability {
                 case .available:
                     continue
@@ -435,7 +432,7 @@ public enum DockerPortPublicationPreflight {
                     continue
                 }
                 let hostIP = string(entry["HostIp"])?.trimmingCharacters(in: .whitespaces) ?? ""
-                guard PortForwardPlan.forwardableHostAddresses.contains(hostIP) else { continue }
+                guard DockerHostAddress(dockerHostIP: hostIP) != nil else { continue }
 
                 let candidate = DockerExplicitTCPPortBinding(
                     hostIP: hostIP, hostPort: hostPort, containerPort: containerPort)
@@ -491,7 +488,7 @@ public enum DockerPortPublicationPreflight {
                     continue
                 }
                 let hostIP = string(entry["HostIp"])?.trimmingCharacters(in: .whitespaces) ?? ""
-                guard PortForwardPlan.forwardableUDPHostAddresses.contains(hostIP) else { continue }
+                guard DockerHostAddress(dockerHostIP: hostIP) != nil else { continue }
 
                 let candidate = DockerExplicitUDPPortBinding(
                     hostIP: hostIP, hostPort: hostPort, containerPort: containerPort)
@@ -530,10 +527,10 @@ public enum DockerPortPublicationPreflight {
             return nil
         }
 
-        var tcpByHostPort: [Int: DockerExplicitTCPPortBinding] = [:]
-        var udpByHostPort: [Int: DockerExplicitUDPPortBinding] = [:]
-        var ambiguousTCPHostPorts: Set<Int> = []
-        var ambiguousUDPHostPorts: Set<Int> = []
+        var tcpByEndpoint: [DockerHostEndpoint: DockerExplicitTCPPortBinding] = [:]
+        var udpByEndpoint: [DockerHostEndpoint: DockerExplicitUDPPortBinding] = [:]
+        var ambiguousTCPEndpoints: Set<DockerHostEndpoint> = []
+        var ambiguousUDPEndpoints: Set<DockerHostEndpoint> = []
 
         for containerPortKey in portBindings.keys.sorted() {
             let protocolName = networkProtocol(in: containerPortKey)
@@ -557,40 +554,41 @@ public enum DockerPortPublicationPreflight {
 
                 switch protocolName {
                 case "tcp":
-                    guard PortForwardPlan.forwardableHostAddresses.contains(hostIP) else {
+                    guard DockerHostAddress(dockerHostIP: hostIP) != nil else {
                         return nil
                     }
                     let candidate = DockerExplicitTCPPortBinding(
                         hostIP: hostIP, hostPort: hostPort, containerPort: containerPort)
-                    guard !ambiguousTCPHostPorts.contains(hostPort) else { continue }
-                    if let existing = tcpByHostPort[hostPort] {
+                    guard let endpoint = candidate.endpoint,
+                          !ambiguousTCPEndpoints.contains(endpoint)
+                    else { continue }
+                    if let existing = tcpByEndpoint[endpoint] {
                         guard existing.containerPort == candidate.containerPort else {
-                            tcpByHostPort.removeValue(forKey: hostPort)
-                            ambiguousTCPHostPorts.insert(hostPort)
+                            tcpByEndpoint.removeValue(forKey: endpoint)
+                            ambiguousTCPEndpoints.insert(endpoint)
                             continue
                         }
-                        if existing.hostIP.contains(":"), !candidate.hostIP.contains(":") {
-                            tcpByHostPort[hostPort] = candidate
-                        }
                     } else {
-                        tcpByHostPort[hostPort] = candidate
+                        tcpByEndpoint[endpoint] = candidate
                     }
 
                 case "udp":
-                    guard PortForwardPlan.forwardableUDPHostAddresses.contains(hostIP) else {
+                    guard DockerHostAddress(dockerHostIP: hostIP) != nil else {
                         return nil
                     }
                     let candidate = DockerExplicitUDPPortBinding(
                         hostIP: hostIP, hostPort: hostPort, containerPort: containerPort)
-                    guard !ambiguousUDPHostPorts.contains(hostPort) else { continue }
-                    if let existing = udpByHostPort[hostPort] {
+                    guard let endpoint = candidate.endpoint,
+                          !ambiguousUDPEndpoints.contains(endpoint)
+                    else { continue }
+                    if let existing = udpByEndpoint[endpoint] {
                         guard existing.containerPort == candidate.containerPort else {
-                            udpByHostPort.removeValue(forKey: hostPort)
-                            ambiguousUDPHostPorts.insert(hostPort)
+                            udpByEndpoint.removeValue(forKey: endpoint)
+                            ambiguousUDPEndpoints.insert(endpoint)
                             continue
                         }
                     } else {
-                        udpByHostPort[hostPort] = candidate
+                        udpByEndpoint[endpoint] = candidate
                     }
 
                 default:
@@ -599,10 +597,10 @@ public enum DockerPortPublicationPreflight {
             }
         }
 
-        let tcp = tcpByHostPort.values.sorted { $0.hostPort < $1.hostPort }
-        let udp = udpByHostPort.values.sorted { $0.hostPort < $1.hostPort }
-        guard ambiguousTCPHostPorts.isEmpty,
-              ambiguousUDPHostPorts.isEmpty,
+        let tcp = tcpByEndpoint.values.sorted { $0.hostPort == $1.hostPort ? $0.hostIP < $1.hostIP : $0.hostPort < $1.hostPort }
+        let udp = udpByEndpoint.values.sorted { $0.hostPort == $1.hostPort ? $0.hostIP < $1.hostIP : $0.hostPort < $1.hostPort }
+        guard ambiguousTCPEndpoints.isEmpty,
+              ambiguousUDPEndpoints.isEmpty,
               !tcp.isEmpty || !udp.isEmpty,
               tcp.count + udp.count <= maximumSynchronousFixedPortBindings
         else {
@@ -661,10 +659,10 @@ public enum DockerPortPublicationPreflight {
             return nil
         }
 
-        var tcpByHostPort: [Int: DockerExplicitTCPPortBinding] = [:]
-        var udpByHostPort: [Int: DockerExplicitUDPPortBinding] = [:]
-        var ambiguousTCPHostPorts: Set<Int> = []
-        var ambiguousUDPHostPorts: Set<Int> = []
+        var tcpByEndpoint: [DockerHostEndpoint: DockerExplicitTCPPortBinding] = [:]
+        var udpByEndpoint: [DockerHostEndpoint: DockerExplicitUDPPortBinding] = [:]
+        var ambiguousTCPEndpoints: Set<DockerHostEndpoint> = []
+        var ambiguousUDPEndpoints: Set<DockerHostEndpoint> = []
 
         for containerPortKey in portBindings.keys.sorted() {
             let protocolName = networkProtocol(in: containerPortKey)
@@ -691,40 +689,41 @@ public enum DockerPortPublicationPreflight {
 
                 switch protocolName {
                 case "tcp":
-                    guard PortForwardPlan.forwardableHostAddresses.contains(hostIP) else {
+                    guard DockerHostAddress(dockerHostIP: hostIP) != nil else {
                         return nil
                     }
                     let candidate = DockerExplicitTCPPortBinding(
                         hostIP: hostIP, hostPort: hostPort, containerPort: containerPort)
-                    guard !ambiguousTCPHostPorts.contains(hostPort) else { continue }
-                    if let existing = tcpByHostPort[hostPort] {
+                    guard let endpoint = candidate.endpoint,
+                          !ambiguousTCPEndpoints.contains(endpoint)
+                    else { continue }
+                    if let existing = tcpByEndpoint[endpoint] {
                         guard existing.containerPort == candidate.containerPort else {
-                            tcpByHostPort.removeValue(forKey: hostPort)
-                            ambiguousTCPHostPorts.insert(hostPort)
+                            tcpByEndpoint.removeValue(forKey: endpoint)
+                            ambiguousTCPEndpoints.insert(endpoint)
                             continue
                         }
-                        if existing.hostIP.contains(":"), !candidate.hostIP.contains(":") {
-                            tcpByHostPort[hostPort] = candidate
-                        }
                     } else {
-                        tcpByHostPort[hostPort] = candidate
+                        tcpByEndpoint[endpoint] = candidate
                     }
 
                 case "udp":
-                    guard PortForwardPlan.forwardableUDPHostAddresses.contains(hostIP) else {
+                    guard DockerHostAddress(dockerHostIP: hostIP) != nil else {
                         return nil
                     }
                     let candidate = DockerExplicitUDPPortBinding(
                         hostIP: hostIP, hostPort: hostPort, containerPort: containerPort)
-                    guard !ambiguousUDPHostPorts.contains(hostPort) else { continue }
-                    if let existing = udpByHostPort[hostPort] {
+                    guard let endpoint = candidate.endpoint,
+                          !ambiguousUDPEndpoints.contains(endpoint)
+                    else { continue }
+                    if let existing = udpByEndpoint[endpoint] {
                         guard existing.containerPort == candidate.containerPort else {
-                            udpByHostPort.removeValue(forKey: hostPort)
-                            ambiguousUDPHostPorts.insert(hostPort)
+                            udpByEndpoint.removeValue(forKey: endpoint)
+                            ambiguousUDPEndpoints.insert(endpoint)
                             continue
                         }
                     } else {
-                        udpByHostPort[hostPort] = candidate
+                        udpByEndpoint[endpoint] = candidate
                     }
 
                 default:
@@ -733,10 +732,10 @@ public enum DockerPortPublicationPreflight {
             }
         }
 
-        let tcp = tcpByHostPort.values.sorted { $0.hostPort < $1.hostPort }
-        let udp = udpByHostPort.values.sorted { $0.hostPort < $1.hostPort }
-        guard ambiguousTCPHostPorts.isEmpty,
-              ambiguousUDPHostPorts.isEmpty,
+        let tcp = tcpByEndpoint.values.sorted { $0.hostPort == $1.hostPort ? $0.hostIP < $1.hostIP : $0.hostPort < $1.hostPort }
+        let udp = udpByEndpoint.values.sorted { $0.hostPort == $1.hostPort ? $0.hostIP < $1.hostIP : $0.hostPort < $1.hostPort }
+        guard ambiguousTCPEndpoints.isEmpty,
+              ambiguousUDPEndpoints.isEmpty,
               !tcp.isEmpty || !udp.isEmpty,
               tcp.count + udp.count <= maximumSynchronousFixedPortBindings
         else {
@@ -792,7 +791,7 @@ public enum DockerPortPublicationPreflight {
                     return nil
                 }
                 let hostIP = string(entry["HostIp"])?.trimmingCharacters(in: .whitespaces) ?? ""
-                guard PortForwardPlan.forwardableHostAddresses.contains(hostIP) else {
+                guard DockerHostAddress(dockerHostIP: hostIP) != nil else {
                     return nil
                 }
 
@@ -921,12 +920,9 @@ public enum DockerPortPublicationPreflight {
                     } else {
                         hostIP = ""
                     }
-                    let forwardableAddresses = transport == .tcp
-                        ? PortForwardPlan.forwardableHostAddresses
-                        : PortForwardPlan.forwardableUDPHostAddresses
-                    guard forwardableAddresses.contains(hostIP) else {
+                    guard DockerHostAddress(dockerHostIP: hostIP) != nil else {
                         return .rejected(
-                            message: "published host address \(hostIP) is not supported; Morbstack forwards \(transport.name) only on loopback")
+                            message: "published host address \(hostIP) is not a numeric IPv4 or IPv6 address")
                     }
                     dynamicEntries.append((
                         containerPortKey,
@@ -965,9 +961,9 @@ public enum DockerPortPublicationPreflight {
 
                     switch protocolName {
                     case "tcp":
-                        guard PortForwardPlan.forwardableHostAddresses.contains(hostIP) else {
+                        guard DockerHostAddress(dockerHostIP: hostIP) != nil else {
                             unsupportedSiblingMessage = unsupportedSiblingMessage
-                                ?? "published host address \(hostIP) is not supported; Morbstack forwards TCP only on loopback"
+                                ?? "published host address \(hostIP) is not a numeric IPv4 or IPv6 address"
                             continue
                         }
                         let candidate = DockerExplicitTCPPortBinding(
@@ -987,9 +983,9 @@ public enum DockerPortPublicationPreflight {
                         }
 
                     case "udp":
-                        guard PortForwardPlan.forwardableUDPHostAddresses.contains(hostIP) else {
+                        guard DockerHostAddress(dockerHostIP: hostIP) != nil else {
                             unsupportedSiblingMessage = unsupportedSiblingMessage
-                                ?? "published host address \(hostIP) is not supported; Morbstack forwards UDP only on loopback"
+                                ?? "published host address \(hostIP) is not a numeric IPv4 or IPv6 address"
                             continue
                         }
                         let candidate = DockerExplicitUDPPortBinding(

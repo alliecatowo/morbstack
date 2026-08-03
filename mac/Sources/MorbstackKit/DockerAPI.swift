@@ -1,7 +1,113 @@
 // Copyright 2026 The Morbstack Authors.
 // Licensed under the Apache License, Version 2.0 (the "License").
 
+import Darwin
 import Foundation
+
+/// The host address Docker attached to a published-port binding.
+///
+/// Docker's empty `HostIp` is not a synonym for loopback: it means the IPv4
+/// wildcard address, exactly as `docker run -p 8080:80` does on a native Linux
+/// host. Keeping that distinction as a value instead of translating it at the
+/// listener boundary prevents an externally reachable Docker publication from
+/// quietly becoming a local-only one on the Mac.
+public enum DockerHostAddress: Hashable, Sendable {
+    case ipv4(String)
+    case ipv6(String)
+
+    /// Parses one Engine `HostIp` spelling. The empty spelling is Docker's IPv4
+    /// wildcard address. Host names are intentionally not accepted: Engine port
+    /// bindings describe socket addresses, not an address lookup that could change
+    /// between Docker's create reply and the host listener bind.
+    public init?(dockerHostIP: String) {
+        let candidate = dockerHostIP.trimmingCharacters(in: .whitespacesAndNewlines)
+        let address = candidate.isEmpty ? "0.0.0.0" : candidate
+
+        var ipv4 = in_addr()
+        if inet_pton(AF_INET, address, &ipv4) == 1 {
+            self = .ipv4(address)
+            return
+        }
+
+        var ipv6 = in6_addr()
+        if inet_pton(AF_INET6, address, &ipv6) == 1 {
+            self = .ipv6(address)
+            return
+        }
+        return nil
+    }
+
+    /// The exact (or empty-normalized) spelling the Mac listener binds.
+    public var stringValue: String {
+        switch self {
+        case .ipv4(let address), .ipv6(let address): address
+        }
+    }
+
+    public var family: Int32 {
+        switch self {
+        case .ipv4: AF_INET
+        case .ipv6: AF_INET6
+        }
+    }
+
+    /// `127/8` and `::1` stay local even when network exposure is disabled.
+    public var isLoopback: Bool {
+        switch self {
+        case .ipv4(let address):
+            var parsed = in_addr()
+            guard inet_pton(AF_INET, address, &parsed) == 1 else { return false }
+            return (UInt32(bigEndian: parsed.s_addr) & 0xff00_0000) == 0x7f00_0000
+        case .ipv6(let address):
+            var parsed = in6_addr()
+            guard inet_pton(AF_INET6, address, &parsed) == 1 else { return false }
+            return withUnsafeBytes(of: parsed) { bytes in
+                bytes.dropLast().allSatisfy { $0 == 0 } && bytes.last == 1
+            }
+        }
+    }
+}
+
+/// A transport-specific listener key. IPv4 and IPv6 have separate socket
+/// namespaces on macOS when the IPv6 socket is `IPV6_V6ONLY`, so two Docker
+/// publications may legitimately use the same numeric port on different families.
+public struct DockerHostEndpoint: Hashable, Sendable {
+    public let address: DockerHostAddress
+    public let port: Int
+
+    public init?(hostIP: String, port: Int) {
+        guard (1...65_535).contains(port), let address = DockerHostAddress(dockerHostIP: hostIP) else {
+            return nil
+        }
+        self.address = address
+        self.port = port
+    }
+
+    public var description: String {
+        switch address {
+        case .ipv4:
+            return "\(address.stringValue):\(port)"
+        case .ipv6:
+            return "[\(address.stringValue)]:\(port)"
+        }
+    }
+}
+
+/// Whether Docker publications may accept traffic from interfaces beyond the Mac.
+///
+/// This is an engine-level user preference, not a listener fallback. The default is
+/// Docker-compatible (`localNetwork`): a bare `-p 8080:80` owns `0.0.0.0:8080`.
+/// Users who want Docker Desktop-style local-only exposure can opt into
+/// `loopbackOnly`; requests that need another address are then rejected before
+/// dockerd sees a successful create.
+public enum MorbPortExposure: String, Codable, CaseIterable, Sendable {
+    case localNetwork
+    case loopbackOnly
+
+    public func permits(_ address: DockerHostAddress) -> Bool {
+        self == .localNetwork || address.isLoopback
+    }
+}
 
 /// One host port a container has asked Docker to publish.
 ///
@@ -244,7 +350,7 @@ public enum DockerAPIDecoding {
 /// Turns a set of published ports into the listeners the Mac should actually have.
 public enum PortForwardPlan {
 
-    /// One host loopback endpoint Docker described with more than one target.
+    /// One host endpoint Docker described with more than one target.
     ///
     /// A Mac listener has no Docker-level routing information after it accepts a
     /// connection: it can reach exactly one container port. `containers/json` will
@@ -253,15 +359,15 @@ public enum PortForwardPlan {
     /// port. Every other duplicate is withheld rather than letting the order of a
     /// daemon response decide which service receives local traffic.
     public struct ListenerConflict: Hashable, Sendable {
-        /// The numeric Mac loopback endpoint that cannot be represented safely.
-        public let hostPort: Int
+        /// The exact Mac endpoint that cannot be represented safely.
+        public let endpoint: DockerHostEndpoint
         /// `tcp` or `udp`.
         public let networkProtocol: String
         /// Every Docker record that competed for this endpoint, in stable order.
         public let bindings: [DockerPortBinding]
 
-        public init(hostPort: Int, networkProtocol: String, bindings: [DockerPortBinding]) {
-            self.hostPort = hostPort
+        public init(endpoint: DockerHostEndpoint, networkProtocol: String, bindings: [DockerPortBinding]) {
+            self.endpoint = endpoint
             self.networkProtocol = networkProtocol
             self.bindings = bindings
         }
@@ -280,67 +386,55 @@ public enum PortForwardPlan {
                 }
                 .joined(separator: ", ")
             return "Docker reports competing \(networkProtocol.uppercased()) targets for "
-                + "local loopback port \(hostPort) (\(targets)); Morbstack is not forwarding this host port"
+                + "\(endpoint.description) (\(targets)); Morbstack is not forwarding this host endpoint"
         }
     }
 
     /// The safe listener set plus Docker publications that cannot be represented by
-    /// one Mac loopback listener.
+    /// one Mac listener.
     public struct ListenerReconciliation: Sendable {
-        public let listeners: [Int: DockerPortBinding]
-        public let conflicts: [Int: ListenerConflict]
+        public let listeners: [DockerHostEndpoint: DockerPortBinding]
+        public let conflicts: [DockerHostEndpoint: ListenerConflict]
 
         public init(
-            listeners: [Int: DockerPortBinding],
-            conflicts: [Int: ListenerConflict]
+            listeners: [DockerHostEndpoint: DockerPortBinding],
+            conflicts: [DockerHostEndpoint: ListenerConflict]
         ) {
             self.listeners = listeners
             self.conflicts = conflicts
         }
     }
 
-    /// Host addresses whose bindings Morbstack mirrors onto the Mac's loopback.
-    ///
-    /// `0.0.0.0` and the empty string are "all interfaces"; `127.0.0.1` is explicitly
-    /// loopback. `::` and `::1` are the IPv6 spellings Docker may return. A
-    /// publication described only by one of them receives a local `[::1]` TCP
-    /// listener; a same-port dual-family pair still collapses to one listener below.
-    /// Anything else is a binding to a specific guest interface address, which does
-    /// not correspond to anything on the Mac.
-    public static let forwardableHostAddresses: Set<String> = ["", "0.0.0.0", "127.0.0.1", "::", "::1"]
-
-    /// The datagram listener is still IPv4-only. Keep IPv6 out of this set rather
-    /// than reporting a successful Docker UDP publication which only an IPv4 socket
-    /// can receive. TCP's IPv6 loopback lease is intentionally separate.
-    public static let forwardableUDPHostAddresses: Set<String> = ["", "0.0.0.0", "127.0.0.1"]
-
-    /// Whether a binding should get a listener on the Mac.
-    public static func isForwardable(_ binding: DockerPortBinding) -> Bool {
-        binding.networkProtocol == "tcp"
-            && forwardableHostAddresses.contains(binding.hostIP)
-            && binding.hostPort > 0
-            && binding.hostPort <= 65535
+    /// The exact Mac endpoint a Docker binding requests, after Docker's empty
+    /// `HostIp` spelling is normalized to its real `0.0.0.0` meaning.
+    public static func endpoint(for binding: DockerPortBinding) -> DockerHostEndpoint? {
+        DockerHostEndpoint(hostIP: binding.hostIP, port: binding.hostPort)
     }
 
-    /// Whether an event-confirmed UDP publication can be represented by one Mac
-    /// loopback datagram endpoint. This is intentionally separate from
-    /// ``isForwardable(_:)`` because TCP and UDP may share one numeric host port.
-    public static func isForwardableUDP(_ binding: DockerPortBinding) -> Bool {
-        binding.networkProtocol == "udp"
-            && forwardableUDPHostAddresses.contains(binding.hostIP)
-            && binding.hostPort > 0
-            && binding.hostPort <= 65535
+    /// Whether a binding gets a listener under the selected, explicit exposure
+    /// policy. This admits both transports and both IP families; UDP is no longer
+    /// silently restricted to IPv4.
+    public static func isForwardable(
+        _ binding: DockerPortBinding,
+        exposure: MorbPortExposure
+    ) -> Bool {
+        guard binding.networkProtocol == "tcp" || binding.networkProtocol == "udp",
+              let endpoint = endpoint(for: binding)
+        else { return false }
+        return exposure.permits(endpoint.address)
     }
 
     /// Produces the complete TCP reconciliation result.
     ///
-    /// Docker reports the same host port twice when it binds both `0.0.0.0` and `::`.
-    /// Those records collapse only when they name the same nonempty container ID and
-    /// container port, preferring IPv4 because the current lease ledger owns one
-    /// local listener per numeric port. Different or unidentified targets are
-    /// reported as conflicts and are deliberately absent from `listeners`.
-    public static func reconcileTCPListeners(_ bindings: [DockerPortBinding]) -> ListenerReconciliation {
-        reconcileListeners(bindings, including: isForwardable)
+    /// IPv4 and IPv6 bindings have independent native listener endpoints. They are
+    /// therefore reconciled separately, even when Docker used the same port number.
+    public static func reconcileTCPListeners(
+        _ bindings: [DockerPortBinding],
+        exposure: MorbPortExposure
+    ) -> ListenerReconciliation {
+        reconcileListeners(bindings) { binding in
+            binding.networkProtocol == "tcp" && isForwardable(binding, exposure: exposure)
+        }
     }
 
     /// Reduces raw TCP bindings to one desired listener per host port.
@@ -348,8 +442,10 @@ public enum PortForwardPlan {
     /// Compatibility convenience for callers that only need the safe listener set.
     /// New reconciliation callers should use ``reconcileTCPListeners(_:)`` so a
     /// withheld conflicting publication can be reported rather than disappearing.
-    public static func desiredListeners(_ bindings: [DockerPortBinding]) -> [Int: DockerPortBinding] {
-        reconcileTCPListeners(bindings).listeners
+    public static func desiredListeners(
+        _ bindings: [DockerPortBinding], exposure: MorbPortExposure
+    ) -> [DockerHostEndpoint: DockerPortBinding] {
+        reconcileTCPListeners(bindings, exposure: exposure).listeners
     }
 
     /// Produces the complete UDP reconciliation result.
@@ -357,33 +453,41 @@ public enum PortForwardPlan {
     /// TCP and UDP have independent host-port spaces, but a UDP endpoint has the same
     /// single-target constraint within its own transport. See
     /// ``reconcileTCPListeners(_:)`` for the dual-stack and conflict policy.
-    public static func reconcileUDPListeners(_ bindings: [DockerPortBinding]) -> ListenerReconciliation {
-        reconcileListeners(bindings, including: isForwardableUDP)
+    public static func reconcileUDPListeners(
+        _ bindings: [DockerPortBinding],
+        exposure: MorbPortExposure
+    ) -> ListenerReconciliation {
+        reconcileListeners(bindings) { binding in
+            binding.networkProtocol == "udp" && isForwardable(binding, exposure: exposure)
+        }
     }
 
     /// Reduces event-confirmed UDP publications to one listener per UDP host port.
     ///
     /// Compatibility convenience for callers that only need safe listener entries.
-    public static func desiredUDPListeners(_ bindings: [DockerPortBinding]) -> [Int: DockerPortBinding] {
-        reconcileUDPListeners(bindings).listeners
+    public static func desiredUDPListeners(
+        _ bindings: [DockerPortBinding], exposure: MorbPortExposure
+    ) -> [DockerHostEndpoint: DockerPortBinding] {
+        reconcileUDPListeners(bindings, exposure: exposure).listeners
     }
 
-    /// Groups one transport's concrete bindings by the one Mac endpoint Morbstack
+    /// Groups one transport's concrete bindings by the exact Mac endpoint Morbstack
     /// can actually bind. Foundation's dictionary iteration order must not choose a
     /// production target, so candidates and diagnostics use an explicit stable order.
     private static func reconcileListeners(
         _ bindings: [DockerPortBinding],
         including isEligible: (DockerPortBinding) -> Bool
     ) -> ListenerReconciliation {
-        var candidatesByPort: [Int: [DockerPortBinding]] = [:]
+        var candidatesByEndpoint: [DockerHostEndpoint: [DockerPortBinding]] = [:]
         for binding in bindings where isEligible(binding) {
-            candidatesByPort[binding.hostPort, default: []].append(binding)
+            guard let endpoint = endpoint(for: binding) else { continue }
+            candidatesByEndpoint[endpoint, default: []].append(binding)
         }
 
-        var listeners: [Int: DockerPortBinding] = [:]
-        var conflicts: [Int: ListenerConflict] = [:]
-        for port in candidatesByPort.keys.sorted() {
-            guard let unsortedCandidates = candidatesByPort[port] else { continue }
+        var listeners: [DockerHostEndpoint: DockerPortBinding] = [:]
+        var conflicts: [DockerHostEndpoint: ListenerConflict] = [:]
+        for endpoint in candidatesByEndpoint.keys.sorted(by: stableEndpointOrder) {
+            guard let unsortedCandidates = candidatesByEndpoint[endpoint] else { continue }
             let candidates = unsortedCandidates.sorted(by: stableBindingOrder)
             guard let first = candidates.first else { continue }
 
@@ -394,13 +498,13 @@ public enum PortForwardPlan {
                 $0.containerID == first.containerID && $0.containerPort == first.containerPort
             }
             guard sameProvenTarget else {
-                conflicts[port] = ListenerConflict(
-                    hostPort: port,
+                conflicts[endpoint] = ListenerConflict(
+                    endpoint: endpoint,
                     networkProtocol: first.networkProtocol,
                     bindings: candidates)
                 continue
             }
-            listeners[port] = preferredBinding(candidates)
+            listeners[endpoint] = preferredBinding(candidates)
         }
         return ListenerReconciliation(listeners: listeners, conflicts: conflicts)
     }
@@ -424,16 +528,22 @@ public enum PortForwardPlan {
         return lhs.networkProtocol < rhs.networkProtocol
     }
 
+    private static func stableEndpointOrder(_ lhs: DockerHostEndpoint, _ rhs: DockerHostEndpoint) -> Bool {
+        if lhs.port != rhs.port { return lhs.port < rhs.port }
+        if lhs.address.family != rhs.address.family { return lhs.address.family < rhs.address.family }
+        return lhs.address.stringValue < rhs.address.stringValue
+    }
+
     /// Computes the listener changes needed to go from `current` to `desired`.
     ///
     /// A host port whose *binding* changed — the container behind it was replaced —
     /// appears in both lists; callers must close before opening or the rebind fails
     /// with `EADDRINUSE` against themselves.
     public static func diff(
-        current: [Int: DockerPortBinding],
-        desired: [Int: DockerPortBinding]
-    ) -> (close: [Int], open: [DockerPortBinding]) {
-        var close: Set<Int> = []
+        current: [DockerHostEndpoint: DockerPortBinding],
+        desired: [DockerHostEndpoint: DockerPortBinding]
+    ) -> (close: [DockerHostEndpoint], open: [DockerPortBinding]) {
+        var close: Set<DockerHostEndpoint> = []
         var open: [DockerPortBinding] = []
 
         for (port, binding) in desired where current[port] != binding {
@@ -443,6 +553,13 @@ public enum PortForwardPlan {
         for port in current.keys where desired[port] == nil {
             close.insert(port)
         }
-        return (close.sorted(), open.sorted { $0.hostPort < $1.hostPort })
+        return (
+            close.sorted(by: stableEndpointOrder),
+            open.sorted {
+                guard let lhs = endpoint(for: $0), let rhs = endpoint(for: $1) else {
+                    return stableBindingOrder($0, $1)
+                }
+                return stableEndpointOrder(lhs, rhs)
+            })
     }
 }

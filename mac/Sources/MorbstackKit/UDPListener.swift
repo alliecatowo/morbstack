@@ -5,48 +5,103 @@ import Darwin
 import Dispatch
 import Foundation
 
-/// A loopback UDP endpoint that delivers complete datagrams with their sender.
+/// A UDP endpoint that delivers complete datagrams with their sender.
 ///
-/// The listener deliberately owns one ordinary `127.0.0.1:<port>` UDP socket. It
-/// does not set either reuse option: sharing a published UDP port would let another
-/// local process receive a container's traffic, which is neither Docker-like nor a
-/// safe fallback after a bind conflict.
+/// The listener owns exactly the address Docker requested. It does not set either
+/// reuse option: sharing a published UDP port would let another local process
+/// receive a container's traffic, which is neither Docker-like nor a safe fallback
+/// after a bind conflict.
 public final class UDPListener {
 
-    /// The largest payload that an IPv4 UDP datagram can carry. A packet larger than
-    /// this cannot exist, so using it as the receive buffer cannot truncate a valid
-    /// IPv4 datagram merely because it crossed the host/guest bridge.
-    public static let maximumDatagramBytes = 65_507
+    /// The largest ordinary IPv6 UDP payload. It also safely contains every IPv4 UDP
+    /// payload, so a single receive buffer preserves both address families.
+    public static let maximumDatagramBytes = 65_527
 
-    /// A stable key for one local UDP client. The listener binds IPv4 loopback, so a
-    /// port plus IPv4 address fully identifies the return destination.
+    /// A stable key for one UDP client. Family, port, and raw address bytes identify
+    /// the return destination without relying on reverse DNS or a presentation
+    /// spelling that could vary across packets.
     public struct Client: Hashable, Sendable {
-        fileprivate let address: UInt32
+        fileprivate let family: Int32
+        fileprivate let address: [UInt8]
         fileprivate let port: UInt16
 
         fileprivate init(_ socketAddress: sockaddr_in) {
-            address = socketAddress.sin_addr.s_addr
+            family = AF_INET
+            address = withUnsafeBytes(of: socketAddress.sin_addr) { Array($0) }
             port = socketAddress.sin_port
         }
 
-        public var description: String {
-            let hostOrder = UInt32(bigEndian: address)
-            let text = [
-                String((hostOrder >> 24) & 0xff),
-                String((hostOrder >> 16) & 0xff),
-                String((hostOrder >> 8) & 0xff),
-                String(hostOrder & 0xff),
-            ].joined(separator: ".")
-            return "\(text):\(UInt16(bigEndian: port))"
+        fileprivate init(_ socketAddress: sockaddr_in6) {
+            family = AF_INET6
+            address = withUnsafeBytes(of: socketAddress.sin6_addr) { Array($0) }
+            port = socketAddress.sin6_port
         }
 
-        fileprivate var socketAddress: sockaddr_in {
-            var result = sockaddr_in()
-            result.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-            result.sin_family = sa_family_t(AF_INET)
-            result.sin_port = port
-            result.sin_addr = in_addr(s_addr: address)
-            return result
+        public var description: String {
+            let text = numericAddress ?? "unknown"
+            return family == AF_INET6
+                ? "[\(text)]:\(UInt16(bigEndian: port))"
+                : "\(text):\(UInt16(bigEndian: port))"
+        }
+
+        fileprivate func withSocketAddress<T>(
+            _ body: (UnsafePointer<sockaddr>, socklen_t) -> T
+        ) -> T {
+            switch family {
+            case AF_INET:
+                var result = sockaddr_in()
+                result.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+                result.sin_family = sa_family_t(AF_INET)
+                result.sin_port = port
+                withUnsafeMutableBytes(of: &result.sin_addr) { destination in
+                    destination.copyBytes(from: address)
+                }
+                return withUnsafePointer(to: &result) { pointer in
+                    pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                        body($0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                    }
+                }
+            case AF_INET6:
+                var result = sockaddr_in6()
+                result.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
+                result.sin6_family = sa_family_t(AF_INET6)
+                result.sin6_port = port
+                withUnsafeMutableBytes(of: &result.sin6_addr) { destination in
+                    destination.copyBytes(from: address)
+                }
+                return withUnsafePointer(to: &result) { pointer in
+                    pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                        body($0, socklen_t(MemoryLayout<sockaddr_in6>.size))
+                    }
+                }
+            default:
+                preconditionFailure("UDP client has an unsupported address family")
+            }
+        }
+
+        private var numericAddress: String? {
+            switch family {
+            case AF_INET:
+                var value = in_addr()
+                withUnsafeMutableBytes(of: &value) { $0.copyBytes(from: address) }
+                return Self.numericString(family: AF_INET, value: &value)
+            case AF_INET6:
+                var value = in6_addr()
+                withUnsafeMutableBytes(of: &value) { $0.copyBytes(from: address) }
+                return Self.numericString(family: AF_INET6, value: &value)
+            default:
+                return nil
+            }
+        }
+
+        private static func numericString<T>(family: Int32, value: inout T) -> String? {
+            var storage = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+            return storage.withUnsafeMutableBufferPointer { buffer in
+                guard let base = buffer.baseAddress,
+                      let pointer = inet_ntop(family, &value, base, socklen_t(buffer.count))
+                else { return nil }
+                return String(cString: pointer)
+            }
         }
     }
 
@@ -57,18 +112,21 @@ public final class UDPListener {
         public var errorDescription: String? {
             switch self {
             case .addressInUse(let port):
-                "127.0.0.1:\(port) is already in use on this Mac"
+                "published UDP port \(port) is already in use on this Mac"
             case .failed(let message):
                 message
             }
         }
     }
 
-    /// The loopback port this endpoint owns.
+    /// The port this endpoint owns.
     ///
     /// A dynamic listener is constructed with `0`; after the kernel binds it, this
     /// contains the concrete endpoint selected for the held Docker lease.
     public private(set) var port: Int
+
+    /// The exact Docker host address this endpoint owns.
+    public let hostAddress: DockerHostAddress
 
     /// Called on `queue` for every complete datagram. A received `Data()` is valid:
     /// UDP permits zero-length datagrams and the bridge preserves them. Access stays
@@ -82,9 +140,14 @@ public final class UDPListener {
     private var source: DispatchSourceRead?
     private var running = false
 
-    public init(port: Int, queue: DispatchQueue) {
+    public init(
+        port: Int,
+        queue: DispatchQueue,
+        hostAddress: DockerHostAddress = .ipv4("127.0.0.1")
+    ) {
         self.port = port
         self.queue = queue
+        self.hostAddress = hostAddress
     }
 
     deinit { stop() }
@@ -108,26 +171,52 @@ public final class UDPListener {
         lock.unlock()
     }
 
-    /// Binds `127.0.0.1:port` and begins draining datagrams.
+    /// Binds the requested Docker host address and begins draining datagrams.
     public func start() throws {
         lock.lock()
         defer { lock.unlock() }
         guard !running else { return }
 
-        let descriptor = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
+        let descriptor = socket(hostAddress.family, SOCK_DGRAM, IPPROTO_UDP)
         guard descriptor >= 0 else {
-            throw Error.failed("socket(AF_INET, SOCK_DGRAM) failed: \(String(cString: strerror(errno)))")
+            throw Error.failed("socket(\(hostAddress.stringValue), SOCK_DGRAM) failed: \(String(cString: strerror(errno)))")
         }
 
-        var address = sockaddr_in()
-        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-        address.sin_family = sa_family_t(AF_INET)
-        address.sin_port = UInt16(truncatingIfNeeded: port).bigEndian
-        address.sin_addr = in_addr(s_addr: UInt32(0x7f00_0001).bigEndian)
-        let length = socklen_t(MemoryLayout<sockaddr_in>.size)
-        let bound = withUnsafePointer(to: &address) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { generic in
-                POSIXSocketSupport.retryOnInterrupt { Darwin.bind(descriptor, generic, length) }
+        let bound: Int32
+        switch hostAddress {
+        case .ipv4(let hostAddress):
+            var address = sockaddr_in()
+            address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            address.sin_family = sa_family_t(AF_INET)
+            address.sin_port = UInt16(truncatingIfNeeded: port).bigEndian
+            guard inet_pton(AF_INET, hostAddress, &address.sin_addr) == 1 else {
+                Darwin.close(descriptor)
+                throw Error.failed("invalid IPv4 host address \(hostAddress)")
+            }
+            bound = withUnsafePointer(to: &address) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { generic in
+                    POSIXSocketSupport.retryOnInterrupt {
+                        Darwin.bind(descriptor, generic, socklen_t(MemoryLayout<sockaddr_in>.size))
+                    }
+                }
+            }
+        case .ipv6(let hostAddress):
+            var v6Only: Int32 = 1
+            _ = setsockopt(descriptor, IPPROTO_IPV6, IPV6_V6ONLY, &v6Only, socklen_t(MemoryLayout<Int32>.size))
+            var address = sockaddr_in6()
+            address.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
+            address.sin6_family = sa_family_t(AF_INET6)
+            address.sin6_port = UInt16(truncatingIfNeeded: port).bigEndian
+            guard inet_pton(AF_INET6, hostAddress, &address.sin6_addr) == 1 else {
+                Darwin.close(descriptor)
+                throw Error.failed("invalid IPv6 host address \(hostAddress)")
+            }
+            bound = withUnsafePointer(to: &address) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { generic in
+                    POSIXSocketSupport.retryOnInterrupt {
+                        Darwin.bind(descriptor, generic, socklen_t(MemoryLayout<sockaddr_in6>.size))
+                    }
+                }
             }
         }
         guard bound == 0 else {
@@ -135,27 +224,41 @@ public final class UDPListener {
             Darwin.close(descriptor)
             if code == EADDRINUSE { throw Error.addressInUse(port: port) }
             throw Error.failed(
-                "bind(127.0.0.1:\(port)/udp) failed: \(String(cString: strerror(code)))")
+                "bind(\(hostAddress.stringValue):\(port)/udp) failed: \(String(cString: strerror(code)))")
         }
 
-        var boundAddress = sockaddr_in()
-        var boundLength = socklen_t(MemoryLayout<sockaddr_in>.size)
-        let named = withUnsafeMutablePointer(to: &boundAddress) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { generic in
-                POSIXSocketSupport.retryOnInterrupt { Darwin.getsockname(descriptor, generic, &boundLength) }
+        let named: Int32
+        let boundPort: Int
+        switch hostAddress {
+        case .ipv4:
+            var boundAddress = sockaddr_in()
+            var boundLength = socklen_t(MemoryLayout<sockaddr_in>.size)
+            named = withUnsafeMutablePointer(to: &boundAddress) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    POSIXSocketSupport.retryOnInterrupt { Darwin.getsockname(descriptor, $0, &boundLength) }
+                }
             }
+            boundPort = Int(UInt16(bigEndian: boundAddress.sin_port))
+        case .ipv6:
+            var boundAddress = sockaddr_in6()
+            var boundLength = socklen_t(MemoryLayout<sockaddr_in6>.size)
+            named = withUnsafeMutablePointer(to: &boundAddress) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    POSIXSocketSupport.retryOnInterrupt { Darwin.getsockname(descriptor, $0, &boundLength) }
+                }
+            }
+            boundPort = Int(UInt16(bigEndian: boundAddress.sin6_port))
         }
-        guard named == 0, boundAddress.sin_family == sa_family_t(AF_INET) else {
+        guard named == 0 else {
             let detail = named == 0
                 ? "unexpected address family"
                 : String(cString: strerror(errno))
             Darwin.close(descriptor)
-            throw Error.failed("getsockname(127.0.0.1/udp) failed: \(detail)")
+            throw Error.failed("getsockname(\(hostAddress.stringValue)/udp) failed: \(detail)")
         }
-        let boundPort = Int(UInt16(bigEndian: boundAddress.sin_port))
         guard (1...65_535).contains(boundPort) else {
             Darwin.close(descriptor)
-            throw Error.failed("getsockname(127.0.0.1/udp) returned invalid port \(boundPort)")
+            throw Error.failed("getsockname(\(hostAddress.stringValue)/udp) returned invalid port \(boundPort)")
         }
         port = boundPort
 
@@ -194,13 +297,9 @@ public final class UDPListener {
         lock.lock()
         defer { lock.unlock() }
         guard fd >= 0 else { return false }
-        var address = client.socketAddress
         let result: Int = datagram.withUnsafeBytes { bytes in
-            withUnsafePointer(to: &address) { pointer in
-                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { generic in
-                    Darwin.sendto(fd, bytes.baseAddress, bytes.count, 0, generic,
-                                 socklen_t(MemoryLayout<sockaddr_in>.size))
-                }
+            client.withSocketAddress { address, length in
+                Darwin.sendto(fd, bytes.baseAddress, bytes.count, 0, address, length)
             }
         }
         return result == datagram.count
@@ -216,8 +315,8 @@ public final class UDPListener {
                 lock.unlock()
                 return
             }
-            var sender = sockaddr_in()
-            var senderLength = socklen_t(MemoryLayout<sockaddr_in>.size)
+            var sender = sockaddr_storage()
+            var senderLength = socklen_t(MemoryLayout<sockaddr_storage>.size)
             let received: Int = storage.withUnsafeMutableBytes { bytes in
                 withUnsafeMutablePointer(to: &sender) { pointer in
                     pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { generic in
@@ -236,8 +335,22 @@ public final class UDPListener {
                 return
             }
             // A zero-length UDP datagram is a real packet, unlike read(2) on a stream.
-            guard sender.sin_family == sa_family_t(AF_INET) else { continue }
-            handler?(Data(storage.prefix(received)), Client(sender))
+            let client: Client?
+            switch Int32(sender.ss_family) {
+            case AF_INET:
+                let address = withUnsafePointer(to: &sender) { pointer in
+                    pointer.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee }
+                }
+                client = Client(address)
+            case AF_INET6:
+                let address = withUnsafePointer(to: &sender) { pointer in
+                    pointer.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { $0.pointee }
+                }
+                client = Client(address)
+            default:
+                client = nil
+            }
+            if let client { handler?(Data(storage.prefix(received)), client) }
         }
     }
 }

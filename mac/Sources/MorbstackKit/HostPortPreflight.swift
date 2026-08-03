@@ -3,7 +3,7 @@
 //
 // Host-side published-port availability snapshots.
 //
-// A successful probe means only that the requested local loopback endpoint bound
+// A successful probe means only that the requested host endpoint bound
 // during this check. It is intentionally *not* a reservation: the descriptor is
 // closed before the result returns, so another process can claim the port before
 // Docker starts a container. Calling a snapshot a reservation would make a race look
@@ -12,15 +12,13 @@
 import Darwin
 import Foundation
 
-/// Checks whether the Mac loopback endpoint Morbstack would use is currently free.
+/// Checks whether the Mac endpoint Morbstack would use is currently free.
 ///
-/// Morbstack forwards TCP and UDP on loopback only. A recognized fixed TCP/UDP
+/// A recognized fixed TCP/UDP
 /// create takes the real held listener after this early check and retains it through
 /// the acknowledged start response, so this API remains a deliberately non-reserving
 /// availability snapshot for both transports.
 public enum HostPortPreflight {
-
-    public static let loopbackAddress = TCPListener.LoopbackAddress.ipv4.rawValue
 
     public enum Transport: String, Codable, CaseIterable, Equatable, Sendable {
         case tcp
@@ -28,7 +26,7 @@ public enum HostPortPreflight {
     }
 
     public enum Availability: String, Codable, Equatable, Sendable {
-        /// The exact loopback endpoint accepted a bind at the time of the probe.
+        /// The exact host endpoint accepted a bind at the time of the probe.
         case available
         /// Another local process had the endpoint bound at the time of the probe.
         case inUse = "in_use"
@@ -39,8 +37,8 @@ public enum HostPortPreflight {
     }
 
     public enum Publication: String, Codable, Equatable, Sendable {
-        /// Morbstack binds a local loopback address, never every network interface.
-        case loopbackOnly = "loopback_only"
+        case loopback
+        case localNetwork = "local_network"
     }
 
     public struct Result: Codable, Equatable, Sendable {
@@ -65,17 +63,14 @@ public enum HostPortPreflight {
     public static func check(
         port: Int,
         transport: Transport,
-        tcpLoopbackAddress: TCPListener.LoopbackAddress = .ipv4
+        hostAddress: DockerHostAddress
     ) -> Result {
-        let publication: Publication = .loopbackOnly
-        // UDP remains IPv4-only. The extra parameter is solely for fixed and dynamic
-        // TCP IPv6-loopback publication.
-        let loopback = transport == .tcp ? tcpLoopbackAddress : .ipv4
+        let publication: Publication = hostAddress.isLoopback ? .loopback : .localNetwork
         guard (1...65535).contains(port) else {
             return Result(
                 port: port,
                 transport: transport,
-                bindAddress: loopback.rawValue,
+                bindAddress: hostAddress.stringValue,
                 availability: .invalid,
                 publication: publication,
                 detail: "port must be between 1 and 65535")
@@ -83,13 +78,13 @@ public enum HostPortPreflight {
 
         let type: Int32 = transport == .tcp ? SOCK_STREAM : SOCK_DGRAM
         let protocolNumber: Int32 = transport == .tcp ? IPPROTO_TCP : IPPROTO_UDP
-        let family: Int32 = loopback == .ipv4 ? AF_INET : AF_INET6
+        let family = hostAddress.family
         let fd = socket(family, type, protocolNumber)
         guard fd >= 0 else {
             return Result(
                 port: port,
                 transport: transport,
-                bindAddress: loopback.rawValue,
+                bindAddress: hostAddress.stringValue,
                 availability: .unavailable,
                 publication: publication,
                 detail: "could not create a \(transport.rawValue.uppercased()) socket")
@@ -102,13 +97,17 @@ public enum HostPortPreflight {
         }
 
         let bindResult: Int32
-        switch loopback {
-        case .ipv4:
+        switch hostAddress {
+        case .ipv4(let hostAddress):
             var address = sockaddr_in()
             address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
             address.sin_family = sa_family_t(AF_INET)
             address.sin_port = UInt16(truncatingIfNeeded: port).bigEndian
-            address.sin_addr = in_addr(s_addr: UInt32(0x7f00_0001).bigEndian)
+            guard inet_pton(AF_INET, hostAddress, &address.sin_addr) == 1 else {
+                return Result(
+                    port: port, transport: transport, bindAddress: hostAddress,
+                    availability: .invalid, publication: publication, detail: "invalid IPv4 host address")
+            }
             bindResult = withUnsafePointer(to: &address) { pointer in
                 pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { generic in
                     POSIXSocketSupport.retryOnInterrupt {
@@ -116,14 +115,18 @@ public enum HostPortPreflight {
                     }
                 }
             }
-        case .ipv6:
+        case .ipv6(let hostAddress):
             var v6Only: Int32 = 1
             _ = setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6Only, socklen_t(MemoryLayout<Int32>.size))
             var address = sockaddr_in6()
             address.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
             address.sin6_family = sa_family_t(AF_INET6)
             address.sin6_port = UInt16(truncatingIfNeeded: port).bigEndian
-            address.sin6_addr = in6addr_loopback
+            guard inet_pton(AF_INET6, hostAddress, &address.sin6_addr) == 1 else {
+                return Result(
+                    port: port, transport: transport, bindAddress: hostAddress,
+                    availability: .invalid, publication: publication, detail: "invalid IPv6 host address")
+            }
             bindResult = withUnsafePointer(to: &address) { pointer in
                 pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { generic in
                     POSIXSocketSupport.retryOnInterrupt {
@@ -137,23 +140,23 @@ public enum HostPortPreflight {
             return Result(
                 port: port,
                 transport: transport,
-                bindAddress: loopback.rawValue,
+                bindAddress: hostAddress.stringValue,
                 availability: code == EADDRINUSE ? .inUse : .unavailable,
                 publication: publication,
                 detail: code == EADDRINUSE
-                    ? "another process currently owns \(loopback.rawValue):\(port)/\(transport.rawValue)"
-                    : "the loopback bind could not be checked (\(String(cString: strerror(code))))")
+                    ? "another process currently owns \(hostAddress.stringValue):\(port)/\(transport.rawValue)"
+                    : "the host bind could not be checked (\(String(cString: strerror(code))))")
         }
 
         return Result(
             port: port,
             transport: transport,
-            bindAddress: loopback.rawValue,
+            bindAddress: hostAddress.stringValue,
             availability: .available,
             publication: publication,
             detail: transport == .tcp
-                ? "available now on loopback; this check does not reserve the port"
-                : "available now on loopback; this check does not reserve the port")
+                ? "available now; this check does not reserve the port"
+                : "available now; this check does not reserve the port")
     }
 
     /// The boundary of the Engine-facing create preflight.
@@ -166,7 +169,6 @@ public enum HostPortPreflight {
     /// and is handed to ``PortForwarder`` without rebinding after a normal `204`
     /// start response. This API itself remains a snapshot: callers of `morb ports
     /// check`, dynamic (`-P`/omitted host port), range, malformed, chunked, and
-    /// oversized shapes must not infer a reservation from its result. Dynamic UDP,
-    /// raw dynamic ranges, and `PublishAllPorts` remain outside the held lease.
+    /// oversized shapes must not infer a reservation from its result.
     public static let reservationDesign = "HostPortPreflight is advisory; recognized fixed TCP/UDP Docker creates take one continuously held transport-indexed listener lease before reaching the Engine."
 }

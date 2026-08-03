@@ -5,10 +5,10 @@ import Darwin
 import Dispatch
 import Foundation
 
-/// Mirrors the guest's published container ports onto the Mac's loopback interface.
+/// Mirrors the guest's published container ports onto the requested Mac interface.
 ///
-/// This is what makes `docker run -d -p 8080:80 nginx` followed by
-/// `curl http://127.0.0.1:8080` work from the Mac. Three pieces:
+/// This is what makes `docker run -d -p 8080:80 nginx` reachable at the host address
+/// Docker requested. Three pieces:
 ///
 /// 1. **Discovery.** A long-lived connection to the Docker Engine API over vsock 2375
 ///    subscribes to `GET /events` filtered to container events. Every event that could
@@ -17,9 +17,9 @@ import Foundation
 ///    would either be laggy or wasteful; events alone would miss whatever happened
 ///    while the daemon was not watching, and would have to reconstruct port bindings
 ///    from a stream that does not carry them.
-/// 2. **Listeners.** Each published port gets the matching local loopback socket:
-///    TCP preserves an explicit IPv6 loopback publication as `::1`; the existing UDP
-///    data path remains IPv4 loopback-only.
+/// 2. **Listeners.** Each published port gets its exact requested IPv4 or IPv6 host
+///    socket. The durable exposure preference controls whether a non-loopback
+///    address is admitted; listeners never rewrite it to loopback.
 /// 3. **Transport.** TCP accepts open a vsock stream-dial (2376) and use ``FDRelay``.
 ///    UDP clients instead get a long-lived framed datagram-dial (2378), preserving
 ///    individual messages and their reply flow.
@@ -269,16 +269,16 @@ public final class PortForwarder {
 
     private struct LeaseRecord {
         let lease: PortLease
-        var tcpListeners: [Int: TCPListener]
-        var udpListeners: [Int: UDPListener]
+        var tcpListeners: [DockerHostEndpoint: TCPListener]
+        var udpListeners: [DockerHostEndpoint: UDPListener]
         /// Ports withdrawn from this lease after Docker reported an ambiguous running
         /// publication. Retaining the lease record preserves container lifecycle
         /// bookkeeping, but never lets a later start observer reactivate a listener
         /// that was deliberately removed from the Mac.
-        var withdrawnTCPHostPorts: Set<Int> = []
+        var withdrawnTCPHostEndpoints: Set<DockerHostEndpoint> = []
         /// UDP has a separate host socket namespace. A conflict can withdraw only
         /// that transport without allowing a later lifecycle promotion to reclaim it.
-        var withdrawnUDPHostPorts: Set<Int> = []
+        var withdrawnUDPHostEndpoints: Set<DockerHostEndpoint> = []
         var containerID: String?
         var startClaimed = false
         var isForwarding = false
@@ -345,8 +345,8 @@ public final class PortForwarder {
     /// Bumped by every ``start()`` and ``stop()``; workers carry the value they were
     /// launched with and exit as soon as it goes stale.
     private var generation = 0
-    private var forwards: [Int: Forward] = [:]
-    private var udpForwards: [Int: UDPForward] = [:]
+    private var forwards: [DockerHostEndpoint: Forward] = [:]
+    private var udpForwards: [DockerHostEndpoint: UDPForward] = [:]
     /// Fixed TCP/UDP listeners held continuously from a recognized create through a
     /// matching start handoff (or container destruction/daemon stop).
     private var leases: [UUID: LeaseRecord] = [:]
@@ -366,12 +366,12 @@ public final class PortForwarder {
     /// idle, so the failure mode is an auto-suspend fired while connections are live.
     private var connectionCounts: [Int: Int] = [:]
     private var refreshQueued = false
-    private var failedBinds: [Int: FailedBind] = [:]
-    private var failedUDPBinds: [Int: FailedBind] = [:]
+    private var failedBinds: [DockerHostEndpoint: FailedBind] = [:]
+    private var failedUDPBinds: [DockerHostEndpoint: FailedBind] = [:]
     /// Docker snapshots that claim one Mac endpoint for competing targets. These are
     /// terminal for their snapshot, not retryable host bind failures.
-    private var conflictingTCPForwards: [Int: PortForwardPlan.ListenerConflict] = [:]
-    private var conflictingUDPForwards: [Int: PortForwardPlan.ListenerConflict] = [:]
+    private var conflictingTCPForwards: [DockerHostEndpoint: PortForwardPlan.ListenerConflict] = [:]
+    private var conflictingUDPForwards: [DockerHostEndpoint: PortForwardPlan.ListenerConflict] = [:]
     private var retryTimer: DispatchSourceTimer?
     /// Dials started but not yet spliced, throttled by ``maxConcurrentDials``.
     private var pendingDials = 0
@@ -384,10 +384,18 @@ public final class PortForwarder {
     private static let maximumUDPFlows = 48
     private static let udpFlowIdleTimeout: TimeInterval = 60
 
+    /// The immutable-at-engine-start port exposure policy selected in Settings.
+    public let portExposure: MorbPortExposure
+
     /// Creates a forwarder. Nothing happens until ``start()``.
-    public init(vm: VMManager, log: MorbLog) {
+    public init(
+        vm: VMManager,
+        log: MorbLog,
+        portExposure: MorbPortExposure = .localNetwork
+    ) {
         self.vm = vm
         self.log = log
+        self.portExposure = portExposure
     }
 
     // MARK: - Observable state
@@ -396,8 +404,8 @@ public final class PortForwarder {
     public var activeForwards: [String] {
         lock.lock()
         defer { lock.unlock() }
-        let tcp = forwards.keys.sorted().compactMap { forwards[$0]?.binding.description }
-        let udp = udpForwards.keys.sorted().compactMap { udpForwards[$0]?.binding.description }
+        let tcp = forwards.keys.sorted(by: Self.endpointOrder).compactMap { forwards[$0]?.binding.description }
+        let udp = udpForwards.keys.sorted(by: Self.endpointOrder).compactMap { udpForwards[$0]?.binding.description }
         return tcp + udp
     }
 
@@ -417,6 +425,7 @@ public final class PortForwarder {
             let binding = forward.binding
             guard binding.networkProtocol == "tcp",
                   (1...65_535).contains(binding.hostPort),
+                  PortForwardPlan.endpoint(for: binding)?.address.isLoopback == true,
                   !binding.containerID.isEmpty
             else {
                 return nil
@@ -428,8 +437,8 @@ public final class PortForwarder {
             lhs.hostPort == rhs.hostPort ? lhs.ownerID < rhs.ownerID : lhs.hostPort < rhs.hostPort
         }
 
-        let failed = Set(failedBinds.keys.compactMap(Self.validTCPHostPort))
-        let conflicts = Set(conflictingTCPForwards.keys.compactMap(Self.validTCPHostPort))
+        let failed = Set(failedBinds.keys.compactMap { Self.validTCPHostPort($0.port) })
+        let conflicts = Set(conflictingTCPForwards.keys.compactMap { Self.validTCPHostPort($0.port) })
         return MorbLocalDomain.LoopbackTCPForwardSnapshot(
             forwarderIsRunning: running,
             activeForwards: active,
@@ -440,6 +449,12 @@ public final class PortForwarder {
     private static func validTCPHostPort(_ port: Int) -> UInt16? {
         guard (1...65_535).contains(port) else { return nil }
         return UInt16(port)
+    }
+
+    private static func endpointOrder(_ lhs: DockerHostEndpoint, _ rhs: DockerHostEndpoint) -> Bool {
+        if lhs.port != rhs.port { return lhs.port < rhs.port }
+        if lhs.address.family != rhs.address.family { return lhs.address.family < rhs.address.family }
+        return lhs.address.stringValue < rhs.address.stringValue
     }
 
     /// The number of forwarded connections currently being relayed.
@@ -462,15 +477,15 @@ public final class PortForwarder {
         lock.lock()
         defer { lock.unlock() }
         let tcp: [String] = Set(failedBinds.keys).union(conflictingTCPForwards.keys)
-            .sorted().compactMap { port -> String? in
-                if let conflict = conflictingTCPForwards[port] { return conflict.diagnostic }
-                guard let failure = failedBinds[port] else { return nil }
+            .sorted(by: Self.endpointOrder).compactMap { endpoint -> String? in
+                if let conflict = conflictingTCPForwards[endpoint] { return conflict.diagnostic }
+                guard let failure = failedBinds[endpoint] else { return nil }
                 return "\(failure.binding.description) — \(failure.reason)"
         }
         let udp: [String] = Set(failedUDPBinds.keys).union(conflictingUDPForwards.keys)
-            .sorted().compactMap { port -> String? in
-                if let conflict = conflictingUDPForwards[port] { return conflict.diagnostic }
-                guard let failure = failedUDPBinds[port] else { return nil }
+            .sorted(by: Self.endpointOrder).compactMap { endpoint -> String? in
+                if let conflict = conflictingUDPForwards[endpoint] { return conflict.diagnostic }
+                guard let failure = failedUDPBinds[endpoint] else { return nil }
                 return "\(failure.binding.description) — \(failure.reason)"
         }
         return tcp + udp
@@ -553,14 +568,13 @@ public final class PortForwarder {
         var dynamic: [DockerDynamicPortPublication] = []
         dynamic.reserveCapacity(requests.count)
         for request in requests {
-            let allowedAddresses = request.transport == .tcp
-                ? PortForwardPlan.forwardableHostAddresses
-                : PortForwardPlan.forwardableUDPHostAddresses
-            guard allowedAddresses.contains(request.hostIP),
+            guard let address = DockerHostAddress(dockerHostIP: request.hostIP),
+                  portExposure.permits(address),
                   (0...65535).contains(request.requestedHostPort),
                   (1...65535).contains(request.containerPort)
             else {
-                throw PortLeaseError.unavailable("unsupported Docker publish-all host publication")
+                throw PortLeaseError.unavailable(
+                    "unsupported Docker publish-all host publication; enable local-network port publishing for wildcard or non-loopback addresses")
             }
             if request.requestedHostPort == 0 {
                 dynamic.append(DockerDynamicPortPublication(
@@ -691,8 +705,8 @@ public final class PortForwarder {
         releaseOnStop: Bool = false
     ) throws -> PortLeaseReservationAttempt {
         let leaseID = UUID()
-        var tcpListeners: [Int: TCPListener] = [:]
-        var udpListeners: [Int: UDPListener] = [:]
+        var tcpListeners: [DockerHostEndpoint: TCPListener] = [:]
+        var udpListeners: [DockerHostEndpoint: UDPListener] = [:]
         var allocatedDynamic: [DockerDynamicPortPublication] = []
         var allocatedDynamicTCP: [DockerExplicitTCPPortBinding] = []
         var allocatedDynamicUDP: [DockerExplicitUDPPortBinding] = []
@@ -710,35 +724,47 @@ public final class PortForwarder {
         }
         do {
             for publication in fixedTCP {
-                let loopbackAddress = TCPListener.LoopbackAddress
-                    .forDockerHostAddress(publication.hostIP)
-                guard conflictingTCPForwards[publication.hostPort] == nil else {
+                guard let endpoint = DockerHostEndpoint(hostIP: publication.hostIP, port: publication.hostPort) else {
+                    throw PortLeaseError.unavailable("invalid published TCP host endpoint")
+                }
+                guard portExposure.permits(endpoint.address) else {
                     throw PortLeaseError.unavailable(
-                        "cannot reserve published TCP port \(loopbackAddress.rawValue):\(publication.hostPort): "
-                            + "Docker currently reports competing targets for this host port")
+                        "Docker requested \(endpoint.description), but local-network port publishing is disabled in Morbstack Settings")
+                }
+                guard conflictingTCPForwards[endpoint] == nil else {
+                    throw PortLeaseError.unavailable(
+                        "cannot reserve published TCP port \(endpoint.description): "
+                            + "Docker currently reports competing targets for this host endpoint")
                 }
                 let listener = TCPListener(
                     port: publication.hostPort,
                     queue: acceptQueue,
-                    loopbackAddress: loopbackAddress)
+                    hostAddress: endpoint.address)
                 do {
                     try listener.start()
                 } catch TCPListenerError.addressInUse {
                     throw PortLeaseError.addressInUse(port: publication.hostPort, protocolName: "tcp")
                 } catch {
                     throw PortLeaseError.unavailable(
-                        "could not reserve published TCP port \(loopbackAddress.rawValue):\(publication.hostPort): \(error.localizedDescription)")
+                        "could not reserve published TCP port \(endpoint.description): \(error.localizedDescription)")
                 }
-                tcpListeners[publication.hostPort] = listener
+                tcpListeners[endpoint] = listener
             }
 
             for publication in fixedUDP {
-                guard conflictingUDPForwards[publication.hostPort] == nil else {
-                    throw PortLeaseError.unavailable(
-                        "cannot reserve published UDP port 127.0.0.1:\(publication.hostPort): "
-                            + "Docker currently reports competing targets for this host port")
+                guard let endpoint = DockerHostEndpoint(hostIP: publication.hostIP, port: publication.hostPort) else {
+                    throw PortLeaseError.unavailable("invalid published UDP host endpoint")
                 }
-                let listener = UDPListener(port: publication.hostPort, queue: acceptQueue)
+                guard portExposure.permits(endpoint.address) else {
+                    throw PortLeaseError.unavailable(
+                        "Docker requested \(endpoint.description), but local-network port publishing is disabled in Morbstack Settings")
+                }
+                guard conflictingUDPForwards[endpoint] == nil else {
+                    throw PortLeaseError.unavailable(
+                        "cannot reserve published UDP port \(endpoint.description): "
+                            + "Docker currently reports competing targets for this host endpoint")
+                }
+                let listener = UDPListener(port: publication.hostPort, queue: acceptQueue, hostAddress: endpoint.address)
                 do {
                     // A held UDP socket drains and discards packets until the exact
                     // successful start response installs its synchronized handler.
@@ -747,36 +773,42 @@ public final class PortForwarder {
                     throw PortLeaseError.addressInUse(port: publication.hostPort, protocolName: "udp")
                 } catch {
                     throw PortLeaseError.unavailable(
-                        "could not reserve published UDP port 127.0.0.1:\(publication.hostPort): \(error.localizedDescription)")
+                        "could not reserve published UDP port \(endpoint.description): \(error.localizedDescription)")
                 }
-                udpListeners[publication.hostPort] = listener
+                udpListeners[endpoint] = listener
             }
 
             for publication in dynamic {
                 switch publication.transport {
                 case .tcp:
-                    let loopbackAddress = TCPListener.LoopbackAddress
-                        .forDockerHostAddress(publication.hostIP)
+                    guard let requested = DockerHostAddress(dockerHostIP: publication.hostIP),
+                          portExposure.permits(requested)
+                    else {
+                        throw PortLeaseError.unavailable(
+                            "Docker requested a host address that is disabled in Morbstack Settings")
+                    }
                     let listener = TCPListener(
                         port: 0,
                         queue: acceptQueue,
-                        loopbackAddress: loopbackAddress)
+                        hostAddress: requested)
                     do {
                         try listener.start()
                     } catch {
                         throw PortLeaseError.unavailable(
-                            "could not allocate a dynamic published TCP port on \(loopbackAddress.rawValue): \(error.localizedDescription)")
+                            "could not allocate a dynamic published TCP port on \(requested.stringValue): \(error.localizedDescription)")
                     }
                     let allocated = DockerExplicitTCPPortBinding(
                         hostIP: publication.hostIP,
                         hostPort: listener.port,
                         containerPort: publication.containerPort)
-                    guard tcpListeners[allocated.hostPort] == nil else {
+                    guard let endpoint = DockerHostEndpoint(hostIP: allocated.hostIP, port: allocated.hostPort),
+                          tcpListeners[endpoint] == nil
+                    else {
                         listener.stop()
                         throw PortLeaseError.unavailable(
                             "kernel returned an already-reserved dynamic TCP port \(allocated.hostPort)")
                     }
-                    tcpListeners[allocated.hostPort] = listener
+                    tcpListeners[endpoint] = listener
                     allocatedDynamicTCP.append(allocated)
                     allocatedDynamic.append(DockerDynamicPortPublication(
                         transport: .tcp,
@@ -785,25 +817,33 @@ public final class PortForwarder {
                         containerPort: allocated.containerPort))
 
                 case .udp:
-                    let listener = UDPListener(port: 0, queue: acceptQueue)
+                    guard let requested = DockerHostAddress(dockerHostIP: publication.hostIP),
+                          portExposure.permits(requested)
+                    else {
+                        throw PortLeaseError.unavailable(
+                            "Docker requested a host address that is disabled in Morbstack Settings")
+                    }
+                    let listener = UDPListener(port: 0, queue: acceptQueue, hostAddress: requested)
                     do {
                         // Like fixed UDP leases, this bound socket drains until the
                         // create-associated listener receives an exact start success.
                         try listener.start()
                     } catch {
                         throw PortLeaseError.unavailable(
-                            "could not allocate a dynamic published UDP port on 127.0.0.1: \(error.localizedDescription)")
+                            "could not allocate a dynamic published UDP port on \(requested.stringValue): \(error.localizedDescription)")
                     }
                     let allocated = DockerExplicitUDPPortBinding(
                         hostIP: publication.hostIP,
                         hostPort: listener.port,
                         containerPort: publication.containerPort)
-                    guard udpListeners[allocated.hostPort] == nil else {
+                    guard let endpoint = DockerHostEndpoint(hostIP: allocated.hostIP, port: allocated.hostPort),
+                          udpListeners[endpoint] == nil
+                    else {
                         listener.stop()
                         throw PortLeaseError.unavailable(
                             "kernel returned an already-reserved dynamic UDP port \(allocated.hostPort)")
                     }
-                    udpListeners[allocated.hostPort] = listener
+                    udpListeners[endpoint] = listener
                     allocatedDynamicUDP.append(allocated)
                     allocatedDynamic.append(DockerDynamicPortPublication(
                         transport: .udp,
@@ -981,10 +1021,10 @@ public final class PortForwarder {
         // `running` becomes true are conservatively closed by `handleAccepted`.
         let generation = running ? self.generation : self.generation + 1
         let activeTCP = record.lease.tcp.filter {
-            !record.withdrawnTCPHostPorts.contains($0.hostPort)
+            $0.endpoint.map { !record.withdrawnTCPHostEndpoints.contains($0) } ?? false
         }
         let activeUDP = record.lease.udp.filter {
-            !record.withdrawnUDPHostPorts.contains($0.hostPort)
+            $0.endpoint.map { !record.withdrawnUDPHostEndpoints.contains($0) } ?? false
         }
         guard !activeTCP.isEmpty || !activeUDP.isEmpty else {
             record.startClaimed = false
@@ -993,7 +1033,9 @@ public final class PortForwarder {
             return false
         }
         for publication in activeTCP {
-            guard let listener = record.tcpListeners[publication.hostPort] else {
+            guard let endpoint = publication.endpoint,
+                  let listener = record.tcpListeners[endpoint]
+            else {
                 record.startClaimed = false
                 leases[identifier] = record
                 lock.unlock()
@@ -1009,11 +1051,13 @@ public final class PortForwarder {
             listener.setConnectionHandler { [weak self] fd in
                 self?.handleAccepted(clientFD: fd, binding: binding, generation: generation)
             }
-            forwards[publication.hostPort] = Forward(
+            forwards[endpoint] = Forward(
                 binding: binding, listener: listener, leaseID: identifier)
         }
         for publication in activeUDP {
-            guard let listener = record.udpListeners[publication.hostPort] else {
+            guard let endpoint = publication.endpoint,
+                  let listener = record.udpListeners[endpoint]
+            else {
                 record.startClaimed = false
                 leases[identifier] = record
                 lock.unlock()
@@ -1034,7 +1078,7 @@ public final class PortForwarder {
                 self.handleUDPDatagram(
                     datagram, from: client, binding: binding, listener: listener, generation: generation)
             }
-            udpForwards[publication.hostPort] = UDPForward(
+            udpForwards[endpoint] = UDPForward(
                 binding: binding, listener: listener, leaseID: identifier)
         }
         record.isForwarding = true
@@ -1073,19 +1117,21 @@ public final class PortForwarder {
             return
         }
         for publication in record.lease.tcp {
-            if forwards[publication.hostPort]?.leaseID == identifier {
-                forwards.removeValue(forKey: publication.hostPort)
+            guard let endpoint = publication.endpoint else { continue }
+            if forwards[endpoint]?.leaseID == identifier {
+                forwards.removeValue(forKey: endpoint)
             }
-            if let listener = record.tcpListeners[publication.hostPort] {
+            if let listener = record.tcpListeners[endpoint] {
                 tcpListeners.append(listener)
             }
         }
         for publication in record.lease.udp {
-            if let forward = udpForwards[publication.hostPort], forward.leaseID == identifier {
-                udpForwards.removeValue(forKey: publication.hostPort)
+            guard let endpoint = publication.endpoint else { continue }
+            if let forward = udpForwards[endpoint], forward.leaseID == identifier {
+                udpForwards.removeValue(forKey: endpoint)
                 flows.append(contentsOf: forward.flows.values)
             }
-            if let listener = record.udpListeners[publication.hostPort] {
+            if let listener = record.udpListeners[endpoint] {
                 udpListeners.append(listener)
             }
         }
@@ -1106,21 +1152,21 @@ public final class PortForwarder {
     /// whole record would unnecessarily darken a non-conflicting publication. The
     /// record stays associated with its container for later destroy cleanup, while a
     /// withdrawn port is permanently excluded from any late start-observer promotion.
-    private func withdrawConflictingTCPLeaseListeners(at ports: Set<Int>, reason: String) {
-        guard !ports.isEmpty else { return }
-        var listeners: [(port: Int, listener: TCPListener)] = []
+    private func withdrawConflictingTCPLeaseListeners(at endpoints: Set<DockerHostEndpoint>, reason: String) {
+        guard !endpoints.isEmpty else { return }
+        var listeners: [(endpoint: DockerHostEndpoint, listener: TCPListener)] = []
         lock.lock()
         for identifier in Array(leases.keys) {
             guard var record = leases[identifier] else { continue }
-            let withdrawn = record.tcpListeners.keys.filter { ports.contains($0) }
+            let withdrawn = record.tcpListeners.keys.filter { endpoints.contains($0) }
             guard !withdrawn.isEmpty else { continue }
-            for port in withdrawn {
-                guard let listener = record.tcpListeners.removeValue(forKey: port) else { continue }
-                record.withdrawnTCPHostPorts.insert(port)
-                if forwards[port]?.leaseID == identifier {
-                    forwards.removeValue(forKey: port)
+            for endpoint in withdrawn {
+                guard let listener = record.tcpListeners.removeValue(forKey: endpoint) else { continue }
+                record.withdrawnTCPHostEndpoints.insert(endpoint)
+                if forwards[endpoint]?.leaseID == identifier {
+                    forwards.removeValue(forKey: endpoint)
                 }
-                listeners.append((port, listener))
+                listeners.append((endpoint, listener))
             }
             record.isForwarding = record.tcpListeners.keys.contains { forwards[$0]?.leaseID == identifier }
                 || record.udpListeners.keys.contains { udpForwards[$0]?.leaseID == identifier }
@@ -1130,30 +1176,30 @@ public final class PortForwarder {
 
         for entry in listeners {
             entry.listener.stop()
-            log.warn("withdrew fixed TCP lease on 127.0.0.1:\(entry.port) — \(reason)")
+            log.warn("withdrew fixed TCP lease on \(entry.endpoint.description) — \(reason)")
         }
     }
 
     /// UDP conflict withdrawal mirrors TCP's lease behavior but never shares a port
     /// map with it. The whole container lease remains associated for destroy cleanup;
     /// only the ambiguous UDP endpoint is permanently unavailable for later starts.
-    private func withdrawConflictingUDPLeaseListeners(at ports: Set<Int>, reason: String) {
-        guard !ports.isEmpty else { return }
-        var listeners: [(port: Int, listener: UDPListener)] = []
+    private func withdrawConflictingUDPLeaseListeners(at endpoints: Set<DockerHostEndpoint>, reason: String) {
+        guard !endpoints.isEmpty else { return }
+        var listeners: [(endpoint: DockerHostEndpoint, listener: UDPListener)] = []
         var flows: [UDPFlow] = []
         lock.lock()
         for identifier in Array(leases.keys) {
             guard var record = leases[identifier] else { continue }
-            let withdrawn = record.udpListeners.keys.filter { ports.contains($0) }
+            let withdrawn = record.udpListeners.keys.filter { endpoints.contains($0) }
             guard !withdrawn.isEmpty else { continue }
-            for port in withdrawn {
-                guard let listener = record.udpListeners.removeValue(forKey: port) else { continue }
-                record.withdrawnUDPHostPorts.insert(port)
-                if let forward = udpForwards[port], forward.leaseID == identifier {
-                    udpForwards.removeValue(forKey: port)
+            for endpoint in withdrawn {
+                guard let listener = record.udpListeners.removeValue(forKey: endpoint) else { continue }
+                record.withdrawnUDPHostEndpoints.insert(endpoint)
+                if let forward = udpForwards[endpoint], forward.leaseID == identifier {
+                    udpForwards.removeValue(forKey: endpoint)
                     flows.append(contentsOf: forward.flows.values)
                 }
-                listeners.append((port, listener))
+                listeners.append((endpoint, listener))
             }
             record.isForwarding = record.tcpListeners.keys.contains { forwards[$0]?.leaseID == identifier }
                 || record.udpListeners.keys.contains { udpForwards[$0]?.leaseID == identifier }
@@ -1164,7 +1210,7 @@ public final class PortForwarder {
         for flow in flows { flow.close() }
         for entry in listeners {
             entry.listener.stop()
-            log.warn("withdrew fixed UDP lease on 127.0.0.1:\(entry.port) — \(reason)")
+            log.warn("withdrew fixed UDP lease on \(entry.endpoint.description) — \(reason)")
         }
     }
 
@@ -1178,14 +1224,16 @@ public final class PortForwarder {
             leaseByContainerID.removeValue(forKey: containerID)
         }
         for publication in record.lease.tcp {
-            if forwards[publication.hostPort]?.leaseID == identifier {
-                forwards.removeValue(forKey: publication.hostPort)
+            guard let endpoint = publication.endpoint else { continue }
+            if forwards[endpoint]?.leaseID == identifier {
+                forwards.removeValue(forKey: endpoint)
             }
         }
         var udpFlows: [UDPFlow] = []
         for publication in record.lease.udp {
-            if let forward = udpForwards[publication.hostPort], forward.leaseID == identifier {
-                udpForwards.removeValue(forKey: publication.hostPort)
+            guard let endpoint = publication.endpoint else { continue }
+            if let forward = udpForwards[endpoint], forward.leaseID == identifier {
+                udpForwards.removeValue(forKey: endpoint)
                 udpFlows.append(contentsOf: forward.flows.values)
             }
         }
@@ -1284,14 +1332,20 @@ public final class PortForwarder {
             // Named individually: this is the line a user greps for when
             // `curl 127.0.0.1:8080` stops answering, and "3 listener(s)" does not
             // tell them which three.
-            let tcpPorts = Set(closing.keys).union(closingLeases.flatMap { $0.lease.tcp.map(\.hostPort) })
-            let udpPorts = Set(closingUDP.keys).union(closingLeases.flatMap { $0.lease.udp.map(\.hostPort) })
-            let descriptions = tcpPorts.sorted().map { "\($0)/tcp" }
-                + udpPorts.sorted().map { "\($0)/udp" }
+            let tcpEndpoints = Set(closing.keys).union(
+                closingLeases.flatMap { lease in
+                    lease.lease.tcp.compactMap(\.endpoint)
+                })
+            let udpEndpoints = Set(closingUDP.keys).union(
+                closingLeases.flatMap { lease in
+                    lease.lease.udp.compactMap(\.endpoint)
+                })
+            let descriptions = tcpEndpoints.sorted(by: Self.endpointOrder).map { "\($0.description)/tcp" }
+                + udpEndpoints.sorted(by: Self.endpointOrder).map { "\($0.description)/udp" }
             let ports = descriptions.joined(separator: ", ")
             let subject = descriptions.count == 1 ? "port \(ports) is" : "ports \(ports) are"
             log.info(
-                "port forwarding stopped\(because); 127.0.0.1 \(subject) no longer "
+                "port forwarding stopped\(because); \(subject) no longer "
                     + "published and will be republished when the guest is running again")
         }
     }
@@ -1738,8 +1792,8 @@ public final class PortForwarder {
     /// Only ever called from ``workQueue``, so the read-diff-write below cannot
     /// interleave with another reconciliation.
     private func apply(bindings: [DockerPortBinding], generation: Int, reason: String) {
-        let tcpReconciliation = PortForwardPlan.reconcileTCPListeners(bindings)
-        let udpReconciliation = PortForwardPlan.reconcileUDPListeners(bindings)
+        let tcpReconciliation = PortForwardPlan.reconcileTCPListeners(bindings, exposure: portExposure)
+        let udpReconciliation = PortForwardPlan.reconcileUDPListeners(bindings, exposure: portExposure)
         let tcpDesired = tcpReconciliation.listeners
         let udpDesired = udpReconciliation.listeners
 
@@ -1764,8 +1818,8 @@ public final class PortForwarder {
     }
 
     private func reconcileHeldLeases(
-        tcpDesired: [Int: DockerPortBinding],
-        udpDesired: [Int: DockerPortBinding],
+        tcpDesired: [DockerHostEndpoint: DockerPortBinding],
+        udpDesired: [DockerHostEndpoint: DockerPortBinding],
         reason: String
     ) {
         var toPromote: [UUID] = []
@@ -1774,19 +1828,19 @@ public final class PortForwarder {
         for (identifier, record) in leases {
             guard let containerID = record.containerID else { continue }
             let expectedTCP = record.lease.tcp.filter {
-                !record.withdrawnTCPHostPorts.contains($0.hostPort)
+                $0.endpoint.map { !record.withdrawnTCPHostEndpoints.contains($0) } ?? false
             }
             let expectedUDP = record.lease.udp.filter {
-                !record.withdrawnUDPHostPorts.contains($0.hostPort)
+                $0.endpoint.map { !record.withdrawnUDPHostEndpoints.contains($0) } ?? false
             }
             let tcpMatches = expectedTCP.allSatisfy { publication in
-                guard let actual = tcpDesired[publication.hostPort] else { return false }
+                guard let endpoint = publication.endpoint, let actual = tcpDesired[endpoint] else { return false }
                 return actual.containerID == containerID
                     && actual.containerPort == publication.containerPort
                     && actual.networkProtocol == "tcp"
             }
             let udpMatches = expectedUDP.allSatisfy { publication in
-                guard let actual = udpDesired[publication.hostPort] else { return false }
+                guard let endpoint = publication.endpoint, let actual = udpDesired[endpoint] else { return false }
                 return actual.containerID == containerID
                     && actual.containerPort == publication.containerPort
                     && actual.networkProtocol == "udp"
@@ -1809,20 +1863,20 @@ public final class PortForwarder {
     }
 
     private func applyTCP(
-        desired: [Int: DockerPortBinding],
+        desired: [DockerHostEndpoint: DockerPortBinding],
         generation: Int,
         reason: String
     ) {
 
         lock.lock()
-        for (port, desiredBinding) in desired {
-            guard var forward = forwards[port], forwardTargetMatches(forward.binding, desiredBinding) else {
+        for (endpoint, desiredBinding) in desired {
+            guard var forward = forwards[endpoint], forwardTargetMatches(forward.binding, desiredBinding) else {
                 continue
             }
             // Preserve a pre-bound listener while replacing only the presentation
             // metadata (most notably Docker's real container name).
             forward.binding = desiredBinding
-            forwards[port] = forward
+            forwards[endpoint] = forward
         }
         let current = forwards.mapValues(\.binding)
         lock.unlock()
@@ -1831,11 +1885,11 @@ public final class PortForwarder {
         // that was replaced changes the binding a retry should carry. Both are
         // invisible to the plan below, which only ever sees ports that *bound*.
         lock.lock()
-        for port in failedBinds.keys {
-            if let stillWanted = desired[port] {
-                failedBinds[port]?.binding = stillWanted
+        for endpoint in failedBinds.keys {
+            if let stillWanted = desired[endpoint] {
+                failedBinds[endpoint]?.binding = stillWanted
             } else {
-                failedBinds.removeValue(forKey: port)
+                failedBinds.removeValue(forKey: endpoint)
             }
         }
         lock.unlock()
@@ -1845,11 +1899,11 @@ public final class PortForwarder {
             // Close first: a port whose container was replaced appears in both lists,
             // and rebinding it while the old listener still holds it would fail
             // EADDRINUSE against ourselves.
-            for port in plan.close {
-                let replacementOwnsPort = desired[port].map { desiredBinding in
-                    current[port].map { $0.containerID != desiredBinding.containerID } ?? false
+            for endpoint in plan.close {
+                let replacementOwnsPort = desired[endpoint].map { desiredBinding in
+                    current[endpoint].map { $0.containerID != desiredBinding.containerID } ?? false
                 } ?? false
-                closeForward(port: port, reason: reason, preserveLease: !replacementOwnsPort)
+                closeForward(endpoint: endpoint, reason: reason, preserveLease: !replacementOwnsPort)
             }
             for binding in plan.open {
                 openForward(binding, generation: generation)
@@ -1863,31 +1917,31 @@ public final class PortForwarder {
     /// numerical port at once. Nothing in this method guesses a pre-start dynamic or
     /// range allocation; `containers/json` has already supplied the concrete endpoint.
     private func applyUDP(
-        desired: [Int: DockerPortBinding],
+        desired: [DockerHostEndpoint: DockerPortBinding],
         generation: Int,
         reason: String
     ) {
         lock.lock()
-        for (port, desiredBinding) in desired {
-            guard let forward = udpForwards[port], forwardTargetMatches(forward.binding, desiredBinding) else {
+        for (endpoint, desiredBinding) in desired {
+            guard let forward = udpForwards[endpoint], forwardTargetMatches(forward.binding, desiredBinding) else {
                 continue
             }
             forward.binding = desiredBinding
         }
         let current = udpForwards.mapValues(\.binding)
-        for port in failedUDPBinds.keys {
-            if let stillWanted = desired[port] {
-                failedUDPBinds[port]?.binding = stillWanted
+        for endpoint in failedUDPBinds.keys {
+            if let stillWanted = desired[endpoint] {
+                failedUDPBinds[endpoint]?.binding = stillWanted
             } else {
-                failedUDPBinds.removeValue(forKey: port)
+                failedUDPBinds.removeValue(forKey: endpoint)
             }
         }
         lock.unlock()
 
         let plan = PortForwardPlan.diff(current: current, desired: desired)
         guard !plan.close.isEmpty || !plan.open.isEmpty else { return }
-        for port in plan.close {
-            closeUDPForward(port: port, reason: reason)
+        for endpoint in plan.close {
+            closeUDPForward(endpoint: endpoint, reason: reason)
         }
         for binding in plan.open {
             openUDPForward(binding, generation: generation)
@@ -1897,15 +1951,15 @@ public final class PortForwarder {
     /// Replaces the non-retryable TCP conflict snapshot and returns diagnostics that
     /// have not already been emitted for this exact competing-target state.
     private func updateTCPConflicts(
-        _ conflicts: [Int: PortForwardPlan.ListenerConflict]
+        _ conflicts: [DockerHostEndpoint: PortForwardPlan.ListenerConflict]
     ) -> [PortForwardPlan.ListenerConflict] {
         lock.lock()
-        let newConflicts = conflicts.keys.sorted().compactMap { port -> PortForwardPlan.ListenerConflict? in
-            guard let conflict = conflicts[port] else { return nil }
-            return conflictingTCPForwards[port] == conflict ? nil : conflict
+        let newConflicts = conflicts.keys.sorted(by: Self.endpointOrder).compactMap { endpoint -> PortForwardPlan.ListenerConflict? in
+            guard let conflict = conflicts[endpoint] else { return nil }
+            return conflictingTCPForwards[endpoint] == conflict ? nil : conflict
         }
         conflictingTCPForwards = conflicts
-        for port in conflicts.keys { failedBinds.removeValue(forKey: port) }
+        for endpoint in conflicts.keys { failedBinds.removeValue(forKey: endpoint) }
         lock.unlock()
         return newConflicts
     }
@@ -1913,25 +1967,29 @@ public final class PortForwarder {
     /// UDP is independent from TCP but has the same one-target requirement within
     /// its own transport. These are state diagnostics, never timer retry entries.
     private func updateUDPConflicts(
-        _ conflicts: [Int: PortForwardPlan.ListenerConflict]
+        _ conflicts: [DockerHostEndpoint: PortForwardPlan.ListenerConflict]
     ) -> [PortForwardPlan.ListenerConflict] {
         lock.lock()
-        let newConflicts = conflicts.keys.sorted().compactMap { port -> PortForwardPlan.ListenerConflict? in
-            guard let conflict = conflicts[port] else { return nil }
-            return conflictingUDPForwards[port] == conflict ? nil : conflict
+        let newConflicts = conflicts.keys.sorted(by: Self.endpointOrder).compactMap { endpoint -> PortForwardPlan.ListenerConflict? in
+            guard let conflict = conflicts[endpoint] else { return nil }
+            return conflictingUDPForwards[endpoint] == conflict ? nil : conflict
         }
         conflictingUDPForwards = conflicts
-        for port in conflicts.keys { failedUDPBinds.removeValue(forKey: port) }
+        for endpoint in conflicts.keys { failedUDPBinds.removeValue(forKey: endpoint) }
         lock.unlock()
         return newConflicts
     }
 
-    private func closeForward(port: Int, reason: String, preserveLease: Bool = true) {
+    private func closeForward(
+        endpoint: DockerHostEndpoint,
+        reason: String,
+        preserveLease: Bool = true
+    ) {
         lock.lock()
-        let forward = forwards.removeValue(forKey: port)
+        let forward = forwards.removeValue(forKey: endpoint)
         // The port is no longer wanted, so a pending retry for it is no longer wanted
         // either — otherwise the timer keeps chasing a container that is long gone.
-        failedBinds.removeValue(forKey: port)
+        failedBinds.removeValue(forKey: endpoint)
         lock.unlock()
         guard let forward else { return }
         if let identifier = forward.leaseID, !preserveLease {
@@ -1944,12 +2002,12 @@ public final class PortForwarder {
         }
     }
 
-    private func closeUDPForward(port: Int, reason: String) {
+    private func closeUDPForward(endpoint: DockerHostEndpoint, reason: String) {
         lock.lock()
-        let forward = udpForwards[port]
-        failedUDPBinds.removeValue(forKey: port)
+        let forward = udpForwards[endpoint]
+        failedUDPBinds.removeValue(forKey: endpoint)
         if forward?.leaseID == nil {
-            udpForwards.removeValue(forKey: port)
+            udpForwards.removeValue(forKey: endpoint)
         }
         lock.unlock()
         guard let forward else { return }
@@ -1967,23 +2025,21 @@ public final class PortForwarder {
     /// Internal rather than private so the backoff can be tested against a real
     /// squatted port without standing up a guest.
     func openForward(_ binding: DockerPortBinding, generation: Int) {
-        let port = binding.hostPort
+        guard let endpoint = PortForwardPlan.endpoint(for: binding) else { return }
 
         // A port under backoff is skipped silently. `apply` cannot tell the difference
         // between "never tried" and "tried and lost the port", because a failed bind
         // leaves no entry in `forwards`, so the check has to happen here or every
         // container event turns into another bind attempt and another log line.
         lock.lock()
-        let deferred = failedBinds[port].map { $0.nextAttemptAt > Date() } ?? false
+        let deferred = failedBinds[endpoint].map { $0.nextAttemptAt > Date() } ?? false
         lock.unlock()
         if deferred { return }
 
-        let loopbackAddress = TCPListener.LoopbackAddress
-            .forDockerHostAddress(binding.hostIP)
         let listener = TCPListener(
-            port: port,
+            port: endpoint.port,
             queue: acceptQueue,
-            loopbackAddress: loopbackAddress)
+            hostAddress: endpoint.address)
         listener.setConnectionHandler { [weak self] fd in
             self?.handleAccepted(clientFD: fd, binding: binding, generation: generation)
         }
@@ -1993,7 +2049,7 @@ public final class PortForwarder {
         } catch TCPListenerError.addressInUse {
             recordFailedBind(
                 binding,
-                reason: "another process holds \(loopbackAddress.rawValue):\(port); will retry")
+                reason: "another process holds \(endpoint.description); will retry")
             return
         } catch {
             recordFailedBind(binding, reason: "\(error); will retry")
@@ -2003,8 +2059,8 @@ public final class PortForwarder {
         lock.lock()
         let accepted = running && self.generation == generation
         if accepted {
-            forwards[port] = Forward(binding: binding, listener: listener, leaseID: nil)
-            failedBinds.removeValue(forKey: port)
+            forwards[endpoint] = Forward(binding: binding, listener: listener, leaseID: nil)
+            failedBinds.removeValue(forKey: endpoint)
         }
         lock.unlock()
 
@@ -2012,20 +2068,20 @@ public final class PortForwarder {
             listener.stop()  // the forwarder was torn down while we were binding
             return
         }
-        log.info("port forward added: \(binding.description) on \(loopbackAddress.rawValue):\(port)")
+        log.info("port forward added: \(binding.description) on \(endpoint.description)")
     }
 
     /// Binds one event-confirmed UDP publication. The listener is a real datagram
     /// endpoint, not a TCP approximation: every host client gets a framed vsock flow
     /// to a connected guest UDP socket and replies return to that same client.
     private func openUDPForward(_ binding: DockerPortBinding, generation: Int) {
-        let port = binding.hostPort
+        guard let endpoint = PortForwardPlan.endpoint(for: binding) else { return }
         lock.lock()
-        let deferred = failedUDPBinds[port].map { $0.nextAttemptAt > Date() } ?? false
+        let deferred = failedUDPBinds[endpoint].map { $0.nextAttemptAt > Date() } ?? false
         lock.unlock()
         if deferred { return }
 
-        let listener = UDPListener(port: port, queue: acceptQueue)
+        let listener = UDPListener(port: endpoint.port, queue: acceptQueue, hostAddress: endpoint.address)
         listener.setDatagramHandler { [weak self, weak listener] datagram, client in
             guard let self, let listener else { return }
             self.handleUDPDatagram(
@@ -2036,7 +2092,7 @@ public final class PortForwarder {
         } catch UDPListener.Error.addressInUse {
             recordFailedUDPBind(
                 binding,
-                reason: "another process holds 127.0.0.1:\(port)/udp; will retry")
+                reason: "another process holds \(endpoint.description)/udp; will retry")
             return
         } catch {
             recordFailedUDPBind(binding, reason: "\(error); will retry")
@@ -2046,23 +2102,22 @@ public final class PortForwarder {
         lock.lock()
         let accepted = running && self.generation == generation
         if accepted {
-            udpForwards[port] = UDPForward(binding: binding, listener: listener)
-            failedUDPBinds.removeValue(forKey: port)
+            udpForwards[endpoint] = UDPForward(binding: binding, listener: listener)
+            failedUDPBinds.removeValue(forKey: endpoint)
         }
         lock.unlock()
         guard accepted else {
             listener.stop()
             return
         }
-        log.info("UDP port forward added: \(binding.description) on 127.0.0.1:\(port)")
+        log.info("UDP port forward added: \(binding.description) on \(endpoint.description)")
     }
 
-    /// The actual host listener is keyed by port, container identity, and its guest
-    /// target. Docker's `Ports` response may normalize `0.0.0.0` to an empty address
-    /// or finally reveal the human-readable name; neither difference requires a
-    /// close/rebind of a lease that already owns the same endpoint.
+    /// The actual host listener is keyed by its address plus port, container identity,
+    /// and guest target. Docker's empty address spelling normalizes to `0.0.0.0` at
+    /// the key boundary, so it never creates a second listener or rewrites to loopback.
     private func forwardTargetMatches(_ lhs: DockerPortBinding, _ rhs: DockerPortBinding) -> Bool {
-        lhs.hostPort == rhs.hostPort
+        PortForwardPlan.endpoint(for: lhs) == PortForwardPlan.endpoint(for: rhs)
             && lhs.containerPort == rhs.containerPort
             && lhs.networkProtocol == rhs.networkProtocol
             && lhs.containerID == rhs.containerID
@@ -2074,18 +2129,18 @@ public final class PortForwarder {
     /// the attempts in between are not, because a conflict that lasts an afternoon
     /// should cost one line per doubling rather than one line per five seconds.
     private func recordFailedBind(_ binding: DockerPortBinding, reason: String) {
-        let port = binding.hostPort
+        guard let endpoint = PortForwardPlan.endpoint(for: binding) else { return }
         lock.lock()
-        let attempts = (failedBinds[port]?.attempts ?? 0) + 1
+        let attempts = (failedBinds[endpoint]?.attempts ?? 0) + 1
         let delay = min(
             PortForwarder.minimumBindBackoff * pow(2, Double(attempts - 1)),
             PortForwarder.maximumBindBackoff)
-        let previousDelay = failedBinds[port].map { _ in
+        let previousDelay = failedBinds[endpoint].map { _ in
             min(
                 PortForwarder.minimumBindBackoff * pow(2, Double(attempts - 2)),
                 PortForwarder.maximumBindBackoff)
         }
-        failedBinds[port] = FailedBind(
+        failedBinds[endpoint] = FailedBind(
             binding: binding,
             reason: reason,
             attempts: attempts,
@@ -2096,23 +2151,23 @@ public final class PortForwarder {
         guard previousDelay == nil || previousDelay! < delay else { return }
         log.warn(
             "cannot publish \(binding.description): \(reason) in \(Int(delay))s "
-                + "(container \(binding.containerName) is not reachable on 127.0.0.1:\(port) "
+                + "(container \(binding.containerName) is not reachable on \(endpoint.description) "
                 + "until then)")
     }
 
     private func recordFailedUDPBind(_ binding: DockerPortBinding, reason: String) {
-        let port = binding.hostPort
+        guard let endpoint = PortForwardPlan.endpoint(for: binding) else { return }
         lock.lock()
-        let attempts = (failedUDPBinds[port]?.attempts ?? 0) + 1
+        let attempts = (failedUDPBinds[endpoint]?.attempts ?? 0) + 1
         let delay = min(
             PortForwarder.minimumBindBackoff * pow(2, Double(attempts - 1)),
             PortForwarder.maximumBindBackoff)
-        let previousDelay = failedUDPBinds[port].map { _ in
+        let previousDelay = failedUDPBinds[endpoint].map { _ in
             min(
                 PortForwarder.minimumBindBackoff * pow(2, Double(attempts - 2)),
                 PortForwarder.maximumBindBackoff)
         }
-        failedUDPBinds[port] = FailedBind(
+        failedUDPBinds[endpoint] = FailedBind(
             binding: binding,
             reason: reason,
             attempts: attempts,
@@ -2121,7 +2176,7 @@ public final class PortForwarder {
         guard previousDelay == nil || previousDelay! < delay else { return }
         log.warn(
             "cannot publish \(binding.description): \(reason) in \(Int(delay))s "
-                + "(container \(binding.containerName) is not reachable on 127.0.0.1:\(port)/udp until then)")
+                + "(container \(binding.containerName) is not reachable on \(endpoint.description)/udp until then)")
     }
 
     // MARK: - Per-client UDP flows
@@ -2135,9 +2190,10 @@ public final class PortForwarder {
     ) {
         let flow: UDPFlow
         let needsDial: Bool
+        guard let endpoint = PortForwardPlan.endpoint(for: binding) else { return }
         lock.lock()
         guard running, self.generation == generation,
-              let forward = udpForwards[binding.hostPort],
+              let forward = udpForwards[endpoint],
               forward.listener === listener,
               forwardTargetMatches(forward.binding, binding)
         else {
@@ -2165,7 +2221,7 @@ public final class PortForwarder {
 
         let onWriteFailure = { [weak self, weak flow] in
             guard let self, let flow else { return }
-            self.removeUDPFlow(flow, hostPort: binding.hostPort, client: client, reason: "a frame write failed")
+            self.removeUDPFlow(flow, endpoint: endpoint, client: client, reason: "a frame write failed")
         }
         if flow.enqueue(datagram, onWriteFailure: onWriteFailure) {
             log.warn(
@@ -2186,7 +2242,7 @@ public final class PortForwarder {
             guard let self, let flow, let listener else { return }
             guard case .success = result else {
                 self.log.warn("dropping UDP flow to \(flow.binding.description): the VM is unavailable")
-                self.removeUDPFlow(flow, hostPort: flow.binding.hostPort, client: flow.client, reason: "the VM was unavailable")
+                self.removeUDPFlow(flow, endpoint: PortForwardPlan.endpoint(for: flow.binding), client: flow.client, reason: "the VM was unavailable")
                 return
             }
             self.udpDialQueue.async { [weak self, weak flow, weak listener] in
@@ -2201,14 +2257,14 @@ public final class PortForwarder {
     /// Blocking datagram-dial handshake, bounded by the flow and setup caps above.
     private func dialUDPFlow(_ flow: UDPFlow, listener: UDPListener) {
         guard isCurrent(flow.generation) else {
-            removeUDPFlow(flow, hostPort: flow.binding.hostPort, client: flow.client, reason: "the forwarder stopped")
+            removeUDPFlow(flow, endpoint: PortForwardPlan.endpoint(for: flow.binding), client: flow.client, reason: "the forwarder stopped")
             return
         }
         let descriptor: Int32
         switch vm.connectVsockBlocking(port: MorbVsockPorts.datagramDial, timeout: 5) {
         case .failure(let error):
             log.warn("could not open a datagram-dial for \(flow.binding.description): \(error)")
-            removeUDPFlow(flow, hostPort: flow.binding.hostPort, client: flow.client, reason: "the guest datagram channel was unavailable")
+            removeUDPFlow(flow, endpoint: PortForwardPlan.endpoint(for: flow.binding), client: flow.client, reason: "the guest datagram channel was unavailable")
             return
         case .success(let fd):
             descriptor = fd
@@ -2218,13 +2274,13 @@ public final class PortForwarder {
         } catch {
             Darwin.close(descriptor)
             log.warn("datagram-dial to \(flow.binding.description) refused: \(error)")
-            removeUDPFlow(flow, hostPort: flow.binding.hostPort, client: flow.client, reason: "the guest rejected the UDP dial")
+            removeUDPFlow(flow, endpoint: PortForwardPlan.endpoint(for: flow.binding), client: flow.client, reason: "the guest rejected the UDP dial")
             return
         }
 
         let onWriteFailure = { [weak self, weak flow] in
             guard let self, let flow else { return }
-            self.removeUDPFlow(flow, hostPort: flow.binding.hostPort, client: flow.client, reason: "a frame write failed")
+            self.removeUDPFlow(flow, endpoint: PortForwardPlan.endpoint(for: flow.binding), client: flow.client, reason: "a frame write failed")
         }
         guard flow.activate(descriptor, onWriteFailure: onWriteFailure) else { return }
         relayQueue.async { [weak self, weak flow, weak listener] in
@@ -2245,17 +2301,17 @@ public final class PortForwarder {
             descriptor = fd
             do {
                 guard let reply = try DatagramDial.readFrame(fd: descriptor) else {
-                    removeUDPFlow(flow, hostPort: flow.binding.hostPort, client: flow.client, reason: "the guest closed the UDP flow")
+                    removeUDPFlow(flow, endpoint: PortForwardPlan.endpoint(for: flow.binding), client: flow.client, reason: "the guest closed the UDP flow")
                     return
                 }
                 flow.noteReply()
                 guard listener.send(reply, to: flow.client) else {
-                    removeUDPFlow(flow, hostPort: flow.binding.hostPort, client: flow.client, reason: "the local UDP listener closed")
+                    removeUDPFlow(flow, endpoint: PortForwardPlan.endpoint(for: flow.binding), client: flow.client, reason: "the local UDP listener closed")
                     return
                 }
             } catch {
                 log.warn("datagram-dial reply for \(flow.binding.description) failed: \(error)")
-                removeUDPFlow(flow, hostPort: flow.binding.hostPort, client: flow.client, reason: "the datagram reply stream failed")
+                removeUDPFlow(flow, endpoint: PortForwardPlan.endpoint(for: flow.binding), client: flow.client, reason: "the datagram reply stream failed")
                 return
             }
         }
@@ -2263,12 +2319,12 @@ public final class PortForwarder {
 
     private func removeUDPFlow(
         _ flow: UDPFlow,
-        hostPort: Int,
+        endpoint: DockerHostEndpoint?,
         client: UDPListener.Client,
         reason: String
     ) {
         lock.lock()
-        if let forward = udpForwards[hostPort], forward.flows[client] === flow {
+        if let endpoint, let forward = udpForwards[endpoint], forward.flows[client] === flow {
             forward.flows.removeValue(forKey: client)
         }
         lock.unlock()

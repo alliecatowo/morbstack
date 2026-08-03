@@ -29,39 +29,31 @@ public enum TCPListenerError: Error, CustomStringConvertible, LocalizedError {
     public var errorDescription: String? { description }
 }
 
-/// A loopback TCP listener that hands accepted descriptors to a callback.
+/// A TCP listener that hands accepted descriptors to a callback.
 ///
 /// This is the Mac-side half of port publishing: `docker run -p 8080:80` produces one
-/// of these on the corresponding local loopback endpoint, and every accepted
+/// of these on the corresponding Docker host endpoint, and every accepted
 /// connection is spliced through to the guest.
 ///
-/// Loopback only, deliberately. Binding `0.0.0.0` because the container asked for it
-/// would put a container that a user believes is local onto every network the Mac is
-/// attached to — including whatever coffee-shop Wi-Fi it is on. Docker Desktop makes
-/// the same choice, and a user who genuinely wants the port exposed can forward it
-/// themselves.
+/// The forwarder supplies an address only after applying the user's explicit port
+/// exposure policy. This type never rewrites a wildcard or a specific Docker address
+/// to loopback: doing so would acknowledge a Docker publication that clients cannot
+/// actually reach.
 ///
 /// Accepted descriptors become the callback's responsibility; the listener never
 /// closes them.
 public final class TCPListener {
 
-    /// The exact local endpoint a listener may own. A Docker request that names an
-    /// IPv6 loopback address must not silently become an IPv4-only listener: a
-    /// client connecting to `[::1]` would otherwise receive a successful create/start
-    /// reply for an endpoint it cannot reach.
+    /// Compatibility spelling for callers that deliberately want one loopback
+    /// family. New port-publication code should use ``hostAddress``.
     public enum LoopbackAddress: String, Sendable {
         case ipv4 = "127.0.0.1"
         case ipv6 = "::1"
 
-        /// Morbstack keeps Docker publications local to the Mac. Wildcard Docker
-        /// spellings therefore map to their matching local family, never to an
-        /// externally reachable wildcard socket.
-        static func forDockerHostAddress(_ hostAddress: String) -> LoopbackAddress {
-            switch hostAddress {
-            case "::", "::1":
-                return .ipv6
-            default:
-                return .ipv4
+        var hostAddress: DockerHostAddress {
+            switch self {
+            case .ipv4: .ipv4("127.0.0.1")
+            case .ipv6: .ipv6("::1")
             }
         }
     }
@@ -112,7 +104,7 @@ public final class TCPListener {
         }
     }
 
-    /// The loopback port this listener binds.
+    /// The port this listener binds.
     ///
     /// A listener constructed with port `0` receives an ephemeral port from the
     /// kernel. `start()` replaces that sentinel with the concrete value before it
@@ -120,8 +112,18 @@ public final class TCPListener {
     /// free port and racing another process to it.
     public private(set) var port: Int
 
-    /// The loopback address paired with ``port``.
-    public let loopbackAddress: LoopbackAddress
+    /// The exact host address paired with ``port``.
+    public let hostAddress: DockerHostAddress
+
+    /// Retained for focused loopback callers. A non-loopback listener has no
+    /// loopback alias, by design.
+    public var loopbackAddress: LoopbackAddress? {
+        switch hostAddress {
+        case .ipv4("127.0.0.1"): .ipv4
+        case .ipv6("::1"): .ipv6
+        default: nil
+        }
+    }
 
     /// Invoked on the listener's queue for every accepted connection, with an owned fd.
     public var onConnection: ((Int32) -> Void)?
@@ -135,18 +137,27 @@ public final class TCPListener {
     /// Creates a listener. Nothing is bound until ``start()``.
     ///
     /// - Parameters:
-    ///   - port: TCP port on the requested loopback address.
+    ///   - port: TCP port on the requested host address.
     ///   - queue: Queue on which the accept loop and ``onConnection`` run.
-    ///   - loopbackAddress: `127.0.0.1` by default; explicit Docker IPv6 loopback
-    ///     publications use `::1` instead.
+    ///   - hostAddress: the exact Docker host address to bind.
     public init(
         port: Int,
         queue: DispatchQueue,
-        loopbackAddress: LoopbackAddress = .ipv4
+        hostAddress: DockerHostAddress = .ipv4("127.0.0.1")
     ) {
         self.port = port
         self.queue = queue
-        self.loopbackAddress = loopbackAddress
+        self.hostAddress = hostAddress
+    }
+
+    /// Loopback-focused source compatibility. This does not participate in Docker
+    /// host-address mapping and therefore cannot turn a wildcard into loopback.
+    public convenience init(
+        port: Int,
+        queue: DispatchQueue,
+        loopbackAddress: LoopbackAddress
+    ) {
+        self.init(port: port, queue: queue, hostAddress: loopbackAddress.hostAddress)
     }
 
     deinit {
@@ -173,7 +184,7 @@ public final class TCPListener {
         lock.unlock()
     }
 
-    /// Binds the selected loopback endpoint and starts accepting.
+    /// Binds the selected host endpoint and starts accepting.
     ///
     /// - Throws: ``TCPListenerError/addressInUse(port:)`` when the port is taken.
     public func start() throws {
@@ -181,11 +192,11 @@ public final class TCPListener {
         defer { lock.unlock() }
         guard !running else { return }
 
-        let family: Int32 = loopbackAddress == .ipv4 ? AF_INET : AF_INET6
+        let family = hostAddress.family
         let fd = socket(family, SOCK_STREAM, 0)
         guard fd >= 0 else {
             throw TCPListenerError.failed(
-                "socket(\(loopbackAddress.rawValue)) failed: \(String(cString: strerror(errno)))")
+                "socket(\(hostAddress.stringValue)) failed: \(String(cString: strerror(errno)))")
         }
 
         // SO_REUSEADDR only lets us re-bind a port stuck in TIME_WAIT from our own
@@ -196,13 +207,16 @@ public final class TCPListener {
         _ = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, socklen_t(MemoryLayout<Int32>.size))
 
         let bindResult: Int32
-        switch loopbackAddress {
-        case .ipv4:
+        switch hostAddress {
+        case .ipv4(let hostAddress):
             var address = sockaddr_in()
             address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
             address.sin_family = sa_family_t(AF_INET)
             address.sin_port = UInt16(truncatingIfNeeded: port).bigEndian
-            address.sin_addr = in_addr(s_addr: UInt32(0x7f00_0001).bigEndian)
+            guard inet_pton(AF_INET, hostAddress, &address.sin_addr) == 1 else {
+                Darwin.close(fd)
+                throw TCPListenerError.failed("invalid IPv4 host address \(hostAddress)")
+            }
             bindResult = withUnsafePointer(to: &address) { pointer in
                 pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { generic in
                     POSIXSocketSupport.retryOnInterrupt {
@@ -210,17 +224,20 @@ public final class TCPListener {
                     }
                 }
             }
-        case .ipv6:
+        case .ipv6(let hostAddress):
             // Never accept IPv4-mapped traffic on the IPv6 listener. The endpoint is
-            // exactly `[::1]`, so its conflict and reachability semantics remain
-            // independent from a `127.0.0.1` publication using the same port number.
+            // exactly the requested IPv6 endpoint, so IPv4 and IPv6 publication
+            // semantics remain independent even when they share a port number.
             var v6Only: Int32 = 1
             _ = setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6Only, socklen_t(MemoryLayout<Int32>.size))
             var address = sockaddr_in6()
             address.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
             address.sin6_family = sa_family_t(AF_INET6)
             address.sin6_port = UInt16(truncatingIfNeeded: port).bigEndian
-            address.sin6_addr = in6addr_loopback
+            guard inet_pton(AF_INET6, hostAddress, &address.sin6_addr) == 1 else {
+                Darwin.close(fd)
+                throw TCPListenerError.failed("invalid IPv6 host address \(hostAddress)")
+            }
             bindResult = withUnsafePointer(to: &address) { pointer in
                 pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { generic in
                     POSIXSocketSupport.retryOnInterrupt {
@@ -234,7 +251,7 @@ public final class TCPListener {
             Darwin.close(fd)
             if code == EADDRINUSE { throw TCPListenerError.addressInUse(port: port) }
             throw TCPListenerError.failed(
-                "bind(\(loopbackAddress.rawValue):\(port)) failed: \(String(cString: strerror(code)))")
+                "bind(\(hostAddress.stringValue):\(port)) failed: \(String(cString: strerror(code)))")
         }
 
         // `port == 0` asks the kernel to allocate a free ephemeral port. Read the
@@ -243,7 +260,7 @@ public final class TCPListener {
         // already made observable rather than proving which one is reserved.
         let boundPort: Int
         let nameResult: Int32
-        switch loopbackAddress {
+        switch hostAddress {
         case .ipv4:
             var address = sockaddr_in()
             var addressLength = socklen_t(MemoryLayout<sockaddr_in>.size)
@@ -270,12 +287,12 @@ public final class TCPListener {
         guard nameResult == 0 else {
             let message = String(cString: strerror(errno))
             Darwin.close(fd)
-            throw TCPListenerError.failed("getsockname(\(loopbackAddress.rawValue)) failed: \(message)")
+            throw TCPListenerError.failed("getsockname(\(hostAddress.stringValue)) failed: \(message)")
         }
         guard (1...65535).contains(boundPort) else {
             Darwin.close(fd)
             throw TCPListenerError.failed(
-                "getsockname(\(loopbackAddress.rawValue)) returned invalid port \(boundPort)")
+                "getsockname(\(hostAddress.stringValue)) returned invalid port \(boundPort)")
         }
         port = boundPort
 
@@ -283,7 +300,7 @@ public final class TCPListener {
             let message = String(cString: strerror(errno))
             Darwin.close(fd)
             throw TCPListenerError.failed(
-                "listen(\(loopbackAddress.rawValue):\(port)) failed: \(message)")
+                "listen(\(hostAddress.stringValue):\(port)) failed: \(message)")
         }
 
         POSIXSocketSupport.setNonBlocking(fd, true)

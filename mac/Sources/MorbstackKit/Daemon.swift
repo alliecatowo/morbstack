@@ -183,7 +183,10 @@ public final class Daemon {
                     + "at \(runtime.directory.path)")
         }
         self.vm = VMManager(config: config, log: logger)
-        let portForwarder = PortForwarder(vm: vm, log: logger)
+        let portForwarder = PortForwarder(
+            vm: vm,
+            log: logger,
+            portExposure: config.allowLANPortPublishing ? .localNetwork : .loopbackOnly)
         self.forwarder = portForwarder
         self.proxy = DockerProxy(vm: vm, log: logger, forwarder: portForwarder)
         self.k8s = K8sManager(vm: vm, log: logger)

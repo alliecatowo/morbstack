@@ -285,7 +285,7 @@ private struct TrackDResourceSettings: View {
 
             if store.needsEngineRestart && model.engine.isRunning {
                 Section("Apply Changes") {
-                    Label("Restart Morbstack to apply resource changes", systemImage: "arrow.clockwise")
+                    Label("Restart Morbstack to apply changes", systemImage: "arrow.clockwise")
                     Text(store.restartSummary)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
@@ -297,6 +297,24 @@ private struct TrackDResourceSettings: View {
                 cpuSetting
                 memorySetting
                 suspendSetting
+            }
+
+            Section("Published Ports") {
+                Toggle(
+                    "Allow containers to accept connections from your local network",
+                    isOn: Binding(
+                        get: { store.draft.allowLANPortPublishing },
+                        set: {
+                            store.draft.allowLANPortPublishing = $0
+                            store.save()
+                        }
+                    )
+                )
+                Text(
+                    "When enabled, Docker wildcard and specific-address publishes bind the same address on this Mac. Turn it off to allow only loopback publications. Restart the engine to apply this change."
+                )
+                .font(.footnote)
+                .foregroundStyle(.secondary)
             }
 
             Section("Storage") {

@@ -457,7 +457,9 @@ case "ports":
         fail("ports check needs at least one --tcp <port> or --udp <port>", code: 2)
     }
 
-    let results = requests.map { HostPortPreflight.check(port: $0.1, transport: $0.0) }
+    let results = requests.map {
+        HostPortPreflight.check(port: $0.1, transport: $0.0, hostAddress: .ipv4("127.0.0.1"))
+    }
     let hasUnavailable = results.contains { $0.availability != .available }
     if wantsJSON {
         out((try? IPCCodec.prettyJSON(results)) ?? "[]")
@@ -465,14 +467,14 @@ case "ports":
         for result in results {
             let marker: String
             switch result.availability {
-            case .available: marker = result.publication == .loopbackOnly ? "[ok]" : "[--]"
+            case .available: marker = "[ok]"
             case .inUse, .invalid, .unavailable: marker = "[!!]"
             }
             out("\(marker) \(result.transport.rawValue) \(result.bindAddress):\(result.port) — \(result.detail)")
         }
         out("")
-        out("TCP and UDP publish on 127.0.0.1 only; Morbstack never exposes a container port to the LAN.")
-        out("A free result is a point-in-time check, not a reservation. TCP fixed creates hold a lease; UDP begins after Docker reports the concrete publication.")
+        out("This command checks 127.0.0.1. Docker publication follows its requested address and Morbstack’s Published Ports setting.")
+        out("A free result is a point-in-time check, not a reservation. TCP and UDP fixed creates hold a lease before Docker receives the request.")
     }
     exit(hasUnavailable ? 2 : 0)
 
