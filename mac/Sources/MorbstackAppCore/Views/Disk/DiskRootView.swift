@@ -25,14 +25,14 @@ extension TrackCDiskCategory {
     }
 }
 
-// MARK: - Table rows
+// MARK: - Disk list rows
 
-/// A named resource in the disk screen's single, size-ordered list.
+/// An individually sized image or volume for the largest-resources section.
 ///
-/// Images and volumes deliberately share the same table as the storage categories. The
-/// screen has one operational surface: select a category or resource, then inspect the
-/// facts in the standard trailing inspector. It is not a dashboard assembled from a
-/// collection of miniature tables and cards.
+/// Docker's category values and individual resource sizes overlap: image categories
+/// account for shared layers once, while each image can refer to those same layers. They
+/// must therefore remain separate sections in the native list rather than an outline
+/// whose parent/child affordance would imply that their values add up.
 private struct TrackCDiskLargestItem: Identifiable {
 
     enum Kind: String {
@@ -354,12 +354,20 @@ struct DiskRootView: View {
         }
     }
 
-    // MARK: Primary table
+    // MARK: Storage list
 
-    private var diskRows: [TrackCDiskRow] {
+    /// These are distinct measurements, not a hierarchy. Keeping their flattened form
+    /// only for selection and inspection lets the native `List` sections communicate
+    /// that category totals and individual resources must not be added together.
+    private var categoryRows: [TrackCDiskRow] {
         segments.map { TrackCDiskRow(content: .category($0)) }
-            + largestItems.map { TrackCDiskRow(content: .resource($0)) }
     }
+
+    private var resourceRows: [TrackCDiskRow] {
+        largestItems.map { TrackCDiskRow(content: .resource($0)) }
+    }
+
+    private var diskRows: [TrackCDiskRow] { categoryRows + resourceRows }
 
     private var selectedRow: TrackCDiskRow? {
         guard let selection else { return nil }
@@ -367,42 +375,64 @@ struct DiskRootView: View {
     }
 
     private var diskTable: some View {
-        Table(diskRows, selection: $selection) {
-            TableColumn("Item") { (row: TrackCDiskRow) in
-                Label(row.title, systemImage: row.symbol)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .help(row.detail ?? row.title)
+        List(selection: $selection) {
+            Section {
+                ForEach(categoryRows) { row in
+                    diskRow(row)
+                }
+            } header: {
+                Text("Storage Categories")
+            } footer: {
+                Text("Docker reports these as aggregate storage accounting. Do not add them to the individual resource sizes below.")
             }
-            .width(min: 160, ideal: 220, max: 420)
-            TableColumn("Type") { (row: TrackCDiskRow) in
-                Text(row.type)
-                    .foregroundStyle(.secondary)
+
+            Section {
+                if resourceRows.isEmpty {
+                    Text("Docker has not reported an individual size for an image or volume.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(resourceRows) { row in
+                        diskRow(row)
+                    }
+                }
+            } header: {
+                Text("Largest Individual Resources")
+            } footer: {
+                Text("Image sizes can share layers with one another and with the Images category.")
             }
-            .width(min: 92, ideal: 110, max: 130)
-            TableColumn("Size") { (row: TrackCDiskRow) in
-                Text(Formatters.bytesString(row.bytes))
-                    .monospacedDigit()
-            }
-            .width(min: 72, ideal: 86, max: 100)
-            .alignment(.numeric)
-            TableColumn("Reclaimable") { (row: TrackCDiskRow) in
-                reclaimableCell(for: row)
-            }
-            .width(min: 100, ideal: 120, max: 144)
-            .alignment(.numeric)
         }
     }
 
-    @ViewBuilder
-    private func reclaimableCell(for row: TrackCDiskRow) -> some View {
-        if let reclaimable = row.reclaimable {
-            Text(reclaimableText(bytes: reclaimable.bytes, estimated: reclaimable.estimated))
-                .monospacedDigit()
-        } else {
-            Text("—")
-                .foregroundStyle(.tertiary)
+    private func diskRow(_ row: TrackCDiskRow) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Label {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(row.title)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text(row.detail ?? row.type)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            } icon: {
+                Image(systemName: row.symbol)
+            }
+
+            Spacer(minLength: 20)
+
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(Formatters.bytesString(row.bytes))
+                    .monospacedDigit()
+                if let reclaimable = row.reclaimable {
+                    Text("Reclaimable \(reclaimableText(bytes: reclaimable.bytes, estimated: reclaimable.estimated))")
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+            }
         }
+        .tag(row.id)
+        .help(row.detail ?? row.title)
     }
 
     private func reclaimableText(bytes: Int64, estimated: Bool) -> String {
