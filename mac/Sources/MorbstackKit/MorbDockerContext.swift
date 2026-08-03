@@ -99,7 +99,10 @@ public enum MorbDockerContext {
 
     /// A complete answer to "is the `morbstack` context registered and current".
     public struct Status: Equatable, Sendable {
-        /// `~/.docker/contexts/meta/<digest>/meta.json` exists for the `morbstack` name.
+        /// `~/.docker/contexts/meta/<digest>/meta.json` exists for the `morbstack` name,
+        /// even when its contents cannot be parsed as a Docker endpoint.  Existence
+        /// must not be inferred from `registeredHost`: a malformed same-named context
+        /// is user-owned data to preserve, not permission to overwrite it.
         public var registered: Bool
         /// The `Host` the registered context points at, if any.
         public var registeredHost: String?
@@ -131,9 +134,10 @@ public enum MorbDockerContext {
         let configDir = dockerConfigDirectory(environment: environment)
         let meta = metaFile(dockerConfigDirectory: configDir)
         let host = readHost(metaFile: meta)
+        let registered = FileManager.default.fileExists(atPath: meta.path)
         let current = currentContextName(dockerConfigDirectory: configDir)
         return Status(
-            registered: host != nil,
+            registered: registered,
             registeredHost: host,
             matchesSocket: host == "unix://\(socketPath)",
             currentContext: current,
@@ -170,12 +174,17 @@ public enum MorbDockerContext {
         let configDir = dockerConfigDirectory(environment: environment)
         let meta = metaFile(dockerConfigDirectory: configDir)
         let expectedHost = "unix://\(socketPath)"
-        if readHost(metaFile: meta) == expectedHost {
+        let existingHost = readHost(metaFile: meta)
+        if existingHost == expectedHost {
             return false
         }
-        if let existingHost = readHost(metaFile: meta) {
+        if let existingHost {
             throw MorbError.config(
                 "\(meta.path) already registers the \(name) Docker context for \(existingHost); refusing to overwrite it. Rename or remove that context, then retry.")
+        }
+        if FileManager.default.fileExists(atPath: meta.path) {
+            throw MorbError.config(
+                "\(meta.path) already contains an unreadable \(name) Docker context; refusing to overwrite it. Repair, rename, or remove that context, then retry.")
         }
         do {
             try FileManager.default.createDirectory(
