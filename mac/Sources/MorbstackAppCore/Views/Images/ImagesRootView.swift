@@ -462,7 +462,14 @@ struct ImagesRootView: View {
             }
             .width(min: 56, ideal: 68, max: 90)
         } rows: {
-            if !split.tagged.isEmpty {
+            // Tagged images are the table's primary data, not a second level of
+            // hierarchy.  Giving the only data set a Section repeated the screen
+            // title in the first row and caused Tahoe to reserve a grouped-table
+            // treatment for a group that does not exist.  Keep a Section only when
+            // dangling layers genuinely need their own, named group.
+            if split.dangling.isEmpty {
+                ForEach(split.tagged) { TableRow($0) }
+            } else if !split.tagged.isEmpty {
                 Section("Images") {
                     ForEach(split.tagged) { TableRow($0) }
                 }

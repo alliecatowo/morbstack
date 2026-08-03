@@ -1,6 +1,31 @@
 # Linux Machines
 
-Status: **design accepted for implementation planning; no machine runtime or UI exists yet.**
+Status: **M0 schema-only foundation is implemented; no machine runtime or UI exists yet.**
+
+M0 is deliberately an inventory contract, not a partial VM feature. The pure
+[MachineRegistry.swift](../mac/Sources/MorbstackKit/MachineRegistry.swift) model
+accepts a strict `MachineImageManifest` and secret-free desired/observed machine
+records, but cannot write images, download anything, start a VM, prepare a seed,
+or expose a user command. Its only runtime answer is **unavailable** until M1 has
+verified boot artifacts, NoCloud provisioning, and the separately-versioned
+machine agent.
+
+- A manifest's `image_digest` is a `sha256:` content identity of its complete v1
+  boot/provisioning declaration: platform, distribution, agent protocol,
+  NoCloud/SSH/VirtioFS expectations, each required artifact digest, provenance,
+  and expiry. It is not a mutable release label or only the root-disk digest.
+- The registry records machines by opaque UUID and associates them with that
+  immutable image digest, never a Docker image, Docker disk, image path, or tag.
+  M0 records have a stopped desired intent and an unavailable observation; neither
+  represents a VM that exists.
+- The document decoder rejects unknown fields at every schema level. The model has
+  no field for cloud-init text, passwords, private keys, terminal output, Docker
+  credentials, or security-scoped bookmark bytes. Selected share descriptors are
+  declarative only and grant no filesystem access; M3 must acquire and review such
+  access separately.
+- Provenance is a declaration in M0, even when its stated result is `verified`.
+  M1 must independently verify publisher material and every acquired artifact
+  before any base becomes attachable.
 
 ## Decision
 
@@ -213,7 +238,7 @@ destination. Failure to release a device aborts deletion and reports the state.
 
 | Phase | Outcome | Acceptance gate |
 | --- | --- | --- |
-| M0 — records/images | Read-only manifest parser, local inventory, record schema, provenance display, deterministic fixtures. | No VM creation; reject bad hash, wrong architecture, missing artifact, mutable identity, and secret-bearing record. |
+| M0 — records/images | Strict manifest/registry model, content-addressed identity, expiry/provenance declaration, and secret-free desired/observed records. No payload acquisition or lifecycle surface. | No VM creation; reject bad hash, wrong architecture, missing artifact, mutable identity, unknown secret-bearing field, and record/image platform mismatch. |
 | M1 — isolated VM | One curated image with supervisor, disk, console, NoCloud seed, agent readiness, create/start/stop/delete. | Prove Docker VM state, disk, socket, Kubernetes, shares, and published ports stay unchanged through every machine lifecycle path. |
 | M2 — NAT/SSH | Explicit NAT, public-key review, loopback relay, host-key verification, SSH snippet, truthful retry. | Prove no non-loopback listener and no private key/user data in records, logs, diagnostics, or exports. |
 | M3 — export/shares | Stopped export/import; single-folder VirtioFS, read-only default, read-write review, share receipts. | Prove no Docker/global-share inheritance, ownership mutation, or delete path can touch base cache or selected host folder. |
