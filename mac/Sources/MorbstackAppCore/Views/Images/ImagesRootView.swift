@@ -201,11 +201,7 @@ struct ImagesRootView: View {
             // Select the first row so the system inspector opens with a useful detail
             // view, while retaining its normal explicit show/hide control.
             .task {
-                guard selection == nil else { return }
-                let split = sections
-                let firstTaggedImage = split.tagged.first
-                let firstDanglingImage = split.dangling.first
-                selection = firstTaggedImage?.id ?? firstDanglingImage?.id
+                initializeSelectionIfNeeded()
             }
     }
 
@@ -594,6 +590,15 @@ struct ImagesRootView: View {
     }
 
     // MARK: Operations
+
+    @MainActor
+    private func initializeSelectionIfNeeded() {
+        guard selection == nil else { return }
+        let split = sections
+        let firstTaggedImage = split.tagged.first
+        let firstDanglingImage = split.dangling.first
+        selection = firstTaggedImage?.id ?? firstDanglingImage?.id
+    }
 
     /// Presents the system's save location and replacement flow. There is deliberately
     /// no app-defined destination: an image archive can contain layer and configuration
