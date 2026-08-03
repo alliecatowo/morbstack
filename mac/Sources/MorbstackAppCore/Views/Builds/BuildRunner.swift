@@ -136,7 +136,7 @@ enum BuildRunnerError: LocalizedError, Equatable {
 enum BuildRunner {
 
     static func isAvailable() -> Bool {
-        MorbCliPlugins.sourceDockerCLI() != nil && MorbCliPlugins.sourceBinary(for: .buildx) != nil
+        MorbCliPlugins.sourceDockerCLI() != nil && MorbCliPlugins.sourceBinary(for: MorbCliPlugins.buildx) != nil
     }
 
     static func run(
@@ -147,7 +147,7 @@ enum BuildRunner {
         guard let docker = MorbCliPlugins.sourceDockerCLI() else {
             throw BuildRunnerError.dockerCLIMissing
         }
-        guard let buildx = MorbCliPlugins.sourceBinary(for: .buildx) else {
+        guard let buildx = MorbCliPlugins.sourceBinary(for: MorbCliPlugins.buildx) else {
             throw BuildRunnerError.buildxPluginMissing
         }
 
@@ -375,7 +375,7 @@ private final class BuildOutputCollector: @unchecked Sendable {
     func consume(
         _ data: Data,
         source: Source,
-        onEvent: (@Sendable (BuildProgressEvent))?
+        onEvent: (@Sendable (BuildProgressEvent) -> Void)?
     ) {
         lock.lock()
         defer { lock.unlock() }
@@ -405,7 +405,7 @@ private final class BuildOutputCollector: @unchecked Sendable {
     private func emitLines(
         from buffer: inout Data,
         source: Source,
-        onEvent: (@Sendable (BuildProgressEvent))?
+        onEvent: (@Sendable (BuildProgressEvent) -> Void)?
     ) {
         while let newline = buffer.firstIndex(of: 0x0A) {
             let line = String(decoding: buffer[..<newline], as: UTF8.self)
@@ -428,7 +428,7 @@ private final class BuildOutputCollector: @unchecked Sendable {
     private func emit(
         line: String,
         source: Source,
-        onEvent: (@Sendable (BuildProgressEvent))?
+        onEvent: (@Sendable (BuildProgressEvent) -> Void)?
     ) {
         defer { nextSequence += 1 }
         guard var event = BuildProgressDecoder.event(line: line, sequence: nextSequence) else { return }
