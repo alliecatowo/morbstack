@@ -17,6 +17,7 @@
 // only records returned by that explicit, read-only Buildx query; it never infers a
 // build history from cache layers or locally fabricated state.
 
+import MorbstackKit
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -83,6 +84,16 @@ private enum BuildDataScope: Hashable {
     case history
 }
 
+/// The selected history row deliberately has no eager detail fetch. `history ls` and
+/// `history inspect` are independent, builder-scoped reads, so showing inspect output
+/// requires this explicit state and a deliberate user command.
+private enum BuildHistoryDetailState: Equatable {
+    case idle
+    case loading
+    case loaded(BuildxHistoryDetail)
+    case unavailable(String)
+}
+
 private enum BuildHistorySortKey: String, CaseIterable, Hashable {
     case name, status, createdAt, duration
 }
@@ -141,6 +152,8 @@ struct BuildsRootView: View {
         BuildHistoryComparator(key: .createdAt, order: .reverse),
     ]
     @State private var historySelection: BuildxHistoryRecord.ID?
+    @State private var historyDetailState: BuildHistoryDetailState = .idle
+    @State private var historyDetailTask: Task<Void, Never>?
     @State private var showsInspector = true
     @State private var isRefreshing = false
     @State private var isPruning = false
@@ -315,10 +328,12 @@ struct BuildsRootView: View {
             }
             .onChange(of: model.buildHistory) { _, _ in
                 selectFirstVisibleRecordIfNeeded(for: .history)
+                resetHistoryDetails()
             }
             .onChange(of: scope) { _, newScope in
                 query = ""
                 selectFirstVisibleRecordIfNeeded(for: newScope)
+                resetHistoryDetails()
                 if newScope == .history {
                     Task { await refreshBuildHistory() }
                 }
@@ -326,10 +341,15 @@ struct BuildsRootView: View {
             .onChange(of: selection) { _, newValue in
                 if newValue != nil { showsInspector = true }
             }
+            .onChange(of: historySelection) { _, newValue in
+                resetHistoryDetails()
+                if newValue != nil { showsInspector = true }
+            }
             .onDisappear {
                 // A build has one client connection. Cancelling its task closes that
                 // client rather than leaving an unseen build running after navigation.
                 buildTask?.cancel()
+                historyDetailTask?.cancel()
             }
     }
 
@@ -669,43 +689,211 @@ struct BuildsRootView: View {
     @ViewBuilder
     private var historyDetailPane: some View {
         if let record = selectedHistoryRecord {
-            Form {
-                Section("Completed Build") {
-                    LabeledContent("Name") {
-                        Text(record.name)
-                            .textSelection(.enabled)
-                            .lineLimit(3)
-                    }
-                    LabeledContent("Status", value: record.status)
-                    LabeledContent("Created", value: record.createdAt.map(Formatters.absoluteDate) ?? "Not reported")
-                    LabeledContent("Duration", value: record.duration ?? "Not reported")
-                    LabeledContent("Build ID") {
-                        Text(record.id)
-                            .font(.system(.callout, design: .monospaced))
-                            .textSelection(.enabled)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
+            switch historyDetailState {
+            case .idle:
+                ContentUnavailableView {
+                    Label("Details Not Loaded", systemImage: "doc.text.magnifyingglass")
+                } description: {
+                    Text("Load the metadata Buildx reports for this completed build record.")
+                } actions: {
+                    Button("Load Details") {
+                        loadHistoryDetails(for: record.id)
                     }
                 }
-                Section("Actions") {
-                    Button {
-                        MorbPasteboard.copy(record.id)
-                    } label: {
-                        Label("Copy Build ID", systemImage: "doc.on.doc")
+            case .loading:
+                ContentUnavailableView {
+                    Label("Loading Build Details", systemImage: "doc.text.magnifyingglass")
+                } description: {
+                    ProgressView("Reading the selected Buildx record…")
+                } actions: {
+                    Button("Cancel Loading") {
+                        historyDetailTask?.cancel()
                     }
                 }
-                Section("Availability") {
-                    Text(
-                        "Buildx reports completed-build metadata for its active builder. This is not a BuildKit cache record.")
-                        .foregroundStyle(.secondary)
+            case .unavailable(let detail):
+                ContentUnavailableView {
+                    Label("Build Details Unavailable", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text(detail)
+                } actions: {
+                    Button("Load Details Again") {
+                        loadHistoryDetails(for: record.id)
+                    }
+                }
+            case .loaded(let detail):
+                if detail.hasReportableFields {
+                    historyDetailsForm(detail)
+                } else {
+                    ContentUnavailableView(
+                        "No Build Details Reported",
+                        systemImage: "doc.text.magnifyingglass",
+                        description: Text("Buildx returned this record without fields Morbstack can show."))
                 }
             }
         } else {
             ContentUnavailableView(
                 "No Build Selected",
                 systemImage: "clock.arrow.circlepath",
-                description: Text("Select a completed build to view the metadata Buildx reported."))
+                description: Text("Select a completed build, then choose Load Details to inspect it."))
         }
+    }
+
+    private func historyDetailsForm(_ detail: BuildxHistoryDetail) -> some View {
+        Form {
+            if detail.name != nil || detail.reference != nil || detail.status != nil {
+                Section("Build") {
+                    if let name = detail.name { LabeledContent("Name", value: name) }
+                    if let reference = detail.reference {
+                        LabeledContent("Reference") {
+                            Text(reference)
+                                .font(.system(.callout, design: .monospaced))
+                                .textSelection(.enabled)
+                                .lineLimit(2)
+                        }
+                    }
+                    if let status = detail.status { LabeledContent("Status", value: status) }
+                }
+            }
+            if detail.startedAt != nil || detail.completedAt != nil || detail.duration != nil {
+                Section("Timing") {
+                    if let startedAt = detail.startedAt { LabeledContent("Started", value: startedAt) }
+                    if let completedAt = detail.completedAt { LabeledContent("Completed", value: completedAt) }
+                    if let duration = detail.duration { LabeledContent("Duration", value: duration) }
+                }
+            }
+            if detail.completedSteps != nil || detail.totalSteps != nil || detail.cachedSteps != nil {
+                Section("Build Steps") {
+                    if let completedSteps = detail.completedSteps {
+                        LabeledContent("Completed", value: completedSteps)
+                    }
+                    if let totalSteps = detail.totalSteps { LabeledContent("Total", value: totalSteps) }
+                    if let cachedSteps = detail.cachedSteps { LabeledContent("Cached", value: cachedSteps) }
+                }
+            }
+            if detail.context != nil || detail.dockerfile != nil || detail.target != nil || !detail.platforms.isEmpty {
+                Section("Inputs") {
+                    if let context = detail.context {
+                        LabeledContent("Context") {
+                            Text(context)
+                                .font(.system(.callout, design: .monospaced))
+                                .textSelection(.enabled)
+                                .lineLimit(3)
+                        }
+                    }
+                    if let dockerfile = detail.dockerfile {
+                        LabeledContent("Dockerfile") {
+                            Text(dockerfile)
+                                .font(.system(.callout, design: .monospaced))
+                                .textSelection(.enabled)
+                                .lineLimit(3)
+                        }
+                    }
+                    if let target = detail.target { LabeledContent("Target", value: target) }
+                    if !detail.platforms.isEmpty {
+                        LabeledContent("Platforms", value: detail.platforms.joined(separator: ", "))
+                    }
+                }
+            }
+            if detail.vcsRepository != nil || detail.vcsRevision != nil || detail.keepsGitDirectory != nil {
+                Section("Version Control") {
+                    if let repository = detail.vcsRepository {
+                        LabeledContent("Repository") {
+                            Text(repository)
+                                .font(.system(.callout, design: .monospaced))
+                                .textSelection(.enabled)
+                                .lineLimit(3)
+                        }
+                    }
+                    if let revision = detail.vcsRevision {
+                        LabeledContent("Revision") {
+                            Text(revision)
+                                .font(.system(.callout, design: .monospaced))
+                                .textSelection(.enabled)
+                                .lineLimit(2)
+                        }
+                    }
+                    if let keepsGitDirectory = detail.keepsGitDirectory {
+                        LabeledContent("Keep Git Directory", value: keepsGitDirectory ? "true" : "false")
+                    }
+                }
+            }
+            if let imageResolveMode = detail.imageResolveMode {
+                Section("Configuration") {
+                    LabeledContent("Image Resolve Mode", value: imageResolveMode)
+                }
+            }
+            if !detail.materials.isEmpty {
+                Section("Materials") {
+                    ForEach(detail.materials) { material in
+                        LabeledContent("URI") {
+                            Text(material.uri)
+                                .font(.system(.callout, design: .monospaced))
+                                .textSelection(.enabled)
+                                .lineLimit(3)
+                        }
+                        if !material.digests.isEmpty {
+                            LabeledContent("Digests") {
+                                Text(material.digests.joined(separator: ", "))
+                                    .font(.system(.callout, design: .monospaced))
+                                    .textSelection(.enabled)
+                                    .lineLimit(3)
+                            }
+                        }
+                    }
+                }
+            }
+            if !detail.attachments.isEmpty {
+                Section("Attachments") {
+                    ForEach(detail.attachments) { attachment in
+                        LabeledContent("Digest") {
+                            Text(attachment.digest)
+                                .font(.system(.callout, design: .monospaced))
+                                .textSelection(.enabled)
+                                .lineLimit(3)
+                        }
+                        if let platform = attachment.platform {
+                            LabeledContent("Platform", value: platform)
+                        }
+                        if let type = attachment.type { LabeledContent("Type", value: type) }
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: Operations
+
+    @MainActor
+    private func loadHistoryDetails(for recordID: BuildxHistoryRecord.ID) {
+        guard historySelection == recordID else { return }
+        historyDetailTask?.cancel()
+        historyDetailState = .loading
+        let socketPath = MorbPaths.dockerSocket.path
+        historyDetailTask = Task { @MainActor [recordID, socketPath] in
+            do {
+                let details = try await BuildxHistoryClient.inspect(
+                    socketPath: socketPath,
+                    recordID: recordID)
+                guard !Task.isCancelled, historySelection == recordID else { return }
+                historyDetailState = .loaded(details)
+            } catch is CancellationError {
+                guard historySelection == recordID else { return }
+                historyDetailState = .idle
+            } catch {
+                guard !Task.isCancelled, historySelection == recordID else { return }
+                historyDetailState = .unavailable(MorbErrorMessage.text(for: error))
+            }
+            if historySelection == recordID {
+                historyDetailTask = nil
+            }
+        }
+    }
+
+    @MainActor
+    private func resetHistoryDetails() {
+        historyDetailTask?.cancel()
+        historyDetailTask = nil
+        historyDetailState = .idle
     }
 
     // MARK: Operations

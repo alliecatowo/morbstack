@@ -7,7 +7,8 @@
 // The latter cannot identify individual completed builds. Buildx documents
 // `history ls --format=json` as the builder-scoped completed-build listing, so this
 // client shows only records that command returned and never fabricates them from cache
-// layers. It does not invoke Buildx history deletion, export, import, or `open`.
+// layers. It may inspect one selected record after an explicit user action, but it does
+// not invoke Buildx history deletion, export, import, `open`, or logs.
 
 import Darwin
 import Foundation
@@ -16,6 +17,7 @@ import MorbstackKit
 enum BuildxHistoryClientError: LocalizedError {
     case dockerCLIMissing
     case buildxPluginMissing
+    case invalidRecordID
     case launchFailed(String)
     case timedOut(String)
     case failed(String)
@@ -27,6 +29,8 @@ enum BuildxHistoryClientError: LocalizedError {
             return "This Morbstack installation does not include its bundled Docker client."
         case .buildxPluginMissing:
             return "This Morbstack installation does not include its bundled Buildx plugin."
+        case .invalidRecordID:
+            return "Buildx reported a record ID that Morbstack cannot safely inspect."
         case .launchFailed(let detail), .timedOut(let detail), .failed(let detail), .decoding(let detail):
             return detail
         }
@@ -58,6 +62,33 @@ enum BuildxHistoryClient {
         return try decodeList(output)
     }
 
+    /// Reads the metadata Buildx reports for exactly one previously listed build record.
+    ///
+    /// Docker documents `buildx history inspect [REF] --format=json` as a read of one
+    /// completed build record. The reference is never typed by the person or inferred
+    /// from cache state: it must be the bounded ID of the currently selected result from
+    /// `history ls`. This client deliberately does not reach the separate `logs`,
+    /// `attachment`, `export`, `import`, `open`, or `rm` subcommands.
+    static func inspect(socketPath: String, recordID: String) async throws -> BuildxHistoryDetail {
+        guard isInspectableRecordID(recordID) else {
+            throw BuildxHistoryClientError.invalidRecordID
+        }
+        guard let docker = MorbCliPlugins.sourceDockerCLI() else {
+            throw BuildxHistoryClientError.dockerCLIMissing
+        }
+        guard let buildx = MorbCliPlugins.sourceBinary(for: MorbCliPlugins.buildx) else {
+            throw BuildxHistoryClientError.buildxPluginMissing
+        }
+
+        let output = try await BuildxHistoryCommand(
+            docker: docker,
+            buildx: buildx,
+            socketPath: socketPath,
+            arguments: ["buildx", "history", "inspect", "--format=json", recordID])
+            .run()
+        return try decodeDetail(output)
+    }
+
     private static func decodeList(_ output: Data) throws -> [BuildxHistoryRecord] {
         guard let document = try? JSONSerialization.jsonObject(with: output),
               let rows = document as? [[String: Any]]
@@ -77,6 +108,37 @@ enum BuildxHistoryClient {
         }
     }
 
+    private static func decodeDetail(_ output: Data) throws -> BuildxHistoryDetail {
+        guard let document = try? JSONSerialization.jsonObject(with: output),
+              let record = document as? [String: Any]
+        else {
+            throw BuildxHistoryClientError.decoding(
+                "Buildx history did not return the documented JSON detail record.")
+        }
+
+        let config = record["Config"] as? [String: Any]
+        return BuildxHistoryDetail(
+            name: text(record["Name"]),
+            reference: text(record["Ref"]),
+            context: text(record["Context"]),
+            dockerfile: text(record["Dockerfile"]),
+            vcsRepository: text(record["VCSRepository"]),
+            vcsRevision: text(record["VCSRevision"]),
+            target: text(record["Target"]),
+            platforms: textArray(record["Platform"]),
+            keepsGitDirectory: record["KeepGitDir"] as? Bool,
+            startedAt: text(record["StartedAt"]),
+            completedAt: text(record["CompletedAt"]),
+            duration: text(record["Duration"]),
+            status: text(record["Status"]),
+            completedSteps: text(record["NumCompletedSteps"]),
+            totalSteps: text(record["NumTotalSteps"]),
+            cachedSteps: text(record["NumCachedSteps"]),
+            imageResolveMode: text(config?["ImageResolveMode"]),
+            materials: materials(record["Materials"]),
+            attachments: attachments(record["Attachments"]))
+    }
+
     private static func text(_ value: Any?) -> String? {
         switch value {
         case let value as String:
@@ -88,11 +150,95 @@ enum BuildxHistoryClient {
         }
     }
 
+    private static func textArray(_ value: Any?) -> [String] {
+        guard let values = value as? [Any] else { return [] }
+        return values.compactMap(text)
+    }
+
+    private static func materials(_ value: Any?) -> [BuildxHistoryMaterial] {
+        guard let values = value as? [[String: Any]] else { return [] }
+        return values.enumerated().compactMap { offset, material in
+            guard let uri = text(material["URI"]) else { return nil }
+            return BuildxHistoryMaterial(
+                id: "material-\(offset)",
+                uri: uri,
+                digests: textArray(material["Digests"]))
+        }
+    }
+
+    private static func attachments(_ value: Any?) -> [BuildxHistoryAttachment] {
+        guard let values = value as? [[String: Any]] else { return [] }
+        return values.enumerated().compactMap { offset, attachment in
+            guard let digest = text(attachment["Digest"]) else { return nil }
+            return BuildxHistoryAttachment(
+                id: "attachment-\(offset)",
+                digest: digest,
+                platform: text(attachment["Platform"]),
+                type: text(attachment["Type"]))
+        }
+    }
+
+    private static func isInspectableRecordID(_ value: String) -> Bool {
+        guard !value.isEmpty, value.utf8.count <= 128 else { return false }
+        let permitted = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_."))
+        return value.unicodeScalars.allSatisfy(permitted.contains)
+    }
+
     private static func parseDate(_ text: String) -> Date? {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter.date(from: text) ?? ISO8601DateFormatter().date(from: text)
     }
+}
+
+/// Exact fields returned by `docker buildx history inspect --format=json` that the
+/// Builds inspector can render without deriving any state from Docker Engine cache.
+/// Optional fields stay absent when the active Buildx version did not return them.
+struct BuildxHistoryDetail: Sendable, Equatable {
+    var name: String?
+    var reference: String?
+    var context: String?
+    var dockerfile: String?
+    var vcsRepository: String?
+    var vcsRevision: String?
+    var target: String?
+    var platforms: [String]
+    var keepsGitDirectory: Bool?
+    var startedAt: String?
+    var completedAt: String?
+    var duration: String?
+    var status: String?
+    var completedSteps: String?
+    var totalSteps: String?
+    var cachedSteps: String?
+    var imageResolveMode: String?
+    var materials: [BuildxHistoryMaterial]
+    var attachments: [BuildxHistoryAttachment]
+
+    var hasReportableFields: Bool {
+        [
+            name, reference, context, dockerfile, vcsRepository, vcsRevision, target,
+            startedAt, completedAt, duration, status, completedSteps, totalSteps,
+            cachedSteps, imageResolveMode,
+        ].contains(where: { $0 != nil })
+            || !platforms.isEmpty
+            || keepsGitDirectory != nil
+            || !materials.isEmpty
+            || !attachments.isEmpty
+    }
+}
+
+struct BuildxHistoryMaterial: Identifiable, Sendable, Equatable {
+    var id: String
+    var uri: String
+    var digests: [String]
+}
+
+struct BuildxHistoryAttachment: Identifiable, Sendable, Equatable {
+    var id: String
+    var digest: String
+    var platform: String?
+    var type: String?
 }
 
 /// Runs a single read-only Buildx command without a shell or inherited Docker state.

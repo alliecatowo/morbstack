@@ -7,6 +7,15 @@ Morbstack's Builds route has two deliberately separate pieces of Docker state:
   search, sort, inspect, and copy an actual cache-record ID. Docker Engine exposes only
   an engine-wide unused-cache cleanup (`POST /build/prune`), so the app never pretends
   it can delete one reviewed record.
+- **Buildx completed-build history** is a separately requested active-builder record
+  list from `docker buildx history ls --format=json`; it is never inferred from cache
+  layers. Selecting a history row does not create another process. The trailing native
+  inspector starts with a direct `ContentUnavailableView` and the clearly labeled
+  **Load Details** action. Only that action runs the bounded, sealed-environment
+  `docker buildx history inspect --format=json <selected-record-id>` read. Its `Form`
+  contains only JSON fields Buildx actually returned; absent fields stay absent. The
+  implementation does not read logs or attachments, and does not export, import, open,
+  or remove history records.
 - **A new local build** is started only after the person selects a folder containing a
   root `Dockerfile` and confirms the request. The app runs its reviewed bundled
   `docker buildx build --progress=rawjson --load` client against Morbstack's own socket.
@@ -33,21 +42,24 @@ and disk usage; it does not claim which cache entries BuildKit retained before t
 cancellation. Failed builds keep the selected context and tag available for an explicit
 retry and show the actual client/BuildKit diagnostic.
 
-The app currently does **not** report a durable build history through Docker Engine:
-`/system/df` cache records do not identify a completed build, its logs, duration, or
-produced tag. Docker documents that this information is instead Buildx history metadata
-(`docker buildx history ls`, `inspect`, and `logs`), with records scoped to the active
-builder ([history list](https://docs.docker.com/reference/cli/docker/buildx/history/ls/)).
-Morbstack does not yet adopt that separate history store/API, so the route labels its
-cache state honestly rather than synthesizing a history from shared layers.
+Docker Engine does **not** report a durable build history: `/system/df` cache records do
+not identify a completed build, its logs, duration, or produced tag. Docker documents
+that this information is instead active-builder Buildx history metadata
+([history list](https://docs.docker.com/reference/cli/docker/buildx/history/ls/) and
+[history inspect](https://docs.docker.com/reference/cli/docker/buildx/history/inspect/)).
+Morbstack adopts only the two read-only history commands above. It does not present a
+history detail until the person explicitly loads it, and it never synthesizes a history
+or an inspect field from shared cache layers.
 
 ## Native macOS semantics
 
-The route is one sortable `Table` for cache records, standard `.searchable` discovery,
-and an optional `.inspector` with a `Form`/`LabeledContent` detail view. Build setup is a
-system sheet with a `Form` and document picker; active work is an ordinary
-`ProgressView`; cache pruning and build execution have explicit confirmation/recovery
-states. It introduces no app-specific cards, toolbar replicas, or progress dashboard.
+The route is a native sortable `Table` for each explicitly selected collection, standard
+`.searchable` discovery, and a system `.inspector`. The on-demand Buildx detail path
+uses `ContentUnavailableView`, `ProgressView`, then `Form`/`LabeledContent`; it has no
+automatic inspection, cache-derived details, cards, toolbar replicas, or progress
+dashboard. Build setup is a system sheet with a `Form` and document picker; active work
+is an ordinary `ProgressView`; cache pruning and build execution have explicit
+confirmation/recovery states.
 
 This follows Apple’s [Lists and tables](https://developer.apple.com/design/human-interface-guidelines/lists-and-tables),
 [Toolbars](https://developer.apple.com/design/human-interface-guidelines/toolbars),
