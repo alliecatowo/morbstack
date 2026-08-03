@@ -7,8 +7,9 @@
 // existing Docker engines respond to read-only requests. The separately labeled
 // images-only workflow begins with an empty selection, derives a fresh plan before a
 // scoped review, and only calls `ImageMigrationTransaction.execute` from the explicit
-// confirmation action. Named volumes have a separate GET-only eligibility comparison;
-// this route never creates a helper container or transfers a volume. No route path
+// confirmation action. Named volumes have a separate eligibility comparison and an
+// explicit selected-volume transaction. The transaction creates helpers and a new
+// destination volume only after its own scoped review and confirmation. No route path
 // starts a runtime, asks a credential helper, writes Docker configuration, or performs
 // an implicit import.
 
@@ -115,6 +116,7 @@ struct MigrationRootView: View {
     @State private var plannedRuntimeID: MigrationRuntime.ID?
     @State private var isPlanning = false
     @State private var imageMigration = ImageMigrationWorkflow()
+    @State private var volumeMigration = VolumeMigrationWorkflow()
 
     private var runtimes: [MigrationRuntime] { inspection?.runtimes ?? [] }
 
@@ -143,6 +145,10 @@ struct MigrationRootView: View {
                 imageMigrationSheet
                     .interactiveDismissDisabled(imageMigration.stage == .transferring)
             }
+            .sheet(isPresented: $volumeMigration.isPresented) {
+                volumeMigrationSheet
+                    .interactiveDismissDisabled(volumeMigration.stage == .transferring)
+            }
             .alert(
                 "Image Migration Couldn’t Continue",
                 isPresented: Binding(
@@ -155,6 +161,19 @@ struct MigrationRootView: View {
                 }
             } message: {
                 Text(imageMigration.errorMessage ?? "")
+            }
+            .alert(
+                "Volume Migration Couldn’t Continue",
+                isPresented: Binding(
+                    get: { volumeMigration.errorMessage != nil },
+                    set: { if !$0 { volumeMigration.errorMessage = nil } }
+                )
+            ) {
+                Button("OK", role: .cancel) {
+                    volumeMigration.errorMessage = nil
+                }
+            } message: {
+                Text(volumeMigration.errorMessage ?? "")
             }
             .task {
                 await inspect()
@@ -282,6 +301,7 @@ struct MigrationRootView: View {
 
                 transferSection(for: runtime)
                 latestImageMigrationSection
+                latestVolumeMigrationSection
                 dockerConfigurationSection(inspection.dockerConfiguration)
             }
         } else {
@@ -386,6 +406,15 @@ struct MigrationRootView: View {
                     Text(
                         "Eligibility compares names and drivers only. Volume contents, free space, overwrite safety, and merge behavior were not inspected.")
                         .foregroundStyle(.secondary)
+
+                    if !volumes.eligible.isEmpty {
+                        Button("Select Volumes to Transfer…") {
+                            presentVolumeMigration(for: runtime, candidates: volumes.eligible)
+                        }
+                        Text(
+                            "Choose the exact eligible volumes to review. Existing Morbstack volumes and unsupported drivers cannot be selected.")
+                            .foregroundStyle(.secondary)
+                    }
                 } else if let unavailableReason = plan(for: runtime)?.volumeUnavailableReason {
                     LabeledContent("Named Volume Eligibility", value: "Unavailable")
                     Text(unavailableReason)
@@ -409,7 +438,7 @@ struct MigrationRootView: View {
             Text("Migration")
         } footer: {
             Text(
-                "Inspection stays read-only. The separately labeled import action transfers only the images you select after a second review; named-volume eligibility does not transfer a volume. This route never starts a runtime or writes Docker configuration.")
+                "Inspection stays read-only until a separately labeled image or volume review is confirmed. Each action uses only its selected records; neither starts a runtime or writes Docker configuration.")
         }
     }
 
@@ -539,6 +568,38 @@ struct MigrationRootView: View {
     }
 
     @ViewBuilder
+    private var volumeMigrationSheet: some View {
+        switch volumeMigration.stage {
+        case .selection:
+            MigrationVolumeSelectionSheet(
+                source: volumeMigration.source?.name ?? "Migration source",
+                destination: "Morbstack",
+                candidates: volumeMigration.candidates,
+                selectedIDs: $volumeMigration.selectedIDs,
+                isPreparing: volumeMigration.isPreparing,
+                onCancel: volumeMigration.close,
+                onReview: volumeMigration.prepareSelection)
+
+        case .review:
+            if let prepared = volumeMigration.prepared {
+                MigrationVolumeReviewSheet(
+                    prepared: prepared,
+                    networkConsentGranted: $volumeMigration.networkConsentGranted,
+                    onBack: volumeMigration.returnToSelection,
+                    onConfirm: volumeMigration.executePreparedSelection)
+            }
+
+        case .transferring:
+            MigrationVolumeProgressSheet(progress: volumeMigration.progress)
+
+        case .report:
+            if let report = volumeMigration.latestReport {
+                MigrationVolumeReportSheet(report: report, onDone: volumeMigration.close)
+            }
+        }
+    }
+
+    @ViewBuilder
     private var latestImageMigrationSection: some View {
         if let report = imageMigration.latestReport {
             Section("Latest Image Import") {
@@ -577,11 +638,49 @@ struct MigrationRootView: View {
         }
     }
 
+    @ViewBuilder
+    private var latestVolumeMigrationSection: some View {
+        if let report = volumeMigration.latestReport {
+            Section("Latest Volume Transfer") {
+                LabeledContent(
+                    "Result",
+                    value: report.isFullyCopied ? "All selected archives uploaded" : "Review required")
+                LabeledContent("Source", value: report.source.name)
+                LabeledContent("Destination", value: report.destination.name)
+                LabeledContent(
+                    "Network Consent",
+                    value: report.helperImageNetworkConsentProvided ? "Provided" : "Not required")
+                LabeledContent("Report") {
+                    if let reportPath = report.reportPath {
+                        Text(reportPath)
+                            .font(.system(.body, design: .monospaced))
+                            .textSelection(.enabled)
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                    } else {
+                        Text(report.reportWriteError ?? "Not written")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Text(
+                    "An archive upload accepted by Docker is not an independent content verification. This transaction never rolls back or deletes a volume automatically.")
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
     private func presentImageMigration(
         for runtime: MigrationRuntime,
         candidates: [MigrationImagePlanItem]
     ) {
         imageMigration.begin(source: runtime, candidates: candidates)
+    }
+
+    private func presentVolumeMigration(
+        for runtime: MigrationRuntime,
+        candidates: [MigrationVolumePlanItem]
+    ) {
+        volumeMigration.begin(source: runtime, candidates: candidates)
     }
 }
 
@@ -941,6 +1040,343 @@ private struct MigrationImageReportSheet: View {
     }
 }
 
+/// The first selected-volume step intentionally starts with no selection. Its table
+/// receives only the currently eligible local-driver, destination-missing records;
+/// `VolumeMigrationTransaction.prepare` derives a fresh plan before review, so a
+/// stale row cannot become an operation by itself.
+private struct MigrationVolumeSelectionSheet: View {
+    let source: String
+    let destination: String
+    let candidates: [MigrationVolumePlanItem]
+    @Binding var selectedIDs: Set<MigrationVolumePlanItem.ID>
+    let isPreparing: Bool
+    let onCancel: () -> Void
+    let onReview: () -> Void
+
+    private var selectedItems: [MigrationVolumePlanItem] {
+        candidates.filter { selectedIDs.contains($0.id) }
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                Form {
+                    Section("Selection") {
+                        LabeledContent("Source", value: source)
+                        LabeledContent("Destination", value: destination)
+                        LabeledContent(
+                            "Selected",
+                            value: "\(selectedItems.count) of \(candidates.count) eligible volumes")
+                        Text(
+                            "Only source volumes that are currently local-driver and missing from Morbstack appear here. This screen begins with nothing selected.")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Table(candidates, selection: $selectedIDs) {
+                    TableColumn("Volume") { volume in
+                        Text(volume.name)
+                            .font(.body.monospaced())
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    .width(min: 220, ideal: 320)
+
+                    TableColumn("Driver") { volume in
+                        Text(volume.driver)
+                    }
+                    .width(min: 90, ideal: 120, max: 160)
+
+                    TableColumn("Eligibility") { _ in
+                        Text("Eligible")
+                            .foregroundStyle(.secondary)
+                    }
+                    .width(min: 90, ideal: 110, max: 140)
+                }
+                .tableStyle(.automatic)
+                .accessibilityLabel("Eligible named volumes available to transfer")
+            }
+            .navigationTitle("Select Volumes to Transfer")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel", action: onCancel)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(action: onReview) {
+                        if isPreparing {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Text("Review Selected Volumes")
+                        }
+                    }
+                    .disabled(selectedItems.isEmpty || isPreparing)
+                    .accessibilityLabel(
+                        isPreparing
+                            ? "Rechecking selected volume eligibility"
+                            : "Review selected volumes before transfer")
+                }
+            }
+        }
+        .frame(minWidth: 580, minHeight: 430)
+    }
+}
+
+/// A document-modal review owns the confirmation boundary for the selected named
+/// volumes. It exposes the exact helper/container and destination effects because the
+/// following action can create a new Morbstack volume and populate it from an archive.
+private struct MigrationVolumeReviewSheet: View {
+    let prepared: PreparedVolumeMigration
+    @Binding var networkConsentGranted: Bool
+    let onBack: () -> Void
+    let onConfirm: () -> Void
+
+    private var helperImageAvailability: String {
+        switch (prepared.sourceHasHelperImage, prepared.destinationHasHelperImage) {
+        case (true, true): return "Available on both engines"
+        case (false, false): return "Missing on source and destination"
+        case (false, true): return "Missing on source"
+        case (true, false): return "Missing on destination"
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                Form {
+                    Section("Selected Volumes") {
+                        LabeledContent("Source", value: prepared.source.name)
+                        LabeledContent("Destination", value: prepared.destination.name)
+                        LabeledContent(
+                            "Selection",
+                            value: "\(prepared.items.count) volume\(prepared.items.count == 1 ? "" : "s")")
+                    }
+
+                    Section("Transfer Effects") {
+                        LabeledContent("Source Helper", value: "Stopped helper with a read-only volume mount")
+                        LabeledContent("Destination", value: "Create a new named volume, then populate it from an archive")
+                        LabeledContent("Existing Destination", value: "Never read, merged, replaced, or deleted")
+                        Text(
+                            "The helper containers are removed best-effort after each archive attempt. No automatic rollback is available if destination creation or upload has begun.")
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if prepared.helperImageNetworkConsentRequired {
+                        Section("Helper Image Network Access") {
+                            LabeledContent("Helper Image", value: "alpine:3.20")
+                            LabeledContent("Availability", value: helperImageAvailability)
+                            Toggle("Allow helper image download", isOn: $networkConsentGranted)
+                            Text(
+                                "At least one engine has no usable helper image. If allowed, the transaction may pull alpine:3.20 only where it is missing before creating any selected destination volume.")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    Section("Safety Limits") {
+                        ForEach(prepared.safetyLimits, id: \.self) { limit in
+                            Text(limit)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+
+                Table(prepared.items) {
+                    TableColumn("Volume") { volume in
+                        Text(volume.name)
+                            .font(.body.monospaced())
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    .width(min: 220, ideal: 320)
+
+                    TableColumn("Driver") { volume in
+                        Text(volume.driver)
+                    }
+                    .width(min: 90, ideal: 120, max: 160)
+
+                    TableColumn("Prepared Eligibility") { _ in
+                        Text("Local and missing")
+                            .foregroundStyle(.secondary)
+                    }
+                    .width(min: 130, ideal: 160, max: 190)
+                }
+                .tableStyle(.automatic)
+                .accessibilityLabel("Named volumes confirmed for transfer")
+            }
+            .navigationTitle("Review Volume Transfer")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Back", action: onBack)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(
+                        "Transfer \(prepared.items.count) Volume\(prepared.items.count == 1 ? "" : "s")",
+                        action: onConfirm)
+                    .disabled(prepared.helperImageNetworkConsentRequired && !networkConsentGranted)
+                }
+            }
+        }
+        .frame(minWidth: 640, minHeight: 540)
+    }
+}
+
+private struct MigrationVolumeProgressSheet: View {
+    let progress: VolumeMigrationProgress?
+
+    private var total: Int { progress?.totalVolumeCount ?? 0 }
+    private var completed: Int { progress?.completedVolumeCount ?? 0 }
+
+    private var phaseTitle: String {
+        switch progress?.phase {
+        case .checkingPreconditions: return "Checking selected volume"
+        case .pullingHelperImage: return "Pulling helper image"
+        case .exporting: return "Reading source archive"
+        case .creatingDestination: return "Creating destination volume"
+        case .importing: return "Populating destination volume"
+        case .completedVolume: return "Completed volume"
+        case .writingReport: return "Writing migration report"
+        case .completed: return "Finalizing volume transfer"
+        case .prepared, .none: return "Preparing selected volumes"
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Transfer Progress") {
+                    if total > 0 {
+                        ProgressView(value: Double(completed), total: Double(total)) {
+                            Text("Completed Volumes")
+                        } currentValueLabel: {
+                            Text("\(completed) of \(total)")
+                                .monospacedDigit()
+                        }
+                    }
+
+                    ProgressView(phaseTitle)
+
+                    if let volumeName = progress?.volumeName {
+                        LabeledContent("Current Volume") {
+                            Text(volumeName)
+                                .font(.system(.body, design: .monospaced))
+                                .textSelection(.enabled)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                    }
+
+                    if let bytes = progress?.bytesTransferred {
+                        LabeledContent("Current Archive", value: Formatters.bytesString(bytes))
+                    }
+
+                    if let detail = progress?.detail {
+                        Text(detail)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Section("Transfer Boundary") {
+                    Text(
+                        "Docker does not report an archive total before reading the source volume, so current-byte updates are not a percentage. An archive upload accepted by Docker is not independently verified, and this transaction offers no cancellation or automatic rollback.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("Transferring Volumes")
+        }
+        .frame(minWidth: 480, minHeight: 330)
+    }
+}
+
+private struct MigrationVolumeReportSheet: View {
+    let report: VolumeMigrationTransactionReport
+    let onDone: () -> Void
+
+    private var result: String {
+        report.isFullyCopied ? "All selected archives uploaded" : "Review required"
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                Form {
+                    Section("Result") {
+                        LabeledContent("Status", value: result)
+                        LabeledContent("Source", value: report.source.name)
+                        LabeledContent("Destination", value: report.destination.name)
+                        LabeledContent("Scope", value: "Selected missing local volumes only")
+                        LabeledContent(
+                            "Helper Image Network Consent",
+                            value: report.helperImageNetworkConsentProvided ? "Provided" : "Not required")
+                        LabeledContent("Report") {
+                            if let path = report.reportPath {
+                                Text(path)
+                                    .font(.system(.body, design: .monospaced))
+                                    .textSelection(.enabled)
+                                    .lineLimit(2)
+                                    .truncationMode(.middle)
+                            } else {
+                                Text(report.reportWriteError ?? "Not written")
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+
+                    Section("Follow-up") {
+                        ForEach(report.rollbackGuidance, id: \.self) { guidance in
+                            Text(guidance)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+
+                Table(report.items) {
+                    TableColumn("Volume") { item in
+                        Text(item.name)
+                            .font(.body.monospaced())
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    .width(min: 180, ideal: 250)
+
+                    TableColumn("Result") { item in
+                        Text(item.outcome.rawValue.replacingOccurrences(of: "_", with: " ").capitalized)
+                    }
+                    .width(min: 104, ideal: 124, max: 150)
+
+                    TableColumn("Destination") { item in
+                        Text(item.destinationState.rawValue.replacingOccurrences(of: "_", with: " ").capitalized)
+                            .foregroundStyle(.secondary)
+                    }
+                    .width(min: 110, ideal: 150, max: 180)
+
+                    TableColumn("Archive") { item in
+                        Text(Formatters.bytesString(item.archiveBytes))
+                            .monospacedDigit()
+                    }
+                    .width(min: 78, ideal: 94, max: 112)
+
+                    TableColumn("Detail") { item in
+                        Text(item.detail ?? "—")
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    .width(min: 170, ideal: 250)
+                }
+                .tableStyle(.automatic)
+                .accessibilityLabel("Volume transfer report")
+            }
+            .navigationTitle("Volume Transfer Report")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done", action: onDone)
+                }
+            }
+        }
+        .frame(minWidth: 680, minHeight: 500)
+    }
+}
+
 private extension ImageMigrationItemOutcome {
     var displayName: String {
         switch self {
@@ -1184,6 +1620,182 @@ private final class ImageMigrationWorkflow {
 
     private static func isRetryable(_ item: ImageMigrationItemReport) -> Bool {
         item.outcome == .failed || item.outcome == .cancelled
+    }
+}
+
+/// Main-actor presentation state for one explicitly selected named-volume transfer.
+/// The transaction itself owns fresh eligibility checks and every Docker mutation;
+/// this object never broadens the selected record set or manufactures cancellation or
+/// verification behavior that the service does not provide.
+@MainActor
+@Observable
+private final class VolumeMigrationWorkflow {
+    enum Stage {
+        case selection
+        case review
+        case transferring
+        case report
+    }
+
+    private enum PreparationResult: Sendable {
+        case prepared(PreparedVolumeMigration)
+        case failed(String)
+    }
+
+    private enum ExecutionResult: Sendable {
+        case completed(VolumeMigrationTransactionReport)
+        case failed(String)
+    }
+
+    var isPresented = false
+    var stage: Stage = .selection
+    var source: MigrationRuntime?
+    var candidates: [MigrationVolumePlanItem] = []
+    var selectedIDs: Set<MigrationVolumePlanItem.ID> = []
+    var prepared: PreparedVolumeMigration?
+    var progress: VolumeMigrationProgress?
+    var isPreparing = false
+    var networkConsentGranted = false
+    var errorMessage: String?
+    var latestReport: VolumeMigrationTransactionReport?
+
+    private var progressPump: Task<Void, Never>?
+
+    func begin(source: MigrationRuntime, candidates: [MigrationVolumePlanItem]) {
+        self.source = source
+        self.candidates = candidates.filter(\.isEligible)
+        selectedIDs = []
+        prepared = nil
+        progress = nil
+        isPreparing = false
+        networkConsentGranted = false
+        errorMessage = nil
+        stage = .selection
+        isPresented = true
+    }
+
+    func close() {
+        guard stage != .transferring else { return }
+        isPresented = false
+        source = nil
+        candidates = []
+        selectedIDs = []
+        prepared = nil
+        progress = nil
+        isPreparing = false
+        networkConsentGranted = false
+        stage = .selection
+    }
+
+    func returnToSelection() {
+        guard stage == .review else { return }
+        prepared = nil
+        networkConsentGranted = false
+        stage = .selection
+    }
+
+    func prepareSelection() {
+        guard !isPreparing,
+              let sourceToken = source?.transferSourceToken
+        else {
+            errorMessage = "Select a running Docker Desktop, Colima, or OrbStack source before transferring volumes."
+            return
+        }
+
+        let names = candidates
+            .filter { selectedIDs.contains($0.id) }
+            .map(\.name)
+        guard !names.isEmpty else {
+            errorMessage = "Select one or more eligible volumes before review."
+            return
+        }
+
+        isPreparing = true
+        Task { [weak self] in
+            let result = await Task.detached(priority: .utility) {
+                do {
+                    return PreparationResult.prepared(
+                        try VolumeMigrationTransaction.prepare(
+                            from: sourceToken,
+                            selection: .names(names)))
+                } catch {
+                    return PreparationResult.failed(String(describing: error))
+                }
+            }.value
+
+            guard let self else { return }
+            self.isPreparing = false
+            switch result {
+            case .prepared(let prepared):
+                self.prepared = prepared
+                self.networkConsentGranted = false
+                self.stage = .review
+            case .failed(let message):
+                self.errorMessage = message
+            }
+        }
+    }
+
+    func executePreparedSelection() {
+        guard stage == .review, let prepared else {
+            errorMessage = "Review the selected volumes again before transfer."
+            return
+        }
+        guard !prepared.helperImageNetworkConsentRequired || networkConsentGranted else {
+            errorMessage = "Allow the separately disclosed helper-image download before transferring these volumes."
+            return
+        }
+
+        progress = nil
+        stage = .transferring
+
+        var continuation: AsyncStream<VolumeMigrationProgress>.Continuation?
+        let updates = AsyncStream<VolumeMigrationProgress>(bufferingPolicy: .bufferingNewest(1)) {
+            continuation = $0
+        }
+        guard let continuation else {
+            errorMessage = "Could not start volume migration progress reporting."
+            stage = .selection
+            return
+        }
+
+        progressPump?.cancel()
+        progressPump = Task { @MainActor [weak self] in
+            for await update in updates {
+                self?.progress = update
+            }
+        }
+
+        Task { [weak self] in
+            let result = await Task.detached(priority: .userInitiated) {
+                defer { continuation.finish() }
+                do {
+                    let networkConsent = prepared.helperImageNetworkConsentRequired
+                        ? prepared.networkConsent()
+                        : nil
+                    return ExecutionResult.completed(
+                        try VolumeMigrationTransaction.execute(
+                            prepared,
+                            confirmation: prepared.confirmation(),
+                            networkConsent: networkConsent,
+                            progress: { continuation.yield($0) }))
+                } catch {
+                    return ExecutionResult.failed(String(describing: error))
+                }
+            }.value
+
+            guard let self else { return }
+            switch result {
+            case .completed(let report):
+                self.latestReport = report
+                self.stage = .report
+            case .failed(let message):
+                self.prepared = nil
+                self.networkConsentGranted = false
+                self.stage = .selection
+                self.errorMessage = message
+            }
+        }
     }
 }
 
