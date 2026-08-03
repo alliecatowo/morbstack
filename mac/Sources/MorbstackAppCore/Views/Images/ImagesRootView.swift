@@ -149,10 +149,7 @@ struct ImagesRootView: View {
                     Text("This frees \(Formatters.bytesString(target.image.size)). Any container created from it later will have to pull it again.")
                 }
             }
-            .onDeleteCommand {
-                guard let selection, let image = model.images.first(where: { $0.id == selection }) else { return }
-                removal = ImageRemovalConfirmation(image: image)
-            }
+            .onDeleteCommand(perform: stageSelectedImageForRemoval)
             .alert(
                 operationFailure?.title ?? "",
                 isPresented: operationFailurePresented,
@@ -232,6 +229,12 @@ struct ImagesRootView: View {
     private func dismissImageArchiveExportNotice(_ isPresented: Bool) {
         guard !isPresented else { return }
         imageArchiveExportNotice = nil
+    }
+
+    private func stageSelectedImageForRemoval() {
+        guard let selectedID = selection else { return }
+        guard let image = model.images.first(where: { $0.id == selectedID }) else { return }
+        removal = ImageRemovalConfirmation(image: image)
     }
 
     @ToolbarContentBuilder
