@@ -262,7 +262,14 @@ struct StacksRootView: View {
             ) { service in
                 Button("Remove", role: .destructive) {
                     removalTarget = nil
-                    perform(.remove, on: service)
+                    // The record can change while the confirmation is visible. Re-read
+                    // it from the current table data so a completed confirmation never
+                    // turns into a silently unavailable lifecycle request.
+                    if let currentService = services.first(where: { $0.id == service.id }),
+                        canRemove(currentService)
+                    {
+                        perform(.remove, on: currentService)
+                    }
                 }
                 Button("Cancel", role: .cancel) { removalTarget = nil }
             } message: { service in
@@ -358,10 +365,40 @@ struct StacksRootView: View {
         }
     }
 
+    /// The primary action is intentionally absent from the secondary toolbar menu
+    /// and inspector. A context menu remains the complete record-local command list.
+    private func secondaryLifecycleActions(for service: ContainerSummary) -> [ContainerAction] {
+        service.availableActions.filter {
+            !$0.isDestructive && $0 != primaryLifecycleAction(for: service)
+        }
+    }
+
+    /// A destructive command is only exposed while Docker reports it as available and
+    /// neither this service nor its Compose project is already changing state.
+    private func canRemove(_ service: ContainerSummary) -> Bool {
+        service.availableActions.contains(.remove)
+            && !isServiceBusy(service)
+            && !isProjectBusy(for: service)
+    }
+
     private func selectionActionsMenu(service: ContainerSummary, stack: ComposeGroup) -> some View {
         Menu {
-            serviceActionItems(for: service)
-            Divider()
+            let secondaryActions = secondaryLifecycleActions(for: service)
+            if isServiceBusy(service) {
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityLabel("Updating \(service.composeService ?? service.displayName)")
+            } else {
+                ForEach(secondaryActions, id: \.rawValue) { action in
+                    Button(action.title, systemImage: action.symbol) {
+                        perform(action, on: service)
+                    }
+                    .disabled(isProjectBusy(for: service))
+                }
+            }
+            if isServiceBusy(service) || !secondaryActions.isEmpty {
+                Divider()
+            }
             Menu("Project Actions") {
                 projectActionItems(for: stack)
             }
@@ -372,8 +409,10 @@ struct StacksRootView: View {
             Button("View Logs") {
                 TrackDAppBridge.reveal(containerID: service.id, in: model, showingLogs: true)
             }
-            Divider()
-            Button("Remove Service…", role: .destructive) { removalTarget = service }
+            if canRemove(service) {
+                Divider()
+                Button("Remove Service…", role: .destructive) { removalTarget = service }
+            }
         } label: {
             Image(systemName: "ellipsis")
         }
@@ -454,7 +493,9 @@ struct StacksRootView: View {
             }
         }
         .onDeleteCommand {
-            if let selectedService { removalTarget = selectedService }
+            if let selectedService, canRemove(selectedService) {
+                removalTarget = selectedService
+            }
         }
     }
 
@@ -514,7 +555,7 @@ struct StacksRootView: View {
             }
 
             Section("Actions") {
-                serviceActionItems(for: service)
+                secondaryServiceActionItems(for: service)
 
                 Menu("Project Actions") {
                     projectActionItems(for: stack)
@@ -540,12 +581,13 @@ struct StacksRootView: View {
                     }
                 }
 
-                Button(role: .destructive) {
-                    removalTarget = service
-                } label: {
-                    Label("Remove Service", systemImage: "trash")
+                if canRemove(service) {
+                    Button(role: .destructive) {
+                        removalTarget = service
+                    } label: {
+                        Label("Remove Service", systemImage: "trash")
+                    }
                 }
-                .disabled(isServiceBusy(service) || isProjectBusy(for: service))
             }
         }
         .formStyle(.columns)
@@ -636,8 +678,8 @@ struct StacksRootView: View {
                     if let url = service.ports.compactMap(\.url).first {
                         Button("Open Published Port") { NSWorkspace.shared.open(url) }
                     }
-                    Divider()
-                    if !isServiceBusy(service), !isProjectBusy(for: service) {
+                    if canRemove(service) {
+                        Divider()
                         Button("Remove Service…", role: .destructive) { removalTarget = service }
                     }
                 }
@@ -653,6 +695,20 @@ struct StacksRootView: View {
                 .accessibilityLabel("Updating \(service.composeService ?? service.displayName)")
         } else {
             ForEach(service.availableActions.filter { !$0.isDestructive }, id: \.rawValue) { action in
+                Button(action.title) { perform(action, on: service) }
+                    .disabled(isProjectBusy(for: service))
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func secondaryServiceActionItems(for service: ContainerSummary) -> some View {
+        if isServiceBusy(service) {
+            ProgressView()
+                .controlSize(.small)
+                .accessibilityLabel("Updating \(service.composeService ?? service.displayName)")
+        } else {
+            ForEach(secondaryLifecycleActions(for: service), id: \.rawValue) { action in
                 Button(action.title) { perform(action, on: service) }
                     .disabled(isProjectBusy(for: service))
             }
@@ -723,7 +779,7 @@ struct StacksRootView: View {
     // MARK: Actions
 
     private func perform(_ action: ContainerAction, on service: ContainerSummary) {
-        guard !isServiceBusy(service), !isProjectBusy(for: service) else { return }
+        guard service.availableActions.contains(action), !isServiceBusy(service), !isProjectBusy(for: service) else { return }
         busyServices.insert(service.id)
         Task { @MainActor in
             await model.containerAction(action, id: service.id)
