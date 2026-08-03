@@ -1,0 +1,265 @@
+// Copyright 2026 The Morbstack Authors.
+// Licensed under the Apache License, Version 2.0 (the "License").
+//
+// A deliberately narrow migration planning API for the native app and `morb`
+// command line. It is a comparison only: no runtime start, Docker configuration
+// mutation, credential lookup, helper-container creation, image pull, import, or
+// report write is reachable from this file.
+
+import Foundation
+import MorbFeatures
+import MorbstackKit
+
+/// The observed state of an endpoint in a read-only migration plan.
+public enum MigrationPlanReadiness: String, Sendable, Equatable, Codable {
+    case ready
+    case notInstalled = "not_installed"
+    case notRunning = "not_running"
+    case unavailable
+}
+
+/// A source or destination used by ``MigrationReadOnlyPlan``.
+///
+/// `detail` is diagnostic text only. It never contains configuration values or
+/// registry credentials.
+public struct MigrationPlanEndpoint: Sendable, Equatable, Codable {
+    public let name: String
+    public let socketPath: String?
+    public let readiness: MigrationPlanReadiness
+    public let detail: String?
+
+    public init(name: String, socketPath: String?, readiness: MigrationPlanReadiness, detail: String?) {
+        self.name = name
+        self.socketPath = socketPath
+        self.readiness = readiness
+        self.detail = detail
+    }
+}
+
+/// One image observed in a derived, read-only comparison.
+public struct MigrationImagePlanItem: Sendable, Equatable, Codable, Identifiable {
+    public enum Disposition: String, Sendable, Equatable, Codable {
+        /// The source has this image and the running Morbstack engine does not.
+        case wouldCopy = "would_copy"
+        /// The running Morbstack engine already has the identical image ID.
+        case alreadyPresent = "already_present"
+    }
+
+    public let reference: String
+    public let imageID: String
+    public let sizeBytes: Int64
+    public let disposition: Disposition
+
+    public var id: String { "\(reference)|\(imageID)" }
+
+    public init(reference: String, imageID: String, sizeBytes: Int64, disposition: Disposition) {
+        self.reference = reference
+        self.imageID = imageID
+        self.sizeBytes = sizeBytes
+        self.disposition = disposition
+    }
+}
+
+/// The image portion of a migration plan. It is present only after the planner
+/// successfully reads both Docker image inventories.
+public struct MigrationImagePlan: Sendable, Equatable, Codable {
+    public let items: [MigrationImagePlanItem]
+
+    public init(items: [MigrationImagePlanItem]) {
+        self.items = items
+    }
+
+    public var wouldCopy: [MigrationImagePlanItem] {
+        items.filter { $0.disposition == .wouldCopy }
+    }
+
+    public var alreadyPresent: [MigrationImagePlanItem] {
+        items.filter { $0.disposition == .alreadyPresent }
+    }
+
+    public var wouldCopyBytes: Int64 {
+        wouldCopy.reduce(0) { $0 + $1.sizeBytes }
+    }
+}
+
+/// A side-effect-free migration inspection result.
+///
+/// `imagePlan` is intentionally optional. A nil plan means the comparison was not
+/// derived; callers must surface `unavailableReason` rather than treating it as an
+/// empty image list. Volume planning is excluded because the existing volume dry run
+/// uses a helper container to inspect destination contents.
+public struct MigrationReadOnlyPlan: Sendable, Equatable, Codable {
+    public let source: MigrationPlanEndpoint
+    public let destination: MigrationPlanEndpoint
+    public let imagePlan: MigrationImagePlan?
+    public let unavailableReason: String?
+
+    public init(
+        source: MigrationPlanEndpoint,
+        destination: MigrationPlanEndpoint,
+        imagePlan: MigrationImagePlan?,
+        unavailableReason: String?
+    ) {
+        self.source = source
+        self.destination = destination
+        self.imagePlan = imagePlan
+        self.unavailableReason = unavailableReason
+    }
+}
+
+/// Produces truthful migration readiness and image-comparison data without changing
+/// either engine. This is the only public migration planning entry point intended for
+/// UI use; transfer commands remain explicit CLI operations.
+public enum MigrationReadOnlyPlanner {
+
+    /// Inspects a named source (`docker-desktop`, `colima`, `orbstack`) or a live Unix
+    /// socket. With no source, it uses the existing safe auto-selection rule: exactly
+    /// one non-Morbstack runtime must be running. The method never starts an engine.
+    public static func inspect(
+        from sourceToken: String? = nil,
+        filter: String? = nil,
+        includeDanglingImages: Bool = false
+    ) -> MigrationReadOnlyPlan {
+        let destination = endpoint(for: RuntimeDetect.detectMorbstack())
+        var source = requestedSourceEndpoint(for: sourceToken)
+
+        let resolvedSource: MigrationSource
+        do {
+            resolvedSource = try SourceResolver.resolve(from: sourceToken)
+        } catch {
+            let reason = "Source is unavailable: \(error)"
+            source = MigrationPlanEndpoint(
+                name: source.name,
+                socketPath: source.socketPath,
+                readiness: source.readiness == .ready ? .unavailable : source.readiness,
+                detail: reason)
+            return MigrationReadOnlyPlan(
+                source: source,
+                destination: destination,
+                imagePlan: nil,
+                unavailableReason: reason)
+        }
+
+        // `morbstack` is a destination, not a legitimate source for a migration plan.
+        // Rejecting it prevents a self-comparison from being presented as a transfer.
+        if sourceToken?.lowercased() == "morbstack" || sameSocket(resolvedSource.socketPath, MorbPaths.dockerSocket.path) {
+            source = MigrationPlanEndpoint(
+                name: "Morbstack",
+                socketPath: resolvedSource.socketPath,
+                readiness: .unavailable,
+                detail: "Morbstack is the migration destination, not a source.")
+            return MigrationReadOnlyPlan(
+                source: source,
+                destination: destination,
+                imagePlan: nil,
+                unavailableReason: source.detail)
+        }
+
+        source = MigrationPlanEndpoint(
+            name: resolvedSource.label,
+            socketPath: resolvedSource.socketPath,
+            readiness: .ready,
+            detail: nil)
+
+        guard destination.readiness == .ready else {
+            let reason = destination.detail ?? "Morbstack's Docker engine is not running."
+            return MigrationReadOnlyPlan(
+                source: source,
+                destination: destination,
+                imagePlan: nil,
+                unavailableReason: reason)
+        }
+
+        let (items, planError) = ImagesCommand.plan(
+            source: resolvedSource,
+            destination: EngineClient(),
+            filter: filter,
+            includeAll: includeDanglingImages)
+        if let planError {
+            return MigrationReadOnlyPlan(
+                source: source,
+                destination: destination,
+                imagePlan: nil,
+                unavailableReason: planError)
+        }
+
+        let imagePlan = MigrationImagePlan(items: items.map { item in
+            MigrationImagePlanItem(
+                reference: item.reference,
+                imageID: item.id,
+                sizeBytes: item.size,
+                disposition: item.status == "planned" ? .wouldCopy : .alreadyPresent)
+        })
+        return MigrationReadOnlyPlan(
+            source: source,
+            destination: destination,
+            imagePlan: imagePlan,
+            unavailableReason: nil)
+    }
+
+    private static func endpoint(for report: RuntimeReport) -> MigrationPlanEndpoint {
+        if !report.installed {
+            return MigrationPlanEndpoint(
+                name: report.name,
+                socketPath: nil,
+                readiness: .notInstalled,
+                detail: "\(report.name) is not installed.")
+        }
+        if !report.running {
+            return MigrationPlanEndpoint(
+                name: report.name,
+                socketPath: report.socketPath,
+                readiness: .notRunning,
+                detail: report.notes.first ?? "\(report.name) is not running.")
+        }
+        return MigrationPlanEndpoint(
+            name: report.name,
+            socketPath: report.socketPath,
+            readiness: .ready,
+            detail: nil)
+    }
+
+    private static func requestedSourceEndpoint(for sourceToken: String?) -> MigrationPlanEndpoint {
+        guard let sourceToken else {
+            return MigrationPlanEndpoint(
+                name: "Automatic source selection",
+                socketPath: nil,
+                readiness: .unavailable,
+                detail: "Select exactly one running Docker Desktop, Colima, or OrbStack runtime.")
+        }
+
+        let normalized = sourceToken.lowercased()
+        let knownRuntime: RuntimeReport?
+        switch normalized {
+        case "docker-desktop", "desktop", "docker":
+            knownRuntime = RuntimeDetect.detectDockerDesktop()
+        case "colima":
+            knownRuntime = RuntimeDetect.detectColima()
+        case "orbstack", "orb":
+            knownRuntime = RuntimeDetect.detectOrbStack()
+        case "morbstack":
+            knownRuntime = RuntimeDetect.detectMorbstack()
+        default:
+            knownRuntime = nil
+        }
+        if let knownRuntime {
+            return endpoint(for: knownRuntime)
+        }
+
+        var path = sourceToken
+        if path.hasPrefix("unix://") {
+            path = String(path.dropFirst("unix://".count))
+        }
+        path = (path as NSString).expandingTildeInPath
+        return MigrationPlanEndpoint(
+            name: path,
+            socketPath: path,
+            readiness: .unavailable,
+            detail: "The socket must exist and answer a Docker ping before a plan can be derived.")
+    }
+
+    private static func sameSocket(_ lhs: String, _ rhs: String) -> Bool {
+        URL(fileURLWithPath: lhs).resolvingSymlinksInPath().standardizedFileURL.path
+            == URL(fileURLWithPath: rhs).resolvingSymlinksInPath().standardizedFileURL.path
+    }
+}

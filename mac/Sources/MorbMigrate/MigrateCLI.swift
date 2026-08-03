@@ -37,6 +37,16 @@ enum MigrateCLI {
             }
             return ConfigCommand.run(arguments: [], json: json)
 
+        case "plan":
+            guard let error = validate(
+                commandArguments,
+                flags: ["all"],
+                options: ["filter", "from"]
+            ) else {
+                return PlanCommand.run(arguments: commandArguments, json: json)
+            }
+            return usageError(error)
+
         case "images":
             guard let error = validate(
                 commandArguments,
@@ -136,6 +146,7 @@ enum MigrateCLI {
         Subcommands:
           detect                 Survey local container runtimes (the default).
           config                 Inspect Docker CLI configuration, read-only.
+          plan [options]         Derive a read-only source/destination image plan.
           images [options]       Copy images into Morbstack.
           volumes [options]      Copy named volumes into Morbstack.
           verify [options]       Compare images and volumes between engines.
@@ -146,6 +157,11 @@ enum MigrateCLI {
           --all                    Include dangling images.
           --dry-run                Print the copy plan without changing anything.
           --yes                    Skip the copy confirmation.
+
+        Plan options:
+          --from <runtime|socket>  Docker Desktop, Colima, OrbStack, or a socket path.
+          --filter <text>          Include matching tagged images only.
+          --all                    Include dangling images.
 
         Volume options:
           --from <runtime|socket>  Docker Desktop, Colima, OrbStack, or a socket path.

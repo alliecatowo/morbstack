@@ -121,7 +121,15 @@ enum ImagesCommand {
         } catch {
             return ([], "could not list images on \(source.label): \(error)")
         }
-        let destImages = (try? destination.jsonArray("GET", "/images/json", query: [("all", "0")], timeout: 30)) ?? []
+        let destImages: [[String: Any]]
+        do {
+            destImages = try destination.jsonArray("GET", "/images/json", query: [("all", "0")], timeout: 30)
+        } catch {
+            // A comparison is only a plan when both inventories were actually read.
+            // Treating an unavailable destination as an empty one would claim every
+            // source image needs copying, which is neither safe nor useful.
+            return ([], "could not list images on Morbstack: \(error)")
+        }
         let destIds = Set(destImages.compactMap { JSONRead.string($0, "Id") })
 
         var items: [ImageCopyItem] = []

@@ -1,16 +1,13 @@
 // Copyright 2026 The Morbstack Authors.
 // Licensed under the Apache License, Version 2.0 (the "License").
 //
-// A read-only view of the migration sources `morb migrate` can inspect.
+// A read-only view of the migration sources Morbstack can inspect.
 //
-// `MorbMigrate` deliberately makes detection and Docker CLI configuration public,
-// read-only APIs. Its transfer commands are intentionally not reused here: images
-// expose terminal-rendered plan output rather than a structured plan, and volume dry
-// runs can create a temporary helper container while checking destination contents.
-// An app action that guessed at either result would make its scope look safer than it
-// is, so this route inspects real runtimes and hands off the explicitly typed CLI dry
-// run command instead. It never starts a runtime, writes Docker configuration, or
-// imports data.
+// The public `MigrationReadOnlyPlanner` derives an image comparison only after both
+// existing Docker engines respond to read-only requests. It intentionally excludes
+// volumes: the current CLI volume dry run creates a helper container. This route never
+// starts a runtime, asks a credential helper, writes Docker configuration, or imports
+// data.
 
 import MorbMigrate
 import SwiftUI
@@ -109,6 +106,9 @@ struct MigrationRootView: View {
     @State private var selection: MigrationRuntime.ID?
     @State private var showsInspector = true
     @State private var isInspecting = false
+    @State private var readOnlyPlan: MigrationReadOnlyPlan?
+    @State private var plannedRuntimeID: MigrationRuntime.ID?
+    @State private var isPlanning = false
 
     private var runtimes: [MigrationRuntime] { inspection?.runtimes ?? [] }
 
@@ -139,7 +139,10 @@ struct MigrationRootView: View {
                 selectFirstRuntimeIfNeeded()
             }
             .onChange(of: selection) { _, newValue in
-                if newValue != nil { showsInspector = true }
+                if newValue != nil {
+                    showsInspector = true
+                    Task { await inspectPlanForSelectedRuntime() }
+                }
             }
     }
 
@@ -156,8 +159,8 @@ struct MigrationRootView: View {
                     Image(systemName: "arrow.clockwise")
                 }
             }
-            .accessibilityLabel(isInspecting ? "Inspecting migration sources" : "Inspect migration sources")
-            .help("Inspect local container runtimes and Docker CLI configuration")
+            .accessibilityLabel(isInspecting ? "Inspecting migration sources" : "Refresh migration inspection")
+            .help("Refresh local runtime readiness and the selected image comparison")
             .disabled(isInspecting || model.launchOptions.tourFixtures)
         }
 
@@ -267,19 +270,31 @@ struct MigrationRootView: View {
     @ViewBuilder
     private func transferSection(for runtime: MigrationRuntime) -> some View {
         Section {
-            if let source = runtime.transferSourceToken {
+            if runtime.transferSourceToken != nil {
                 LabeledContent("Image Plan", value: imagePlanStatus(for: runtime))
-                Button {
-                    MorbPasteboard.copy("morb migrate images --from \(source) --dry-run")
-                } label: {
-                    Label("Copy Image Dry-Run Command", systemImage: "doc.on.doc")
-                }
-                .disabled(!runtime.running || !model.engine.isRunning)
+                if isPlanning && plannedRuntimeID != runtime.id {
+                    ProgressView("Comparing image inventories…")
+                        .controlSize(.small)
+                } else if let plan = plan(for: runtime), let images = plan.imagePlan {
+                    LabeledContent(
+                        "Would Copy",
+                        value: "\(images.wouldCopy.count) images · \(Formatters.bytesString(images.wouldCopyBytes))")
+                    LabeledContent("Already Present", value: "\(images.alreadyPresent.count) images")
+                    Text(
+                        images.items.isEmpty
+                            ? "No tagged images matched this comparison."
+                            : "The selected source and the running Morbstack engine were compared directly. No image data was imported.")
+                        .foregroundStyle(.secondary)
+                } else if let unavailableReason = plan(for: runtime)?.unavailableReason {
+                    Text(unavailableReason)
+                        .foregroundStyle(.secondary)
+                } else if runtime.running {
+                    Text("Select Refresh to derive a comparison from the two running engines.")
+                        .foregroundStyle(.secondary)
 
-                LabeledContent("Volume Plan", value: "CLI only")
+                LabeledContent("Volume Plan", value: "Not available")
                 Text(
-                    "The current volume dry run can create a temporary helper container to inspect the destination. "
-                        + "Morbstack keeps that operation in the CLI until the migration service exposes a structured, side-effect-free plan.")
+                    "The current volume dry run can create a temporary helper container to inspect the destination, so it is deliberately excluded here.")
                     .foregroundStyle(.secondary)
             } else {
                 Text(
@@ -325,9 +340,16 @@ struct MigrationRootView: View {
     }
 
     private func imagePlanStatus(for runtime: MigrationRuntime) -> String {
-        if !runtime.running { return "Start the source runtime" }
-        if !model.engine.isRunning { return "Start Morbstack" }
-        return "Copy CLI dry-run command"
+        guard runtime.running else { return "Source not running" }
+        guard plannedRuntimeID == runtime.id, let plan = readOnlyPlan else {
+            return isPlanning ? "Comparing…" : "Not inspected"
+        }
+        guard let images = plan.imagePlan else { return "Unavailable" }
+        return "\(images.wouldCopy.count) to copy"
+    }
+
+    private func plan(for runtime: MigrationRuntime) -> MigrationReadOnlyPlan? {
+        plannedRuntimeID == runtime.id ? readOnlyPlan : nil
     }
 
     @MainActor
@@ -341,6 +363,28 @@ struct MigrationRootView: View {
         }.value
         inspection = report
         selectFirstRuntimeIfNeeded()
+        await inspectPlanForSelectedRuntime()
+    }
+
+    @MainActor
+    private func inspectPlanForSelectedRuntime() async {
+        guard !model.launchOptions.tourFixtures, !isPlanning else { return }
+        guard let runtime = selectedRuntime, let source = runtime.transferSourceToken else {
+            readOnlyPlan = nil
+            plannedRuntimeID = nil
+            return
+        }
+
+        isPlanning = true
+        defer { isPlanning = false }
+        readOnlyPlan = nil
+        plannedRuntimeID = nil
+        let plan = await Task.detached(priority: .utility) {
+            MigrationReadOnlyPlanner.inspect(from: source)
+        }.value
+        guard selection == runtime.id else { return }
+        readOnlyPlan = plan
+        plannedRuntimeID = runtime.id
     }
 
     private func selectFirstRuntimeIfNeeded() {
