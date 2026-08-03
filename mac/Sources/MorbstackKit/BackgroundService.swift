@@ -108,6 +108,14 @@ public enum MorbBackgroundService {
         let desiredReceipt = try Receipt(bundle: bundle)
         let current = registration(of: agent)
 
+        // A newer macOS can expose a status this build does not understand. An
+        // explicit enable request is not authority to tear down an unknown service:
+        // preserve the existing registration and send the person to Login Items.
+        guard current != .unknown else {
+            throw MorbError.unsupported(
+                "macOS returned an unrecognized background-service state; inspect Login Items before changing Morbstack's service")
+        }
+
         // Apple requires re-registration when an app updates its helper executable
         // or plist. The receipt makes that explicit operation happen once per changed
         // payload, rather than restarting an already-current agent on every command.
@@ -133,8 +141,18 @@ public enum MorbBackgroundService {
                 throw MorbError.io("could not enable Morbstack background service: \(error.localizedDescription)")
             }
         }
-        try write(receipt: desiredReceipt)
         let registered = registration(of: agent)
+        // `register()` returning does not make a stale or rejected agent healthy.
+        // Keep the update receipt as evidence of a macOS-confirmed registration,
+        // rather than claiming that a launch agent whose state remains unresolved
+        // belongs to this bundle.
+        guard registered == .enabled || registered == .requiresApproval else {
+            removeReceipt()
+            return report(
+                registration: registered, plistPath: bundle.plistURL.path,
+                diagnostic: diagnostic(for: registered, bundle: bundle))
+        }
+        try write(receipt: desiredReceipt)
         return report(
             registration: registered, plistPath: bundle.plistURL.path,
             diagnostic: diagnostic(for: registered, bundle: bundle))
@@ -158,7 +176,12 @@ public enum MorbBackgroundService {
             return report(
                 registration: .notRegistered, plistPath: bundle.plistURL.path,
                 diagnostic: diagnostic(for: .notRegistered, bundle: bundle))
-        case .enabled, .requiresApproval, .unknown, .unavailable:
+        case .unknown:
+            // Do not mutate a registration whose meaning this SDK does not know.
+            // The owner can review and change it explicitly in Login Items.
+            throw MorbError.unsupported(
+                "macOS returned an unrecognized background-service state; inspect Login Items before changing Morbstack's service")
+        case .enabled, .requiresApproval, .unavailable:
             do {
                 try agent.unregister()
             } catch {

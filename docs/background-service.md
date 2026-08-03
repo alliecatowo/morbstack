@@ -16,3 +16,10 @@ The command foundation is intentionally explicit and idempotent: `status` never
 registers, `enable` treats already-registered as success, `disable` treats an absent
 service as success, and opening Login Items is a separate direct request. No build,
 app launch, daemon start, or installation path registers a background service.
+
+If a newer macOS reports a Service Management state this build does not recognize,
+Morbstack does not unregister or replace the existing service. The command reports the
+state and directs the person to Login Items. Likewise, Morbstack records an update
+receipt only after macOS reports the service as enabled or awaiting approval; a
+successful API call with an unresolved status is not treated as proof that this app
+bundle owns a healthy agent.
