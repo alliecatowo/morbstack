@@ -122,6 +122,16 @@ the only port-forward capability proposed for Morbstack. It is deliberately a
 small local-development escape hatch, not a general Kubernetes proxy and not a
 replacement for a person's `kubectl` installation.
 
+The source tree now records the exact Darwin arm64 `kubectl` release that a
+future coordinator may use, and can hash-verify it if a release pipeline
+*explicitly* stages it at the private bundle path
+`Contents/Resources/host-bin/kubernetes/kubectl`. The artifact is not fetched
+by default, is absent from the current app, and has no UI or CLI action. A
+missing, symlinked, non-executable, or hash-mismatched helper is an explicit
+unavailable result; it will not fall back to `PATH`, a user-installed
+`kubectl`, `KUBECONFIG`, or `~/.kube/config`. This packaging boundary does not
+create a listener, child process, credential, or port-forward capability.
+
 The daemon will accept a request only for the Pod currently selected in
 Morbstack: its namespace, DNS-style name, and current Kubernetes UID, plus one
 validated TCP Pod port and a requested loopback TCP port. It will reject

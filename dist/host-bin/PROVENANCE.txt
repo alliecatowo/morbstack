@@ -1,7 +1,7 @@
 Morbstack host Docker CLI toolchain provenance
 =================================================
 
-Three client-side binaries live here, laid out exactly the way
+Three Docker client-side binaries live here, laid out exactly the way
 Morbstack.app itself bundles them (Contents/Resources/host-bin/) and the
 way the `docker` CLI's own cli-plugins resolution expects:
 
@@ -22,6 +22,14 @@ zero-config-discovery finding and docs/compat.md. `morb install-cli`
 (mac/Sources/morb/main.swift) is what actually wires these onto a user's
 system, always with explicit consent — see that command's own help text and
 MorbstackKit/CliPlugins.swift/MorbPathSetup.swift for the mechanics.
+
+The reserved path below is deliberately different: it is a private app helper,
+not a Docker plugin and never a user-installed command. Its provenance record
+is kept here before its bytes are fetched so a release pipeline has one
+deterministic source of truth. A normal source checkout and the current app do
+**not** contain it, and no port-forward capability is implemented or exposed.
+
+    dist/host-bin/kubernetes/kubectl                 <- future private helper
 
 -----------------------------------------------------------------------
 docker (the client itself)
@@ -136,6 +144,36 @@ the default builder since Docker 23+) and `docker buildx build` both
 failed out of the box with a stock docker CLI: `docker: 'buildx' is not
 a docker command`. This is the single highest-ROI fix identified by that
 audit. Fetched by scripts/fetch-guest-assets.sh (--buildx-only).
+
+-----------------------------------------------------------------------
+kubectl (private, future selected-Pod port-forward helper)
+-----------------------------------------------------------------------
+
+Status: declared and verified when explicitly staged; absent from the current
+bundle. This is not a general `kubectl` distribution, an installation action,
+or evidence that Morbstack currently implements Kubernetes port-forwarding.
+
+File: kubernetes/kubectl
+Version: v1.36.2
+Platform: darwin-arm64
+License: Apache-2.0
+Source: https://dl.k8s.io/release/v1.36.2/bin/darwin/arm64/kubectl
+sha256: 4408c85c83fd3a31adaa555bdf3c7a6c81f74b19449a9060ba31ab91926f023d
+
+Verification: `scripts/fetch-guest-assets.sh --host-kubectl-only` first
+compares the official adjacent `kubectl.sha256` sidecar to the pin above, then
+hashes the downloaded bytes before installing them. `mise run app` repeats the
+same hash check and refuses a symlink before it copies/signs an explicitly
+staged helper. `MorbKubernetesKubectl.bundledKubectl()` repeats the regular-file,
+executable, and SHA-256 checks at future use time. It never searches PATH or
+uses a person's kubectl, KUBECONFIG, or ~/.kube/config when the helper is absent
+or invalid.
+
+The helper lives outside `cli-plugins`, is never touched by `morb install-cli`,
+and is not fetched by the script's default asset set. A later selected-Pod
+coordinator must use it only through its fixed absolute bundle path and a
+Morbstack-private ephemeral credential file; that coordinator and its required
+clean-cluster acceptance matrix are still pending in docs/k8s.md.
 
 -----------------------------------------------------------------------
 Installing the toolchain

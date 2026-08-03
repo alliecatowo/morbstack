@@ -53,6 +53,12 @@
 #                functional; shipping this client-side plugin is what turns
 #                that into a working `docker build`/`docker buildx build`
 #                out of the box.
+#   8. kubectl:  Kubernetes v1.36.2 client for the HOST darwin-arm64. This
+#                is a deliberately private, optional helper at
+#                dist/host-bin/kubernetes/kubectl. It is not installed into
+#                PATH, is not part of the ordinary Docker toolchain, and is
+#                not fetched by the default asset set while selected-Pod
+#                port-forward remains unimplemented. See docs/k8s.md.
 #
 #   dist/host-bin/ mirrors exactly how Morbstack.app itself bundles these
 #   three (Contents/Resources/host-bin/{docker,cli-plugins/docker-compose,
@@ -61,7 +67,7 @@
 #   Resources/host-bin/), no path special-casing between them. See
 #   MorbstackKit/CliPlugins.swift.
 #
-#   8. k8s:      k3s v1.36.2+k3s1 arm64 server binary and cri-dockerd v0.4.4
+#   9. k8s:      k3s v1.36.2+k3s1 arm64 server binary and cri-dockerd v0.4.4
 #                arm64, both hash-pinned -> dist/guest-k8s/ (the repository's
 #                provenance-bearing cache) and $MORBSTACK_HOME/data/k8s/ (the
 #                copy morbstackd actually reads). This is the OPTIONAL
@@ -86,6 +92,7 @@
 #   scripts/fetch-guest-assets.sh --cli-only       # host docker CLI binary only
 #   scripts/fetch-guest-assets.sh --compose-only   # host docker-compose only
 #   scripts/fetch-guest-assets.sh --buildx-only    # host docker-buildx only
+#   scripts/fetch-guest-assets.sh --host-kubectl-only # private future helper only
 #   scripts/fetch-guest-assets.sh --k8s-only       # k3s + cri-dockerd only
 #   scripts/fetch-guest-assets.sh -h               # help
 #
@@ -232,13 +239,25 @@ BUILDX_RELEASE_URL="https://github.com/docker/buildx/releases/download/${BUILDX_
 BUILDX_SHA256_SIDECAR_URL="https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/checksums-signed.txt"
 BUILDX_SHA256="82c6a3d9df37790c5bdb0d7ca88986d1d17622fc2b88ebe34b275c6c47acd7a6"
 
+# --- kubectl: Kubernetes client, HOST darwin-arm64 ---
+#
+# This is intentionally kept separate from the Docker CLI and its plugins. A
+# future selected-Pod port-forward may execute only this absolute, hash-verified
+# app-bundled path with a Morbstack-private ephemeral credential. It must never
+# substitute a user-installed client or configuration. The official release page
+# publishes both this exact binary and the one-line sha256 sidecar.
+KUBECTL_VERSION="v1.36.2"
+KUBECTL_RELEASE_URL="https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/darwin/arm64/kubectl"
+KUBECTL_SHA256_SIDECAR_URL="${KUBECTL_RELEASE_URL}.sha256"
+KUBECTL_SHA256="4408c85c83fd3a31adaa555bdf3c7a6c81f74b19449a9060ba31ab91926f023d"
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 usage() {
 	cat <<EOF
-Usage: $(basename "$0") [--kernel-only|--docker-only|--alpine-only|--fsutils-only|--host-cli|--cli-only|--compose-only|--buildx-only|--k8s-only] [-h]
+Usage: $(basename "$0") [--kernel-only|--docker-only|--alpine-only|--fsutils-only|--host-cli|--cli-only|--compose-only|--buildx-only|--host-kubectl-only|--k8s-only] [-h]
 
 Fetch and verify all pinned third-party guest assets:
   kernel   -> ${MORBSTACK_HOME}/data/kernel/vmlinux
@@ -248,6 +267,7 @@ Fetch and verify all pinned third-party guest assets:
   cli      -> ${REPO_ROOT}/dist/host-bin/docker
   compose  -> ${REPO_ROOT}/dist/host-bin/cli-plugins/docker-compose
   buildx   -> ${REPO_ROOT}/dist/host-bin/cli-plugins/docker-buildx
+  kubectl  -> ${REPO_ROOT}/dist/host-bin/kubernetes/kubectl (optional; not fetched by default)
   k8s      -> ${REPO_ROOT}/dist/guest-k8s/  and  ${MORBSTACK_HOME}/data/k8s/
 
 Options:
@@ -259,6 +279,9 @@ Options:
   --cli-only       Only fetch/verify the host docker CLI binary
   --compose-only   Only fetch/verify the host docker-compose CLI plugin
   --buildx-only    Only fetch/verify the host docker-buildx CLI plugin
+  --host-kubectl-only
+                    Only fetch/verify the private host kubectl helper for a future
+                    selected-Pod port-forward; it does not enable that feature
   --k8s-only       Only fetch/verify the k3s + cri-dockerd Kubernetes payload
   -h               Show this help and exit
 EOF
@@ -771,6 +794,56 @@ fetch_buildx() {
 }
 
 # ---------------------------------------------------------------------------
+# Step: kubectl (HOST darwin-arm64, private future port-forward helper)
+# ---------------------------------------------------------------------------
+
+fetch_kubectl() {
+	echo "== kubectl (${KUBECTL_VERSION}, HOST darwin-arm64, optional private helper) =="
+
+	local dest_dir="${REPO_ROOT}/dist/host-bin/kubernetes"
+	local dest_file="${dest_dir}/kubectl"
+
+	require_cmd curl
+
+	if [ -x "${dest_file}" ]; then
+		local have_sha
+		have_sha="$(sha256_of "${dest_file}")"
+		if [ "${have_sha}" = "${KUBECTL_SHA256}" ]; then
+			check "private kubectl already present and verified: ${dest_file}"
+			return 0
+		fi
+		echo "  existing kubectl has sha256 ${have_sha}, expected ${KUBECTL_SHA256}; re-fetching" >&2
+	fi
+
+	mkdir -p "${dest_dir}"
+	local tmp
+	tmp="$(mktemp "${TMPDIR:-/tmp}/morbstack-kubectl.XXXXXX")"
+	trap 'rm -f "${tmp}"' RETURN
+
+	info "fetching sha256 sidecar ${KUBECTL_SHA256_SIDECAR_URL}"
+	local sidecar_sha
+	sidecar_sha="$(curl --fail --location --show-error --silent "${KUBECTL_SHA256_SIDECAR_URL}" | tr -d '[:space:]')"
+	[ "${sidecar_sha}" = "${KUBECTL_SHA256}" ] ||
+		fail "kubectl sha256 sidecar (${sidecar_sha}) does not match the pin in this script (${KUBECTL_SHA256}); upstream release may have changed"
+
+	info "downloading ${KUBECTL_RELEASE_URL}"
+	curl --fail --location --show-error --progress-bar --output "${tmp}" "${KUBECTL_RELEASE_URL}" ||
+		fail "failed to download kubectl"
+
+	local got_sha
+	got_sha="$(sha256_of "${tmp}")"
+	[ "${got_sha}" = "${KUBECTL_SHA256}" ] ||
+		fail "kubectl sha256 mismatch: got ${got_sha}, expected ${KUBECTL_SHA256} (possible corruption or upstream tamper)"
+
+	install -m 0755 "${tmp}" "${dest_file}"
+	check "installed and verified private helper: ${dest_file}"
+	info "this only stages a future helper; it does not enable or expose Kubernetes port-forwarding"
+
+	trap - RETURN
+	rm -f "${tmp}"
+}
+
+# ---------------------------------------------------------------------------
 # Step: k8s (k3s + cri-dockerd, GUEST aarch64)
 # ---------------------------------------------------------------------------
 
@@ -976,6 +1049,7 @@ DO_FSUTILS=1
 DO_CLI=1
 DO_COMPOSE=1
 DO_BUILDX=1
+DO_KUBECTL=0
 DO_K8S=1
 
 while [ $# -gt 0 ]; do
@@ -987,6 +1061,7 @@ while [ $# -gt 0 ]; do
 		DO_CLI=0
 		DO_COMPOSE=0
 		DO_BUILDX=0
+		DO_KUBECTL=0
 		DO_K8S=0
 		;;
 	--docker-only)
@@ -996,6 +1071,7 @@ while [ $# -gt 0 ]; do
 		DO_CLI=0
 		DO_COMPOSE=0
 		DO_BUILDX=0
+		DO_KUBECTL=0
 		DO_K8S=0
 		;;
 	--alpine-only)
@@ -1005,6 +1081,7 @@ while [ $# -gt 0 ]; do
 		DO_CLI=0
 		DO_COMPOSE=0
 		DO_BUILDX=0
+		DO_KUBECTL=0
 		DO_K8S=0
 		;;
 	--fsutils-only)
@@ -1014,6 +1091,7 @@ while [ $# -gt 0 ]; do
 		DO_CLI=0
 		DO_COMPOSE=0
 		DO_BUILDX=0
+		DO_KUBECTL=0
 		DO_K8S=0
 		;;
 	--host-cli)
@@ -1024,6 +1102,7 @@ while [ $# -gt 0 ]; do
 		DO_CLI=1
 		DO_COMPOSE=1
 		DO_BUILDX=1
+		DO_KUBECTL=0
 		DO_K8S=0
 		;;
 	--cli-only)
@@ -1033,6 +1112,7 @@ while [ $# -gt 0 ]; do
 		DO_FSUTILS=0
 		DO_COMPOSE=0
 		DO_BUILDX=0
+		DO_KUBECTL=0
 		DO_K8S=0
 		;;
 	--compose-only)
@@ -1042,6 +1122,7 @@ while [ $# -gt 0 ]; do
 		DO_FSUTILS=0
 		DO_CLI=0
 		DO_BUILDX=0
+		DO_KUBECTL=0
 		DO_K8S=0
 		;;
 	--buildx-only)
@@ -1051,6 +1132,18 @@ while [ $# -gt 0 ]; do
 		DO_FSUTILS=0
 		DO_CLI=0
 		DO_COMPOSE=0
+		DO_KUBECTL=0
+		DO_K8S=0
+		;;
+	--host-kubectl-only)
+		DO_KERNEL=0
+		DO_DOCKER=0
+		DO_ALPINE=0
+		DO_FSUTILS=0
+		DO_CLI=0
+		DO_COMPOSE=0
+		DO_BUILDX=0
+		DO_KUBECTL=1
 		DO_K8S=0
 		;;
 	--k8s-only)
@@ -1061,6 +1154,7 @@ while [ $# -gt 0 ]; do
 		DO_CLI=0
 		DO_COMPOSE=0
 		DO_BUILDX=0
+		DO_KUBECTL=0
 		;;
 	-h | --help)
 		usage
@@ -1082,6 +1176,7 @@ done
 [ "${DO_CLI}" -eq 1 ] && fetch_docker_cli
 [ "${DO_COMPOSE}" -eq 1 ] && fetch_compose
 [ "${DO_BUILDX}" -eq 1 ] && fetch_buildx
+[ "${DO_KUBECTL}" -eq 1 ] && fetch_kubectl
 [ "${DO_K8S}" -eq 1 ] && fetch_k8s
 
 echo ""

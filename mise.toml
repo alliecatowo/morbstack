@@ -209,6 +209,24 @@ for TOOL in \
 		exit 1
 	fi
 done
+# `kubectl` is intentionally optional today: there is no port-forward feature to
+# ship until its bounded coordinator and clean-cluster acceptance exist. If a
+# release pipeline has explicitly staged the future helper, however, verify the
+# exact provenance pin here before copying/signing it. A missing helper remains a
+# truthful unavailable state in MorbstackKit; a mismatched or symlinked helper must
+# never become a sealed part of an app bundle.
+KUBECTL=dist/host-bin/kubernetes/kubectl
+if [ -e "$KUBECTL" ] || [ -L "$KUBECTL" ]; then
+	if [ ! -x "$KUBECTL" ] || [ -L "$KUBECTL" ]; then
+		echo "error: optional bundled kubectl is not an executable regular file: $KUBECTL" >&2
+		exit 1
+	fi
+	KUBECTL_SHA256=`shasum -a 256 "$KUBECTL" | awk '{print $1}'`
+	if [ "$KUBECTL_SHA256" != "4408c85c83fd3a31adaa555bdf3c7a6c81f74b19449a9060ba31ab91926f023d" ]; then
+		echo "error: optional bundled kubectl failed SHA-256 verification: $KUBECTL" >&2
+		exit 1
+	fi
+fi
 
 # One product per invocation: `swift build` accepts a single `--product`,
 # and passing two silently builds only the last one — which then fails
@@ -285,6 +303,9 @@ codesign --force --sign - --entitlements mac/Resources/morbstackd.entitlements \
 codesign --force --sign - dist/Morbstack.app/Contents/Resources/host-bin/docker
 codesign --force --sign - dist/Morbstack.app/Contents/Resources/host-bin/cli-plugins/docker-compose
 codesign --force --sign - dist/Morbstack.app/Contents/Resources/host-bin/cli-plugins/docker-buildx
+if [ -e dist/Morbstack.app/Contents/Resources/host-bin/kubernetes/kubectl ]; then
+	codesign --force --sign - dist/Morbstack.app/Contents/Resources/host-bin/kubernetes/kubectl
+fi
 codesign --force --sign - dist/Morbstack.app
 # Fail loudly rather than shipping a daemon that cannot boot the guest.
 codesign -d --entitlements - dist/Morbstack.app/Contents/MacOS/morbstackd 2>&1 \
