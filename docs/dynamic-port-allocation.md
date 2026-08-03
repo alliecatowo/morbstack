@@ -63,6 +63,27 @@ the existing 256 KiB preflight window, a single numeric `Content-Length`, no
 and 128 KiB of body. It returns a clear host error rather than exposing an unassociated
 `201` if the response does not meet that contract.
 
+## Fixed-TCP recovery after a VM stop
+
+The listener itself is intentionally not persisted across a VM/daemon stop: while the
+guest is absent, accepting the Mac port would be a false availability claim. The next
+bodyless `POST /containers/<canonical-full-64-lowercase-hex-id>/start` instead gets
+a bounded inspect on a fresh Docker-API vsock connection after the guest is ready.
+Morbstack accepts that
+recovery only when the inspect response proves the same stopped ID and every
+`HostConfig.PortBindings` entry is a concrete, unambiguous loopback TCP endpoint. It
+then binds and associates all listeners under the current forwarder generation before
+relaying the original start bytes; the existing exact-`204` observer remains the only
+activation handoff.
+
+This is not durable host-side lease persistence or general start interception. A
+name/unique-prefix start, inspect or lifecycle failure, a running container, empty or
+zero host port, range, UDP/non-TCP, unsupported address, malformed/ambiguous binding,
+or a non-bodyless request remains an unchanged relay with no synchronous recovery
+claim. If a fully proved endpoint cannot be bound on macOS, the start is rejected
+before it reaches the Engine rather than reporting a container that Morbstack cannot
+publish.
+
 ## Still outside the synchronous guarantee
 
 The following remain unsupported or explicitly outside this transaction:

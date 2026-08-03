@@ -153,6 +153,73 @@ final class PortForwardingTests: XCTestCase {
         XCTAssertTrue(rangeMessage.contains("not a single port"))
     }
 
+    // MARK: - Fixed TCP lease recovery after VM loss
+
+    func testStoppedFullIDInspectYieldsOnlyConcreteLoopbackTCPLeaseBindings() {
+        let containerID = String(repeating: "a", count: 64)
+        let inspect = Data(
+            """
+            {
+              "Id":"\(containerID)",
+              "State":{"Running":false},
+              "HostConfig":{"PortBindings":{
+                "80/tcp":[
+                  {"HostIp":"::","HostPort":"8080"},
+                  {"HostIp":"0.0.0.0","HostPort":"8080"}
+                ],
+                "443/tcp":[{"HostIp":"127.0.0.1","HostPort":"8443"}]
+              }}
+            }
+            """.utf8)
+
+        XCTAssertTrue(DockerPortPublicationPreflight.isFullContainerID(containerID))
+        XCTAssertEqual(
+            DockerPortPublicationPreflight.stoppedContainerTCPBindings(
+                in: inspect,
+                expectedContainerID: containerID),
+            [
+                DockerExplicitTCPPortBinding(hostIP: "0.0.0.0", hostPort: 8080, containerPort: 80),
+                DockerExplicitTCPPortBinding(hostIP: "127.0.0.1", hostPort: 8443, containerPort: 443)
+            ])
+    }
+
+    func testStoppedInspectRecoveryRefusesUnprovenIdentityOrPublicationShapes() {
+        let containerID = String(repeating: "b", count: 64)
+        func inspect(id: String, running: Bool = false, bindings: String) -> Data {
+            Data(
+                """
+                {"Id":"\(id)","State":{"Running":\(running)},
+                "HostConfig":{"PortBindings":\(bindings)}}
+                """.utf8)
+        }
+
+        XCTAssertFalse(DockerPortPublicationPreflight.isFullContainerID("short-id"))
+        XCTAssertFalse(DockerPortPublicationPreflight.isFullContainerID(String(repeating: "B", count: 64)))
+        XCTAssertNil(
+            DockerPortPublicationPreflight.stoppedContainerTCPBindings(
+                in: inspect(id: String(repeating: "c", count: 64), bindings: #"{"80/tcp":[{"HostPort":"8080"}]}"#),
+                expectedContainerID: containerID))
+        XCTAssertNil(
+            DockerPortPublicationPreflight.stoppedContainerTCPBindings(
+                in: inspect(id: containerID, running: true, bindings: #"{"80/tcp":[{"HostPort":"8080"}]}"#),
+                expectedContainerID: containerID))
+
+        for bindings in [
+            #"{"80/tcp":[{"HostPort":""}]}"#,
+            #"{"80/tcp":[{"HostPort":"0"}]}"#,
+            #"{"80/tcp":[{"HostPort":"8080-8081"}]}"#,
+            #"{"53/udp":[{"HostPort":"5353"}]}"#,
+            #"{"80/tcp":[{"HostIp":"192.168.65.3","HostPort":"8080"}]}"#,
+            #"{"80/tcp":[{"HostPort":"8080"}],"81/tcp":[{"HostPort":"8080"}]}"#
+        ] {
+            XCTAssertNil(
+                DockerPortPublicationPreflight.stoppedContainerTCPBindings(
+                    in: inspect(id: containerID, bindings: bindings),
+                    expectedContainerID: containerID),
+                "\(bindings) must retain the raw start relay")
+        }
+    }
+
     // MARK: - Running containers (the auto-suspend interlock)
 
     /// The idle timer asks the engine this question before it is allowed to tear the

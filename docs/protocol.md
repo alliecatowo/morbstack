@@ -502,8 +502,17 @@ later recognized start can reuse it. A destroy event releases it immediately. Wh
 there are associated leases, a `containers/json?all=1` reconciliation additionally
 reclaims identities absent from Docker's snapshot, covering an event missed during
 reconnect. Daemon or VM-forwarder shutdown deliberately releases all leases: they
-cannot survive a VM-unavailable interval, and only normal running-container
-discovery is rebuilt after the VM returns.
+do not remain bound while there is no guest service to forward to. Once the guest is
+again serving Docker, a bodyless start by an **exact canonical full container ID**
+gets one bounded `GET /containers/<id>/json` before that unchanged start reaches
+dockerd. If
+the inspect response proves the same stopped ID and a fully understood set of fixed,
+loopback TCP `HostConfig.PortBindings`, Morbstack atomically rebinds and associates
+those listeners in the current forwarder generation; the existing exact-204 handoff
+then activates them. Inspect failures, names or ID prefixes, running containers,
+dynamic/ranged/UDP/non-loopback/ambiguous bindings, and lifecycle-generation changes
+remain raw start relays with no synchronous recovery guarantee. A concrete Mac bind
+failure instead returns Docker-style HTTP 500 before dockerd starts the container.
 
 The admission path rejects SCTP/unknown protocols and host addresses outside the
 loopback-only forwarder's supported set rather than letting them become a

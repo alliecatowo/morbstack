@@ -243,6 +243,23 @@ public final class PortForwarder {
         let publications: [DockerExplicitTCPPortBinding]
     }
 
+    /// The only non-error way an inspect-derived reservation can decline. It means
+    /// a lifecycle transition or another owner changed the in-memory ledger between
+    /// the guest inspect and the atomic host bind; DockerProxy must retain its raw
+    /// relay fallback rather than report a host-side publication error.
+    private enum TCPPortReservationAttempt {
+        case reserved(DynamicTCPPortReservation)
+        case noLongerCurrent
+    }
+
+    /// Couples the recovered host lease to the immutable ID proved by a stopped
+    /// container inspect, while rejecting a VM-forwarder generation that changed
+    /// during that blocking inspect.
+    private struct StartLeaseAssociation {
+        let containerID: String
+        let generation: Int
+    }
+
     private struct LeaseRecord {
         let lease: TCPPortLease
         var listeners: [Int: TCPListener]
@@ -407,7 +424,13 @@ public final class PortForwarder {
         _ publications: [DockerExplicitTCPPortBinding]
     ) throws -> TCPPortLease {
         precondition(!publications.isEmpty, "a TCP lease needs at least one fixed publication")
-        return try reserveTCPPorts(fixed: publications, dynamic: []).lease
+        guard case .reserved(let reservation) = try reserveTCPPorts(
+            fixed: publications,
+            dynamic: [])
+        else {
+            preconditionFailure("an unconditional fixed TCP reservation cannot become stale")
+        }
+        return reservation.lease
     }
 
     /// Reserves fixed TCP ports and kernel-selected dynamic TCP ports as one lease.
@@ -421,7 +444,78 @@ public final class PortForwarder {
         alongside fixedPublications: [DockerExplicitTCPPortBinding]
     ) throws -> DynamicTCPPortReservation {
         precondition(!publications.isEmpty, "a dynamic TCP transaction needs at least one publication")
-        return try reserveTCPPorts(fixed: fixedPublications, dynamic: publications)
+        guard case .reserved(let reservation) = try reserveTCPPorts(
+            fixed: fixedPublications,
+            dynamic: publications)
+        else {
+            preconditionFailure("an unconditional dynamic TCP reservation cannot become stale")
+        }
+        return reservation
+    }
+
+    /// Rebuilds a fixed TCP lease that was deliberately released while the VM was
+    /// unavailable. The caller has already proved the request is a bodyless start
+    /// for a full immutable ID; this method independently proves that the Engine
+    /// still describes that exact stopped container with only concrete loopback TCP
+    /// bindings before it opens any Mac listener.
+    ///
+    /// Blocking by design. DockerProxy invokes it on its relay worker after
+    /// `ensureRunning`, never on the VM or forwarder lifecycle queues. An inspect
+    /// transport/response failure is deliberately an opaque fallback (`nil`), not a
+    /// synthetic Docker error. A real Mac bind failure throws so the start cannot
+    /// reach dockerd after Morbstack failed to reserve its promised endpoint.
+    func reserveStoppedContainerStartLease(
+        containerID: String,
+        timeout: TimeInterval = 5
+    ) throws -> TCPPortLease? {
+        guard DockerPortPublicationPreflight.isFullContainerID(containerID) else {
+            return nil
+        }
+
+        lock.lock()
+        guard running, leaseByContainerID[containerID] == nil else {
+            lock.unlock()
+            return nil
+        }
+        let inspectedGeneration = generation
+        lock.unlock()
+
+        let inspectBody: Data
+        do {
+            inspectBody = try getEngineJSON(
+                path: DockerAPIDecoding.containerInspectPath(containerID: containerID),
+                timeout: timeout)
+        } catch {
+            // An unavailable/old Engine must retain the historical byte-for-byte
+            // start relay. Event reconciliation can still publish a later running
+            // endpoint, but this request receives no synchronous lease claim.
+            log.info("could not inspect stopped container \(String(containerID.prefix(12))) for TCP lease recovery: \(error)")
+            return nil
+        }
+
+        guard let publications = DockerPortPublicationPreflight.stoppedContainerTCPBindings(
+            in: inspectBody,
+            expectedContainerID: containerID)
+        else {
+            return nil
+        }
+
+        let association = StartLeaseAssociation(
+            containerID: containerID,
+            generation: inspectedGeneration)
+        switch try reserveTCPPorts(
+            fixed: publications,
+            dynamic: [],
+            startLeaseAssociation: association)
+        {
+        case .reserved(let reservation):
+            let ports = publications.map(\.hostPort).map(String.init).joined(separator: ", ")
+            log.info(
+                "recovered TCP lease \(ports) for stopped container \(String(containerID.prefix(12))) before Docker start")
+            return reservation.lease
+        case .noLongerCurrent:
+            return nil
+        }
     }
 
     /// The one lock covers both concrete binds and `port: 0` allocation. This makes
@@ -429,8 +523,9 @@ public final class PortForwarder {
     /// create can reach the guest.
     private func reserveTCPPorts(
         fixed fixedPublications: [DockerExplicitTCPPortBinding],
-        dynamic dynamicPublications: [DockerExplicitTCPPortBinding]
-    ) throws -> DynamicTCPPortReservation {
+        dynamic dynamicPublications: [DockerExplicitTCPPortBinding],
+        startLeaseAssociation: StartLeaseAssociation? = nil
+    ) throws -> TCPPortReservationAttempt {
         let leaseID = UUID()
         var listeners: [Int: TCPListener] = [:]
         var allocatedDynamic: [DockerExplicitTCPPortBinding] = []
@@ -440,6 +535,15 @@ public final class PortForwarder {
         // concurrent stop could clear the ledger between these two steps, leaving an
         // anonymous descriptor alive with no owner that can release it.
         lock.lock()
+        if let startLeaseAssociation {
+            guard running,
+                  generation == startLeaseAssociation.generation,
+                  leaseByContainerID[startLeaseAssociation.containerID] == nil
+            else {
+                lock.unlock()
+                return .noLongerCurrent
+            }
+        }
         do {
             for publication in fixedPublications {
                 let listener = TCPListener(port: publication.hostPort, queue: acceptQueue)
@@ -483,7 +587,13 @@ public final class PortForwarder {
                 throw TCPPortLeaseError.unavailable("dynamic TCP allocation did not retain every requested listener")
             }
             let lease = TCPPortLease(identifier: leaseID, publications: allPublications)
-            leases[lease.identifier] = LeaseRecord(lease: lease, listeners: listeners)
+            leases[lease.identifier] = LeaseRecord(
+                lease: lease,
+                listeners: listeners,
+                containerID: startLeaseAssociation?.containerID)
+            if let startLeaseAssociation {
+                leaseByContainerID[startLeaseAssociation.containerID] = lease.identifier
+            }
             lock.unlock()
         } catch {
             lock.unlock()
@@ -492,9 +602,10 @@ public final class PortForwarder {
         }
 
         let ports = (fixedPublications + allocatedDynamic).map(\.hostPort).map(String.init).joined(separator: ", ")
-        log.info("reserved TCP port\(expectedPublicationCount == 1 ? "" : "s") \(ports) for Docker create")
+        let purpose = startLeaseAssociation == nil ? "Docker create" : "Docker start"
+        log.info("reserved TCP port\(expectedPublicationCount == 1 ? "" : "s") \(ports) for \(purpose)")
         let lease = TCPPortLease(identifier: leaseID, publications: fixedPublications + allocatedDynamic)
-        return DynamicTCPPortReservation(lease: lease, publications: allocatedDynamic)
+        return .reserved(DynamicTCPPortReservation(lease: lease, publications: allocatedDynamic))
     }
 
     /// Records the only stable identity returned by Docker's create response.

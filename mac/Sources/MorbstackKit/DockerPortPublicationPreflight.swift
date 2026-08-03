@@ -251,6 +251,111 @@ public enum DockerPortPublicationPreflight {
         return byHostPort.values.sorted { $0.hostPort < $1.hostPort }
     }
 
+    /// Whether `identifier` is an immutable Docker container ID rather than a name
+    /// or an accepted unique prefix.
+    ///
+    /// A start-time lease recovery has to inspect one container and then forward an
+    /// unchanged start request. Names and prefixes can resolve to a different object
+    /// between those operations, so that recovery deliberately accepts only this
+    /// canonical, 64-character lowercase hexadecimal form Docker returns in its
+    /// inspect response.
+    static func isFullContainerID(_ identifier: String) -> Bool {
+        let bytes = Array(identifier.utf8)
+        guard bytes.count == 64 else { return false }
+        return bytes.allSatisfy { byte in
+            (48...57).contains(byte) || (97...102).contains(byte)
+        }
+    }
+
+    /// Returns the fully understood fixed TCP publications in a stopped-container
+    /// inspect document, or `nil` when this document cannot safely support a
+    /// synchronous start-time host lease.
+    ///
+    /// This is intentionally stricter than ``explicitTCPBindings(in:)``. The latter
+    /// may ignore an Engine-owned or unsupported sibling in a create request; an
+    /// inspect-derived recovery must instead understand *every* published entry
+    /// before it reserves any port. Otherwise it could make a partial claim while
+    /// forwarding a start for a container with a different publication shape.
+    ///
+    /// The caller supplies the full ID from the request path. Matching it to the
+    /// inspect document is the identity proof that lets the proxy preserve the
+    /// original start bytes without a name/prefix reuse race.
+    static func stoppedContainerTCPBindings(
+        in inspectBody: Data,
+        expectedContainerID: String
+    ) -> [DockerExplicitTCPPortBinding]? {
+        guard isFullContainerID(expectedContainerID),
+              let object = try? JSONSerialization.jsonObject(with: inspectBody) as? [String: Any],
+              let containerID = object["Id"] as? String,
+              containerID == expectedContainerID,
+              let state = object["State"] as? [String: Any],
+              let isRunning = state["Running"] as? Bool,
+              !isRunning,
+              let hostConfig = object["HostConfig"] as? [String: Any],
+              let portBindings = hostConfig["PortBindings"] as? [String: Any],
+              !portBindings.isEmpty
+        else {
+            return nil
+        }
+
+        // The host owns one loopback listener per port. Docker may describe the
+        // same target through IPv4 and IPv6 wildcard entries; retain the IPv4
+        // spelling for diagnostics, matching PortForwardPlan.desiredListeners(_:).
+        var byHostPort: [Int: DockerExplicitTCPPortBinding] = [:]
+        var ambiguousHostPorts: Set<Int> = []
+
+        for containerPortKey in portBindings.keys.sorted() {
+            guard networkProtocol(in: containerPortKey) == "tcp",
+                  let containerPort = containerPort(in: containerPortKey),
+                  (1...65535).contains(containerPort),
+                  let entries = portBindings[containerPortKey] as? [Any],
+                  !entries.isEmpty
+            else {
+                return nil
+            }
+
+            for rawEntry in entries {
+                guard let entry = rawEntry as? [String: Any],
+                      let rawHostPort = string(entry["HostPort"])?.trimmingCharacters(in: .whitespaces),
+                      let hostPort = Int(rawHostPort),
+                      (1...65535).contains(hostPort)
+                else {
+                    // Empty, zero, missing, and ranged values are all Engine-owned
+                    // allocation shapes. A recovery must leave them opaque.
+                    return nil
+                }
+                let hostIP = string(entry["HostIp"])?.trimmingCharacters(in: .whitespaces) ?? ""
+                guard PortForwardPlan.forwardableHostAddresses.contains(hostIP) else {
+                    return nil
+                }
+
+                let candidate = DockerExplicitTCPPortBinding(
+                    hostIP: hostIP,
+                    hostPort: hostPort,
+                    containerPort: containerPort)
+                guard !ambiguousHostPorts.contains(hostPort) else { continue }
+                if let existing = byHostPort[hostPort] {
+                    guard existing.containerPort == candidate.containerPort else {
+                        byHostPort.removeValue(forKey: hostPort)
+                        ambiguousHostPorts.insert(hostPort)
+                        continue
+                    }
+                    if existing.hostIP.contains(":"), !candidate.hostIP.contains(":") {
+                        byHostPort[hostPort] = candidate
+                    }
+                } else {
+                    byHostPort[hostPort] = candidate
+                }
+            }
+        }
+
+        // An ambiguous Mac port must not be reserved for one of several guest
+        // targets. Treat the whole recovery as unsupported rather than making a
+        // partial promise; the ordinary event reconciler remains the fallback.
+        guard ambiguousHostPorts.isEmpty, !byHostPort.isEmpty else { return nil }
+        return byHostPort.values.sorted { $0.hostPort < $1.hostPort }
+    }
+
     /// Recognizes only explicit empty `HostPort` TCP bindings for the stateful Phase
     /// 1 allocator. `PublishAllPorts`, ranges, UDP, missing `HostPort`, invalid
     /// address/protocol values, and opaque sibling entries are rejected rather than

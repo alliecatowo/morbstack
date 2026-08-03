@@ -120,6 +120,13 @@ public enum DockerAPIDecoding {
         containersPath + "?all=1"
     }
 
+    /// The immutable-container inspect path used by the bounded start-time TCP
+    /// lease recovery. Callers admit only a full hexadecimal ID before interpolating
+    /// it here, so no name, prefix, or path escaping semantics enter that protocol.
+    public static func containerInspectPath(containerID: String) -> String {
+        "/\(apiVersion)/containers/\(containerID)/json"
+    }
+
     /// Counts the entries in a `GET /containers/json` response body.
     ///
     /// - Throws: ``MorbError/protocolViolation(_:)`` when the document is not an array.
