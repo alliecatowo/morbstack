@@ -920,7 +920,10 @@ case "context":
     case "use":
         let force = extraArguments.contains("--force")
         let status = MorbDockerContext.status()
-        if status.isCurrent {
+        // `currentContext` is only a name. A stale or user-owned context can retain
+        // the `morbstack` name while pointing at a different endpoint, so do not
+        // report success until the registered endpoint also matches this runtime.
+        if status.isCurrent && status.matchesSocket {
             finish(.success(["switched": .bool(false), "already_current": .bool(true)])) { _ in
                 out("[ok] \"\(MorbDockerContext.name)\" is already the current context")
             }
