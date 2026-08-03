@@ -453,16 +453,11 @@ struct DetailHost: View {
                 content
             }
         }
-        // The one toolbar item that is true on every screen in every state. It is a
-        // standard *secondary* toolbar command rather than a separately drawn control:
-        // the selected route owns the one primary action for its current task, while
-        // AppKit can move this universal refresh into its system overflow as the window
-        // narrows.
-        .toolbar { refreshItem }
-        // The standard refresh item must have an equivalent in the Engine menu. The
-        // focused value keeps the menu truthful to the detail route that owns it, and
-        // lets a route replace the shell's general refresh without editing the command
-        // graph again.
+        // Routes own the toolbar command for their current collection. A second
+        // app-wide refresh beside it is visually redundant and, on Builds, can imply
+        // that the expensive cache endpoint is part of a normal refresh. The focused
+        // value keeps ⌘R and Engine > Refresh available without duplicating the native
+        // toolbar item.
         .focusedSceneValue(\.routeRefreshAction, routeRefreshAction)
         .alert("Unable to Complete Operation", isPresented: errorIsPresented) {
             Button("OK", role: .cancel) { model.dismissError() }
@@ -500,30 +495,19 @@ struct DetailHost: View {
         }
     }
 
-    /// Refresh, in the toolbar, on every screen.
-    ///
-    /// This is deliberately a secondary action: a contextual route decides whether it
-    /// has a primary command such as Pull or Build. A `Label` rather than a bare
-    /// `Image` preserves the accessibility name and Customize Toolbar title.
-    @ToolbarContentBuilder
-    private var refreshItem: some ToolbarContent {
-        ToolbarItem(id: "app.refresh", placement: .secondaryAction) {
-            Button {
-                routeRefreshAction?()
-            } label: {
-                Label("Refresh", systemImage: "arrow.clockwise")
-            }
-            .disabled(routeRefreshAction == nil)
-            .help("Refresh everything (⌘R)")
-        }
-    }
-
-    /// The fallback visible on every running-engine route. Disk and Builds retain their
-    /// explicitly scoped toolbar commands; when either needs that narrower operation in
-    /// the menu, its route can publish `routeRefreshAction` over this fallback.
+    /// The menu/keyboard refresh follows the selected route's data boundary. The
+    /// toolbar remains route-owned, so the command is not drawn twice in the system
+    /// chrome.
     private var routeRefreshAction: (() -> Void)? {
         guard model.engine.isRunning else { return nil }
-        return { Task { await model.refreshAll() } }
+        switch model.selection {
+        case .builds:
+            return { Task { await model.refreshBuildCache() } }
+        case .disk:
+            return { Task { await model.refreshDisk() } }
+        default:
+            return { Task { await model.refreshAll() } }
+        }
     }
 
     @ViewBuilder
