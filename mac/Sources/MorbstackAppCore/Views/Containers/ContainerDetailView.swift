@@ -63,21 +63,41 @@ struct ContainerDetailView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            inspectorHeader
-            Picker("View", selection: $tab) {
-                ForEach(TrackBDetailTab.allCases) { item in
-                    Label(item.title, systemImage: item.symbol).tag(item)
-                }
+        // A selected container is an inspector with four peer representations, not a
+        // custom-header detail page. `TabView` supplies the macOS tab behavior,
+        // keyboard focus, accessibility, and Tahoe appearance for that choice.
+        TabView(selection: $tab) {
+            Tab(
+                TrackBDetailTab.overview.title,
+                systemImage: TrackBDetailTab.overview.symbol,
+                value: .overview)
+            {
+                tabBody(for: .overview)
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .padding([.horizontal, .bottom])
 
-            Divider()
+            Tab(
+                TrackBDetailTab.logs.title,
+                systemImage: TrackBDetailTab.logs.symbol,
+                value: .logs)
+            {
+                tabBody(for: .logs)
+            }
 
-            tabBody(for: tab)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            Tab(
+                TrackBDetailTab.stats.title,
+                systemImage: TrackBDetailTab.stats.symbol,
+                value: .stats)
+            {
+                tabBody(for: .stats)
+            }
+
+            Tab(
+                TrackBDetailTab.inspect.title,
+                systemImage: TrackBDetailTab.inspect.symbol,
+                value: .inspect)
+            {
+                tabBody(for: .inspect)
+            }
         }
         .task(id: container.id) { await loadInspect() }
         .onChange(of: container.state) { _, _ in
@@ -89,28 +109,6 @@ struct ContainerDetailView: View {
         .onAppear {
             if model.consumeLogsTabRequest(for: container.id) { tab = .logs }
         }
-    }
-
-    private var inspectorHeader: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(container.displayName)
-                .font(.headline)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .textSelection(.enabled)
-            Text(container.status.isEmpty ? container.state.capitalized : container.status)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-            Text(container.image)
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .textSelection(.enabled)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding()
     }
 
     @ViewBuilder
