@@ -225,6 +225,34 @@ and VoiceOver behavior, long-name truncation/copy, secret reveal/copy, mount act
 and lifecycle acceptance remain required; no build, test, Docker/VM action, or live-app
 interaction was performed for this source change.
 
+### 2026-08-03 Trailing inspector surface correction
+
+The current real-window audit found that compact selected-record details could read as
+rounded mini-panels when a trailing inspector left its `Form` presentation implicit or
+wrapped one `DisclosureGroup` in an otherwise empty `Section`. The user task is to scan
+or act on one selected Docker record, not enter a second card-based workspace.
+
+Consulted: Apple’s [inspectors](https://developer.apple.com/documentation/swiftui/view/inspector(ispresented:content:)),
+[forms](https://developer.apple.com/documentation/swiftui/form),
+[lists and tables](https://developer.apple.com/design/human-interface-guidelines/lists-and-tables),
+and SwiftUI [`LabeledContent`](https://developer.apple.com/documentation/swiftui/labeledcontent)
+and [`DisclosureGroup`](https://developer.apple.com/documentation/swiftui/disclosuregroup).
+
+The selected-record inspectors for Images, Containers, Stacks, Disk, Volumes, Networks,
+Build cache/history, and Migration now use the system `FormStyle.columns` alignment on
+the full top-leading inspector canvas. Containers keeps State, Configuration, and Ports
+as semantic sections, but Environment, Mounts, and Labels are direct count-labelled
+system disclosures rather than a disclosure wrapped in an empty section. Images likewise
+keeps repository facts and any Compatibility warning semantic, while Repo Tags is one
+direct standard disclosure. No card, custom material, background, manual property grid,
+table choice, selection, command, or accessibility label changed. Disk and Migration
+also use the same 340/400-point minimum/ideal inspector hypothesis, so their labeled
+facts no longer compress into a narrow column.
+
+This is source-only remediation. New current-bundle Computer Use review at normal,
+minimum, and expanded inspector widths in light and dark appearance, followed by
+keyboard/VoiceOver evidence, remains required before visual acceptance.
+
 ### 2026-08-03 Compose source review hierarchy correction
 
 The selected-source task is to review one explicitly chosen document and then decide

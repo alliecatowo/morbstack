@@ -553,6 +553,10 @@ struct StacksRootView: View {
                 }
             }
         }
+        // A selected record uses the system inspector's aligned macOS form columns,
+        // not grouped mini-panels or a custom detail surface.
+        .formStyle(.columns)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .task(id: stack.id) {
             metadata.load(project: project, containerID: service.id, client: model.client)
         }
@@ -568,6 +572,8 @@ struct StacksRootView: View {
 
             composeMetadataSection(project: project)
         }
+        .formStyle(.columns)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .task(id: stack.id) {
             if let service = stack.containers.first {
                 metadata.load(project: project, containerID: service.id, client: model.client)

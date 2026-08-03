@@ -360,7 +360,7 @@ struct DiskRootView: View {
             diskTable
                 .inspector(isPresented: $showsInspector) {
                     inspector
-                        .inspectorColumnWidth(min: 280, ideal: 340, max: 460)
+                        .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
                 }
                 .onChange(of: model.disk) { _, disk in
                     if disk != nil { selectFirstRowIfNeeded() }
@@ -583,6 +583,10 @@ struct DiskRootView: View {
 
                 diskImageFacts
             }
+            // Keep selected storage facts in the system inspector's aligned form
+            // columns. The Form remains responsible for all spacing and appearance.
+            .formStyle(.columns)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         } else {
             ContentUnavailableView(
                 label: {

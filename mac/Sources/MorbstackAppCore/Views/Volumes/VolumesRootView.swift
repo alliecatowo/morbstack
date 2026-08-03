@@ -594,6 +594,8 @@ struct VolumesRootView: View {
                 }
 
             }
+            .formStyle(.columns)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         } else {
             ContentUnavailableView(
                 "No Volume Selected",

@@ -266,7 +266,7 @@ struct MigrationRootView: View {
             .accessibilityHint("Select a runtime to review migration readiness")
             .inspector(isPresented: $showsInspector) {
                 detailPane
-                    .inspectorColumnWidth(min: 280, ideal: 340, max: 460)
+                    .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
             }
         }
     }
@@ -311,6 +311,8 @@ struct MigrationRootView: View {
                 latestVolumeMigrationSection
                 dockerConfigurationSection(inspection.dockerConfiguration)
             }
+            .formStyle(.columns)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         } else {
             ContentUnavailableView(
                 "No Runtime Selected",

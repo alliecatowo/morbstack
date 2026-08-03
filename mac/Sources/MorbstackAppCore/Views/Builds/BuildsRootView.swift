@@ -673,6 +673,8 @@ struct BuildsRootView: View {
                     LabeledContent("Storage", value: record.shared ? "Shared" : "Not shared")
                 }
             }
+            .formStyle(.columns)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         } else {
             ContentUnavailableView(
                 "No Record Selected",
@@ -877,6 +879,8 @@ struct BuildsRootView: View {
                 }
             }
         }
+        .formStyle(.columns)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     @ViewBuilder

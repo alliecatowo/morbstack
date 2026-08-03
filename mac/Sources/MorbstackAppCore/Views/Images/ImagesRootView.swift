@@ -663,20 +663,24 @@ struct ImagesRootView: View {
                     LabeledContent("Created", value: Formatters.absoluteDate(image.createdAt))
                 }
 
+                // Tags are secondary facts for the selected image. A direct system
+                // disclosure avoids wrapping one control in an empty form section.
                 if !image.repoTags.isEmpty {
-                    Section {
-                        DisclosureGroup("Repo Tags (\(image.repoTags.count))", isExpanded: $repoTagsExpanded) {
-                            ForEach(image.repoTags, id: \.self) { tag in
-                                Text(tag)
-                                    .font(.system(.callout, design: .monospaced))
-                                    .textSelection(.enabled)
-                            }
+                    DisclosureGroup("Repo Tags (\(image.repoTags.count))", isExpanded: $repoTagsExpanded) {
+                        ForEach(image.repoTags, id: \.self) { tag in
+                            Text(tag)
+                                .font(.system(.callout, design: .monospaced))
+                                .textSelection(.enabled)
                         }
                     }
                 }
 
                 compatibilitySection(for: image)
             }
+            // Use the system's compact trailing-inspector form columns. There is no
+            // custom inspector surface, card, background, or row treatment here.
+            .formStyle(.columns)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         } else {
             ContentUnavailableView {
                 Label("No Image Selected", systemImage: "square.on.square")
