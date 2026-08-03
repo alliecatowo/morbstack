@@ -145,6 +145,8 @@ the WindowServer-composited bundle.
 | Volumes | Real local named volume selection | Inspector labels the Docker path as a **Guest Mount Point** and offers no impossible Finder reveal. |
 | Builds | Empty cache state; Build sheet opened then dismissed | `ContentUnavailableView` offers Build/Refresh; Build is a system document-modal review sheet and no build ran. |
 | Disk | Real `/system/df` data and selection | Native list sections separate non-additive aggregate categories from largest individual resources; the VM capacity indicator remains factual. |
+| Stacks | Real Compose project outline expanded; stopped service selected | The native `Table(children:)` disclosure exposes the actual project→service hierarchy, the inspector uses `Form` facts/actions, and the selected stopped service has exactly one symbol-only Start primary action. No lifecycle command was invoked. |
+| Migration | Real Docker Desktop and Morbstack inventory selected | The native runtime `Table` and inspector compared real local inventories in read-only mode. No image or volume workflow was opened, so transfer/recheck/progress acceptance remains pending. |
 | Kubernetes | Rebuilt daemon diagnosis and Enable review | The stale-daemon compatibility error disappeared after a clean daemon restart. Kubernetes accurately reported Off, then showed a standard enable confirmation naming the first-download consequence; it was cancelled, so k3s was not enabled. |
 
 The app uses the current system dark appearance without a global tint/appearance
