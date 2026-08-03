@@ -143,7 +143,11 @@ struct MigrationRootView: View {
             .toolbar { toolbarContent }
             .sheet(isPresented: $imageMigration.isPresented) {
                 imageMigrationSheet
-                    .interactiveDismissDisabled(imageMigration.stage == .transferring)
+                    // Rechecking is the boundary immediately before execution. Keep
+                    // the review workflow visible until it returns a changed plan or
+                    // enters the separate, in-flight transfer state.
+                    .interactiveDismissDisabled(
+                        imageMigration.stage == .rechecking || imageMigration.stage == .transferring)
             }
             .sheet(isPresented: $volumeMigration.isPresented) {
                 volumeMigrationSheet
@@ -258,6 +262,8 @@ struct MigrationRootView: View {
                 .width(min: 92, ideal: 112, max: 144)
             }
             .tableStyle(.automatic)
+            .accessibilityLabel("Local container runtimes")
+            .accessibilityHint("Select a runtime to review migration readiness")
             .inspector(isPresented: $showsInspector) {
                 detailPane
                     .inspectorColumnWidth(min: 280, ideal: 340, max: 460)
@@ -763,6 +769,7 @@ private struct MigrationImageSelectionSheet: View {
                     .width(min: 130, ideal: 180)
                 }
                 .tableStyle(.automatic)
+                .disabled(isPreparing)
                 .accessibilityLabel("Images available to import")
             }
             .navigationTitle("Select Images to Import")
@@ -1132,6 +1139,7 @@ private struct MigrationVolumeSelectionSheet: View {
                     .width(min: 90, ideal: 110, max: 140)
                 }
                 .tableStyle(.automatic)
+                .disabled(isPreparing)
                 .accessibilityLabel("Eligible named volumes available to transfer")
             }
             .navigationTitle("Select Volumes to Transfer")
@@ -1203,7 +1211,7 @@ private struct MigrationVolumeReviewSheet: View {
                         LabeledContent("Destination", value: "Create a new named volume, then populate it from an archive")
                         LabeledContent("Existing Destination", value: "Never read, merged, replaced, or deleted")
                         Text(
-                            "The helper containers are removed best-effort after each archive attempt. No automatic rollback is available if destination creation or upload has begun.")
+                            "Morbstack refreshes this exact selection once more after confirmation. The helper containers are removed best-effort after each archive attempt. No automatic rollback is available if destination creation or upload has begun.")
                             .foregroundStyle(.secondary)
                     }
 
@@ -1539,7 +1547,7 @@ private final class ImageMigrationWorkflow {
     }
 
     func close() {
-        guard stage != .transferring else { return }
+        guard stage != .rechecking, stage != .transferring else { return }
         isPresented = false
         source = nil
         candidates = []
@@ -1801,7 +1809,7 @@ private final class VolumeMigrationWorkflow {
     }
 
     func close() {
-        guard stage != .transferring else { return }
+        guard stage != .rechecking, stage != .transferring else { return }
         isPresented = false
         source = nil
         candidates = []
@@ -1900,10 +1908,10 @@ private final class VolumeMigrationWorkflow {
             case .prepared(let refreshed):
                 guard self.stage == .rechecking else { return }
                 self.prepared = refreshed
-                if Self.helperImageStateChanged(from: prepared, to: refreshed) {
+                if Self.preparationChanged(from: prepared, to: refreshed) {
                     self.networkConsentGranted = false
                     self.stage = .review
-                    self.recheckNotice = "Helper-image availability changed while rechecking. Review the refreshed transfer details before transferring."
+                    self.recheckNotice = "The selected volume plan changed while rechecking. Review the refreshed eligibility and transfer details before transferring."
                     return
                 }
                 self.beginExecution(with: refreshed)
@@ -1916,13 +1924,21 @@ private final class VolumeMigrationWorkflow {
         }
     }
 
-    private static func helperImageStateChanged(
+    /// Fresh preparation must preserve every reviewed fact, not just helper-image
+    /// availability. A changed endpoint, eligibility, or safety boundary returns the
+    /// person to review before any helper, volume, or archive write can begin.
+    private static func preparationChanged(
         from previous: PreparedVolumeMigration,
         to refreshed: PreparedVolumeMigration
     ) -> Bool {
-        previous.helperImageNetworkConsentRequired != refreshed.helperImageNetworkConsentRequired
+        previous.source != refreshed.source
+            || previous.destination != refreshed.destination
+            || previous.items != refreshed.items
+            || previous.selectionDescription != refreshed.selectionDescription
+            || previous.helperImageNetworkConsentRequired != refreshed.helperImageNetworkConsentRequired
             || previous.sourceHasHelperImage != refreshed.sourceHasHelperImage
             || previous.destinationHasHelperImage != refreshed.destinationHasHelperImage
+            || previous.safetyLimits != refreshed.safetyLimits
     }
 
     private func beginExecution(with prepared: PreparedVolumeMigration) {
