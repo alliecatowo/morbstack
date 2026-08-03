@@ -210,8 +210,8 @@ pub fn negotiate<S: Read + Write>(conn: &mut S) -> io::Result<Option<u16>> {
 #[cfg(target_os = "linux")]
 mod imp {
     use super::{
-        dial_error_reason, err_line, negotiate, BUSY_REASON, BUSY_REPLY_TIMEOUT_MS,
-        DIAL_ADDR, MAX_CONNECTIONS, OK_LINE, PREAMBLE_TIMEOUT, VSOCK_STREAM_DIAL_PORT,
+        dial_error_reason, err_line, negotiate, BUSY_REASON, BUSY_REPLY_TIMEOUT_MS, DIAL_ADDR,
+        MAX_CONNECTIONS, OK_LINE, PREAMBLE_TIMEOUT, VSOCK_STREAM_DIAL_PORT,
     };
     use crate::log;
     use crate::proxy::copy_stream;
@@ -506,8 +506,8 @@ mod tests {
             "TCP -1\n",
             "TCP +80\n",
             "TCP 0x50\n",
-            "TCP  80\n",  // double space: the extra one is not a digit
-            "TCP 80 \n",  // trailing space
+            "TCP  80\n", // double space: the extra one is not a digit
+            "TCP 80 \n", // trailing space
             "TCP 80 90\n",
         ] {
             assert!(
@@ -680,9 +680,6 @@ mod tests {
     fn the_port_registry_entry_matches_the_contract() {
         assert_eq!(VSOCK_STREAM_DIAL_PORT, 2376);
         assert_ne!(VSOCK_STREAM_DIAL_PORT, crate::proxy::VSOCK_DOCKER_PORT);
-        assert_ne!(
-            VSOCK_STREAM_DIAL_PORT,
-            crate::control::VSOCK_CONTROL_PORT
-        );
+        assert_ne!(VSOCK_STREAM_DIAL_PORT, crate::control::VSOCK_CONTROL_PORT);
     }
 }

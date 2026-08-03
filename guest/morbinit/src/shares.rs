@@ -92,7 +92,10 @@ pub const FSTYPE: &str = "virtiofs";
 pub fn parse_cmdline(cmdline: &str) -> Vec<ShareSpec> {
     let mut specs = Vec::new();
     for token in cmdline.split_whitespace() {
-        let Some(value) = token.strip_prefix(CMDLINE_KEY).and_then(|r| r.strip_prefix('=')) else {
+        let Some(value) = token
+            .strip_prefix(CMDLINE_KEY)
+            .and_then(|r| r.strip_prefix('='))
+        else {
             continue;
         };
         let Some((tag, rest)) = value.split_once(':') else {

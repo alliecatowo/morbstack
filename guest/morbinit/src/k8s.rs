@@ -164,7 +164,9 @@ pub fn enabled_flag_path() -> PathBuf {
 
 /// Whether both payload binaries are present and executable.
 pub fn is_installed() -> bool {
-    PAYLOAD_NAMES.iter().all(|name| is_executable(&binary_path(name)))
+    PAYLOAD_NAMES
+        .iter()
+        .all(|name| is_executable(&binary_path(name)))
 }
 
 fn is_executable(path: &Path) -> bool {
@@ -180,7 +182,6 @@ fn is_executable(path: &Path) -> bool {
         path.is_file()
     }
 }
-
 
 /// `sync(2)`, but callable from the portable parts of this module.
 ///
@@ -416,7 +417,10 @@ pub fn service_specs(gate: Arc<AtomicBool>) -> Vec<ServiceSpec> {
         // DaemonSet to land, and it is why k3s runs with --flannel-backend=none
         // below. The two settings are one decision and must move together.
         "--network-plugin=".to_string(),
-        format!("--cri-dockerd-root-directory={}", state.join("cri-dockerd").display()),
+        format!(
+            "--cri-dockerd-root-directory={}",
+            state.join("cri-dockerd").display()
+        ),
     ];
 
     let k3s_args: Vec<String> = vec![
@@ -566,7 +570,9 @@ pub fn parse_node_table(output: &str) -> (u32, u32) {
     for line in output.lines() {
         let mut fields = line.split_whitespace();
         let Some(_name) = fields.next() else { continue };
-        let Some(status) = fields.next() else { continue };
+        let Some(status) = fields.next() else {
+            continue;
+        };
         total += 1;
         if status == "Ready" {
             ready += 1;
@@ -864,7 +870,10 @@ fn read_preamble<R: Read>(reader: &mut R) -> io::Result<String> {
     }
     Err(io::Error::new(
         io::ErrorKind::InvalidData,
-        format!("install request exceeded {} bytes with no newline", MAX_PREAMBLE_LEN),
+        format!(
+            "install request exceeded {} bytes with no newline",
+            MAX_PREAMBLE_LEN
+        ),
     ))
 }
 
@@ -1174,7 +1183,6 @@ default       broken                          0/1   CrashLoopBackOff   6   4m
         let mut input = std::io::Cursor::new(vec![b'A'; MAX_PREAMBLE_LEN * 4]);
         assert!(read_preamble(&mut input).is_err());
     }
-
 
     // ---- enable-state persistence -----------------------------------------
 

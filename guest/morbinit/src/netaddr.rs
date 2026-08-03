@@ -35,7 +35,9 @@ pub fn parse_default_gateway(text: &str) -> Option<std::net::Ipv4Addr> {
         }
         let raw = u32::from_str_radix(fields[2], 16).ok()?;
         let bytes = raw.to_le_bytes();
-        return Some(std::net::Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]));
+        return Some(std::net::Ipv4Addr::new(
+            bytes[0], bytes[1], bytes[2], bytes[3],
+        ));
     }
     None
 }
@@ -105,7 +107,8 @@ mod tests {
 
     #[test]
     fn no_default_route_is_none() {
-        let text = "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n\
+        let text =
+            "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n\
                      eth0\t0040A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0\n";
         assert_eq!(parse_default_gateway(text), None);
     }

@@ -219,11 +219,15 @@ public struct RuntimeArtifactInstallation: Equatable, Sendable {
     public let version: String
     public let directory: URL
     public let wasAlreadyInstalled: Bool
+    /// Whether an installed release under this same version carried different bytes
+    /// and was superseded by the signed bundle's payload.
+    public let wasReplaced: Bool
 
-    public init(version: String, directory: URL, wasAlreadyInstalled: Bool) {
+    public init(version: String, directory: URL, wasAlreadyInstalled: Bool, wasReplaced: Bool = false) {
         self.version = version
         self.directory = directory
         self.wasAlreadyInstalled = wasAlreadyInstalled
+        self.wasReplaced = wasReplaced
     }
 }
 
@@ -266,10 +270,19 @@ public final class RuntimeArtifactStore {
 
         let destination = directory.appendingPathComponent(manifest.runtimeVersion, isDirectory: true)
         var alreadyInstalled = false
-        if fileManager.fileExists(atPath: destination.path) {
-            try verifyInstalledRelease(at: destination, expectedVersion: manifest.runtimeVersion)
+        var replaced = false
+        // A release is identified by its bytes, never by its version string alone.
+        // The installed manifest lives in a user-writable directory and is exactly
+        // the file that a stale respin or a tampered runtime would also rewrite, so
+        // it cannot be its own authority: agreement is measured against the signed
+        // bundle's manifest. Without this, an installed 0.1.0-m0 stays frozen even
+        // though the bundle now carries different bytes under that same version --
+        // which silently boots a guest image nobody built.
+        let existed = fileManager.fileExists(atPath: destination.path)
+        if existed, (try? verify(manifest: manifest, in: destination)) != nil {
             alreadyInstalled = true
         } else {
+            replaced = existed
             let staging = directory.appendingPathComponent(".install-\(UUID().uuidString)", isDirectory: true)
             defer { try? fileManager.removeItem(at: staging) }
             try fileManager.createDirectory(
@@ -293,6 +306,23 @@ public final class RuntimeArtifactStore {
             try write(manifest: manifest, to: staging.appendingPathComponent("manifest.json"))
             try verifyInstalledRelease(at: staging, expectedVersion: manifest.runtimeVersion)
 
+            if replaced {
+                // Both directories exist, so supersede the stale payload with a single
+                // atomic exchange: `current` never observes a missing version directory,
+                // and the superseded release is discarded only after the swap succeeds.
+                guard renamex_np(staging.path, destination.path, UInt32(RENAME_SWAP)) == 0 else {
+                    let code = errno
+                    throw MorbError.io(
+                        "could not replace runtime \(manifest.runtimeVersion): \(String(cString: strerror(code)))")
+                }
+                try? fileManager.removeItem(at: staging)
+                try activate(version: manifest.runtimeVersion)
+                return RuntimeArtifactInstallation(
+                    version: manifest.runtimeVersion,
+                    directory: destination,
+                    wasAlreadyInstalled: false,
+                    wasReplaced: true)
+            }
             do {
                 // Staging and destination share `directory`, so this is an atomic
                 // rename rather than a cross-volume copy.

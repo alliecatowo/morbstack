@@ -182,9 +182,11 @@ public final class Daemon {
         self.log = logger
         self.config = try MorbConfig.load()
         if let runtime = try RuntimeArtifactStore.installBundledRuntimeIfPresent() {
-            logger.info(
-                "runtime \(runtime.version) \(runtime.wasAlreadyInstalled ? "verified" : "installed") "
-                    + "at \(runtime.directory.path)")
+            let disposition =
+                runtime.wasReplaced
+                ? "replaced (the installed payload did not match this bundle)"
+                : (runtime.wasAlreadyInstalled ? "verified" : "installed")
+            logger.info("runtime \(runtime.version) \(disposition) at \(runtime.directory.path)")
         }
         self.vm = VMManager(config: config, log: logger)
         let portForwarder = PortForwarder(

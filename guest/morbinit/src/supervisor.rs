@@ -140,8 +140,7 @@ const BAKED_IMAGE_NAME: &str = "hello-world";
 /// This is also the search path morbinit itself uses to decide what the
 /// guest image contains (`disk::which`), so "what dockerd can find" and
 /// "what we think dockerd can find" cannot drift apart.
-pub const GUEST_PATH: &str =
-    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+pub const GUEST_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 /// dockerd's documented switch for "my root filesystem is a ramdisk": it
 /// propagates `NoPivotRoot` through containerd's runc shim options, so runc
@@ -191,7 +190,12 @@ pub fn default_services(docker_data_on_disk: bool) -> Vec<ServiceSpec> {
         "--containerd".to_string(),
         CONTAINERD_SOCK.to_string(),
         "--storage-driver".to_string(),
-        if docker_data_on_disk { "overlay2" } else { "vfs" }.to_string(),
+        if docker_data_on_disk {
+            "overlay2"
+        } else {
+            "vfs"
+        }
+        .to_string(),
     ];
     // No `-H tcp://...`: the Docker API reaches the host over AF_VSOCK port
     // 2375, proxied by morbinit itself (see `proxy.rs`). A TCP listener here
@@ -426,7 +430,11 @@ fn describe_wait_status(status: i32) -> String {
     } else if low == 0x7f {
         format!("stopped by signal {}", (status >> 8) & 0xff)
     } else {
-        let core = if status & 0x80 != 0 { " (core dumped)" } else { "" };
+        let core = if status & 0x80 != 0 {
+            " (core dumped)"
+        } else {
+            ""
+        };
         format!("killed by signal {}{}", low, core)
     }
 }
@@ -715,7 +723,10 @@ impl Supervisor {
             if wanted {
                 self.services[idx].backoff = INITIAL_BACKOFF;
                 self.services[idx].next_attempt = now_for_edges;
-                log::log(&format!("{} was enabled — starting it", self.services[idx].spec.name));
+                log::log(&format!(
+                    "{} was enabled — starting it",
+                    self.services[idx].spec.name
+                ));
             } else if self.services[idx].pid.is_some() {
                 log::log(&format!(
                     "{} is no longer enabled — stopping it",
@@ -783,7 +794,10 @@ impl Supervisor {
                 state.pid = Some(pid);
                 state.child = child;
                 state.started_at = Some(now);
-                log::log(&format!("started service {} (pid {})", state.spec.name, pid));
+                log::log(&format!(
+                    "started service {} (pid {})",
+                    state.spec.name, pid
+                ));
                 // Backoff is deliberately NOT reset here. Spawning is not
                 // succeeding — see `STABLE_RUNTIME`.
             }
@@ -928,12 +942,7 @@ impl Supervisor {
 
     /// Poll the reap drain until `services[idx]` is no longer running or
     /// `budget` elapses. Returns whether it exited.
-    fn wait_for_exit<P: Platform>(
-        &mut self,
-        p: &mut P,
-        idx: usize,
-        budget: Duration,
-    ) -> bool {
+    fn wait_for_exit<P: Platform>(&mut self, p: &mut P, idx: usize, budget: Duration) -> bool {
         let deadline = p.now() + budget;
         loop {
             self.drain(p);
@@ -1070,11 +1079,7 @@ mod tests {
     }
 
     /// A service behind an on/off switch, as `k8s.rs` builds them.
-    fn gated_spec(
-        name: &'static str,
-        path: &'static str,
-        gate: Arc<AtomicBool>,
-    ) -> ServiceSpec {
+    fn gated_spec(name: &'static str, path: &'static str, gate: Arc<AtomicBool>) -> ServiceSpec {
         ServiceSpec {
             name,
             path,
@@ -1133,10 +1138,7 @@ mod tests {
 
         /// Every spawn of `name` lives exactly `d` before exiting.
         fn always_lives(mut self, name: &'static str, d: Duration) -> Self {
-            self.lifetimes
-                .entry(name)
-                .or_default()
-                .push_back(Some(d));
+            self.lifetimes.entry(name).or_default().push_back(Some(d));
             self
         }
 
@@ -1550,7 +1552,6 @@ mod tests {
         assert_eq!(p.signals_to(pid), vec![SIGTERM]);
     }
 
-
     // ---- gated (optional) services ----------------------------------------
 
     #[test]
@@ -1562,7 +1563,10 @@ mod tests {
         let mut sup = Supervisor::new(vec![gated_spec("k3s", "/nope/k3s", gate)]);
 
         sup.start_all_on(&mut p);
-        assert!(p.starts.is_empty(), "a gated-off service must not be spawned");
+        assert!(
+            p.starts.is_empty(),
+            "a gated-off service must not be spawned"
+        );
 
         advance(&mut p, Duration::from_secs(600));
         sup.tick_on(&mut p);
@@ -1639,9 +1643,17 @@ mod tests {
             advance(&mut p, Duration::from_millis(100));
             let before = p.starts.len();
             sup.tick_on(&mut p);
-            advance(&mut p, Duration::from_secs(expected_delay_secs) - Duration::from_millis(1));
+            advance(
+                &mut p,
+                Duration::from_secs(expected_delay_secs) - Duration::from_millis(1),
+            );
             sup.tick_on(&mut p);
-            assert_eq!(p.starts.len(), before, "restarted before {}s", expected_delay_secs);
+            assert_eq!(
+                p.starts.len(),
+                before,
+                "restarted before {}s",
+                expected_delay_secs
+            );
             advance(&mut p, Duration::from_millis(1));
             sup.tick_on(&mut p);
             assert_eq!(p.starts.len(), before + 1);
@@ -1684,7 +1696,10 @@ mod tests {
         let dockerd_at = order.iter().position(|&x| x == dockerd).unwrap();
         let containerd_at = order.iter().position(|&x| x == containerd).unwrap();
         assert!(cri_at < dockerd_at && k3s_at < dockerd_at);
-        assert!(dockerd_at < containerd_at, "dockerd still stops before containerd");
+        assert!(
+            dockerd_at < containerd_at,
+            "dockerd still stops before containerd"
+        );
         assert!(sup.services.iter().all(|s| s.pid.is_none()));
     }
 
@@ -1728,7 +1743,10 @@ mod tests {
         // dockerd's SIGTERM handler is flushing a layer store; k3s's is
         // closing a crash-safe SQLite database. Only one of those deserves ten
         // seconds, and the difference is what buys the budget headroom.
-        assert_eq!(spec("dockerd", "/x").stop_ladder(), (STOP_GRACE, KILL_GRACE));
+        assert_eq!(
+            spec("dockerd", "/x").stop_ladder(),
+            (STOP_GRACE, KILL_GRACE)
+        );
         assert_eq!(
             gated_spec("k3s", "/x", Arc::new(AtomicBool::new(true))).stop_ladder(),
             (GATED_STOP_GRACE, GATED_KILL_GRACE)
@@ -1916,7 +1934,9 @@ mod tests {
             "--userland-proxy-path",
             DOCKER_PROXY_BIN
         ])]));
-        assert!(!userland_proxy_enabled(&[spec(&["--userland-proxy=false"])]));
+        assert!(!userland_proxy_enabled(&[spec(&[
+            "--userland-proxy=false"
+        ])]));
         // Enabled is the dockerd default, so a bare argument list means on.
         assert!(userland_proxy_enabled(&[spec(&[])]));
         // No dockerd at all: report the conservative answer rather than

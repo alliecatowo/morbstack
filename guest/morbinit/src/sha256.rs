@@ -243,11 +243,11 @@ mod tests {
         // rather than a single read. The property under test is the one the
         // payload verifier depends on: the digest is a function of the bytes,
         // never of how the reads happened to split them.
-        let data: Vec<u8> = (0..(FILE_CHUNK as u32 + 12_345)).map(|i| (i % 253) as u8).collect();
-        let path = std::env::temp_dir().join(format!(
-            "morbinit-sha256-hashfile-{}",
-            std::process::id()
-        ));
+        let data: Vec<u8> = (0..(FILE_CHUNK as u32 + 12_345))
+            .map(|i| (i % 253) as u8)
+            .collect();
+        let path =
+            std::env::temp_dir().join(format!("morbinit-sha256-hashfile-{}", std::process::id()));
         std::fs::write(&path, &data).unwrap();
 
         let from_file = hash_file(path.to_str().unwrap());
@@ -318,12 +318,30 @@ mod tests {
         // fit in the final block — the classic off-by-one in a hand-rolled
         // SHA-2 padding.
         let expected = [
-            (55usize, "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318"),
-            (56, "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a"),
-            (57, "f13b2d724659eb3bf47f2dd6af1accc87b81f09f59f2b75e5c0bed6589dfe8c6"),
-            (63, "7d3e74a05d7db15bce4ad9ec0658ea98e3f06eeecf16b4c6fff2da457ddc2f34"),
-            (64, "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb"),
-            (65, "635361c48bb9eab14198e76ea8ab7f1a41685d6ad62aa9146d301d4f17eb0ae0"),
+            (
+                55usize,
+                "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318",
+            ),
+            (
+                56,
+                "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a",
+            ),
+            (
+                57,
+                "f13b2d724659eb3bf47f2dd6af1accc87b81f09f59f2b75e5c0bed6589dfe8c6",
+            ),
+            (
+                63,
+                "7d3e74a05d7db15bce4ad9ec0658ea98e3f06eeecf16b4c6fff2da457ddc2f34",
+            ),
+            (
+                64,
+                "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb",
+            ),
+            (
+                65,
+                "635361c48bb9eab14198e76ea8ab7f1a41685d6ad62aa9146d301d4f17eb0ae0",
+            ),
         ];
         for (len, want) in expected {
             assert_eq!(hex_of(&vec![b'a'; len]), want, "length {}", len);

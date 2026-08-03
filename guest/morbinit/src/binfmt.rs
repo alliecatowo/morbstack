@@ -394,7 +394,10 @@ pub fn setup() -> BinfmtStatus {
 
     match mount_rosetta_share() {
         Ok(()) => {
-            if register(&BinfmtRegistration::x86_64(ROSETTA_ENTRY, ROSETTA_INTERPRETER)) {
+            if register(&BinfmtRegistration::x86_64(
+                ROSETTA_ENTRY,
+                ROSETTA_INTERPRETER,
+            )) {
                 log::log(&format!(
                     "amd64 binfmt: registered Rosetta ({}) for x86-64 ELF",
                     ROSETTA_INTERPRETER
@@ -591,7 +594,10 @@ fn register(reg: &BinfmtRegistration) -> bool {
             let enabled = registration_is_enabled(&contents);
             let interpreter = registration_interpreter(&contents);
             if !enabled {
-                log::log(&format!("binfmt entry {} registered but is disabled", entry));
+                log::log(&format!(
+                    "binfmt entry {} registered but is disabled",
+                    entry
+                ));
                 return false;
             }
             if let Some(found) = interpreter {
@@ -642,7 +648,10 @@ mod tests {
     #[test]
     fn register_line_has_exactly_seven_colon_separated_fields() {
         let line = BinfmtRegistration::x86_64(ROSETTA_ENTRY, ROSETTA_INTERPRETER).register_line();
-        assert!(line.starts_with(':'), "the delimiter declaration is missing");
+        assert!(
+            line.starts_with(':'),
+            "the delimiter declaration is missing"
+        );
         // Leading ':' yields an empty first element, then the seven fields.
         let parts: Vec<&str> = line.split(':').collect();
         assert_eq!(parts.len(), 8, "unexpected field count in {:?}", line);
@@ -719,7 +728,10 @@ mod tests {
             .zip(mask.iter())
             .zip(magic.iter())
             .all(|((b, m), want)| b & m == *want);
-        assert!(!matches, "an aarch64 header must not match the x86-64 magic");
+        assert!(
+            !matches,
+            "an aarch64 header must not match the x86-64 magic"
+        );
     }
 
     #[test]

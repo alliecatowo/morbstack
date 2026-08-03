@@ -51,16 +51,16 @@ mod dial;
 mod disk;
 mod dns;
 mod jsonlite;
+mod k8s;
+mod listen_probe;
+mod live_share;
+mod live_share_receiver;
 mod log;
 mod mounts;
 mod net;
 mod netaddr;
-mod publish_all;
-mod k8s;
-mod live_share;
-mod live_share_receiver;
-mod listen_probe;
 mod proxy;
+mod publish_all;
 mod sha256;
 mod shares;
 mod supervisor;
@@ -203,7 +203,10 @@ fn real_init() {
     let docker_data_on_disk = disk::provision();
 
     if let Err(e) = sys::set_hostname("morbstack") {
-        log::log(&format!("WARNING: sethostname(\"morbstack\") failed: {}", e));
+        log::log(&format!(
+            "WARNING: sethostname(\"morbstack\") failed: {}",
+            e
+        ));
     }
 
     // Networking before the services: dockerd probes its own connectivity at
@@ -325,7 +328,10 @@ fn real_init() {
     match sys::VsockListener::bind(control::VSOCK_CONTROL_PORT) {
         Ok(listener) => {
             if let Err(e) = control::spawn_server(listener, Arc::clone(&ctx)) {
-                log::log(&format!("FATAL: could not start control server thread: {}", e));
+                log::log(&format!(
+                    "FATAL: could not start control server thread: {}",
+                    e
+                ));
             } else {
                 log::log(&format!(
                     "control server listening on vsock port {}",
@@ -389,10 +395,9 @@ fn real_init() {
     // separate, authenticated vsock channel.  The receiver has authority only
     // over shares that mounted during this boot and turns invalidations into
     // guest-kernel metadata notifications; it never accepts an arbitrary path.
-    if let Err(e) = live_share_receiver::spawn_live_share_receiver(
-        &advertised_shares,
-        &share_results,
-    ) {
+    if let Err(e) =
+        live_share_receiver::spawn_live_share_receiver(&advertised_shares, &share_results)
+    {
         log::log(&format!(
             "ERROR: could not bind live-share receiver port {}: host file notifications will be unavailable ({})",
             live_share_receiver::VSOCK_LIVE_SHARE_PORT,

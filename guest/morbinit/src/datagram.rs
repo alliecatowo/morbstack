@@ -114,7 +114,11 @@ pub fn write_frame<W: Write>(writer: &mut W, datagram: &[u8]) -> io::Result<()> 
     if datagram.len() > MAX_DATAGRAM_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("datagram has {} bytes; maximum is {}", datagram.len(), MAX_DATAGRAM_BYTES),
+            format!(
+                "datagram has {} bytes; maximum is {}",
+                datagram.len(),
+                MAX_DATAGRAM_BYTES
+            ),
         ));
     }
     writer.write_all(&(datagram.len() as u32).to_be_bytes())?;
@@ -144,7 +148,10 @@ pub fn read_frame<R: Read>(reader: &mut R) -> io::Result<Option<Vec<u8>>> {
     if length > MAX_DATAGRAM_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("datagram frame length {} exceeds {}", length, MAX_DATAGRAM_BYTES),
+            format!(
+                "datagram frame length {} exceeds {}",
+                length, MAX_DATAGRAM_BYTES
+            ),
         ));
     }
     let mut datagram = vec![0u8; length];
@@ -197,24 +204,35 @@ mod imp {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
             let remaining = self.deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "timed out waiting for the preamble"));
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "timed out waiting for the preamble",
+                ));
             }
             let milliseconds = std::cmp::min(remaining.as_millis(), i32::MAX as u128) as i32;
             if !sys::poll_readable(self.file.as_raw_fd(), milliseconds)? {
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "timed out waiting for the preamble"));
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "timed out waiting for the preamble",
+                ));
             }
             self.file.read(buf)
         }
     }
     impl Write for DeadlineStream<'_> {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> { self.file.write(buf) }
-        fn flush(&mut self) -> io::Result<()> { self.file.flush() }
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.file.write(buf)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            self.file.flush()
+        }
     }
 
     pub fn spawn_datagram_dialer() -> io::Result<()> {
         let listener = sys::VsockListener::bind(VSOCK_DATAGRAM_DIAL_PORT)?;
         log::log(&format!(
-            "datagram dialer listening on vsock port {}", VSOCK_DATAGRAM_DIAL_PORT
+            "datagram dialer listening on vsock port {}",
+            VSOCK_DATAGRAM_DIAL_PORT
         ));
         thread::Builder::new()
             .name("datagram-dial".to_string())
@@ -249,14 +267,20 @@ mod imp {
                 });
             if let Err(error) = spawned {
                 live.fetch_sub(1, Ordering::SeqCst);
-                log::log(&format!("datagram dialer could not spawn handler: {}", error));
+                log::log(&format!(
+                    "datagram dialer could not spawn handler: {}",
+                    error
+                ));
             }
         }
     }
 
     fn send_busy(mut conn: std::fs::File) {
         let reply = err_line(BUSY_REASON);
-        if matches!(sys::poll_writable(conn.as_raw_fd(), BUSY_REPLY_TIMEOUT_MS), Ok(true)) {
+        if matches!(
+            sys::poll_writable(conn.as_raw_fd(), BUSY_REPLY_TIMEOUT_MS),
+            Ok(true)
+        ) {
             let _ = conn.write_all(&reply).and_then(|()| conn.flush());
         }
     }
@@ -305,7 +329,10 @@ mod imp {
                     match read_frame(&mut vsock_read) {
                         Ok(Some(datagram)) => {
                             if let Err(error) = udp_write.send(&datagram) {
-                                log::log(&format!("datagram dial host->guest send error: {}", error));
+                                log::log(&format!(
+                                    "datagram dial host->guest send error: {}",
+                                    error
+                                ));
                                 break;
                             }
                         }
@@ -334,9 +361,15 @@ mod imp {
                 }
                 Err(error)
                     if error.kind() == io::ErrorKind::WouldBlock
-                        || error.kind() == io::ErrorKind::TimedOut => continue,
+                        || error.kind() == io::ErrorKind::TimedOut =>
+                {
+                    continue
+                }
                 Err(error) => {
-                    log::log(&format!("datagram dial guest->host receive error: {}", error));
+                    log::log(&format!(
+                        "datagram dial guest->host receive error: {}",
+                        error
+                    ));
                     break;
                 }
             }

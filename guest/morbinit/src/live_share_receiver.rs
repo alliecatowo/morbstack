@@ -153,8 +153,8 @@ mod imp {
     fn serve_connection(mut connection: File, context: &ReceiverContext) -> io::Result<()> {
         write_line(&mut connection, &format!("BOOT {}", hex(&context.boot_id)))?;
         let (message, hello) = read_hello(&mut connection, context)?;
-        let session = live_share::validate_hello(message, &context.mounted_shares)
-            .map_err(protocol_error)?;
+        let session =
+            live_share::validate_hello(message, &context.mounted_shares).map_err(protocol_error)?;
         let ready_body = format!("READY {} {}", hello.session_hex, hex(&context.boot_id));
         write_line(
             &mut connection,

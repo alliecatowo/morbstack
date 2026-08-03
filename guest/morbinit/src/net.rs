@@ -99,7 +99,11 @@ fn run_busybox(args: &[&str]) -> bool {
             false
         }
         Err(e) => {
-            log::log(&format!("busybox {} — could not run: {}", args.join(" "), e));
+            log::log(&format!(
+                "busybox {} — could not run: {}",
+                args.join(" "),
+                e
+            ));
             false
         }
     }
@@ -176,10 +180,7 @@ fn write_resolv_conf() -> io::Result<()> {
     if let Some(parent) = Path::new(RESOLV_CONF).parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(
-        RESOLV_CONF,
-        format!("nameserver {}\n", FALLBACK_NAMESERVER),
-    )
+    std::fs::write(RESOLV_CONF, format!("nameserver {}\n", FALLBACK_NAMESERVER))
 }
 
 // ---------------------------------------------------------------------------

@@ -444,8 +444,7 @@ mod tests {
     #[test]
     fn aaaa_queries_get_a_noerror_zero_answer_reply_not_a_forward() {
         let query = encode_query(42, "host.docker.internal", TYPE_AAAA);
-        let reply =
-            answer_locally(&query, "1.2.3.4".parse().unwrap()).expect("answered locally");
+        let reply = answer_locally(&query, "1.2.3.4".parse().unwrap()).expect("answered locally");
         assert_eq!(&reply[6..8], &0u16.to_be_bytes(), "zero answers for AAAA");
         assert_eq!(reply[3], 0x80, "still NOERROR, not an error");
     }

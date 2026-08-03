@@ -40,7 +40,9 @@ pub fn parse_preamble(line: &str) -> Result<(Transport, u16), String> {
     let port: u16 = fields[2]
         .parse()
         .map_err(|_| format!("port is out of range: {:?}", fields[2]))?;
-    if port == 0 { return Err("port 0 is not probeable".to_string()) }
+    if port == 0 {
+        return Err("port 0 is not probeable".to_string());
+    }
     Ok((transport, port))
 }
 
@@ -61,10 +63,18 @@ pub fn table_has_loopback_listener(table: &str, transport: Transport, port: u16)
     };
     table.lines().skip(1).any(|line| {
         let fields: Vec<_> = line.split_whitespace().collect();
-        let Some(local) = fields.get(1) else { return false };
-        if fields.get(3).copied() != Some(expected_state) { return false }
-        let Some((address, raw_port)) = local.rsplit_once(':') else { return false };
-        let Ok(found_port) = u16::from_str_radix(raw_port, 16) else { return false };
+        let Some(local) = fields.get(1) else {
+            return false;
+        };
+        if fields.get(3).copied() != Some(expected_state) {
+            return false;
+        }
+        let Some((address, raw_port)) = local.rsplit_once(':') else {
+            return false;
+        };
+        let Ok(found_port) = u16::from_str_radix(raw_port, 16) else {
+            return false;
+        };
         found_port == port && is_loopback_or_wildcard(address)
     })
 }
@@ -75,9 +85,11 @@ fn is_loopback_or_wildcard(address: &str) -> bool {
         // `/proc/net/tcp` encodes IPv4 words little-endian.
         8 => normalized == "00000000" || normalized == "0100007F",
         // Accept both byte presentations seen for ::1 across proc parsers.
-        32 => normalized == "00000000000000000000000000000000"
-            || normalized == "00000000000000000000000000000001"
-            || normalized == "00000000000000000000000001000000",
+        32 => {
+            normalized == "00000000000000000000000000000000"
+                || normalized == "00000000000000000000000000000001"
+                || normalized == "00000000000000000000000001000000"
+        }
         _ => false,
     }
 }
@@ -85,8 +97,8 @@ fn is_loopback_or_wildcard(address: &str) -> bool {
 #[cfg(target_os = "linux")]
 mod imp {
     use super::{
-        parse_preamble, table_has_loopback_listener, Transport, MAX_CONNECTIONS,
-        MAX_PREAMBLE_LEN, PREAMBLE_TIMEOUT, VSOCK_LISTEN_PROBE_PORT,
+        parse_preamble, table_has_loopback_listener, Transport, MAX_CONNECTIONS, MAX_PREAMBLE_LEN,
+        PREAMBLE_TIMEOUT, VSOCK_LISTEN_PROBE_PORT,
     };
     use crate::dial::{err_line, read_preamble_line};
     use crate::log;
@@ -164,14 +176,19 @@ mod imp {
                 });
             if let Err(error) = spawned {
                 live.fetch_sub(1, Ordering::SeqCst);
-                log::log(&format!("listener probe could not spawn handler: {}", error));
+                log::log(&format!(
+                    "listener probe could not spawn handler: {}",
+                    error
+                ));
             }
         }
     }
 
     struct ConnectionGuard(Arc<AtomicUsize>);
     impl Drop for ConnectionGuard {
-        fn drop(&mut self) { self.0.fetch_sub(1, Ordering::SeqCst); }
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
     }
 
     fn handle(mut connection: std::fs::File) -> io::Result<()> {
@@ -202,7 +219,9 @@ mod imp {
         };
         for path in paths {
             let table = fs::read_to_string(path)?;
-            if table_has_loopback_listener(&table, transport, port) { return Ok(true) }
+            if table_has_loopback_listener(&table, transport, port) {
+                return Ok(true);
+            }
         }
         Ok(false)
     }
@@ -217,8 +236,14 @@ mod tests {
 
     #[test]
     fn parses_one_closed_probe_grammar() {
-        assert_eq!(parse_preamble("LISTEN tcp 8080\n"), Ok((Transport::Tcp, 8080)));
-        assert_eq!(parse_preamble("LISTEN udp 53\r\n"), Ok((Transport::Udp, 53)));
+        assert_eq!(
+            parse_preamble("LISTEN tcp 8080\n"),
+            Ok((Transport::Tcp, 8080))
+        );
+        assert_eq!(
+            parse_preamble("LISTEN udp 53\r\n"),
+            Ok((Transport::Udp, 53))
+        );
         assert!(parse_preamble("LISTEN tcp 0\n").is_err());
         assert!(parse_preamble("LISTEN sctp 80\n").is_err());
         assert!(parse_preamble("LISTEN tcp 80 extra\n").is_err());

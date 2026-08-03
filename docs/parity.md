@@ -37,6 +37,43 @@ new live PASS until the exact #9/#18/#19 commands are run against a freshly
 built guest. Until then, the historical FAIL rows and tally remain the
 audit record rather than a statement about the current implementation.
 
+### Live re-run 2026-08-03 against the rebuilt guest
+
+Those commands have now been run against a freshly built and freshly
+**staged** guest. Full evidence in [`audit/ENGINE-MATRIX.md`](audit/ENGINE-MATRIX.md).
+Two staging defects had to be fixed first: `mise run guest-image` alone never
+reaches the booted VM (the daemon boots `runtime/current`, staged from the app
+bundle), and the runtime installer could not replace a payload under an
+unchanged version because it verified an installed release against its own
+manifest rather than the signed bundle's. Any earlier "rebuilt guest" result
+should be treated as suspect for that reason.
+
+- **#9 `/tmp` bind sources — now PASS.** `-v /tmp/morbbind:/x` and
+  `-v /private/tmp/morbbind:/x` return the identical host file
+  (`HOST-PRIVATE-TMP-MARKER`), and `-v $HOME/...` reads and writes real host
+  content. The alias works.
+- **#18/#19 host aliases — PARTIAL, not PASS.** The bare name still does not
+  resolve: `docker run --rm alpine getent hosts host.docker.internal` exits 2
+  and `wget` reports `bad address`. With
+  `--add-host host.docker.internal:host-gateway` it resolves to `192.168.64.1`
+  and a real Mac-side service answers. So the gateway plumbing is proven, but
+  the automatic Docker-Desktop-compatible alias is still absent. The #18/#19
+  rows stay **FAIL** for the documented behaviour they test.
+
+**A new and more serious finding supersedes part of #9's reasoning.** The
+`/etc` and `/var` bind guards exist and are correct, but they never run for
+ordinary CLI traffic: `DockerProxy` inspects only the *first* HTTP request on
+each client connection and then splices the connection raw, so the Docker
+CLI's keep-alive reuse means `POST /containers/create` is almost always
+un-inspected. Proven by sending one identical create body two ways — HTTP 400
+(rejected) as the first request on a fresh connection, HTTP 201 (accepted) as
+the second request on a keep-alive connection. Consequently
+`-v /etc/hosts:/x` still silently serves the **guest's** file
+(`e3998dbe…` vs the Mac's `c7dd0e2e…`), `-v /var/log:/x` silently serves the
+guest's directory, and container writes to those paths are silently lost. The
+same bypass disables the create-time port-publication preflight. This is
+fail-open and is the top open item.
+
 ### Current delivery state (not a replacement for this audit)
 
 The current checkout also packages Buildx and implements a consented
