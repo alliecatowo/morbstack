@@ -117,20 +117,23 @@ only that no retained data was returned at that moment.
 
 ### Planned selected-Pod local port-forward
 
-**Status: planned contract; not implemented, tested, or released.** This is
-the only port-forward capability proposed for Morbstack. It is deliberately a
+**Status: source-level coordinator only; not tested or released.** This is the
+only port-forward capability proposed for Morbstack. It is deliberately a
 small local-development escape hatch, not a general Kubernetes proxy and not a
-replacement for a person's `kubectl` installation.
+replacement for a person's `kubectl` installation. `K8sManager` now owns the
+bounded session model, but no daemon IPC, CLI, or app action can invoke it.
 
 The source tree now records the exact Darwin arm64 `kubectl` release that a
 future coordinator may use, and can hash-verify it if a release pipeline
 *explicitly* stages it at the private bundle path
 `Contents/Resources/host-bin/kubernetes/kubectl`. The artifact is not fetched
-by default, is absent from the current app, and has no UI or CLI action. A
-missing, symlinked, non-executable, or hash-mismatched helper is an explicit
-unavailable result; it will not fall back to `PATH`, a user-installed
-`kubectl`, `KUBECONFIG`, or `~/.kube/config`. This packaging boundary does not
-create a listener, child process, credential, or port-forward capability.
+by default and is absent from the current app, so this source boundary is
+unavailable in the shipped bundle. A missing, symlinked, non-executable, or
+hash-mismatched helper is an explicit unavailable result; it will not fall
+back to `PATH`, a user-installed `kubectl`, `KUBECONFIG`, or `~/.kube/config`.
+Without the verified helper and an explicit future UI/IPC action, it creates no
+listener, child process, credential material, or practical port-forward
+capability.
 
 The daemon will accept a request only for the Pod currently selected in
 Morbstack: its namespace, DNS-style name, and current Kubernetes UID, plus one

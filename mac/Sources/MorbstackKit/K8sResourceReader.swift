@@ -45,6 +45,25 @@ public final class K8sResourceReader: @unchecked Sendable {
         }
     }
 
+    /// Reads the one current Pod identity a daemon-owned local port-forward may
+    /// target. This is a fixed authenticated GET, not an arbitrary Kubernetes proxy:
+    /// the coordinator supplies a validated namespace and Pod name, then compares the
+    /// returned UID and regular-container state with its original selected request.
+    public func portForwardTarget(namespace: String, pod name: String) throws -> K8sPodPortForwardTarget {
+        try Self.validateSegment(namespace, named: "namespace")
+        try Self.validateSegment(name, named: "Pod name")
+        let data = try get("api/v1/namespaces/\(namespace)/pods/\(name)")
+        do {
+            return try JSONDecoder().decode(Pod.self, from: data)
+                .portForwardTarget(namespace: namespace, name: name)
+        } catch let error as MorbError {
+            throw error
+        } catch {
+            throw MorbError.protocolViolation(
+                "the selected Kubernetes Pod changed to a response Morbstack could not validate for port forwarding: \(error.localizedDescription)")
+        }
+    }
+
     // MARK: - Fixed request contract
 
     private static func path(for reference: K8s.ResourceReference) throws -> String {
@@ -284,6 +303,9 @@ private enum PEM {
 private struct Metadata: Decodable {
     var uid: String?
     var creationTimestamp: String?
+    var deletionTimestamp: String?
+    var name: String?
+    var namespace: String?
     var labels: [String: String]?
     var annotations: [String: String]?
 }
@@ -297,6 +319,11 @@ private struct Pod: Decodable {
         var nodeName: String?
         var serviceAccountName: String?
         var hostNetwork: Bool?
+        var containers: [Container]?
+
+        struct Container: Decodable {
+            var name: String?
+        }
     }
 
     struct Status: Decodable {
@@ -305,6 +332,19 @@ private struct Pod: Decodable {
         var hostIP: String?
         var qosClass: String?
         var conditions: [Condition]?
+        var containerStatuses: [ContainerStatus]?
+
+        struct ContainerStatus: Decodable {
+            var name: String?
+            var ready: Bool?
+            var state: ContainerState?
+        }
+
+        struct ContainerState: Decodable {
+            var running: Running?
+
+            struct Running: Decodable {}
+        }
     }
 
     struct Condition: Decodable {
@@ -331,6 +371,31 @@ private struct Pod: Decodable {
             conditions: Bound.conditions(status?.conditions ?? []),
             labels: Bound.metadata(metadata.labels),
             annotations: Bound.metadata(metadata.annotations))
+    }
+
+    func portForwardTarget(namespace: String, name: String) throws -> K8sPodPortForwardTarget {
+        guard metadata.name == name, metadata.namespace == namespace,
+              let uid = Bound.text(metadata.uid)
+        else {
+            throw MorbError.protocolViolation(
+                "the Kubernetes API returned a Pod whose identity did not match the selected Pod")
+        }
+        var statuses: [String: Bool] = [:]
+        for status in status?.containerStatuses ?? [] {
+            guard let name = Bound.text(status.name) else { continue }
+            statuses[name] = status.ready == true && status.state?.running != nil
+        }
+        let containers = (spec?.containers ?? []).compactMap { container -> K8sPodPortForwardTarget.Container? in
+            guard let name = Bound.text(container.name) else { return nil }
+            return K8sPodPortForwardTarget.Container(name: name, isRunning: statuses[name] == true)
+        }
+        return K8sPodPortForwardTarget(
+            namespace: namespace,
+            name: name,
+            uid: uid,
+            isRunning: status?.phase == "Running",
+            isDeleting: metadata.deletionTimestamp != nil,
+            containers: containers)
     }
 }
 

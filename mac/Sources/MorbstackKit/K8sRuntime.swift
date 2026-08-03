@@ -347,12 +347,17 @@ public final class K8sManager {
     /// The loopback forward for the API server. Public so ``Daemon`` can start and
     /// stop it alongside the port forwarder as the VM comes and goes.
     public let forward: K8sAPIServerForward
+    /// The daemon-owned selected-Pod port-forward session boundary. It has no IPC or
+    /// app control yet; a future selected-row action must call the explicit start and
+    /// cancel methods below, never shell out from the UI.
+    public let podPortForward: K8sPodPortForwardCoordinator
 
     public init(vm: VMManager, log: MorbLog, payloadDirectory: URL = MorbPaths.k8sPayloadDirectory) {
         self.vm = vm
         self.log = log
         self.payloadDirectory = payloadDirectory
         self.forward = K8sAPIServerForward(vm: vm, log: log)
+        self.podPortForward = K8sPodPortForwardCoordinator(log: log)
     }
 
     // MARK: Control channel
@@ -417,8 +422,51 @@ public final class K8sManager {
         let status = try withControl {
             try K8s.requestStatus($0, action: "disable", timeout: Self.controlTimeout)
         }
+        podPortForward.cancelAll(reason: "Kubernetes was disabled")
         forward.stop()
         return status
+    }
+
+    /// Explicitly starts one daemon-owned selected-Pod loopback forward. This does
+    /// not generate a kubeconfig, start Kubernetes, or republish the API server: all
+    /// of those are already-required facts and are revalidated by the coordinator.
+    @discardableResult
+    public func startPodPortForward(
+        _ request: K8sPodPortForwardRequest
+    ) throws -> K8sPodPortForwardLease {
+        try podPortForward.start(request) { [weak self] in
+            guard let self else {
+                throw MorbError.io("Morbstack stopped while preparing the selected Pod port forward")
+            }
+            let status = try self.status()
+            guard status.phase == .ready else {
+                throw MorbError.io(
+                    "Kubernetes is \(status.phase.summary), so the selected Pod cannot be forwarded yet. Wait for Kubernetes to report ready.")
+            }
+            guard let port = self.forward.boundPort else {
+                throw MorbError.io(
+                    "Kubernetes is ready but Morbstack’s local API forward is not current; refresh status before forwarding the selected Pod.")
+            }
+            guard FileManager.default.fileExists(atPath: K8s.defaultKubeconfigURL.path) else {
+                throw MorbError.io(
+                    "Morbstack’s private kubeconfig is missing; generate it before forwarding the selected Pod.")
+            }
+            return try K8sPodPortForwardPrerequisites(
+                kubeconfigURL: K8s.defaultKubeconfigURL,
+                apiForwardPort: port)
+        }
+    }
+
+    /// Explicit cancellation for the selected route owner. A stale lease cannot
+    /// cancel a later selection's forward.
+    public func cancelPodPortForward(_ lease: K8sPodPortForwardLease) {
+        podPortForward.cancel(lease)
+    }
+
+    /// VM, API-forward, route, and selection owners use this to end a current lease.
+    /// There is deliberately no restore path.
+    public func cancelPodPortForwards(reason: String) {
+        podPortForward.cancelAll(reason: reason)
     }
 
     // MARK: Read-only selected-resource inspection

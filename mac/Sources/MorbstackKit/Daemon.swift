@@ -226,6 +226,7 @@ public final class Daemon {
                     // Docker-published port, so it needs the same lifecycle teardown
                     // explicitly. This also cancels a status read that began while a
                     // previous VM was still running.
+                    self.k8s.cancelPodPortForwards(reason: "the VM \(state.token)")
                     self.stopKubernetesAPIServerForwardOnForwarderQueue()
                 }
             }
@@ -338,6 +339,7 @@ public final class Daemon {
 
     private func stopKubernetesAPIServerForwardOnForwarderQueue() {
         kubernetesForwardGeneration &+= 1
+        k8s.cancelPodPortForwards(reason: "Morbstack’s Kubernetes API forward stopped")
         k8s.forward.stop()
     }
 
@@ -352,12 +354,14 @@ public final class Daemon {
 
                 switch K8sAPIForwardPublication.action(vmState: self.vm.state, status: status) {
                 case .stop:
+                    self.k8s.cancelPodPortForwards(reason: "Kubernetes is no longer ready")
                     self.k8s.forward.stop()
 
                 case .awaitReadiness:
                     // An open listener is a promise that the endpoint can serve a
                     // client. Close it while control readiness is unknown or the
                     // guest explicitly says k3s is still starting, then retry.
+                    self.k8s.cancelPodPortForwards(reason: "Kubernetes API readiness is no longer current")
                     self.k8s.forward.stop()
                     self.scheduleKubernetesAPIServerReconciliation(
                         generation: generation, after: Self.kubernetesReconciliationDelay)
@@ -1137,6 +1141,7 @@ public final class Daemon {
         proxy.beginOrderlyShutdown()
         proxy.stop()
         forwarder.stop(reason: "daemon shutting down")
+        k8s.cancelPodPortForwards(reason: "the daemon is shutting down")
         controlServer.stop()
 
         let semaphore = DispatchSemaphore(value: 0)
