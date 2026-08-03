@@ -154,9 +154,34 @@ until this is closed (tracked as an inotify/FSEvents bridge, see
 [`roadmap.md`](roadmap.md) — a known gap, not a design decision, and nothing
 here should be read as a hot-reload capability claim).
 
-## The failure mode this exists for
+## Engine-side bind validation
 
-**A bind mount whose host path is not shared does not produce an error.**
+Before relaying a normal Docker container-create request, Morbstack verifies bind
+sources against the directories attached to the **running** VM and the guest's
+VirtioFS mount report. It never treats a configured-but-not-yet-attached path as a
+share, and it never adds a share on behalf of a container request.
+
+An unshared source, a share the guest reports as failed, or a guest too old to
+report share state fails the create request with Docker's familiar
+`invalid mount config for type "bind": ...` error instead of letting dockerd
+create an empty guest-local directory. `/tmp` is compared as `/private/tmp`, but
+the request sent to Docker is not rewritten. The check also follows existing
+symlinks (and the nearest existing parent of a missing legacy source) before
+accepting it, so a path under `/Users` that resolves to unshared `/opt` is rejected.
+
+Docker's two bind syntaxes keep their normal behavior once the share is known
+live: legacy `-v host:container` can create a missing host directory under a
+shared root; explicit `--mount type=bind,src=…` requires its source to exist.
+The validation does not add synced shares or filesystem notifications — VirtioFS
+is still live sharing without host-to-guest `inotify` (see below). It is an
+admission check rather than a filesystem sandbox: a symlink or share can still
+change after the request snapshot, and chunked, oversized, or unrecognized Docker
+create requests remain dockerd-owned opaque streams.
+
+## The failure mode this prevents
+
+Without that check, **a bind mount whose host path is not shared does not produce
+an error.**
 
 Docker asks the guest kernel for `/opt/secret`; the guest does not have it;
 `dockerd` creates an empty directory there and starts the container. Your

@@ -105,6 +105,9 @@ Before changing a route:
    Increase Contrast, Reduce Transparency, and narrow-window toolbar overflow.
 6. Launch fixture data in a real app window and review it with Computer Use. An offscreen
    image cannot pass a window/material/sidebar/toolbar check.
+7. If a route represents a runtime fact (for example a mount, published port, or engine
+   lifecycle state), verify the Engine-facing contract separately. Native visual
+   hierarchy must never make an unverified service capability look usable.
 
 For each route, record a compact review card before calling it complete:
 
@@ -121,6 +124,8 @@ For each route, record a compact review card before calling it complete:
 
 - exact HIG/API pages consulted;
 - a list of semantics covered and any documented exceptions;
+- for an Engine-facing claim, the bounded protocol/daemon admission contract and its
+  focused tests, including any intentionally unsupported request shapes;
 - `git diff --check` and source parse/typecheck result;
 - one serialized app build after the concurrent source work has settled; and
 - the full-window acceptance result, including safe sidebar/table/inspector/search and

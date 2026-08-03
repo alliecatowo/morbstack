@@ -347,9 +347,12 @@ must preserve:
 
 - **One vsock connection maps to exactly one dockerd connection**, opened
   fresh by morbinit for each accepted vsock connection. Nothing parses or
-  multiplexes the HTTP stream on either side — the Docker Engine API uses
-  HTTP/1.1 hijacked upgrades for `attach`/`exec`/`build`/log-follow, which
-  are not safely multiplexable over a shared connection.
+  multiplexes the HTTP stream in the guest. On the host, the only exception
+  is the bounded, non-consuming fixed-length create admission peek documented
+  in §3.2; every byte still goes through the same one-to-one relay unchanged.
+  The Docker Engine API uses HTTP/1.1 hijacked upgrades for
+  `attach`/`exec`/`build`/log-follow, which are not safely multiplexable over
+  a shared connection.
 - **Half-close aware, both sides.** When one direction hits EOF, the relay
   issues `shutdown(fd, SHUT_WR)` on the *other* descriptor only after
   everything already queued toward it has drained — not on first EOF. This
@@ -455,7 +458,7 @@ guest -> host:  "OK\n"              connection established; splice begins
   specific host IP (`-p 127.0.0.1:8081:80`) is honored as that specific
   bind address, never widened.
 
-#### Engine create preflight for explicit host ports
+#### Engine create preflight for host ports and bind sources
 
 Before relaying an ordinary fixed-length `POST .../containers/create`, the
 host-side `DockerProxy` takes a bounded non-consuming `MSG_PEEK` of the request.
@@ -468,11 +471,25 @@ preflight rejects explicit UDP publications (there is no UDP relay) and host
 addresses outside the loopback-only forwarder's supported set rather than letting
 them become a successful-looking but unreachable publish.
 
-This is deliberately an admission check, **not a lease**. The peek does not remove
-any bytes, and unrecognized, chunked, oversized, dynamic (`-P`/empty host port), and
-range requests remain opaque byte streams for the Engine. The preflight socket is
-closed immediately, so another process can still claim the port before Docker starts
-the container; a separately-created container can also be started after the snapshot.
+Once the VM is ready, the same preserved request body is also checked for bind
+sources in `HostConfig.Binds` and top-level `Mounts`. The check uses the directory
+shares actually attached to that VM plus the guest's `info.shares` mount report—not
+the next-boot `shared_paths` configuration. A lexical `/tmp` source is compared as
+`/private/tmp`; no source bytes are rewritten. It rejects an unshared source, a
+failed/unreported VirtioFS root, or a source (including a missing legacy `-v` child)
+whose existing symlink ancestor resolves outside a live share with a Docker-style
+HTTP 400 `invalid mount config for type "bind": ...` response. Explicit
+`--mount type=bind` sources must exist; legacy `-v` sources retain Docker's normal
+missing-directory creation behavior only under a verified live share. Named volumes
+and malformed shapes remain dockerd's responsibility.
+
+This is deliberately an admission check, **not a lease or a filesystem sandbox**.
+The peek does not remove any bytes, and chunked, oversized, or otherwise unrecognized
+create requests remain opaque byte streams for the Engine. Dynamic (`-P`/empty host
+port) and range publication requests receive no port availability verdict. The port
+probe socket is closed immediately, so another process can still claim the port before
+Docker starts the container; a separately-created container can also be started after
+the snapshot. Likewise, a source path can change after its share/symlink snapshot.
 Full Docker-compatible publication still requires a create/start response-aware TCP
 lease ledger, listener handoff, rollback/expiry, a guest allocation protocol for
 dynamic ports, and a real UDP data plane.

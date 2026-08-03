@@ -23,8 +23,8 @@ public final class DockerProxy {
     /// for the non-consuming admission peek, not a request-size limit for the Engine:
     /// a larger or chunked request simply bypasses this best-effort preflight and is
     /// relayed byte-for-byte as it was before.
-    private static let portPreflightPeekLimit = 256 * 1024
-    private static let portPreflightPeekBudget: TimeInterval = 0.25
+    private static let createPreflightPeekLimit = 256 * 1024
+    private static let createPreflightPeekBudget: TimeInterval = 0.25
 
     private let vm: VMManager
     private let log: MorbLog
@@ -137,14 +137,22 @@ public final class DockerProxy {
     }
 
     private func preflightThenRelay(clientFD: Int32) {
-        switch inspectPublishedPorts(in: clientFD) {
+        guard let createBody = inspectContainerCreate(in: clientFD) else {
+            relayAfterCreatePreflight(clientFD: clientFD, createBody: nil)
+            return
+        }
+
+        switch DockerPortPublicationPreflight.inspectContainerCreate(body: createBody) {
         case .allowed:
-            relayAfterPortPreflight(clientFD: clientFD)
+            // Bind validation needs the VM's actual attached share list and the
+            // guest's post-boot mount report, so it runs after `ensureRunning`.
+            relayAfterCreatePreflight(clientFD: clientFD, createBody: createBody)
         case .rejected(let message):
-            log.warn("docker container create rejected before relay: \(message)")
-            writeEngineError(to: clientFD, statusCode: 500, reason: "Internal Server Error", message: message)
-            Darwin.close(clientFD)
-            connectionFinished()
+            rejectContainerCreate(
+                clientFD: clientFD,
+                statusCode: 500,
+                reason: "Internal Server Error",
+                message: message)
         }
     }
 
@@ -152,8 +160,8 @@ public final class DockerProxy {
     /// request. No bytes are removed from `clientFD`; the original stream remains
     /// intact for ``FDRelay``. That is what lets the normal proxy preserve upgraded,
     /// chunked, and otherwise opaque Engine traffic without a second HTTP proxy.
-    private func inspectPublishedPorts(in clientFD: Int32) -> DockerPortPublicationPreflight.Verdict {
-        let deadline = Date().addingTimeInterval(DockerProxy.portPreflightPeekBudget)
+    private func inspectContainerCreate(in clientFD: Int32) -> Data? {
+        let deadline = Date().addingTimeInterval(DockerProxy.createPreflightPeekBudget)
 
         while Date() < deadline {
             let remainingMilliseconds = max(1, Int32((deadline.timeIntervalSinceNow * 1_000).rounded(.up)))
@@ -161,19 +169,19 @@ public final class DockerProxy {
             let polled = POSIXSocketSupport.retryOnInterrupt {
                 withUnsafeMutablePointer(to: &descriptor) { poll($0, 1, remainingMilliseconds) }
             }
-            guard polled > 0 else { return .allowed }
+            guard polled > 0 else { return nil }
 
-            guard let bytes = peekClientBytes(clientFD) else { return .allowed }
+            guard let bytes = peekClientBytes(clientFD) else { return nil }
             let parsed: (head: HTTPRequestHead, consumed: Int)?
             do {
                 parsed = try MinimalHTTP.parseRequestHead(bytes)
             } catch {
-                return .allowed
+                return nil
             }
             guard let parsed else {
                 // The complete header is not visible yet. Keep waiting only while it
                 // can still fit in the bounded peek buffer.
-                guard bytes.count < DockerProxy.portPreflightPeekLimit else { return .allowed }
+                guard bytes.count < DockerProxy.createPreflightPeekLimit else { return nil }
                 // `MSG_PEEK` leaves the partial head readable, so `poll` would wake
                 // immediately again. Yield briefly rather than spinning a relay worker
                 // while the local client finishes writing its request.
@@ -181,14 +189,14 @@ public final class DockerProxy {
                 continue
             }
 
-            guard isContainerCreate(parsed.head) else { return .allowed }
+            guard isContainerCreate(parsed.head) else { return nil }
             guard
                 !(parsed.head.headers["transfer-encoding"] ?? "").lowercased().contains("chunked"),
                 let contentLength = parsed.head.headers["content-length"].flatMap(Int.init),
                 contentLength >= 0,
-                contentLength <= DockerProxy.portPreflightPeekLimit - parsed.consumed
+                contentLength <= DockerProxy.createPreflightPeekLimit - parsed.consumed
             else {
-                return .allowed
+                return nil
             }
 
             let bodyEnd = parsed.consumed + contentLength
@@ -196,14 +204,13 @@ public final class DockerProxy {
                 usleep(1_000)
                 continue
             }
-            return DockerPortPublicationPreflight.inspectContainerCreate(
-                body: Data(bytes[parsed.consumed..<bodyEnd]))
+            return Data(bytes[parsed.consumed..<bodyEnd])
         }
-        return .allowed
+        return nil
     }
 
     private func peekClientBytes(_ clientFD: Int32) -> Data? {
-        var buffer = [UInt8](repeating: 0, count: DockerProxy.portPreflightPeekLimit)
+        var buffer = [UInt8](repeating: 0, count: DockerProxy.createPreflightPeekLimit)
         let count = buffer.withUnsafeMutableBytes { raw -> Int in
             guard let base = raw.baseAddress else { return -1 }
             return Darwin.recv(clientFD, base, raw.count, Int32(MSG_PEEK))
@@ -219,7 +226,7 @@ public final class DockerProxy {
         return components.suffix(2).map(String.init) == ["containers", "create"]
     }
 
-    private func relayAfterPortPreflight(clientFD: Int32) {
+    private func relayAfterCreatePreflight(clientFD: Int32, createBody: Data?) {
 
         vm.ensureRunning(timeout: DockerProxy.bootTimeout) { [weak self] result in
             guard let self else {
@@ -237,6 +244,23 @@ public final class DockerProxy {
                 Darwin.close(clientFD)
                 self.connectionFinished()
             case .success:
+                if let createBody {
+                    switch DockerBindMountPreflight.inspectContainerCreate(
+                        body: createBody,
+                        shares: self.vm.shares,
+                        guestShareStates: self.vm.guestShareStates)
+                    {
+                    case .allowed:
+                        break
+                    case .rejected(let message):
+                        self.rejectContainerCreate(
+                            clientFD: clientFD,
+                            statusCode: 400,
+                            reason: "Bad Request",
+                            message: message)
+                        return
+                    }
+                }
                 self.vm.connectVsock(port: MorbVsockPorts.dockerAPI) { [weak self] vsockResult in
                     guard let self else {
                         Darwin.close(clientFD)
@@ -303,6 +327,18 @@ public final class DockerProxy {
         queue.async { [weak self] in
             self?.idleHandler?()
         }
+    }
+
+    private func rejectContainerCreate(
+        clientFD: Int32,
+        statusCode: Int,
+        reason: String,
+        message: String
+    ) {
+        log.warn("docker container create rejected before relay: \(message)")
+        writeEngineError(to: clientFD, statusCode: statusCode, reason: reason, message: message)
+        Darwin.close(clientFD)
+        connectionFinished()
     }
 
     /// Writes a minimal HTTP 502 so `docker ps` shows a real message instead of

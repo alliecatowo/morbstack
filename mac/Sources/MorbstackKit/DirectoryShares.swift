@@ -155,7 +155,7 @@ public enum MorbShares {
         var accepted: [String] = []
 
         for raw in paths {
-            let path = resolveMacOSPrivateAlias(normalise(raw))
+            let path = canonicalHostPath(raw)
             guard !path.isEmpty else { continue }
 
             guard !reservedGuestRoots.contains(path) else {
@@ -329,6 +329,30 @@ public enum MorbShares {
         let joined = segments.joined(separator: "/")
         if absolute { return "/" + joined }
         return joined
+    }
+
+    /// Returns the lexical host-path spelling Morbstack uses for VirtioFS matching.
+    ///
+    /// This intentionally does not resolve arbitrary symlinks: the guest receives
+    /// the literal bind source, so turning a user path into some other path here
+    /// could make a host-side check claim a share that dockerd cannot see. The one
+    /// exception is macOS's three documented `/private` aliases, which must be
+    /// rewritten before comparing against a VirtioFS mount point for the same reason
+    /// they are rewritten while planning shares.
+    public static func canonicalHostPath(_ path: String) -> String {
+        resolveMacOSPrivateAlias(normalise(path))
+    }
+
+    /// Maps only macOS's `/private` aliases in a Docker bind source.
+    ///
+    /// Unlike ``canonicalHostPath(_:)``, this deliberately preserves `..`, `.` and
+    /// whitespace. Those are part of the source path dockerd will resolve, and
+    /// normalising them before symlink resolution can turn `/Users/link/../x` into a
+    /// different path from the one the guest kernel follows. It is used only as the
+    /// first, same-path VirtioFS comparison; a bind preflight subsequently resolves
+    /// symlinks through the original path before making its final coverage decision.
+    static func canonicalBindSource(_ path: String) -> String {
+        resolveMacOSPrivateAlias(path)
     }
 
     /// Whether `path` sits inside `ancestor` (and is not `ancestor` itself).
