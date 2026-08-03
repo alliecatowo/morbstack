@@ -127,7 +127,7 @@ struct ContainerStatsTab: View {
                             }
                         }
                     }
-                    .formStyle(.grouped)
+                    .formStyle(.automatic)
                     .scrollDisabled(true)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.vertical)

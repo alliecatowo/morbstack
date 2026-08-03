@@ -80,7 +80,7 @@ private struct KubernetesDiagnosisSheet: View {
                 }
             }
         }
-        .formStyle(.grouped)
+        .formStyle(.automatic)
         .frame(minWidth: 460, idealWidth: 520, minHeight: 310, idealHeight: 360)
         .navigationTitle("Kubernetes Recovery")
         .toolbar {

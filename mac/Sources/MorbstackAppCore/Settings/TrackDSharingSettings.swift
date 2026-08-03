@@ -80,7 +80,7 @@ struct TrackDSharingSettings: View {
                 rosettaExplanation
             }
         }
-        .formStyle(.grouped)
+        .formStyle(.automatic)
         // The guest's mount state changes only after a restart or a configuration edit.
         // Refreshing on open is enough; the pane deliberately does not poll.
         .task { await model.refreshFileSharing() }

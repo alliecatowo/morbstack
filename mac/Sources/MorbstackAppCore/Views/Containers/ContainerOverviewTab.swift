@@ -50,7 +50,7 @@ struct ContainerOverviewTab: View {
             if !details.mounts.isEmpty { mountsSection(details) }
             if !details.labels.isEmpty { labelsSection(details) }
         }
-        .formStyle(.grouped)
+        .formStyle(.automatic)
     }
 
     @ViewBuilder

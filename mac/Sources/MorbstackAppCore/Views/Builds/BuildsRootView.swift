@@ -1181,7 +1181,7 @@ struct BuildsRootView: View {
                         + "This initial workflow does not import Docker credential helpers, so private base images may fail.")
             }
         }
-        .formStyle(.grouped)
+        .formStyle(.automatic)
     }
 
     private func buildProgressForm(for request: LocalBuildRequest) -> some View {
@@ -1217,7 +1217,7 @@ struct BuildsRootView: View {
                 Text("Cancel closes this build's client connection. Docker cancels a build when its client disconnects.")
             }
         }
-        .formStyle(.grouped)
+        .formStyle(.automatic)
     }
 
     private func buildCompletionForm(for request: LocalBuildRequest) -> some View {
@@ -1232,7 +1232,7 @@ struct BuildsRootView: View {
             }
             buildResultActions
         }
-        .formStyle(.grouped)
+        .formStyle(.automatic)
     }
 
     private func buildCancelledForm(for request: LocalBuildRequest) -> some View {
@@ -1245,7 +1245,7 @@ struct BuildsRootView: View {
             }
             buildResultActions
         }
-        .formStyle(.grouped)
+        .formStyle(.automatic)
     }
 
     private func buildFailureForm(for request: LocalBuildRequest, detail: String) -> some View {
@@ -1259,7 +1259,7 @@ struct BuildsRootView: View {
             }
             buildResultActions
         }
-        .formStyle(.grouped)
+        .formStyle(.automatic)
     }
 
     private var buildResultActions: some View {

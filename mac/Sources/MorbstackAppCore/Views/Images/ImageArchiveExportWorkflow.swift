@@ -169,7 +169,7 @@ struct ImageArchiveExportSheet: View {
                 .disabled(operation.isCancellationRequested)
             }
         }
-        .formStyle(.grouped)
+        .formStyle(.automatic)
         .frame(minWidth: 460, idealWidth: 520)
     }
 }

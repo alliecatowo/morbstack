@@ -175,7 +175,7 @@ struct VolumeArchiveExportSheet: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .formStyle(.grouped)
+        .formStyle(.automatic)
         .frame(minWidth: 460, idealWidth: 520)
     }
 }
