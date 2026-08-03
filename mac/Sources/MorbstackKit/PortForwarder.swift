@@ -263,6 +263,11 @@ public final class PortForwarder {
     private struct LeaseRecord {
         let lease: TCPPortLease
         var listeners: [Int: TCPListener]
+        /// Ports withdrawn from this lease after Docker reported an ambiguous running
+        /// publication. Retaining the lease record preserves container lifecycle
+        /// bookkeeping, but never lets a later start observer reactivate a listener
+        /// that was deliberately removed from the Mac.
+        var withdrawnHostPorts: Set<Int> = []
         var containerID: String?
         var startClaimed = false
         var isForwarding = false
@@ -345,6 +350,10 @@ public final class PortForwarder {
     private var refreshQueued = false
     private var failedBinds: [Int: FailedBind] = [:]
     private var failedUDPBinds: [Int: FailedBind] = [:]
+    /// Docker snapshots that claim one Mac endpoint for competing targets. These are
+    /// terminal for their snapshot, not retryable host bind failures.
+    private var conflictingTCPForwards: [Int: PortForwardPlan.ListenerConflict] = [:]
+    private var conflictingUDPForwards: [Int: PortForwardPlan.ListenerConflict] = [:]
     private var retryTimer: DispatchSourceTimer?
     /// Dials started but not yet spliced, throttled by ``maxConcurrentDials``.
     private var pendingDials = 0
@@ -393,13 +402,17 @@ public final class PortForwarder {
     public var failedForwards: [String] {
         lock.lock()
         defer { lock.unlock() }
-        let tcp: [String] = failedBinds.keys.sorted().compactMap { port -> String? in
-            guard let failure = failedBinds[port] else { return nil }
-            return "\(failure.binding.description) — \(failure.reason)"
+        let tcp: [String] = Set(failedBinds.keys).union(conflictingTCPForwards.keys)
+            .sorted().compactMap { port -> String? in
+                if let conflict = conflictingTCPForwards[port] { return conflict.diagnostic }
+                guard let failure = failedBinds[port] else { return nil }
+                return "\(failure.binding.description) — \(failure.reason)"
         }
-        let udp: [String] = failedUDPBinds.keys.sorted().compactMap { port -> String? in
-            guard let failure = failedUDPBinds[port] else { return nil }
-            return "\(failure.binding.description) — \(failure.reason)"
+        let udp: [String] = Set(failedUDPBinds.keys).union(conflictingUDPForwards.keys)
+            .sorted().compactMap { port -> String? in
+                if let conflict = conflictingUDPForwards[port] { return conflict.diagnostic }
+                guard let failure = failedUDPBinds[port] else { return nil }
+                return "\(failure.binding.description) — \(failure.reason)"
         }
         return tcp + udp
     }
@@ -546,6 +559,11 @@ public final class PortForwarder {
         }
         do {
             for publication in fixedPublications {
+                guard conflictingTCPForwards[publication.hostPort] == nil else {
+                    throw TCPPortLeaseError.unavailable(
+                        "cannot reserve published TCP port 127.0.0.1:\(publication.hostPort): "
+                            + "Docker currently reports competing targets for this host port")
+                }
                 let listener = TCPListener(port: publication.hostPort, queue: acceptQueue)
                 do {
                     try listener.start()
@@ -716,7 +734,16 @@ public final class PortForwarder {
         // response still has the no-gap handoff contract. Connections accepted before
         // `running` becomes true are conservatively closed by `handleAccepted`.
         let generation = running ? self.generation : self.generation + 1
-        for publication in record.lease.publications {
+        let activePublications = record.lease.publications.filter {
+            !record.withdrawnHostPorts.contains($0.hostPort)
+        }
+        guard !activePublications.isEmpty else {
+            record.startClaimed = false
+            leases[identifier] = record
+            lock.unlock()
+            return false
+        }
+        for publication in activePublications {
             guard let listener = record.listeners[publication.hostPort] else {
                 record.startClaimed = false
                 leases[identifier] = record
@@ -741,7 +768,7 @@ public final class PortForwarder {
         leases[identifier] = record
         lock.unlock()
 
-        for publication in record.lease.publications {
+        for publication in activePublications {
             log.info(
                 "port lease activated: \(publication.hostPort) -> \(String(containerID.prefix(12))):\(publication.containerPort)/tcp")
         }
@@ -777,6 +804,41 @@ public final class PortForwarder {
         }
         lock.unlock()
         log.info("port lease paused: \(forward.binding.description) — after \(reason)")
+    }
+
+    /// Withdraws only the concrete listeners whose Docker endpoint is ambiguous.
+    ///
+    /// A fixed-create lease can cover several independent ports, so releasing its
+    /// whole record would unnecessarily darken a non-conflicting publication. The
+    /// record stays associated with its container for later destroy cleanup, while a
+    /// withdrawn port is permanently excluded from any late start-observer promotion.
+    private func withdrawConflictingTCPLeaseListeners(at ports: Set<Int>, reason: String) {
+        guard !ports.isEmpty else { return }
+        var listeners: [(port: Int, listener: TCPListener)] = []
+        lock.lock()
+        for identifier in Array(leases.keys) {
+            guard var record = leases[identifier] else { continue }
+            let withdrawn = record.listeners.keys.filter { ports.contains($0) }
+            guard !withdrawn.isEmpty else { continue }
+            for port in withdrawn {
+                guard let listener = record.listeners.removeValue(forKey: port) else { continue }
+                record.withdrawnHostPorts.insert(port)
+                if forwards[port]?.leaseID == identifier {
+                    forwards.removeValue(forKey: port)
+                }
+                listeners.append((port, listener))
+            }
+            record.isForwarding = record.listeners.keys.contains {
+                forwards[$0]?.leaseID == identifier
+            }
+            leases[identifier] = record
+        }
+        lock.unlock()
+
+        for entry in listeners {
+            entry.listener.stop()
+            log.warn("withdrew fixed TCP lease on 127.0.0.1:\(entry.port) — \(reason)")
+        }
     }
 
     private func releaseLease(_ identifier: UUID, reason: String) {
@@ -850,6 +912,8 @@ public final class PortForwarder {
         connectionCounts.removeAll()
         failedBinds.removeAll()
         failedUDPBinds.removeAll()
+        conflictingTCPForwards.removeAll()
+        conflictingUDPForwards.removeAll()
         let timer = retryTimer
         retryTimer = nil
         lock.unlock()
@@ -1253,7 +1317,13 @@ public final class PortForwarder {
     /// Only ever called from ``workQueue``, so the read-diff-write below cannot
     /// interleave with another reconciliation.
     private func apply(bindings: [DockerPortBinding], generation: Int, reason: String) {
-        let desired = PortForwardPlan.desiredListeners(bindings)
+        let reconciliation = PortForwardPlan.reconcileTCPListeners(bindings)
+        let desired = reconciliation.listeners
+        let newConflicts = updateTCPConflicts(reconciliation.conflicts)
+        withdrawConflictingTCPLeaseListeners(
+            at: Set(reconciliation.conflicts.keys),
+            reason: "Docker reported competing targets")
+        for conflict in newConflicts { log.warn(conflict.diagnostic) }
 
         // A start by container name or an opaque client can bypass DockerProxy's
         // start-response observer. The event snapshot is still a guest-authored
@@ -1313,7 +1383,10 @@ public final class PortForwarder {
     /// numerical port at once. Nothing in this method guesses a pre-start dynamic or
     /// range allocation; `containers/json` has already supplied the concrete endpoint.
     private func applyUDP(bindings: [DockerPortBinding], generation: Int, reason: String) {
-        let desired = PortForwardPlan.desiredUDPListeners(bindings)
+        let reconciliation = PortForwardPlan.reconcileUDPListeners(bindings)
+        let desired = reconciliation.listeners
+        let newConflicts = updateUDPConflicts(reconciliation.conflicts)
+        for conflict in newConflicts { log.warn(conflict.diagnostic) }
 
         lock.lock()
         for (port, desiredBinding) in desired {
@@ -1340,6 +1413,38 @@ public final class PortForwarder {
         for binding in plan.open {
             openUDPForward(binding, generation: generation)
         }
+    }
+
+    /// Replaces the non-retryable TCP conflict snapshot and returns diagnostics that
+    /// have not already been emitted for this exact competing-target state.
+    private func updateTCPConflicts(
+        _ conflicts: [Int: PortForwardPlan.ListenerConflict]
+    ) -> [PortForwardPlan.ListenerConflict] {
+        lock.lock()
+        let newConflicts = conflicts.keys.sorted().compactMap { port -> PortForwardPlan.ListenerConflict? in
+            guard let conflict = conflicts[port] else { return nil }
+            return conflictingTCPForwards[port] == conflict ? nil : conflict
+        }
+        conflictingTCPForwards = conflicts
+        for port in conflicts.keys { failedBinds.removeValue(forKey: port) }
+        lock.unlock()
+        return newConflicts
+    }
+
+    /// UDP is independent from TCP but has the same one-target requirement within
+    /// its own transport. These are state diagnostics, never timer retry entries.
+    private func updateUDPConflicts(
+        _ conflicts: [Int: PortForwardPlan.ListenerConflict]
+    ) -> [PortForwardPlan.ListenerConflict] {
+        lock.lock()
+        let newConflicts = conflicts.keys.sorted().compactMap { port -> PortForwardPlan.ListenerConflict? in
+            guard let conflict = conflicts[port] else { return nil }
+            return conflictingUDPForwards[port] == conflict ? nil : conflict
+        }
+        conflictingUDPForwards = conflicts
+        for port in conflicts.keys { failedUDPBinds.removeValue(forKey: port) }
+        lock.unlock()
+        return newConflicts
     }
 
     private func closeForward(port: Int, reason: String, preserveLease: Bool = true) {
