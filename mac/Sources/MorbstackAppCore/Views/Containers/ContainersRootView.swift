@@ -359,6 +359,11 @@ struct ContainersRootView: View {
             }
             .width(min: 86, ideal: 106)
         }
+        // The automatic Tahoe table style renders empty rows as inset, rounded bands
+        // in this dense operations pane. Bordered is the system's non-inset macOS
+        // table treatment; it preserves native selection, sorting, resizing, and
+        // accessibility without introducing a Morbstack row style.
+        .tableStyle(.bordered)
         .contextMenu(forSelectionType: String.self) { ids in
             contextMenu(for: ids)
         } primaryAction: { ids in
