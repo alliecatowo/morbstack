@@ -228,7 +228,12 @@ struct ImagesRootView: View {
             .toolbar { toolbarContent }
             .focusedSceneValue(
                 \.imageArchiveExportAction,
-                selectedImage == nil || imageArchiveExport != nil ? nil : chooseImageArchiveDestination)
+                imageArchiveExportAction)
+    }
+
+    private var imageArchiveExportAction: (() -> Void)? {
+        guard selectedImage != nil, imageArchiveExport == nil else { return nil }
+        return chooseImageArchiveDestination
     }
 
     private var removalAlertTitle: String {
