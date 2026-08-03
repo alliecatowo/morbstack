@@ -311,7 +311,7 @@ struct ImagesRootView: View {
             .disabled(selectedImage == nil || imageArchiveExport != nil)
         }
         if !model.images.isEmpty {
-            ToolbarItem(id: "images.inspector", placement: .primaryAction) {
+            ToolbarItem(id: "images.inspector", placement: .automatic) {
                 Button {
                     showsInspector.toggle()
                 } label: {
@@ -493,8 +493,6 @@ struct ImagesRootView: View {
         .tableStyle(.automatic)
         .contextMenu(forSelectionType: ImageSummary.ID.self) { ids in
             contextMenu(for: ids)
-        } primaryAction: { ids in
-            if let id = ids.first { selection = id }
         }
     }
 
