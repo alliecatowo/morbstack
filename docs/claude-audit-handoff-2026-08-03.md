@@ -45,9 +45,9 @@ Read these before making a visual or behavioral judgement:
 
 ## Current branch and commit set
 
-The branch is `code/native-content-continuation` at `53f6d4a` before this
-handoff-document commit. Recent work is deliberately small-commit, with each
-commit grouped around one outcome:
+The audited source tip is `8a8957f` on `code/native-content-continuation`.
+This documentation amendment follows that source commit. Recent work is
+deliberately small-commit, with each commit grouped around one outcome:
 
 | Area | Commits |
 | --- | --- |
@@ -57,7 +57,7 @@ commit grouped around one outcome:
 | Compose and Buildx | `64912ae`, `52f92ea`, `b6e808e`, `7a2faa4`, `127df9a` |
 | Image/volume operations | `ac26a91`, `abf4230` |
 | Native macOS migration | `e66c25e`, `d8c1193`, `ab413e0`, `f5e436e`, `62c4b0e` |
-| File-notification transport | `3115ff0` |
+| File-notification transport | `3115ff0`, `8a8957f` (compile repair) |
 | Grow-only Docker disk transaction | `53f6d4a` |
 
 ### Prior Claude checkpoints
@@ -178,23 +178,26 @@ Completed in this work wave:
 - Focused `swiftc -parse`, Rust formatter/parser, and `git diff --check` handoffs
   for individual commits.
 - A serialized `mise run --raw app` bundle assembly followed by
-  `codesign --verify --deep --strict dist/Morbstack.app` succeeded before the
-  final inspector, file-share, guest allocator, and pending disk commits.
+  `codesign --verify --deep --strict dist/Morbstack.app` succeeded at the
+  `8a8957f` source tip after the final inspector, file-share, guest allocator,
+  and disk commits.
 - Real Computer Use review of the WindowServer-composited app showed actual
   local Docker containers/images and validated safe navigation, selected-record
   inspection, the Resources policies, Stacks selection, and the native
   `NSOpenPanel` Compose-source entry. Stable captures are stored under
   `artifacts/visual/`; they include useful pre-remediation Image/Disk references.
+- The signed `8a8957f` bundle was relaunched in a real WindowServer window and
+  reviewed on the dark Disk route against real local Docker data. Its direct
+  Computer Use capture is in this handoff conversation; the app remains open.
 
 Still required after the final commit:
 
-1. One serialized app bundle build and signature verification.
-2. Real-window review of the rebuilt inspector forms in light/dark, normal/narrow
+1. Real-window review of the rebuilt inspector forms in light/dark, normal/narrow
    widths, sidebar/inspector animation, toolbar overflow, keyboard focus, menus,
    search, table sort/selection, and unavailable/confirmation states.
-3. A guest-image rebuild before testing guest Rust/Moby changes. This is a Docker
+2. A guest-image rebuild before testing guest Rust/Moby changes. This is a Docker
    Buildx workload and was deliberately not run while the user was unavailable.
-4. The serial clean-profile CP-01 through CP-07 acceptance matrix: normal CLI/
+3. The serial clean-profile CP-01 through CP-07 acceptance matrix: normal CLI/
    context/direct socket, Docker/Compose/Buildx, `-p`/`-P`, mounts, Testcontainers
    (Java/Go/Node/Python), and Dev Containers.
 
