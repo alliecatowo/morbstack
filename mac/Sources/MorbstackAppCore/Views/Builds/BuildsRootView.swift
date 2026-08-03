@@ -643,7 +643,9 @@ struct BuildsRootView: View {
             Section {
                 Label("Build Completed", systemImage: "checkmark.circle")
                 LabeledContent("Image", value: request.displayName)
-                Text("The result was loaded into Morbstack's local image store. Images and build-cache records were refreshed.")
+                Text(
+                    "The result was loaded into Morbstack's local image store. Images and build-cache "
+                        + "records update independently, so either list can still show its last successful refresh.")
                     .foregroundStyle(.secondary)
             }
             buildResultActions
