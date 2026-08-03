@@ -19,6 +19,7 @@ dist/*
 !dist/CROSS_COMPILE.md
 dist/*/*
 !dist/*/PROVENANCE.txt
+!dist/*/TOOLCHAIN.plist
 
 .mise.local.toml
 

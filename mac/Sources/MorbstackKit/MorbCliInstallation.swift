@@ -142,14 +142,15 @@ public enum MorbCliInstallation {
         environment: [String: String] = ProcessInfo.processInfo.environment,
         makeDefault: Bool = false
     ) -> Plan {
+        let toolchain = MorbCliPlugins.sourceToolchain()
         let docker = linkItem(
             name: "docker",
-            source: MorbCliPlugins.sourceDockerCLI(),
+            source: toolchain?.docker,
             destination: dockerDestination(environment: environment))
         let plugins = MorbCliPlugins.all.map { plugin in
             linkItem(
                 name: plugin.binaryName,
-                source: MorbCliPlugins.sourceBinary(for: plugin),
+                source: toolchain?.source(for: plugin),
                 destination: MorbCliPlugins.cliPluginsDirectory(environment: environment)
                     .appendingPathComponent(plugin.binaryName, isDirectory: false))
         }
@@ -230,15 +231,17 @@ public enum MorbCliInstallation {
         }
 
         var results: [String: LinkResult] = [:]
-        guard let dockerSource = MorbCliPlugins.sourceDockerCLI() else {
-            throw MorbError.notFound("the bundled docker client disappeared while first-run setup was starting")
+        guard let toolchain = MorbCliPlugins.sourceToolchain() else {
+            throw MorbError.notFound(
+                "the bundled Docker CLI toolchain disappeared or no longer passed provenance verification while first-run setup was starting")
         }
         results["docker"] = try installLink(
-            source: dockerSource, destination: dockerDestination(environment: environment))
+            source: toolchain.docker, destination: dockerDestination(environment: environment))
 
         for plugin in MorbCliPlugins.all {
-            guard let source = MorbCliPlugins.sourceBinary(for: plugin) else {
-                throw MorbError.notFound("the bundled \(plugin.binaryName) disappeared while first-run setup was starting")
+            guard let source = toolchain.source(for: plugin) else {
+                throw MorbError.notFound(
+                    "the verified Docker CLI toolchain omitted \(plugin.binaryName) while first-run setup was starting")
             }
             let destination = MorbCliPlugins.cliPluginsDirectory(environment: environment)
                 .appendingPathComponent(plugin.binaryName, isDirectory: false)

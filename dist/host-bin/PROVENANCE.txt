@@ -8,6 +8,7 @@ way the `docker` CLI's own cli-plugins resolution expects:
     dist/host-bin/docker                        <- the client itself
     dist/host-bin/cli-plugins/docker-compose     <- `docker compose` plugin
     dist/host-bin/cli-plugins/docker-buildx      <- `docker buildx` plugin
+    dist/host-bin/TOOLCHAIN.plist                <- the three-tool manifest
 
 All three are host Mac (arm64) binaries that never enter the VM/initramfs.
 `docker` is the main entry point a user's shell resolves; the two plugin
@@ -75,12 +76,18 @@ independent cross-check at pin time, the same digest was confirmed against
 Homebrew's own formula API
 (`https://formulae.brew.sh/api/formula/docker.json`, key
 `.bottle.stable.files.arm64_tahoe.sha256`), which agreed exactly. The
-extracted binary's own hash (above) is checked at pin time but not re-hashed
-on every fetch, because the bottle also carries man pages, shell
-completions, and the formula's own metadata files whose presence/absence
-does not affect the shipped binary's correctness — `fetch_docker_cli`
-instead checks that the installed binary runs and reports exactly
-"version 29.7.1", which is the property that actually matters.
+extracted binary's own hash (above) is re-checked after every extraction and
+before an already-staged binary is reused. Its reported version is an
+additional sanity check, not a substitute for byte verification.
+
+`TOOLCHAIN.plist` names exactly these three files and records their immutable
+upstream hashes in both `source_sha256` and `sha256`. The app packager rejects
+any source root that does not match those compiler-pinned values. It signs the
+three nested executables, then updates only `sha256` to their final signed
+bytes before outer-signing the app. The shipped app therefore validates final
+bytes against its manifest while its valid outer code signature seals both the
+manifest and those bytes; it never mixes files from separate roots or falls
+back to an arbitrary checkout if a bundle is incomplete.
 
 `file` confirms: Mach-O 64-bit executable arm64. Ad-hoc/linker-signed.
 Runs standalone (`./docker --version` -> "Docker version 29.7.1, build

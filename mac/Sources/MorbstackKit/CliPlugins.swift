@@ -10,7 +10,9 @@
 // the person at the keyboard, or `--force`. See dist/host-bin/PROVENANCE.txt for where
 // the binaries themselves come from and how their hashes were verified.
 
+import CryptoKit
 import Foundation
+import Security
 
 public enum MorbCliPlugins {
 
@@ -29,6 +31,90 @@ public enum MorbCliPlugins {
     public static let compose = Plugin(name: "compose")
     public static let buildx = Plugin(name: "buildx")
     public static let all: [Plugin] = [compose, buildx]
+
+    /// One complete, verified Docker CLI toolchain from a single source root.
+    ///
+    /// The Docker client and both plugins must be selected together. Resolving each
+    /// file independently could otherwise combine an app-bundled `docker` with a
+    /// checkout's Buildx, or install an executable whose bytes no longer match the
+    /// release's declared provenance.
+    public struct Toolchain: Sendable {
+        public let root: URL
+        public let docker: URL
+        public let compose: URL
+        public let buildx: URL
+
+        public func source(for plugin: Plugin) -> URL? {
+            if plugin.name == "compose" { return compose }
+            if plugin.name == "buildx" { return buildx }
+            return nil
+        }
+    }
+
+    private struct Tool: Decodable {
+        let id: String
+        let path: String
+        let version: String
+        let sourceSha256: String
+        let sha256: String
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case path
+            case version
+            case sourceSha256 = "source_sha256"
+            case sha256
+        }
+    }
+
+    private struct Manifest: Decodable {
+        let schemaVersion: Int
+        let platform: String
+        let tools: [Tool]
+
+        enum CodingKeys: String, CodingKey {
+            case schemaVersion = "schema_version"
+            case platform
+            case tools
+        }
+    }
+
+    private struct PinnedTool {
+        let id: String
+        let path: String
+        let version: String
+        let sha256: String
+    }
+
+    private static let manifestName = "TOOLCHAIN.plist"
+    private static let pinnedTools = [
+        PinnedTool(
+            id: "docker", path: "docker", version: "29.7.1",
+            sha256: "49d98ab806e8678cd6341b09dad6389e5bcd8a46513de7651053bee3d8366e8d"),
+        PinnedTool(
+            id: "compose", path: "cli-plugins/docker-compose", version: "v5.3.1",
+            sha256: "32691ba1196d819fa68cbdc0aad9a5569e730a35ae40c6fdd8458110ecd69488"),
+        PinnedTool(
+            id: "buildx", path: "cli-plugins/docker-buildx", version: "v0.36.0",
+            sha256: "82c6a3d9df37790c5bdb0d7ca88986d1d17622fc2b88ebe34b275c6c47acd7a6"),
+    ]
+
+    /// Resolves one complete provenance-verified toolchain. A packaged executable
+    /// never falls back to a checkout: an invalid signed bundle is a release defect,
+    /// not permission to borrow arbitrary developer bytes from elsewhere on disk.
+    public static func sourceToolchain() -> Toolchain? {
+        if bundledHostBinLocation() != nil { return bundledToolchain }
+        return candidateHostBinDirectories().lazy.compactMap { validatedToolchain(at: $0) }.first
+    }
+
+    /// Validated once per process for the immutable, signed app-bundle case. Checkout
+    /// roots stay uncached so a developer's fetch/replace cycle is immediately seen.
+    private static let bundledToolchain: Toolchain? = {
+        guard let location = bundledHostBinLocation(), isValidCodeSignature(appURL: location.appURL) else {
+            return nil
+        }
+        return validatedToolchain(at: location.hostBinURL, isSealedBundle: true)
+    }()
 
     /// Whether a resolved symlink target is a binary from a Morbstack bundle or
     /// checkout. This is deliberately about *provenance*, not mere path shape:
@@ -76,27 +162,7 @@ public enum MorbCliPlugins {
     /// directories up. Both are tried, bundle location first, so an installed app never
     /// accidentally reads out of a developer's repo checkout instead of its own bundle.
     public static func sourceBinary(for plugin: Plugin) -> URL? {
-        for dir in candidateHostBinDirectories() {
-            // `host-bin` is the root of the *toolchain*, not Docker's plugin search
-            // directory.  Keeping plugins one level down is what lets the packaged
-            // layout exactly mirror a normal Docker config directory:
-            //
-            //   Contents/Resources/host-bin/docker
-            //   Contents/Resources/host-bin/cli-plugins/docker-compose
-            //   Contents/Resources/host-bin/cli-plugins/docker-buildx
-            //
-            // Looking directly under `host-bin` made every plan report its sources as
-            // missing even after the fetcher had verified the real files.  That was
-            // especially bad on a clean machine: first-run could look complete while
-            // `docker compose` and `docker buildx` were not actually installed.
-            let candidate = dir
-                .appendingPathComponent("cli-plugins", isDirectory: true)
-                .appendingPathComponent(plugin.binaryName, isDirectory: false)
-            if FileManager.default.isExecutableFile(atPath: candidate.path) {
-                return candidate
-            }
-        }
-        return nil
+        sourceToolchain()?.source(for: plugin)
     }
 
     static func candidateHostBinDirectories() -> [URL] {
@@ -130,13 +196,99 @@ public enum MorbCliPlugins {
     /// the development machine: the app bundle itself is the source of all three host
     /// executables.
     public static func sourceDockerCLI() -> URL? {
-        for dir in candidateHostBinDirectories() {
-            let candidate = dir.appendingPathComponent("docker", isDirectory: false)
-            if FileManager.default.isExecutableFile(atPath: candidate.path) {
-                return candidate
-            }
+        sourceToolchain()?.docker
+    }
+
+    private struct BundledHostBinLocation {
+        let appURL: URL
+        let hostBinURL: URL
+    }
+
+    private static func bundledHostBinLocation() -> BundledHostBinLocation? {
+        let executable = URL(fileURLWithPath: MorbExecutable.currentPath()).resolvingSymlinksInPath()
+        let macOSDirectory = executable.deletingLastPathComponent()
+        guard macOSDirectory.lastPathComponent == "MacOS" else { return nil }
+        let contents = macOSDirectory.deletingLastPathComponent()
+        guard contents.lastPathComponent == "Contents" else { return nil }
+        let appURL = contents.deletingLastPathComponent()
+        guard appURL.pathExtension == "app" else { return nil }
+        return BundledHostBinLocation(
+            appURL: appURL,
+            hostBinURL: contents
+                .appendingPathComponent("Resources", isDirectory: true)
+                .appendingPathComponent("host-bin", isDirectory: true))
+    }
+
+    private static func validatedToolchain(at root: URL, isSealedBundle: Bool = false) -> Toolchain? {
+        guard isRegularDirectory(root) else { return nil }
+        let manifestURL = root.appendingPathComponent(manifestName, isDirectory: false)
+        guard isRegularFile(manifestURL),
+              let data = try? Data(contentsOf: manifestURL, options: .mappedIfSafe),
+              let manifest = try? PropertyListDecoder().decode(Manifest.self, from: data),
+              manifest.schemaVersion == 1,
+              manifest.platform == "darwin-arm64",
+              manifest.tools.count == pinnedTools.count
+        else { return nil }
+
+        var binaries: [String: URL] = [:]
+        for expected in pinnedTools {
+            let entries = manifest.tools.filter { $0.id == expected.id }
+            guard entries.count == 1, let entry = entries.first,
+                  entry.path == expected.path,
+                  entry.version == expected.version,
+                  entry.sourceSha256 == expected.sha256,
+                  isSHA256(entry.sha256)
+            else { return nil }
+            let binary = root.appendingPathComponent(expected.path, isDirectory: false)
+            guard isRegularFile(binary),
+                  FileManager.default.isExecutableFile(atPath: binary.path),
+                  sha256(of: binary) == entry.sha256,
+                  isSealedBundle || entry.sha256 == expected.sha256
+            else { return nil }
+            binaries[expected.id] = binary
         }
-        return nil
+
+        guard let docker = binaries["docker"],
+              let compose = binaries["compose"],
+              let buildx = binaries["buildx"]
+        else { return nil }
+        return Toolchain(root: root, docker: docker, compose: compose, buildx: buildx)
+    }
+
+    private static func isRegularDirectory(_ url: URL) -> Bool {
+        let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        return values?.isDirectory == true && values?.isSymbolicLink != true
+    }
+
+    private static func isRegularFile(_ url: URL) -> Bool {
+        let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+        return values?.isRegularFile == true && values?.isSymbolicLink != true
+    }
+
+    private static func sha256(of url: URL) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        do {
+            while let data = try handle.read(upToCount: 1 << 20), !data.isEmpty {
+                hasher.update(data: data)
+            }
+        } catch {
+            return nil
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func isSHA256(_ value: String) -> Bool {
+        value.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil
+    }
+
+    private static func isValidCodeSignature(appURL: URL) -> Bool {
+        var staticCode: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(appURL as CFURL, SecCSFlags(), &staticCode) == errSecSuccess,
+              let staticCode
+        else { return false }
+        return SecStaticCodeCheckValidity(staticCode, SecCSFlags(), nil) == errSecSuccess
     }
 
     // MARK: - Planning (pure, no disk writes)
@@ -180,8 +332,9 @@ public enum MorbCliPlugins {
     ) -> Plan {
         let directory = cliPluginsDirectory(environment: environment)
         let fm = FileManager.default
+        let toolchain = sourceToolchain()
         let items: [Plan.Item] = all.map { plugin in
-            let source = sourceBinary(for: plugin)
+            let source = toolchain?.source(for: plugin)
             let destination = directory.appendingPathComponent(plugin.binaryName, isDirectory: false)
             let existingTarget = try? fm.destinationOfSymbolicLink(atPath: destination.path)
             let present = fm.fileExists(atPath: destination.path) || existingTarget != nil
@@ -240,6 +393,7 @@ public enum MorbCliPlugins {
     ) -> [InstallOutcome] {
         let directory = cliPluginsDirectory(environment: environment)
         let fm = FileManager.default
+        let toolchain = sourceToolchain()
         do {
             try fm.createDirectory(at: directory, withIntermediateDirectories: true)
         } catch {
@@ -247,7 +401,7 @@ public enum MorbCliPlugins {
         }
 
         return all.map { plugin in
-            guard let source = sourceBinary(for: plugin) else {
+            guard let source = toolchain?.source(for: plugin) else {
                 return .sourceMissing(plugin.name)
             }
             let destination = directory.appendingPathComponent(plugin.binaryName, isDirectory: false)

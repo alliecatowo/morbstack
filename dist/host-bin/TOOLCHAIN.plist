@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>schema_version</key>
+	<integer>1</integer>
+	<key>platform</key>
+	<string>darwin-arm64</string>
+	<key>tools</key>
+	<array>
+		<dict>
+			<key>id</key>
+			<string>docker</string>
+			<key>path</key>
+			<string>docker</string>
+			<key>version</key>
+			<string>29.7.1</string>
+			<key>source_sha256</key>
+			<string>49d98ab806e8678cd6341b09dad6389e5bcd8a46513de7651053bee3d8366e8d</string>
+			<key>sha256</key>
+			<string>49d98ab806e8678cd6341b09dad6389e5bcd8a46513de7651053bee3d8366e8d</string>
+		</dict>
+		<dict>
+			<key>id</key>
+			<string>compose</string>
+			<key>path</key>
+			<string>cli-plugins/docker-compose</string>
+			<key>version</key>
+			<string>v5.3.1</string>
+			<key>source_sha256</key>
+			<string>32691ba1196d819fa68cbdc0aad9a5569e730a35ae40c6fdd8458110ecd69488</string>
+			<key>sha256</key>
+			<string>32691ba1196d819fa68cbdc0aad9a5569e730a35ae40c6fdd8458110ecd69488</string>
+		</dict>
+		<dict>
+			<key>id</key>
+			<string>buildx</string>
+			<key>path</key>
+			<string>cli-plugins/docker-buildx</string>
+			<key>version</key>
+			<string>v0.36.0</string>
+			<key>source_sha256</key>
+			<string>82c6a3d9df37790c5bdb0d7ca88986d1d17622fc2b88ebe34b275c6c47acd7a6</string>
+			<key>sha256</key>
+			<string>82c6a3d9df37790c5bdb0d7ca88986d1d17622fc2b88ebe34b275c6c47acd7a6</string>
+		</dict>
+	</array>
+</dict>
+</plist>

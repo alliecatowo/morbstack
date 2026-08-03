@@ -215,6 +215,10 @@ CRI_DOCKERD_SHA256="d52b7a79376560d7dcb5490e16dcb78578bd0f040c1e70dec220824fae74
 # containing the same value is corroborating, not load-bearing on its own.
 CLI_VERSION="29.7.1"
 CLI_BOTTLE_SHA256="1bc0f3ce68c682ff23050b964f9a721b15fa1524ae29129c02c96d3966e98dcd"
+# Hash of the exact `docker/${CLI_VERSION}/bin/docker` member shipped in the
+# bottle. The bottle hash proves the archive; this pin proves the extracted
+# executable that will enter `dist/host-bin` and, eventually, a signed app.
+CLI_SHA256="49d98ab806e8678cd6341b09dad6389e5bcd8a46513de7651053bee3d8366e8d"
 CLI_BOTTLE_URL="https://ghcr.io/v2/homebrew/core/docker/blobs/sha256:${CLI_BOTTLE_SHA256}"
 # Path inside the bottle's own tar layout (Cellar-style:
 # <formula>/<version>/bin/<binary>) to the one file this script keeps.
@@ -629,16 +633,15 @@ fetch_docker_cli() {
 		have_sha="$(sha256_of "${dest_file}")"
 		# The extracted binary's own hash is not the bottle archive's hash
 		# (the archive also contains completions, man pages, the formula's
-		# own LICENSE/NOTICE/sbom.spdx.json) — idempotency here checks that
-		# the installed binary still runs and reports the pinned version,
-		# which is the property that actually matters and survives a
-		# `docker --version` sanity check rather than an opaque hash of a
-		# file that was never published as its own artifact.
-		if [ -n "${have_sha}" ] && "${dest_file}" --version 2>/dev/null | grep -q "version ${CLI_VERSION}"; then
+		# own LICENSE/NOTICE/sbom.spdx.json). Verify that exact member as
+		# well as its reported version so a same-version replacement cannot
+		# silently become the candidate for a signed release.
+		if [ "${have_sha}" = "${CLI_SHA256}" ] \
+			&& "${dest_file}" --version 2>/dev/null | grep -q "version ${CLI_VERSION}"; then
 			check "docker CLI already present and verified: ${dest_file} ($(${dest_file} --version))"
 			return 0
 		fi
-		echo "  existing ${dest_file} did not report version ${CLI_VERSION}; re-fetching" >&2
+		echo "  existing ${dest_file} did not match the pinned hash and version; re-fetching" >&2
 	fi
 
 	mkdir -p "${dest_dir}"
@@ -666,6 +669,11 @@ fetch_docker_cli() {
 
 	local extracted="${tmp_extract}/${CLI_BOTTLE_MEMBER}"
 	[ -f "${extracted}" ] || fail "expected member ${CLI_BOTTLE_MEMBER} not found inside the docker CLI bottle"
+	local member_sha
+	member_sha="$(sha256_of "${extracted}")"
+	[ "${member_sha}" = "${CLI_SHA256}" ] ||
+		fail "docker CLI member sha256 mismatch: got ${member_sha}, expected ${CLI_SHA256}"
+	check "extracted docker CLI sha256 verified against the pin"
 
 	mv "${extracted}" "${dest_file}"
 	chmod 755 "${dest_file}"
