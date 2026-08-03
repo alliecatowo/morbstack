@@ -137,8 +137,9 @@ docker context show   # morbstack on a clean Docker config
 
 The release gate adds an actual `docker run`, BuildKit build, Compose stack,
 and Testcontainers/IDE discovery test with Docker Desktop and Homebrew removed
-from PATH. Merely proving these files exist is not evidence that those tools
-work end to end.
+from PATH. The complete candidate, socket-discovery, and fixture rules are the
+[clean-profile Docker acceptance matrix](clean-profile-acceptance.md). Merely
+proving these files exist is not evidence that those tools work end to end.
 
 ## Safe removal
 

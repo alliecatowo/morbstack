@@ -69,9 +69,10 @@ guarantee.
    service opt-in, starts only Morbstack after explicit confirmation, then
    performs a bounded Docker health verification and exposes a repair action.
    Clean-profile live evidence remains the P0 release gate.
-4. **Release evidence, not documentation promises.** Run a clean-profile
-   compatibility matrix for direct socket discovery, Docker contexts,
-   Buildx, Compose, Testcontainers, Dev Containers and core IDE paths.
+4. **Release evidence, not documentation promises.** Run the
+   [clean-profile Docker acceptance matrix](clean-profile-acceptance.md) for
+   direct socket discovery, Docker contexts, Buildx, Compose, Testcontainers,
+   Dev Containers and core IDE paths.
 
 ### P1 — make the daily development loop reliable
 

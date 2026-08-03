@@ -39,6 +39,13 @@ working" has a precise, checkable answer rather than a marketing claim.
 
 ## CI-enforced ecosystem compatibility matrix
 
+Before this broader CI matrix can support a public drop-in claim, a packaged
+candidate must pass the source-controlled
+[clean-profile Docker acceptance matrix](clean-profile-acceptance.md). That
+matrix proves default installation, context/socket discovery, bundled Compose
+and Buildx, Testcontainers, and Dev Containers on a new account; it is a
+release gate, not an assertion that the checks have already run.
+
 The following are run in CI against Morbstack (target: M2 for the public,
 CI-gated version of this matrix per `docs/roadmap.md`; some subset may run
 earlier, ad hoc, during M0/M1 development):
