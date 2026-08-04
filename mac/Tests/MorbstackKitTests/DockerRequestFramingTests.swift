@@ -270,6 +270,8 @@ final class DockerHijackDetectionTests: XCTestCase {
         XCTAssertFalse(DockerHijackDetection.isHijackCandidate(
             head("GET", "/v1.47/events", ["connection": "Upgrade"])))
         XCTAssertFalse(DockerHijackDetection.isHijackCandidate(
+            head("POST", "/v1.47/images/create?fromImage=alpine", ["connection": "Upgrade"])))
+        XCTAssertFalse(DockerHijackDetection.isHijackCandidate(
             head("GET", "/v1.47/containers/abc/archive?path=/etc")))
         XCTAssertFalse(DockerHijackDetection.isHijackCandidate(
             head("POST", "/v1.47/containers/create")))
@@ -799,6 +801,71 @@ final class DockerFramedRelayTests: XCTestCase {
             POSIXSocketSupport.readSome(wired.guest, into: raw.baseAddress!, count: raw.count)
         }
         XCTAssertEqual(eof, 0, "cancelling docker events must close the Engine write side")
+
+        shutdown(wired.guest, SHUT_WR)
+        wait(for: [wired.done], timeout: 10)
+    }
+
+    /// `docker pull` is `POST /images/create`: the repository and tag are encoded
+    /// in its query, while progress and terminal pull errors are JSON records in a
+    /// normal chunked response. The proxy must not decode or rewrite either side.
+    func testImagePullQueryAndChunkedProgressErrorStayByteExactOnKeepAlive() throws {
+        let wired = try makeRelay()
+        let pull = "POST /v1.47/images/create?fromImage=registry.example.com%2Fteam%2Fimage&tag=v1.2.3 HTTP/1.1\r\n"
+            + "Host: morbstack\r\nX-Registry-Auth: dGVzdA==\r\nContent-Length: 0\r\n\r\n"
+        write(pull, to: wired.client)
+        XCTAssertEqual(
+            readAvailable(wired.guest, atLeast: pull.utf8.count),
+            Data(pull.utf8),
+            "the encoded image reference and registry-auth header must reach dockerd unchanged")
+
+        let progress = Data(#"{"status":"Pulling fs layer","id":"sha256:abc"}"#.utf8) + Data([0x0A])
+        let terminalError = Data(#"{"errorDetail":{"message":"denied: requested access"},"error":"denied: requested access"}"#.utf8)
+            + Data([0x0A])
+        let response = Data((
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                + "Transfer-Encoding: chunked\r\n\r\n").utf8)
+            + Self.chunked([progress, terminalError])
+        write(response, to: wired.guest)
+        XCTAssertEqual(
+            readAvailable(wired.client, atLeast: response.count),
+            response,
+            "pull progress and terminal error JSON must remain a byte-exact Engine stream")
+
+        write(Self.ping, to: wired.client)
+        XCTAssertEqual(readAvailable(wired.guest, atLeast: Self.ping.utf8.count), Data(Self.ping.utf8))
+        XCTAssertEqual(policy.seen.map { $0.head.target }, [
+            "/v1.47/images/create?fromImage=registry.example.com%2Fteam%2Fimage&tag=v1.2.3",
+            "/_ping",
+        ])
+        XCTAssertTrue(policy.seen.allSatisfy { $0.body == nil }, "a normal pull has no inspected body")
+        XCTAssertEqual(policy.framingFailures, [])
+
+        wired.relay.cancel()
+        wait(for: [wired.done], timeout: 10)
+    }
+
+    /// Closing a running `docker pull` must close the Engine write side exactly like
+    /// every other streaming request. The relay neither invents a cancellation error
+    /// nor attempts to consume the rest of the daemon's progress stream.
+    func testClientCancellationOfImagePullHalfClosesTheEngine() throws {
+        let wired = try makeRelay()
+        let pull = "POST /v1.47/images/create?fromImage=alpine&tag=3.20 HTTP/1.1\r\n"
+            + "Host: morbstack\r\nContent-Length: 0\r\n\r\n"
+        write(pull, to: wired.client)
+        XCTAssertEqual(readAvailable(wired.guest, atLeast: pull.utf8.count), Data(pull.utf8))
+
+        let first = Data("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n".utf8)
+            + Data(#"{"status":"Downloading","id":"layer"}"#.utf8) + Data([0x0A])
+        write(first, to: wired.guest)
+        XCTAssertEqual(readAvailable(wired.client, atLeast: first.count), first)
+
+        shutdown(wired.client, SHUT_WR)
+        var buffer = [UInt8](repeating: 0, count: 16)
+        let eof = buffer.withUnsafeMutableBytes { raw -> Int in
+            POSIXSocketSupport.readSome(wired.guest, into: raw.baseAddress!, count: raw.count)
+        }
+        XCTAssertEqual(eof, 0, "cancelling docker pull must close the Engine write side")
 
         shutdown(wired.guest, SHUT_WR)
         wait(for: [wired.done], timeout: 10)

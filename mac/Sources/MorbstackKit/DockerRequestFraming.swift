@@ -562,6 +562,16 @@ enum DockerHijackDetection {
         // reconnect correctly.
         if head.method.uppercased() == "GET", last == "events" { return false }
 
+        // Image pulls are ordinary streaming HTTP as well. `fromImage` and `tag`
+        // are query values the relay must preserve, and pull failures are terminal
+        // JSON records in the response stream rather than a connection upgrade.
+        if head.method.uppercased() == "POST",
+           components.count >= 2,
+           components[components.count - 2] == "images",
+           last == "create" {
+            return false
+        }
+
         if head.headers["upgrade"] != nil { return true }
         if (head.headers["connection"] ?? "").lowercased().contains("upgrade") { return true }
 
