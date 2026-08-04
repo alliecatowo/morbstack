@@ -432,7 +432,7 @@ struct StacksRootView: View {
                 TrackDAppBridge.reveal(containerID: service.id, in: model)
             }
             Button("View Logs") {
-                TrackDAppBridge.reveal(containerID: service.id, in: model, showingLogs: true)
+                revealContainerLogs(for: service)
             }
             if canRemove(service) {
                 Divider()
@@ -634,7 +634,7 @@ struct StacksRootView: View {
                         TrackDAppBridge.reveal(containerID: service.id, in: model)
                     }
                     Button("View Logs") {
-                        TrackDAppBridge.reveal(containerID: service.id, in: model, showingLogs: true)
+                        revealContainerLogs(for: service)
                     }
                     if let url = service.ports.compactMap(\.url).first {
                         Button("Open Published Port") { NSWorkspace.shared.open(url) }
@@ -646,6 +646,15 @@ struct StacksRootView: View {
                 }
             }
         }
+    }
+
+    /// Stacks only knows that a container bears a Compose project label; it has not
+    /// requested or assembled a project transcript. Keep this as a selected-container
+    /// handoff so the Containers log document retains its own explicit tail, follow,
+    /// filter, stream, and bounded-retention scope.
+    @MainActor
+    private func revealContainerLogs(for service: ContainerSummary) {
+        TrackDAppBridge.reveal(containerID: service.id, in: model, showingLogs: true)
     }
 
     @ViewBuilder
