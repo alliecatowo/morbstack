@@ -20,6 +20,22 @@ import XCTest
 
 @testable import MorbstackAppCore
 
+final class TrackDCommandLineToolsStatusTests: XCTestCase {
+
+    func testProcessSelectionNamesTheWinningDockerSourceWithoutLeakingDockerHost() {
+        XCTAssertEqual(
+            TrackDCommandLineToolsStatus.processSelectionSummary(
+                for: .environmentContext("remote-builder")),
+            "DOCKER_CONTEXT=remote-builder")
+        XCTAssertEqual(
+            TrackDCommandLineToolsStatus.processSelectionSummary(for: .dockerHost),
+            "DOCKER_HOST")
+        XCTAssertEqual(
+            TrackDCommandLineToolsStatus.processSelectionSummary(for: .savedContext("morbstack")),
+            "Saved context: morbstack")
+    }
+}
+
 final class TrackDConfigEditorTests: XCTestCase {
 
     private let limits = TrackDResourceLimits(hostCores: 8, hostMemoryGiB: 16)

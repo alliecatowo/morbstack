@@ -107,7 +107,7 @@ struct MorbSettingsView: View {
         case .general: TrackDGeneralSettings()
         case .resources: TrackDResourceSettings(model: model, store: store)
         case .sharing: TrackDSharingSettings(model: model, store: store)
-        case .advanced: TrackDAdvancedSettings(store: store)
+        case .advanced: TrackDAdvancedSettings(model: model, store: store)
         }
     }
 }
@@ -599,6 +599,7 @@ private struct TrackDResourceSettings: View {
 
 private struct TrackDAdvancedSettings: View {
 
+    let model: AppModel
     let store: TrackDSettingsStore
     /// This snapshot reads existing CLI integration state only. It is deliberately
     /// separate from first-run setup: Settings explains what is present, while the
@@ -630,17 +631,9 @@ private struct TrackDAdvancedSettings: View {
                 }
             }
 
-            Section("Sockets") {
-                pathValue("Docker Engine API", path: MorbPaths.dockerSocket.path)
-                pathValue("Daemon control", path: MorbPaths.controlSocket.path)
-                LabeledContent("Docker CLI") {
-                    Button("Copy Context Command", systemImage: "doc.on.doc") {
-                        MorbPasteboard.copy(TrackDLinks.dockerContextCommand(socketPath: MorbPaths.dockerSocket.path))
-                    }
-                }
-            }
+            engineIntegrationSection
 
-            commandLineToolsSection
+            dockerCLIIntegrationSection
 
             Section("Diagnostics") {
                 LabeledContent("Logs") {
@@ -665,16 +658,40 @@ private struct TrackDAdvancedSettings: View {
         .formStyle(.automatic)
     }
 
-    private var commandLineToolsSection: some View {
+    private var engineIntegrationSection: some View {
+        Section("Docker Engine") {
+            LabeledContent("Status", value: model.engine.headline)
+            LabeledContent("Virtual Machine", value: model.engine.vmState)
+            if let version = model.engine.version {
+                LabeledContent("Daemon Version", value: version)
+            }
+            pathValue("Engine API Socket", path: MorbPaths.dockerSocket.path)
+            pathValue("Daemon Control Socket", path: MorbPaths.controlSocket.path)
+            Text(
+                "A Docker context can be correctly registered while the engine is stopped. The context endpoint below is configuration; this status is the app’s latest daemon report."
+            )
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var dockerCLIIntegrationSection: some View {
         Section {
-            LabeledContent("Morbstack context") {
+            LabeledContent("Morbstack Context") {
                 Text(commandLineTools.contextSummary)
             }
-            LabeledContent("Saved selection") {
+            LabeledContent("Saved Docker Context") {
                 commandLineValue(commandLineTools.context.currentContext)
+            }
+            LabeledContent("Process Selection") {
+                commandLineValue(commandLineTools.processSelectionSummary)
             }
             LabeledContent("Context endpoint") {
                 commandLineValue(commandLineTools.context.registeredHost ?? "Not registered")
+            }
+            LabeledContent("Docker Configuration") {
+                commandLineValue(commandLineTools.context.dockerConfigDirectory)
             }
             Text(commandLineTools.contextGuidance)
                 .font(.footnote)
@@ -700,20 +717,19 @@ private struct TrackDAdvancedSettings: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            LabeledContent("Shell overrides") {
-                commandLineValue(commandLineTools.environmentSummary)
+            LabeledContent("Terminal Setup") {
+                Button("Copy Context Command", systemImage: "doc.on.doc") {
+                    MorbPasteboard.copy(TrackDLinks.dockerContextCommand(socketPath: MorbPaths.dockerSocket.path))
+                }
+                .help("Copy a Docker command that creates and selects the morbstack context")
             }
-            Text(commandLineTools.environmentGuidance)
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
 
-            Button("Refresh", systemImage: "arrow.clockwise") {
+            Button("Refresh Docker CLI Status", systemImage: "arrow.clockwise") {
                 commandLineTools = .inspect()
             }
             .help("Re-read Docker context and bundled command-line tool status")
         } header: {
-            Text("Command-Line Tools")
+            Text("Docker CLI Integration")
         } footer: {
             Text(
                 "Settings only reads this status. Choose Morbstack > Set Up Command-Line Tools… "
@@ -743,6 +759,7 @@ private struct TrackDAdvancedSettings: View {
                     MorbPasteboard.copy(path)
                 }
                 .labelStyle(.iconOnly)
+                .accessibilityLabel("Copy \(label)")
                 .help("Copy \(label.lowercased())")
             }
         }
@@ -752,7 +769,7 @@ private struct TrackDAdvancedSettings: View {
 /// A read-only snapshot of the standard Docker integration locations.  All three
 /// source APIs inspect the current process and file system; no command is spawned and
 /// none of the mutating installer/context APIs is reachable from this type.
-private struct TrackDCommandLineToolsStatus {
+struct TrackDCommandLineToolsStatus {
     let context: MorbDockerContext.Status
     let installationPlan: MorbCliInstallation.Plan
     let pluginPlan: MorbCliPlugins.Plan
@@ -778,6 +795,27 @@ private struct TrackDCommandLineToolsStatus {
             return "Overridden by shell"
         case .savedContext:
             return context.isCurrent ? "Current" : "Registered"
+        }
+    }
+
+    /// Docker's resolved configuration source for this process, not a claim about a
+    /// terminal command that may add its own `--context` or `--host` flag. Naming the
+    /// winning source makes a shell override distinguishable from a stale saved
+    /// context without exposing a potentially sensitive `DOCKER_HOST` value.
+    var processSelectionSummary: String {
+        Self.processSelectionSummary(for: context.effectiveSelection)
+    }
+
+    static func processSelectionSummary(
+        for selection: MorbDockerContext.Status.EffectiveSelection
+    ) -> String {
+        switch selection {
+        case .environmentContext(let selected):
+            return "DOCKER_CONTEXT=\(selected)"
+        case .dockerHost:
+            return "DOCKER_HOST"
+        case .savedContext(let selected):
+            return "Saved context: \(selected)"
         }
     }
 
@@ -857,24 +895,4 @@ private struct TrackDCommandLineToolsStatus {
         return "The bundled docker client, Compose plugin, and Buildx plugin are available. Re-enter command-line setup to review \(unresolvedPlugins)."
     }
 
-    var environmentSummary: String {
-        var entries: [String] = []
-        if let environmentContext = context.environmentContext {
-            entries.append("DOCKER_CONTEXT=\(environmentContext)")
-        }
-        if context.hasDockerHostOverride {
-            entries.append("DOCKER_HOST is set")
-        }
-        return entries.isEmpty ? "None" : entries.joined(separator: ", ")
-    }
-
-    var environmentGuidance: String {
-        if let environmentContext = context.environmentContext {
-            return "DOCKER_CONTEXT selects \(environmentContext) for commands launched with this environment. Docker gives it precedence over DOCKER_HOST and the saved context."
-        }
-        if context.hasDockerHostOverride {
-            return "DOCKER_HOST overrides the saved Docker context for commands launched with this environment. Clear it in the shell that set it to use the saved selection."
-        }
-        return "A shell that sets DOCKER_CONTEXT or DOCKER_HOST can target a different endpoint than the saved Docker context."
-    }
 }
