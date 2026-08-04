@@ -274,6 +274,10 @@ final class DockerHijackDetectionTests: XCTestCase {
         XCTAssertFalse(DockerHijackDetection.isHijackCandidate(
             head("POST", "/v1.47/build?t=example%2Fimage", ["connection": "Upgrade"])))
         XCTAssertFalse(DockerHijackDetection.isHijackCandidate(
+            head("GET", "/v1.47/images/get?names=alpine", ["connection": "Upgrade"])))
+        XCTAssertFalse(DockerHijackDetection.isHijackCandidate(
+            head("POST", "/v1.47/images/load?quiet=0", ["connection": "Upgrade"])))
+        XCTAssertFalse(DockerHijackDetection.isHijackCandidate(
             head("GET", "/v1.47/containers/abc/archive?path=/etc")))
         XCTAssertFalse(DockerHijackDetection.isHijackCandidate(
             head("POST", "/v1.47/containers/create")))
@@ -949,6 +953,99 @@ final class DockerFramedRelayTests: XCTestCase {
             POSIXSocketSupport.readSome(wired.guest, into: raw.baseAddress!, count: raw.count)
         }
         XCTAssertEqual(eof, 0, "cancelling docker build must close the Engine write side")
+
+        shutdown(wired.guest, SHUT_WR)
+        wait(for: [wired.done], timeout: 10)
+    }
+
+    /// `docker image save` exports one tar stream, and `docker image load` imports
+    /// one. Neither side has a proxy-owned envelope: multiple encoded image names,
+    /// large archive bytes, chunking, and the load progress stream all stay opaque.
+    func testLargeChunkedImageSaveAndLoadStreamsStayByteExactOnKeepAlive() throws {
+        let wired = try makeRelay()
+        var archive = Data("manifest.json\u{00}repositories\u{00}ustar\u{00}".utf8)
+        archive.append(Data(repeating: 0x5A, count: 200_000))
+        let archiveChunks = Self.chunked([
+            Data(archive.prefix(73_001)),
+            Data(archive.dropFirst(73_001).prefix(91_007)),
+            Data(archive.dropFirst(164_008)),
+        ])
+
+        let save = "GET /v1.47/images/get?names=registry.example.com%2Fteam%2Fone%3Av1&names=registry.example.com%2Fteam%2Ftwo%3Av2 HTTP/1.1\r\n"
+            + "Host: morbstack\r\n\r\n"
+        write(save, to: wired.client)
+        XCTAssertEqual(readAvailable(wired.guest, atLeast: save.utf8.count), Data(save.utf8))
+
+        let saveResponse = Data((
+            "HTTP/1.1 200 OK\r\nContent-Type: application/x-tar\r\n"
+                + "Transfer-Encoding: chunked\r\n\r\n").utf8)
+            + archiveChunks
+        DispatchQueue(label: "test.image-save-writer").async { [guest = wired.guest] in
+            _ = POSIXSocketSupport.writeAll(guest, saveResponse)
+        }
+        XCTAssertEqual(
+            readAvailable(wired.client, atLeast: saveResponse.count, timeout: 15),
+            saveResponse,
+            "the image-save archive and its chunk delimiters must reach the client unchanged")
+
+        var load = Data((
+            "POST /v1.47/images/load?quiet=0 HTTP/1.1\r\nHost: morbstack\r\n"
+                + "Content-Type: application/x-tar\r\nTransfer-Encoding: chunked\r\n\r\n").utf8)
+        load.append(archiveChunks)
+        DispatchQueue(label: "test.image-load-writer").async { [client = wired.client] in
+            _ = POSIXSocketSupport.writeAll(client, load)
+        }
+        XCTAssertEqual(
+            readAvailable(wired.guest, atLeast: load.count, timeout: 15),
+            load,
+            "the image-load archive must reach dockerd without buffering or re-chunking")
+
+        let loaded = Data(#"{"stream":"Loaded image: registry.example.com/team/one:v1\n"}"#.utf8) + Data([0x0A])
+        let loadResponse = Data((
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                + "Transfer-Encoding: chunked\r\n\r\n").utf8)
+            + Self.chunked([loaded])
+        write(loadResponse, to: wired.guest)
+        XCTAssertEqual(readAvailable(wired.client, atLeast: loadResponse.count), loadResponse)
+
+        write(Self.ping, to: wired.client)
+        XCTAssertEqual(readAvailable(wired.guest, atLeast: Self.ping.utf8.count), Data(Self.ping.utf8))
+        XCTAssertEqual(policy.seen.map { $0.head.target }, [
+            "/v1.47/images/get?names=registry.example.com%2Fteam%2Fone%3Av1&names=registry.example.com%2Fteam%2Ftwo%3Av2",
+            "/v1.47/images/load?quiet=0",
+            "/_ping",
+        ])
+        XCTAssertTrue(policy.seen.allSatisfy { $0.body == nil }, "image archives must never be inspected")
+        XCTAssertEqual(policy.framingFailures, [])
+
+        wired.relay.cancel()
+        wait(for: [wired.done], timeout: 10)
+    }
+
+    /// Closing an image import while its Engine progress stream is still open must
+    /// close the Engine write side. The relay does not fabricate a load result or
+    /// consume the remainder of the archive/progress conversation.
+    func testClientCancellationOfImageLoadHalfClosesTheEngine() throws {
+        let wired = try makeRelay()
+        let archive = Data("manifest.json\u{00}ustar\u{00}".utf8)
+        var load = Data((
+            "POST /v1.47/images/load?quiet=0 HTTP/1.1\r\nHost: morbstack\r\n"
+                + "Content-Type: application/x-tar\r\nContent-Length: \(archive.count)\r\n\r\n").utf8)
+        load.append(archive)
+        write(load, to: wired.client)
+        XCTAssertEqual(readAvailable(wired.guest, atLeast: load.count), load)
+
+        let first = Data("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n".utf8)
+            + Data(#"{"stream":"Loading image\n"}"#.utf8) + Data([0x0A])
+        write(first, to: wired.guest)
+        XCTAssertEqual(readAvailable(wired.client, atLeast: first.count), first)
+
+        shutdown(wired.client, SHUT_WR)
+        var buffer = [UInt8](repeating: 0, count: 16)
+        let eof = buffer.withUnsafeMutableBytes { raw -> Int in
+            POSIXSocketSupport.readSome(wired.guest, into: raw.baseAddress!, count: raw.count)
+        }
+        XCTAssertEqual(eof, 0, "cancelling docker image load must close the Engine write side")
 
         shutdown(wired.guest, SHUT_WR)
         wait(for: [wired.done], timeout: 10)

@@ -577,6 +577,21 @@ enum DockerHijackDetection {
         // so this route must keep HTTP framing even if a stale Upgrade header appears.
         if head.method.uppercased() == "POST", last == "build" { return false }
 
+        // Image save/load use ordinary tar streams. Neither an exported OCI/Docker
+        // archive nor an import-progress response is a connection upgrade.
+        if head.method.uppercased() == "GET",
+           components.count >= 2,
+           components[components.count - 2] == "images",
+           last == "get" {
+            return false
+        }
+        if head.method.uppercased() == "POST",
+           components.count >= 2,
+           components[components.count - 2] == "images",
+           last == "load" {
+            return false
+        }
+
         if head.headers["upgrade"] != nil { return true }
         if (head.headers["connection"] ?? "").lowercased().contains("upgrade") { return true }
 
