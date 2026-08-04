@@ -129,6 +129,21 @@ struct StacksRootView: View {
     @State private var composeSourceValidation = ComposeSourceValidationModel()
     @State private var composeProjectOperations = ComposeProjectOperationModel()
 
+    /// Fixture records are intentionally disconnected from the host engine. Compose
+    /// source selection and lifecycle commands cross that boundary, so they must not
+    /// become reachable merely because the fixture has realistic-looking rows.
+    private var externalStackOperationsAreAvailable: Bool {
+        model.permitsExternalOperations
+    }
+
+    private var composeSourceSelectionIsAvailable: Bool {
+        externalStackOperationsAreAvailable && !composeFileEditor.isPresented
+    }
+
+    private var fixtureStackOperationMessage: String {
+        "Compose source selection and lifecycle actions are unavailable in developer fixture data. This window is not connected to a Docker Engine."
+    }
+
     /// Compose projects only. Unmanaged containers belong to the Containers browser.
     private var stacks: [ComposeGroup] {
         model.containers.groupedByComposeProject().filter { $0.project != nil }
@@ -333,9 +348,11 @@ struct StacksRootView: View {
                 Button { chooseComposeFile() } label: {
                     Image(systemName: "doc.text")
                 }
-                .disabled(composeFileEditor.isPresented)
+                .disabled(!composeSourceSelectionIsAvailable)
                 .accessibilityLabel("Edit Compose file")
-                .help("Choose and edit a Compose YAML file")
+                .help(externalStackOperationsAreAvailable
+                    ? "Choose and edit a Compose YAML file"
+                    : fixtureStackOperationMessage)
             }
         }
 
@@ -382,6 +399,7 @@ struct StacksRootView: View {
     /// system-managed secondary menu, so they do not crowd search or the inspector
     /// control at narrow widths.
     private func primaryLifecycleAction(for service: ContainerSummary) -> ContainerAction? {
+        guard externalStackOperationsAreAvailable else { return nil }
         switch service.state {
         case "running", "restarting":
             return service.availableActions.contains(.stop) ? .stop : nil
@@ -403,7 +421,8 @@ struct StacksRootView: View {
     /// A destructive command is only exposed while Docker reports it as available and
     /// neither this service nor its Compose project is already changing state.
     private func canRemove(_ service: ContainerSummary) -> Bool {
-        service.availableActions.contains(.remove)
+        externalStackOperationsAreAvailable
+            && service.availableActions.contains(.remove)
             && !isServiceBusy(service)
             && !isProjectBusy(for: service)
     }
@@ -420,7 +439,10 @@ struct StacksRootView: View {
                     Button(action.title, systemImage: action.symbol) {
                         perform(action, on: service)
                     }
-                    .disabled(isProjectBusy(for: service))
+                    .disabled(!externalStackOperationsAreAvailable || isProjectBusy(for: service))
+                    .help(externalStackOperationsAreAvailable
+                        ? action.title
+                        : fixtureStackOperationMessage)
                 }
             }
             if isServiceBusy(service) || !secondaryActions.isEmpty {
@@ -547,6 +569,8 @@ struct StacksRootView: View {
 
             composeMetadataSection(project: project)
 
+            fixtureOperationAvailabilitySection
+
             if !service.ports.isEmpty {
                 Section("Ports") {
                     ForEach(service.ports) { port in
@@ -573,6 +597,8 @@ struct StacksRootView: View {
             }
 
             composeMetadataSection(project: project)
+
+            fixtureOperationAvailabilitySection
         }
         .formStyle(.columns)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -611,6 +637,16 @@ struct StacksRootView: View {
         }
     }
 
+    @ViewBuilder
+    private var fixtureOperationAvailabilitySection: some View {
+        if !externalStackOperationsAreAvailable {
+            Section("Developer Fixture Data") {
+                Text(fixtureStackOperationMessage)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
     // MARK: Native menus and action items
 
     @ViewBuilder
@@ -638,7 +674,9 @@ struct StacksRootView: View {
                     Button("View Logs") {
                         revealContainerLogs(for: service)
                     }
-                    if let url = service.ports.compactMap(\.url).first {
+                    if externalStackOperationsAreAvailable,
+                        let url = service.ports.compactMap(\.url).first
+                    {
                         Button("Open Published Port") { NSWorkspace.shared.open(url) }
                     }
                     if canRemove(service) {
@@ -668,7 +706,10 @@ struct StacksRootView: View {
         } else {
             ForEach(service.availableActions.filter { !$0.isDestructive }, id: \.rawValue) { action in
                 Button(action.title) { perform(action, on: service) }
-                    .disabled(isProjectBusy(for: service))
+                    .disabled(!externalStackOperationsAreAvailable || isProjectBusy(for: service))
+                    .help(externalStackOperationsAreAvailable
+                        ? action.title
+                        : fixtureStackOperationMessage)
             }
         }
     }
@@ -689,17 +730,26 @@ struct StacksRootView: View {
                 Button(projectLifecycleMenuTitle(.start, count: startTargets.count)) {
                     requestProjectLifecycleAction(.start, on: stack)
                 }
-                .disabled(startTargets.isEmpty)
+                .disabled(!externalStackOperationsAreAvailable || startTargets.isEmpty)
+                .help(externalStackOperationsAreAvailable
+                    ? projectLifecycleMenuTitle(.start, count: startTargets.count)
+                    : fixtureStackOperationMessage)
             }
             if !hidingUnavailableActions || !runningTargets.isEmpty {
                 Button(projectLifecycleMenuTitle(.restart, count: runningTargets.count)) {
                     requestProjectLifecycleAction(.restart, on: stack)
                 }
-                .disabled(runningTargets.isEmpty)
+                .disabled(!externalStackOperationsAreAvailable || runningTargets.isEmpty)
+                .help(externalStackOperationsAreAvailable
+                    ? projectLifecycleMenuTitle(.restart, count: runningTargets.count)
+                    : fixtureStackOperationMessage)
                 Button(projectLifecycleMenuTitle(.stop, count: runningTargets.count)) {
                     requestProjectLifecycleAction(.stop, on: stack)
                 }
-                .disabled(runningTargets.isEmpty)
+                .disabled(!externalStackOperationsAreAvailable || runningTargets.isEmpty)
+                .help(externalStackOperationsAreAvailable
+                    ? projectLifecycleMenuTitle(.stop, count: runningTargets.count)
+                    : fixtureStackOperationMessage)
             }
 
             if let project = stack.project,
@@ -710,9 +760,15 @@ struct StacksRootView: View {
             }
             Divider()
             Button("Edit Compose File…") { chooseComposeFile() }
-                .disabled(composeFileEditor.isPresented)
+                .disabled(!composeSourceSelectionIsAvailable)
+                .help(externalStackOperationsAreAvailable
+                    ? "Choose and edit a Compose YAML file"
+                    : fixtureStackOperationMessage)
             Button("Edit Project Environment File…") { chooseProjectEnvironmentFile() }
-                .disabled(composeFileEditor.isPresented)
+                .disabled(!composeSourceSelectionIsAvailable)
+                .help(externalStackOperationsAreAvailable
+                    ? "Choose and edit a project's .env file"
+                    : fixtureStackOperationMessage)
         }
     }
 
@@ -727,7 +783,10 @@ struct StacksRootView: View {
             Button("Start Engine") {
                 Task { await model.engineAction(.start) }
             }
-            .disabled(model.engine.isTransitional)
+            .disabled(!externalStackOperationsAreAvailable || model.engine.isTransitional)
+            .help(externalStackOperationsAreAvailable
+                ? "Start Morbstack engine"
+                : fixtureStackOperationMessage)
         }
     }
 
@@ -744,15 +803,25 @@ struct StacksRootView: View {
                 Button("Choose Compose File…") {
                     chooseComposeFile()
                 }
-                .disabled(composeFileEditor.isPresented)
+                .disabled(!composeSourceSelectionIsAvailable)
+                .help(externalStackOperationsAreAvailable
+                    ? "Choose and edit a Compose YAML file"
+                    : fixtureStackOperationMessage)
                 Button("Choose Project Environment File…") {
                     chooseProjectEnvironmentFile()
                 }
-                .disabled(composeFileEditor.isPresented)
+                .disabled(!composeSourceSelectionIsAvailable)
+                .help(externalStackOperationsAreAvailable
+                    ? "Choose and edit a project's .env file"
+                    : fixtureStackOperationMessage)
                 Divider()
                 Button("Copy Docker Context Command") {
                     MorbPasteboard.copy(TrackDLinks.dockerContextCommand(socketPath: MorbPaths.dockerSocket.path))
                 }
+                .disabled(!externalStackOperationsAreAvailable)
+                .help(externalStackOperationsAreAvailable
+                    ? "Copy Docker context command"
+                    : fixtureStackOperationMessage)
             }
         }
     }
@@ -760,7 +829,11 @@ struct StacksRootView: View {
     // MARK: Actions
 
     private func perform(_ action: ContainerAction, on service: ContainerSummary) {
-        guard service.availableActions.contains(action), !isServiceBusy(service), !isProjectBusy(for: service) else { return }
+        guard externalStackOperationsAreAvailable,
+            service.availableActions.contains(action),
+            !isServiceBusy(service),
+            !isProjectBusy(for: service)
+        else { return }
         busyServices.insert(service.id)
         Task { @MainActor in
             await model.containerAction(action, id: service.id)
@@ -802,7 +875,10 @@ struct StacksRootView: View {
 
     private func requestProjectLifecycleAction(_ action: ContainerAction, on stack: ComposeGroup) {
         let targets = projectLifecycleTargets(action, in: stack)
-        guard !targets.isEmpty, !busyProjects.contains(stack.id) else { return }
+        guard externalStackOperationsAreAvailable,
+            !targets.isEmpty,
+            !busyProjects.contains(stack.id)
+        else { return }
         projectLifecycleReview = ProjectLifecycleReview(
             action: action,
             projectID: stack.id,
@@ -829,7 +905,9 @@ struct StacksRootView: View {
     }
 
     private func confirmProjectLifecycleAction(_ review: ProjectLifecycleReview) {
-        guard let stack = stacks.first(where: { $0.id == review.projectID }) else { return }
+        guard externalStackOperationsAreAvailable,
+            let stack = stacks.first(where: { $0.id == review.projectID })
+        else { return }
         run(review.action, on: stack, limitingTo: review.targetIDs)
     }
 
@@ -841,7 +919,10 @@ struct StacksRootView: View {
         let targets = projectLifecycleTargets(action, in: stack).filter { service in
             targetIDs?.contains(service.id) ?? true
         }
-        guard !targets.isEmpty, !busyProjects.contains(stack.id) else { return }
+        guard externalStackOperationsAreAvailable,
+            !targets.isEmpty,
+            !busyProjects.contains(stack.id)
+        else { return }
 
         busyProjects.insert(stack.id)
         Task { @MainActor in
@@ -891,7 +972,7 @@ struct StacksRootView: View {
     /// never runs Compose, reloads a stack, deploys changes, or writes any file. The
     /// editor revalidates this selection before opening it.
     private func chooseComposeFile() {
-        guard !composeFileEditor.isPresented else { return }
+        guard externalStackOperationsAreAvailable, !composeFileEditor.isPresented else { return }
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
@@ -911,7 +992,7 @@ struct StacksRootView: View {
     /// local editor. Opening it is not an interpolation, credentials, or deployment
     /// operation.
     private func chooseProjectEnvironmentFile() {
-        guard !composeFileEditor.isPresented else { return }
+        guard externalStackOperationsAreAvailable, !composeFileEditor.isPresented else { return }
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = false

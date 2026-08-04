@@ -234,6 +234,14 @@ final class AppModel {
         launchOptions.fixtureProvenance
     }
 
+    /// A fixture window may render deterministic Docker-shaped records, but it is not
+    /// connected to a Docker Engine. Routes that own a process, a direct socket, a
+    /// document picker for a command, or another operation outside ``client`` must
+    /// consult this before offering that work.
+    var permitsExternalOperations: Bool {
+        fixtureProvenance == nil
+    }
+
     // MARK: Private
 
     @ObservationIgnored private var eventsTask: Task<Void, Never>?

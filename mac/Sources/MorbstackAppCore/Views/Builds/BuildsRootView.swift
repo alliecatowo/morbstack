@@ -367,6 +367,18 @@ struct BuildsRootView: View {
         scope == .cache ? isRefreshing : isHistoryRefreshing
     }
 
+    /// Build cache fixture data can be browsed safely through the injected Docker
+    /// client. Buildx history, builder inspection/selection, and a local build each
+    /// launch a bundled client or use a direct socket, so they must remain unavailable
+    /// in the deliberately disconnected fixture window.
+    private var externalBuildOperationsAreAvailable: Bool {
+        model.permitsExternalOperations
+    }
+
+    private var fixtureBuildOperationMessage: String {
+        "Buildx commands and local build selection are unavailable in developer fixture data. This window is not connected to a Docker Engine."
+    }
+
     var body: some View {
         content
             .navigationTitle("Builds")
@@ -474,6 +486,13 @@ struct BuildsRootView: View {
                 resetHistoryDetails()
             }
             .onChange(of: scope) { _, newScope in
+                // The History view starts an explicit Buildx query. Keep a fixture
+                // window on its injected cache records even if state restoration or an
+                // accessibility action attempts to select the unavailable segment.
+                guard externalBuildOperationsAreAvailable || newScope != .history else {
+                    scope = .cache
+                    return
+                }
                 query = ""
                 selectFirstVisibleRecordIfNeeded(for: newScope)
                 resetHistoryDetails()
@@ -505,12 +524,17 @@ struct BuildsRootView: View {
         ToolbarItem(id: "builds.scope", placement: .automatic) {
             Picker("Build data", selection: $scope) {
                 Text("Cache").tag(BuildDataScope.cache)
-                Text("History").tag(BuildDataScope.history)
+                Text("History")
+                    .tag(BuildDataScope.history)
+                    .disabled(!externalBuildOperationsAreAvailable)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
             .accessibilityLabel("Build data")
-            .help("Choose BuildKit cache or Buildx history")
+            .help(
+                externalBuildOperationsAreAvailable
+                    ? "Choose BuildKit cache or Buildx history"
+                    : "Buildx history is unavailable in developer fixture data")
         }
         if scope == .cache {
             ToolbarItem(id: "builds.start", placement: .primaryAction) {
@@ -520,8 +544,11 @@ struct BuildsRootView: View {
                     Image(systemName: "plus")
                 }
                 .accessibilityLabel("Build an image")
-                .help("Build an image from a local Dockerfile")
-                .disabled(isPruning)
+                .help(
+                    externalBuildOperationsAreAvailable
+                        ? "Build an image from a local Dockerfile"
+                        : fixtureBuildOperationMessage)
+                .disabled(!externalBuildOperationsAreAvailable || isPruning)
             }
         }
         ToolbarItem(id: "builds.refresh", placement: .secondaryAction) {
@@ -547,8 +574,11 @@ struct BuildsRootView: View {
                 Image(systemName: "hammer")
             }
             .accessibilityLabel("View active Buildx builder")
-            .help("View the active Buildx builder")
-            .disabled(isBuilding || isSelectingMorbstackDefaultBuilder)
+            .help(
+                externalBuildOperationsAreAvailable
+                    ? "View the active Buildx builder"
+                    : fixtureBuildOperationMessage)
+            .disabled(!externalBuildOperationsAreAvailable || isBuilding || isSelectingMorbstackDefaultBuilder)
         }
         if scope == .cache {
             ToolbarItem(id: "builds.prune", placement: .secondaryAction) {
@@ -564,10 +594,12 @@ struct BuildsRootView: View {
                 }
                 .accessibilityLabel(isPruning ? "Pruning unused build cache" : "Prune unused build cache")
                 .help(
-                    unusedCount == 0
+                    !externalBuildOperationsAreAvailable
+                        ? fixtureBuildOperationMessage
+                        : unusedCount == 0
                         ? "No unused build cache to prune"
                         : "Prune \(unusedCount) unused cache record\(unusedCount == 1 ? "" : "s")")
-                .disabled(unusedCount == 0 || isPruning || isRefreshing)
+                .disabled(!externalBuildOperationsAreAvailable || unusedCount == 0 || isPruning || isRefreshing)
             }
         }
         if scope == .cache ? !records.isEmpty : !model.buildHistory.isEmpty {
@@ -587,10 +619,20 @@ struct BuildsRootView: View {
 
     @ViewBuilder
     private var content: some View {
-        if scope == .cache {
+        if !externalBuildOperationsAreAvailable, scope == .history {
+            fixtureHistoryUnavailable
+        } else if scope == .cache {
             cacheContent
         } else {
             historyContent
+        }
+    }
+
+    private var fixtureHistoryUnavailable: some View {
+        ContentUnavailableView {
+            Label("Buildx History Unavailable", systemImage: "clock.arrow.circlepath")
+        } description: {
+            Text(fixtureBuildOperationMessage)
         }
     }
 
@@ -607,6 +649,11 @@ struct BuildsRootView: View {
                 } label: {
                     Label("Build Image", systemImage: "plus")
                 }
+                .disabled(!externalBuildOperationsAreAvailable)
+                .help(
+                    externalBuildOperationsAreAvailable
+                        ? "Build an image from a local Dockerfile"
+                        : fixtureBuildOperationMessage)
                 Button {
                     Task { await refreshBuildCache() }
                 } label: {
@@ -781,6 +828,12 @@ struct BuildsRootView: View {
     private var detailPane: some View {
         if let record = selectedRecord {
             Form {
+                if !externalBuildOperationsAreAvailable {
+                    Section("Developer Fixture Data") {
+                        Text(fixtureBuildOperationMessage)
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 Section("Cache Storage") {
                     LabeledContent("Deduplicated Total", value: Formatters.bytesString(BuildCacheList.storageSize(records)))
                     LabeledContent("Records", value: "\(records.count)")
@@ -1160,7 +1213,7 @@ struct BuildsRootView: View {
 
     @MainActor
     private func loadHistoryDetails(for recordID: BuildxHistoryRecord.ID) {
-        guard historySelection == recordID else { return }
+        guard externalBuildOperationsAreAvailable, historySelection == recordID else { return }
         historyDetailTask?.cancel()
         resetHistoryLogs()
         historyDetailState = .loading
@@ -1196,7 +1249,8 @@ struct BuildsRootView: View {
 
     @MainActor
     private func loadHistoryLogs(for recordID: BuildxHistoryRecord.ID) {
-        guard historySelection == recordID,
+        guard externalBuildOperationsAreAvailable,
+              historySelection == recordID,
               case .loaded = historyDetailState
         else { return }
         historyLogTask?.cancel()
@@ -1247,6 +1301,7 @@ struct BuildsRootView: View {
 
     @MainActor
     private func refreshBuildHistory() async {
+        guard externalBuildOperationsAreAvailable else { return }
         await model.refreshBuildHistory()
     }
 
@@ -1254,14 +1309,14 @@ struct BuildsRootView: View {
     private func refreshCurrentScope() async {
         if scope == .cache {
             await refreshBuildCache()
-        } else {
+        } else if externalBuildOperationsAreAvailable {
             await refreshBuildHistory()
         }
     }
 
     @MainActor
     private func pruneUnusedCache() async {
-        guard unusedCount > 0, !isPruning else { return }
+        guard externalBuildOperationsAreAvailable, unusedCount > 0, !isPruning else { return }
 
         isPruning = true
         lastPrunedBytes = nil
@@ -1446,6 +1501,7 @@ struct BuildsRootView: View {
 
     @MainActor
     private func openBuilderSheet() {
+        guard externalBuildOperationsAreAvailable else { return }
         if case .loaded = model.buildxCurrentBuilderState,
            let builder = model.buildxCurrentBuilder
         {
@@ -1460,7 +1516,7 @@ struct BuildsRootView: View {
 
     @MainActor
     private func inspectActiveBuilder() {
-        guard !isSelectingMorbstackDefaultBuilder else { return }
+        guard externalBuildOperationsAreAvailable, !isSelectingMorbstackDefaultBuilder else { return }
         builderSheetTask?.cancel()
         builderSheetState = .loading
         builderSheetBuilder = nil
@@ -1495,7 +1551,11 @@ struct BuildsRootView: View {
 
     @MainActor
     private func useMorbstackDefaultBuilder() async {
-        guard !isSelectingMorbstackDefaultBuilder, !isBuilding, !isHistoryRefreshing else { return }
+        guard externalBuildOperationsAreAvailable,
+              !isSelectingMorbstackDefaultBuilder,
+              !isBuilding,
+              !isHistoryRefreshing
+        else { return }
         cancelActiveBuilderInspection()
         isSelectingMorbstackDefaultBuilder = true
         defaultBuilderError = nil
@@ -1521,7 +1581,11 @@ struct BuildsRootView: View {
             Group {
                 switch buildPhase {
                 case .configuration:
-                    buildConfigurationForm
+                    if externalBuildOperationsAreAvailable {
+                        buildConfigurationForm
+                    } else {
+                        fixtureBuildOperationUnavailable
+                    }
                 case .running(let request):
                     buildProgressForm(for: request)
                 case .succeeded(let request):
@@ -1594,6 +1658,14 @@ struct BuildsRootView: View {
             }
         }
         .formStyle(.automatic)
+    }
+
+    private var fixtureBuildOperationUnavailable: some View {
+        ContentUnavailableView {
+            Label("Build Image Unavailable", systemImage: "hammer")
+        } description: {
+            Text(fixtureBuildOperationMessage)
+        }
     }
 
     private func buildProgressForm(for request: LocalBuildRequest) -> some View {
@@ -1720,7 +1792,7 @@ struct BuildsRootView: View {
     }
 
     private func prepareBuild() {
-        guard let draftContextDirectory else { return }
+        guard externalBuildOperationsAreAvailable, let draftContextDirectory else { return }
         do {
             pendingBuildRequest = try LocalBuildRequest(contextDirectory: draftContextDirectory, tag: draftTag)
             buildPreparationError = nil
@@ -1730,6 +1802,7 @@ struct BuildsRootView: View {
     }
 
     private func startBuild(_ request: LocalBuildRequest) {
+        guard externalBuildOperationsAreAvailable else { return }
         buildEvents = []
         buildPreparationError = nil
         buildPhase = .running(request)

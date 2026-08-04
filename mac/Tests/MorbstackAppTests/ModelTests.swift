@@ -895,6 +895,8 @@ final class LaunchOptionsTests: XCTestCase {
         XCTAssertEqual(provenance?.accessibilityLabel, "Fixture data. Not connected to a Docker Engine.")
         XCTAssertFalse(provenance?.detail.localizedCaseInsensitiveContains("running") ?? true)
         XCTAssertFalse(provenance?.accessibilityLabel.localizedCaseInsensitiveContains("running") ?? true)
+        XCTAssertFalse(AppModel.forLaunch(options).permitsExternalOperations)
+        XCTAssertTrue(AppModel(launchOptions: .none).permitsExternalOperations)
     }
 
     /// macOS appends its own arguments when launching from Xcode; an app that refused
