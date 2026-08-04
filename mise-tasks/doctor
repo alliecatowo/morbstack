@@ -59,13 +59,6 @@ for probe in "$BUNDLE_INITRD:bundle" "$INITRD_STAGED:staged"; do
 	[ -e "$p" ] || note "no ${label} initrd at ${p} — that comparison is being skipped"
 done
 
-# A check that silently does not run is the same disease this task exists to
-# cure, so assert the paths we are about to compare actually exist.
-for probe in "$BUNDLE_INITRD:bundle" "$INITRD_STAGED:staged"; do
-	p="${probe%:*}"; label="${probe##*:}"
-	[ -e "$p" ] || note "no ${label} initrd at ${p} — that comparison is being skipped"
-done
-
 # The daemon boots runtime/current, which is staged FROM THE APP BUNDLE -- not
 # data/kernel/, which is where `mise run guest-image` writes. So the loop is
 # guest-image -> app -> restart. Running guest-image alone changes nothing at
