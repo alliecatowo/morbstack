@@ -1137,6 +1137,27 @@ class DockerClient: @unchecked Sendable {
         try await delete("/volumes/\(name)?force=\(force ? 1 : 0)")
     }
 
+    /// Creates the native Networks route's deliberately bounded bridge network.
+    ///
+    /// The v1.43 request omits `EnableIPv4` because Docker added it in v1.48; omitting
+    /// it preserves Docker's default IPv4 allocation. `EnableIPv6`, labels, and bridge
+    /// options are the exact values reviewed in `NetworkCreateSheet`. The request has
+    /// no IPAM configuration and no endpoint/container attachment fields.
+    func createNetwork(_ request: NetworkCreateRequest) async throws -> NetworkCreateResult {
+        let body = try JSONEncoder().encode(NetworkCreatePayload(request))
+        let data = try await postJSON("/networks/create", body: body)
+        let response: NetworkCreateResponse
+        do {
+            response = try Self.decoder.decode(NetworkCreateResponse.self, from: data)
+        } catch {
+            throw DockerClientError.decoding("could not decode Docker's network-create response: \(error)")
+        }
+        guard let id = response.Id, !id.isEmpty else {
+            throw DockerClientError.decoding("Docker created a network without returning its ID")
+        }
+        return NetworkCreateResult(id: id, warning: response.Warning)
+    }
+
     func removeNetwork(id: String) async throws {
         try await delete("/networks/\(id)")
     }
@@ -1404,6 +1425,32 @@ private struct LocalImageCreateResponse: Decodable {
 /// for its documented default (`local`) while leaving labels and driver options absent.
 private struct VolumeCreatePayload: Encodable {
     let Name: String
+}
+
+/// The exact v1.43 network-create body. This deliberately lacks both `EnableIPv4`
+/// (introduced in v1.48) and `IPAM`, so the UI cannot make a version-incompatible
+/// IPv4 or custom-subnet promise.
+private struct NetworkCreatePayload: Encodable {
+    let Name: String
+    let Driver: String
+    let EnableIPv6: Bool
+    let Labels: [String: String]
+    let Options: [String: String]
+
+    init(_ request: NetworkCreateRequest) {
+        Name = request.name
+        Driver = request.driver.rawValue
+        EnableIPv6 = request.enableIPv6
+        Labels = request.labels
+        Options = request.options
+    }
+}
+
+/// Docker's successful network-create response contains the new immutable ID and may
+/// include a warning that remains meaningful even though the request succeeded.
+private struct NetworkCreateResponse: Decodable {
+    let Id: String?
+    let Warning: String?
 }
 
 /// The only Engine request shape the app exposes for an attached command. There is no

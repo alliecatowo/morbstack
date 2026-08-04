@@ -225,6 +225,8 @@ struct NetworksRootView: View {
     @State private var removal: NetworkSummary?
     @State private var busy = false
     @State private var operationAlert: NetworkOperationAlert?
+    @State private var isShowingNetworkCreate = false
+    @State private var isCreatingNetwork = false
     @State private var inspection: NetworkInspection?
     @State private var inspectionError: String?
     @State private var isLoadingInspection = false
@@ -254,6 +256,10 @@ struct NetworksRootView: View {
         return model.networks.first { $0.id == selection }
     }
 
+    private var isPerformingNetworkOperation: Bool {
+        busy || isCreatingNetwork
+    }
+
     var body: some View {
         content
             .navigationTitle("Networks")
@@ -263,6 +269,11 @@ struct NetworksRootView: View {
             .sheet(item: $unusedRemovalPlan) { plan in
                 UnusedNetworkRemovalReview(plan: plan) { targets in
                     Task { await removeUnused(targets) }
+                }
+            }
+            .sheet(isPresented: $isShowingNetworkCreate) {
+                NetworkCreateSheet { request in
+                    try await createNetwork(request)
                 }
             }
             .alert(
@@ -296,7 +307,7 @@ struct NetworksRootView: View {
                 Text(alert.message)
             }
             .onDeleteCommand {
-                guard !busy,
+                guard !isPerformingNetworkOperation,
                       let selection,
                       let network = model.networks.first(where: { $0.id == selection }),
                       canOfferRemoval(of: network)
@@ -326,6 +337,19 @@ struct NetworksRootView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
+        ToolbarItem(id: "networks.create", placement: .primaryAction) {
+            Button {
+                isShowingNetworkCreate = true
+            } label: {
+                Image(systemName: "plus")
+            }
+            .disabled(isPerformingNetworkOperation)
+            .accessibilityLabel("Create network")
+            .help(
+                isPerformingNetworkOperation
+                    ? "Wait for the current network operation to finish"
+                    : "Create a bridge network")
+        }
         ToolbarItem(id: "networks.removeUnused", placement: .secondaryAction) {
             if busy {
                 ProgressView()
@@ -337,7 +361,7 @@ struct NetworksRootView: View {
                 } label: {
                     Image(systemName: "trash")
                 }
-                .disabled(unusedCount == 0)
+                .disabled(unusedCount == 0 || isPerformingNetworkOperation)
                 .accessibilityLabel("Remove unused networks")
                 .help(
                     unusedCount == 0
@@ -346,9 +370,8 @@ struct NetworksRootView: View {
             }
         }
         if !model.networks.isEmpty {
-            // Network inventory has no universal primary task.  Keep the inspector
-            // as a navigation affordance and reserve the primary region for a future
-            // contextual operation rather than turning this toggle into one.
+            // Creating is the primary task; the inspector still changes navigation
+            // layout and remains system-placed with the other view controls.
             ToolbarItem(id: "networks.inspector", placement: .automatic) {
                 Button {
                     showsInspector.toggle()
@@ -372,15 +395,15 @@ struct NetworksRootView: View {
                 Text("No Docker networks are reported by the engine.")
             } actions: {
                 Button {
+                    isShowingNetworkCreate = true
+                } label: {
+                    Label("Create Network", systemImage: "plus")
+                }
+                .disabled(isPerformingNetworkOperation)
+                Button {
                     Task { await model.refreshAll() }
                 } label: {
                     Label("Refresh", systemImage: "arrow.clockwise")
-                }
-                Button {
-                    MorbPasteboard.copy(
-                        "docker --host unix://\(MorbPaths.dockerSocket.path) network create my-network")
-                } label: {
-                    Label("Copy a Create Command", systemImage: "doc.on.doc")
                 }
             }
         } else if visibleNetworks.isEmpty {
@@ -453,7 +476,7 @@ struct NetworksRootView: View {
                 let removable = canOfferRemoval(of: network)
                 Divider()
                 Button("Remove…", role: .destructive) { removal = network }
-                    .disabled(!removable || busy)
+                    .disabled(!removable || isPerformingNetworkOperation)
                     .help(
                         !removable
                             ? "Disconnect every attached container first"
@@ -711,7 +734,7 @@ struct NetworksRootView: View {
                 Button("Remove Network…", role: .destructive) {
                     removal = summary
                 }
-                .disabled(busy)
+                .disabled(isPerformingNetworkOperation)
             }
         }
     }
@@ -771,7 +794,7 @@ struct NetworksRootView: View {
 
     @MainActor
     private func remove(_ network: NetworkSummary) async {
-        guard !network.isBuiltIn, !busy else { return }
+        guard !network.isBuiltIn, !isPerformingNetworkOperation else { return }
         busy = true
         defer { busy = false }
         do {
@@ -788,7 +811,7 @@ struct NetworksRootView: View {
 
     @MainActor
     private func removeUnused(_ targets: [UnusedNetworkRemovalTarget]) async {
-        guard !targets.isEmpty, !busy else { return }
+        guard !targets.isEmpty, !isPerformingNetworkOperation else { return }
         busy = true
         defer { busy = false }
 
@@ -819,5 +842,22 @@ struct NetworksRootView: View {
                 focusID: failures.first?.id)
         }
         await model.refreshAll()
+    }
+
+    @MainActor
+    private func createNetwork(_ request: NetworkCreateRequest) async throws -> NetworkCreateResult {
+        guard !isPerformingNetworkOperation else {
+            throw DockerClientError.transport("another network operation is already in progress")
+        }
+        isCreatingNetwork = true
+        defer { isCreatingNetwork = false }
+
+        let result = try await model.client.createNetwork(request)
+        // Docker's response ID is authoritative. Refresh the table to obtain its
+        // current summary and attachment count, then select that exact returned ID.
+        await model.refreshAll()
+        selection = result.id
+        showsInspector = true
+        return result
     }
 }

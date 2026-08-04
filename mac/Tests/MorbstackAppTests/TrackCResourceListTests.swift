@@ -428,6 +428,61 @@ final class TrackCResourceListTests: XCTestCase {
 
     // MARK: - Networks
 
+    func testNetworkCreateRequestKeepsTheV143BridgeAuthorityExplicit() {
+        let labels = [
+            NetworkCreateKeyValue(key: "com.example.owner", value: "operations"),
+            NetworkCreateKeyValue(),
+        ]
+        let options = [
+            NetworkCreateKeyValue(key: "com.docker.network.driver.mtu", value: "1450"),
+        ]
+
+        let result = NetworkCreateRequest.make(
+            name: "project_default",
+            enableIPv6: true,
+            labels: labels,
+            options: options)
+
+        guard case .success(let request) = result else {
+            return XCTFail("the bounded bridge request should be valid")
+        }
+        XCTAssertEqual(request.name, "project_default")
+        XCTAssertEqual(request.driver, .bridge)
+        XCTAssertEqual(request.ipv4Mode, .dockerDefault)
+        XCTAssertTrue(request.enableIPv6)
+        XCTAssertEqual(request.labels, ["com.example.owner": "operations"])
+        XCTAssertEqual(request.options, ["com.docker.network.driver.mtu": "1450"])
+    }
+
+    func testNetworkCreateRequestRejectsAmbiguousAdvancedEntries() {
+        XCTAssertEqual(
+            NetworkCreateRequest.make(
+                name: "project_default",
+                enableIPv6: false,
+                labels: [NetworkCreateKeyValue(key: "", value: "orphaned")],
+                options: []),
+            .failure(.labelKeyRequired))
+
+        XCTAssertEqual(
+            NetworkCreateRequest.make(
+                name: "project_default",
+                enableIPv6: false,
+                labels: [
+                    NetworkCreateKeyValue(key: "com.example.owner", value: "one"),
+                    NetworkCreateKeyValue(key: "com.example.owner", value: "two"),
+                ],
+                options: []),
+            .failure(.duplicateLabel("com.example.owner")))
+
+        XCTAssertEqual(
+            NetworkCreateRequest.make(
+                name: "project_default",
+                enableIPv6: false,
+                labels: [],
+                options: [NetworkCreateKeyValue(key: "", value: "1450")]),
+            .failure(.optionKeyRequired))
+    }
+
     func testNetworkNameSortIncludesBuiltInAndUserDefinedRecords() {
         let networks = [
             network("none"),
