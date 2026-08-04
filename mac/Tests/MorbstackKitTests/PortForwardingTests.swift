@@ -30,6 +30,20 @@ final class PortForwardingTests: XCTestCase {
             detail: "hermetic test probe")
     }
 
+    /// A deterministic occupied endpoint. This lets the create preflight exercise
+    /// the same Docker-shaped allocation rejection a real held listener reports,
+    /// without depending on a service that happens to be running on the test Mac.
+    private static let alwaysInUse: DockerPortPublicationPreflight.HostPortAvailabilityProbe = {
+        port, transport, address in
+        HostPortPreflight.Result(
+            port: port,
+            transport: transport,
+            bindAddress: address.stringValue,
+            availability: .inUse,
+            publication: address.isLoopback ? .loopback : .localNetwork,
+            detail: "hermetic occupied endpoint")
+    }
+
     /// A realistic two-container `GET /containers/json` body.
     ///
     /// `web` publishes 8080->80 on both address families the way dockerd really does;
@@ -221,6 +235,60 @@ final class PortForwardingTests: XCTestCase {
         XCTAssertEqual(
             DockerPortPublicationPreflight.explicitTCPBindings(in: create),
             [DockerExplicitTCPPortBinding(hostIP: "0.0.0.0", hostPort: 8080, containerPort: 80)])
+    }
+
+    func testFixedDockerRunConflictIsRejectedBeforeTheCreateTransaction() {
+        let create = Data(
+            #"{"HostConfig":{"PortBindings":{"80/tcp":[{"HostPort":"19999"}]}}}"#.utf8)
+
+        guard case .rejected(let message) = DockerPortPublicationPreflight.inspectContainerCreate(
+            body: create,
+            availability: Self.alwaysInUse)
+        else {
+            return XCTFail("an occupied fixed endpoint must be refused before Docker create")
+        }
+        XCTAssertEqual(
+            message,
+            "driver failed programming external connectivity: Bind for 0.0.0.0:19999/tcp failed: port is already allocated")
+        XCTAssertEqual(
+            DockerPortPublicationPreflight.fixedPortLeasePlan(in: create),
+            DockerFixedPortLeasePlan(
+                tcp: [DockerExplicitTCPPortBinding(hostIP: "", hostPort: 19999, containerPort: 80)],
+                udp: []),
+            "the recognized fixed form must stay on the atomic pre-create lease path")
+    }
+
+    func testFixedIPv6ConflictUsesAnUnambiguousDockerEndpoint() {
+        let create = Data(
+            #"{"HostConfig":{"PortBindings":{"80/tcp":[{"HostIp":"::","HostPort":"19999"}]}}}"#.utf8)
+
+        guard case .rejected(let message) = DockerPortPublicationPreflight.inspectContainerCreate(
+            body: create,
+            availability: Self.alwaysInUse)
+        else {
+            return XCTFail("an occupied IPv6 endpoint must be refused before Docker create")
+        }
+        XCTAssertEqual(
+            message,
+            "driver failed programming external connectivity: Bind for [::]:19999/tcp failed: port is already allocated")
+    }
+
+    func testPortLeaseConflictUsesTheSameDockerEndpointSpellingAsPreflight() throws {
+        let endpoint = try XCTUnwrap(DockerHostEndpoint(hostIP: "0.0.0.0", port: 19999))
+        let error = PortForwarder.PortLeaseError.addressInUse(endpoint: endpoint, protocolName: "tcp")
+        XCTAssertEqual(
+            try XCTUnwrap(error.errorDescription),
+            "driver failed programming external connectivity: Bind for 0.0.0.0:19999/tcp failed: port is already allocated")
+    }
+
+    func testOutOfRangeFixedPortIsRejectedRatherThanForceUnwrapped() {
+        let create = Data(
+            #"{"HostConfig":{"PortBindings":{"80/tcp":[{"HostPort":"70000"}]}}}"#.utf8)
+        XCTAssertEqual(
+            DockerPortPublicationPreflight.inspectContainerCreate(
+                body: create,
+                availability: Self.alwaysAvailable),
+            .rejected(message: "published TCP host port 70000 is invalid"))
     }
 
     func testExplicitTCPCreateBindingsDoNotGuessDynamicTargets() {

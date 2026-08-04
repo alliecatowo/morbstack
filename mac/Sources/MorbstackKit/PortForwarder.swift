@@ -306,13 +306,13 @@ public final class PortForwarder {
     }
 
     enum PortLeaseError: LocalizedError {
-        case addressInUse(port: Int, protocolName: String)
+        case addressInUse(endpoint: DockerHostEndpoint, protocolName: String)
         case unavailable(String)
 
         var errorDescription: String? {
             switch self {
-            case .addressInUse(let port, let protocolName):
-                "driver failed programming external connectivity: Bind for local loopback port \(port)/\(protocolName) failed: port is already allocated"
+            case .addressInUse(let endpoint, let protocolName):
+                "driver failed programming external connectivity: Bind for \(endpoint.description)/\(protocolName) failed: port is already allocated"
             case .unavailable(let message):
                 message
             }
@@ -776,7 +776,7 @@ public final class PortForwarder {
                 do {
                     try listener.start()
                 } catch TCPListenerError.addressInUse {
-                    throw PortLeaseError.addressInUse(port: publication.hostPort, protocolName: "tcp")
+                    throw PortLeaseError.addressInUse(endpoint: endpoint, protocolName: "tcp")
                 } catch {
                     throw PortLeaseError.unavailable(
                         "could not reserve published TCP port \(endpoint.description): \(error.localizedDescription)")
@@ -803,7 +803,7 @@ public final class PortForwarder {
                     // successful start response installs its synchronized handler.
                     try listener.start()
                 } catch UDPListener.Error.addressInUse {
-                    throw PortLeaseError.addressInUse(port: publication.hostPort, protocolName: "udp")
+                    throw PortLeaseError.addressInUse(endpoint: endpoint, protocolName: "udp")
                 } catch {
                     throw PortLeaseError.unavailable(
                         "could not reserve published UDP port \(endpoint.description): \(error.localizedDescription)")

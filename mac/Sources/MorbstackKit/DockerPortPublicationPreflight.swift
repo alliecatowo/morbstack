@@ -489,7 +489,10 @@ public enum DockerPortPublicationPreflight {
                         message: "published \(protocolName.uppercased()) host port \(hostPort) is not a valid port or port range")
                 }
 
-                let endpoint = DockerHostEndpoint(hostIP: hostIP, port: port)!
+                guard let endpoint = DockerHostEndpoint(hostIP: hostIP, port: port) else {
+                    return .rejected(
+                        message: "published \(protocolName.uppercased()) host port \(hostPort) is invalid")
+                }
                 if fixedHostEndpoints.insert("\(protocolName)|\(endpoint.description)").inserted,
                    fixedHostEndpoints.count > maximumSynchronousFixedPortBindings {
                     return .rejected(
@@ -512,12 +515,12 @@ public enum DockerPortPublicationPreflight {
                     continue
                 case .inUse:
                     return .rejected(
-                        message: "driver failed programming external connectivity: Bind for \(result.bindAddress):\(port)/\(protocolName) failed: port is already allocated")
+                        message: "driver failed programming external connectivity: Bind for \(endpoint.description)/\(protocolName) failed: port is already allocated")
                 case .invalid:
                     return .rejected(message: "published \(protocolName.uppercased()) host port \(hostPort) is invalid")
                 case .unavailable:
                     return .rejected(
-                        message: "could not verify published \(protocolName.uppercased()) port \(result.bindAddress):\(port): \(result.detail)")
+                        message: "could not verify published \(protocolName.uppercased()) port \(endpoint.description): \(result.detail)")
                 }
             }
         }
