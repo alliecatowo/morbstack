@@ -158,7 +158,7 @@ the author.
 
 | ID | Ticket | Severity | State |
 | --- | --- | --- | --- |
-| UI-1 | Fixture-mode watermark — a `--tour-fixtures` window is indistinguishable from live and its footer asserts "Engine running" while never dialling the engine | blocker | `open` |
+| UI-1 | Fixture-mode provenance — `--tour-fixtures` must be visibly and accessibly distinct from live data | blocker | `done` (fixture title/footer/a11y never claim a live Engine) |
 | UI-2 | Port renders as `18,099` — thousands separator on a port | blocker | `done` (string-typed inspector display + focused regression) |
 | UI-3 | Add Show/Hide Sidebar to the View menu | major | `open` |
 | UI-4 | Unmatched search must use `ContentUnavailableView.search` | major | `open` |
@@ -166,7 +166,7 @@ the author.
 | UI-6 | 8 undescribed elements, 3 contrast failures | major | `blocked` (SP-8) |
 | UI-7 | Containers toolbar: ~12 symbol-only items in 6 groups against a cap of 3, incl. **two identical trash cans** | major | `open` |
 | UI-8 | Toolbar items vanish at narrow width with no overflow — with UI-3, some commands become unreachable | major | `open` |
-| UI-9 | Images table: Repository column crushes to one character per row | major | `open` |
+| UI-9 | Images table: Repository column crushes to one character per row | major | `done` (native `TableColumn` minimum width; narrow-window evidence still pending) |
 | UI-10 | Disk inspector overlaps and overdraws the table | major | `open` |
 | UI-11 | Container uptime freezes ("Up 23 seconds" vs `docker ps` "Up About a minute") | major | `open` |
 | UI-12 | **Second UI pass** — Stacks, Kubernetes, Networks, Builds, Migration, Settings, ⌘K, menu-bar extra, light mode, prune/pull were never toured. The 32 issues are a floor. | major | `open` |
