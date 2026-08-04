@@ -78,14 +78,13 @@ final class ConfigTests: XCTestCase {
         let original = MorbConfig()
         let parsed = try MorbConfig.parse(original.toTOML())
         XCTAssertEqual(parsed, original)
-        XCTAssertFalse(parsed.allowHostNetworkPortPublishing)
     }
 
-    func testHostNetworkPortForwardingPreferenceRoundTrips() throws {
-        let original = MorbConfig(allowHostNetworkPortPublishing: true)
+    func testLANPortPublishingPreferenceRoundTrips() throws {
+        let original = MorbConfig(allowLANPortPublishing: false)
         let parsed = try MorbConfig.parse(original.toTOML())
-        XCTAssertTrue(parsed.allowHostNetworkPortPublishing)
-        XCTAssertTrue(parsed.toTOML().contains("allow_host_network_port_publishing = true"))
+        XCTAssertFalse(parsed.allowLANPortPublishing)
+        XCTAssertTrue(parsed.toTOML().contains("allow_lan_port_publishing = false"))
     }
 
     func testRoundTripOfCustomConfiguration() throws {

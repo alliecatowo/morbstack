@@ -321,24 +321,6 @@ private struct TrackDResourceSettings: View {
                 .foregroundStyle(.secondary)
             }
 
-            Section("Host Networking") {
-                Toggle(
-                    "Make exposed ports from host-network containers reachable on this Mac",
-                    isOn: Binding(
-                        get: { store.draft.allowHostNetworkPortPublishing },
-                        set: {
-                            store.draft.allowHostNetworkPortPublishing = $0
-                            store.save()
-                        }
-                    )
-                )
-                Text(
-                    "When enabled, a host-network container's Docker-exposed port is reachable at the same Mac port after its service listens on the guest loopback address or all guest interfaces. An explicit --network host -p HOST:CONTAINER mapping instead uses the requested Mac port. Restart the engine to apply this change."
-                )
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-            }
-
             Section("Storage") {
                 LabeledContent("Disk capacity") {
                     HStack(spacing: 6) {

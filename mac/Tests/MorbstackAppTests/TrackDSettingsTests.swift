@@ -182,15 +182,6 @@ final class TrackDConfigEditorTests: XCTestCase {
         XCTAssertFalse(TrackDConfigEditor.requiresEngineRestart(from: config, to: config))
     }
 
-    func testRestartIsRequiredForHostNetworkPortForwarding() {
-        let applied = MorbConfig()
-        var pending = applied
-        pending.allowHostNetworkPortPublishing = true
-
-        XCTAssertTrue(TrackDConfigEditor.requiresEngineRestart(from: applied, to: pending))
-        XCTAssertTrue(TrackDConfigEditor.restartSummary(from: applied, to: pending).contains("host-network"))
-    }
-
     func testRestartIsRequiredForLiveReloadPathChanges() {
         let applied = MorbConfig()
         var pending = applied

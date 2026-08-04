@@ -46,13 +46,6 @@ public struct MorbConfig: Equatable, Codable, Sendable {
     /// `0.0.0.0`, while people who need local-only development can opt out.
     public var allowLANPortPublishing: Bool
 
-    /// Whether a Docker-declared port on a `--network host` container may create a
-    /// Mac listener. Explicit `-p HOST:CONTAINER` uses its declared Mac endpoint;
-    /// an otherwise-unpublished Docker `EXPOSE` port is bridged at the same port only
-    /// after the guest confirms a loopback-reachable listener. Host networking is
-    /// guest-local under Virtualization.framework, so this remains opt-in.
-    public var allowHostNetworkPortPublishing: Bool
-
     /// Host directories exposed to the guest over VirtioFS, each mounted inside the
     /// guest at its own absolute path so that `docker run -v <hostpath>:...` resolves
     /// identically on both sides.
@@ -104,7 +97,6 @@ public struct MorbConfig: Equatable, Codable, Sendable {
         rosetta: Bool = true,
         autoSuspendMinutes: Int = 5,
         allowLANPortPublishing: Bool = true,
-        allowHostNetworkPortPublishing: Bool = false,
         sharedPaths: [String] = MorbShares.defaultSharedPaths,
         liveSharePaths: [String] = []
     ) {
@@ -117,7 +109,6 @@ public struct MorbConfig: Equatable, Codable, Sendable {
         self.rosetta = rosetta
         self.autoSuspendMinutes = autoSuspendMinutes
         self.allowLANPortPublishing = allowLANPortPublishing
-        self.allowHostNetworkPortPublishing = allowHostNetworkPortPublishing
         self.sharedPaths = sharedPaths
         self.liveSharePaths = liveSharePaths
     }
@@ -204,7 +195,6 @@ public struct MorbConfig: Equatable, Codable, Sendable {
         case rosetta
         case autoSuspendMinutes = "auto_suspend_minutes"
         case allowLANPortPublishing = "allow_lan_port_publishing"
-        case allowHostNetworkPortPublishing = "allow_host_network_port_publishing"
         case sharedPaths = "shared_paths"
         case liveSharePaths = "live_share_paths"
     }
@@ -252,9 +242,6 @@ public struct MorbConfig: Equatable, Codable, Sendable {
         if baseline.rosetta != candidate.rosetta { changed.insert(.rosetta) }
         if baseline.autoSuspendMinutes != candidate.autoSuspendMinutes { changed.insert(.autoSuspendMinutes) }
         if baseline.allowLANPortPublishing != candidate.allowLANPortPublishing { changed.insert(.allowLANPortPublishing) }
-        if baseline.allowHostNetworkPortPublishing != candidate.allowHostNetworkPortPublishing {
-            changed.insert(.allowHostNetworkPortPublishing)
-        }
         if baseline.sharedPaths != candidate.sharedPaths { changed.insert(.sharedPaths) }
         if baseline.liveSharePaths != candidate.liveSharePaths { changed.insert(.liveSharePaths) }
         return changed
@@ -339,7 +326,6 @@ public struct MorbConfig: Equatable, Codable, Sendable {
         case .rosetta: .boolean(rosetta)
         case .autoSuspendMinutes: .integer(autoSuspendMinutes)
         case .allowLANPortPublishing: .boolean(allowLANPortPublishing)
-        case .allowHostNetworkPortPublishing: .boolean(allowHostNetworkPortPublishing)
         case .sharedPaths: .stringArray(sharedPaths)
         case .liveSharePaths: .stringArray(liveSharePaths)
         }
@@ -356,8 +342,6 @@ public struct MorbConfig: Equatable, Codable, Sendable {
         case (.rosetta, .boolean(let value)): rosetta = value
         case (.autoSuspendMinutes, .integer(let value)): autoSuspendMinutes = value
         case (.allowLANPortPublishing, .boolean(let value)): allowLANPortPublishing = value
-        case (.allowHostNetworkPortPublishing, .boolean(let value)):
-            allowHostNetworkPortPublishing = value
         case (.sharedPaths, .stringArray(let value)): sharedPaths = value
         case (.liveSharePaths, .stringArray(let value)): liveSharePaths = value
         default:
@@ -538,10 +522,6 @@ public struct MorbConfig: Equatable, Codable, Sendable {
         out += "# Set false to keep container ports on loopback only.\n"
         out += "allow_lan_port_publishing = \(allowLANPortPublishing)\n"
         out += "\n"
-        out += "# Make Docker-declared ports from guest host-network containers reachable on this Mac.\n"
-        out += "# Explicit -p uses its requested Mac port; exposed listeners use the same port.\n"
-        out += "allow_host_network_port_publishing = \(allowHostNetworkPortPublishing)\n"
-        out += "\n"
         out += "# Host directories exposed to the guest over VirtioFS. Each one is mounted\n"
         out += "# inside the guest at the same absolute path, so `docker run -v /Users/me/app:/app`\n"
         out += "# sees the real directory. Paths that do not exist are skipped. Set to [] to\n"
@@ -627,8 +607,6 @@ public struct MorbConfig: Equatable, Codable, Sendable {
                 config.autoSuspendMinutes = try requireInt(value, key: key, line: lineNumber, minimum: 0)
             case .allowLANPortPublishing:
                 config.allowLANPortPublishing = try requireBool(value, key: key, line: lineNumber)
-            case .allowHostNetworkPortPublishing:
-                config.allowHostNetworkPortPublishing = try requireBool(value, key: key, line: lineNumber)
             case .sharedPaths:
                 // An explicit `[]` really does mean "share nothing"; only an absent key
                 // falls back to the defaults, which `MorbConfig()` already installed.
