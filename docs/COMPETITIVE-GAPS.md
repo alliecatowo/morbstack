@@ -112,6 +112,15 @@ WSL competitor. Compete there deliberately or not at all; do not drift into it.
 - **Asset provenance** — every third-party binary SHA-256 pinned, several doubly; Moby pinned to tag *and* peeled commit. Better than most funded projects.
 - **A publishable benchmark harness.** A closed competitor structurally cannot match "here is the harness, run it yourself."
 - **Honest CLI writing.** `morb`'s help volunteers its own limits ("snapshots, not reservations", "does not open a shell yet"). Keep that voice.
+- **Old Docker API clients work against engine 29** (2026-08-04, PROTO-7). Stock moby 29 defaults its
+  minimum API version to 1.44 — an upstream default, not anyone's product decision — which 400s the
+  `GET /v1.32/info` probe `testcontainers-java` ≤1.20.x uses for daemon discovery; the library then
+  *silently* fails over to whatever other daemon is on the machine and the suite runs green against
+  the wrong engine. Morbstack sets `DOCKER_MIN_API_VERSION=1.24` (upstream's own hard floor) in the
+  guest, verified live: `/v1.32/info` → 200, modern negotiation unchanged at 1.55. Docker Desktop is
+  only insulated from this because it still ships engine 27; when it moves to 29 it inherits the
+  breakage unless it does the same. Morbstack is the engine-29 distribution the ≤1.20.x
+  testcontainers-java installed base actually works against.
 
 ## Where we must stop claiming a win
 
