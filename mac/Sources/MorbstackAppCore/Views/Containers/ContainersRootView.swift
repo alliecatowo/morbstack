@@ -37,6 +37,7 @@ struct ContainersRootView: View {
     @State private var isPruning = false
     @State private var isShowingPruneConfirmation = false
     @State private var removalTarget: ContainerSummary?
+    @State private var commandTarget: ContainerSummary?
     @State private var showsInspector = true
     @State private var pruneError: String?
 
@@ -124,6 +125,9 @@ struct ContainersRootView: View {
             } message: {
                 Text(pruneError ?? "")
             }
+            .sheet(item: $commandTarget) { container in
+                ContainerExecSheet(container: container, model: model)
+            }
             .onChange(of: model.selectedContainerID) { _, selection in
                 if selection != nil { showsInspector = true }
             }
@@ -157,6 +161,17 @@ struct ContainersRootView: View {
                     .accessibilityLabel("\(action.title) \(selected.displayName)")
                     .help("\(action.title) \(selected.displayName)")
                 }
+            }
+
+            // A selected-record command belongs in macOS's managed secondary-action
+            // area, not in every list row or a hand-built command bar. The sheet itself
+            // explains why a stopped selection cannot execute before it can reach Docker.
+            ToolbarItem(id: "containers.runCommand", placement: .secondaryAction) {
+                Button("Run Command…", systemImage: "terminal") {
+                    commandTarget = selected
+                }
+                .accessibilityLabel("Run command in \(selected.displayName)")
+                .help("Run a noninteractive command in \(selected.displayName)")
             }
         }
 
@@ -295,6 +310,8 @@ struct ContainersRootView: View {
         ForEach(container.availableActions.filter { !$0.isDestructive }, id: \.rawValue) { action in
             Button(action.title) { perform(action, on: container.id) }
         }
+        Divider()
+        Button("Run Command…", systemImage: "terminal") { commandTarget = container }
         Divider()
         Button("Copy Name") { MorbPasteboard.copy(container.displayName) }
         Button("Copy Container ID") { MorbPasteboard.copy(container.id) }

@@ -683,8 +683,8 @@ class DockerClient: @unchecked Sendable {
         try await run { try self.send(method: "POST", path: self.url(path), timeout: timeout) }
     }
 
-    /// Sends one bounded JSON document. This is intentionally private to the narrow
-    /// local-image create operation; it is not a generic UI-to-Docker request editor.
+    /// Sends one bounded, locally-owned JSON request. Callers declare a fixed request
+    /// shape near their command rather than exposing a generic UI-to-Docker editor.
     @discardableResult
     private func postJSON(_ path: String, body: Data, timeout: TimeInterval = 60) async throws -> Data {
         try await run {
@@ -699,9 +699,10 @@ class DockerClient: @unchecked Sendable {
 
     private func url(_ path: String) -> String { "/\(Self.apiVersion)\(path)" }
 
-    /// The JSON request shape needed by `POST /containers/create`. `MinimalHTTP` owns
-    /// the shared bodyless request vocabulary; keeping this complete-body shape here
-    /// makes its content type and byte-count ownership explicit.
+    /// `MinimalHTTP` owns the shared bodyless request vocabulary; keeping this
+    /// complete-body shape here makes a typed JSON request's content type and byte
+    /// count explicit. Callers pass only internally-defined request documents, never
+    /// an arbitrary HTTP editor from the UI.
     private static func jsonRequest(method: String, path: String, body: Data) -> Data {
         let head = """
             \(method) \(path) HTTP/1.1\r
@@ -986,6 +987,88 @@ class DockerClient: @unchecked Sendable {
         return inspected.Config?.Tty ?? false
     }
 
+    // MARK: Container commands
+
+    /// Runs one explicitly noninteractive command in a running container and returns
+    /// the output Docker attached to that command. This is intentionally not a shell:
+    /// `command` is sent as Docker's `Cmd` array, stdin stays closed, and no TTY is
+    /// allocated. A caller that cancels this method stops reading the attached stream;
+    /// Docker's exec API does not promise that disconnecting the reader terminates the
+    /// process, so the UI must describe that boundary rather than call it cancellation.
+    ///
+    /// The stored prefix is limited independently for each stream. We continue reading
+    /// after either cap so Docker can close the operation normally, but tell the caller
+    /// exactly which output was incomplete.
+    func executeContainerCommand(id: String, command: [String]) async throws -> DockerExecResult {
+        guard !command.isEmpty else {
+            throw DockerClientError.decoding("a container command needs an executable")
+        }
+
+        let createBody = try JSONEncoder().encode(
+            DockerExecCreateRequest(
+                AttachStdin: false,
+                AttachStdout: true,
+                AttachStderr: true,
+                Tty: false,
+                Cmd: command))
+        let createData = try await postJSON("/containers/\(id)/exec", body: createBody)
+        let created: DockerExecCreateResponse
+        do {
+            created = try Self.decoder.decode(DockerExecCreateResponse.self, from: createData)
+        } catch {
+            throw DockerClientError.decoding("could not decode Docker's exec response: \(error)")
+        }
+        guard let execID = created.Id, !execID.isEmpty else {
+            throw DockerClientError.decoding("Docker created an exec instance without returning its ID")
+        }
+
+        try Task.checkCancellation()
+        let startBody = try JSONEncoder().encode(DockerExecStartRequest(Detach: false, Tty: false))
+        let output = DockerExecOutputCollector()
+        try await readExecOutput(id: execID, startBody: startBody, collector: output)
+        try Task.checkCancellation()
+
+        // `/exec/{id}/json` is a post-completion metadata read. A successful attached
+        // stream does not make a missing follow-up status a command success, so retain
+        // `nil` when the Engine does not report an exit code instead of manufacturing 0.
+        let exitCode = try? await inspectExecExitCode(id: execID)
+        return output.result(exitCode: exitCode)
+    }
+
+    private func readExecOutput(
+        id: String,
+        startBody: Data,
+        collector: DockerExecOutputCollector
+    ) async throws {
+        let outcome = DockerExecStreamOutcome()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                guard outcome.begin(continuation) else { return }
+                let handle = stream(
+                    method: "POST",
+                    path: "/exec/\(id)/start",
+                    requestBody: startBody,
+                    onBody: { collector.consume($0) },
+                    onFinish: { error in
+                        collector.finish()
+                        outcome.finish(error)
+                    })
+                outcome.adopt(handle)
+            }
+        } onCancel: {
+            outcome.cancel()
+        }
+    }
+
+    private func inspectExecExitCode(id: String) async throws -> Int? {
+        let data = try await run { try self.send(method: "GET", path: self.url("/exec/\(id)/json")) }
+        do {
+            return try Self.decoder.decode(DockerExecInspectResponse.self, from: data).ExitCode
+        } catch {
+            throw DockerClientError.decoding("could not decode Docker's exec inspection: \(error)")
+        }
+    }
+
     // MARK: Container lifecycle
 
     /// Creates one container from the immutable ID of an image that the Images route
@@ -1093,7 +1176,7 @@ class DockerClient: @unchecked Sendable {
     private func stream(
         method: String,
         path: String,
-        mode: StdcopyDemuxer.Mode = .auto,
+        requestBody: Data? = nil,
         onBody: @escaping @Sendable (Data) -> Void,
         onFinish: @escaping @Sendable (Error?) -> Void
     ) -> DockerConnectionHandle {
@@ -1115,7 +1198,11 @@ class DockerClient: @unchecked Sendable {
                     onFinish(nil)
                     return
                 }
-                try opened.write(MinimalHTTP.request(method: method, path: fullPath, closeWhenDone: true))
+                if let requestBody {
+                    try opened.write(Self.jsonRequest(method: method, path: fullPath, body: requestBody))
+                } else {
+                    try opened.write(MinimalHTTP.request(method: method, path: fullPath, closeWhenDone: true))
+                }
 
                 var raw = Data()
                 var head: HTTPResponseHead?
@@ -1163,7 +1250,6 @@ class DockerClient: @unchecked Sendable {
         thread.name = "morbstack.docker.stream"
         thread.stackSize = 512 * 1024
         thread.start()
-        _ = mode
         return handle
     }
 
@@ -1411,6 +1497,77 @@ private final class DockerExecOutputCollector: @unchecked Sendable {
 }
 
 // MARK: - Stream plumbing
+
+/// Coordinates attached-exec completion with Task cancellation. The only cancellable
+/// resource is the app's socket attachment: Moby runs the exec process with a
+/// background context, so the connection close must never be described as killing it.
+private final class DockerExecStreamOutcome: @unchecked Sendable {
+
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Error>?
+    private var handle: DockerConnectionHandle?
+    private var wasCancelled = false
+    private var didResume = false
+
+    /// Registers the waiter. Returns `false` after a cancellation that arrived before
+    /// the operation installed its continuation; that continuation is already resumed.
+    func begin(_ continuation: CheckedContinuation<Void, Error>) -> Bool {
+        lock.lock()
+        self.continuation = continuation
+        if wasCancelled {
+            didResume = true
+            self.continuation = nil
+            lock.unlock()
+            continuation.resume(throwing: CancellationError())
+            return false
+        }
+        lock.unlock()
+        return true
+    }
+
+    func adopt(_ handle: DockerConnectionHandle) {
+        lock.lock()
+        self.handle = handle
+        let shouldCancel = wasCancelled
+        lock.unlock()
+        if shouldCancel { handle.cancel() }
+    }
+
+    func cancel() {
+        lock.lock()
+        wasCancelled = true
+        let handle = self.handle
+        let continuation = didResume ? nil : self.continuation
+        if continuation != nil {
+            didResume = true
+            self.continuation = nil
+        }
+        lock.unlock()
+
+        handle?.cancel()
+        continuation?.resume(throwing: CancellationError())
+    }
+
+    func finish(_ error: Error?) {
+        lock.lock()
+        guard !didResume, let continuation else {
+            lock.unlock()
+            return
+        }
+        didResume = true
+        self.continuation = nil
+        let cancellationWon = wasCancelled
+        lock.unlock()
+
+        if cancellationWon {
+            continuation.resume(throwing: CancellationError())
+        } else if let error {
+            continuation.resume(throwing: error)
+        } else {
+            continuation.resume()
+        }
+    }
+}
 
 /// A cancellation token for an in-flight stream.
 ///

@@ -248,6 +248,62 @@ and VoiceOver behavior, long-name truncation/copy, secret reveal/copy, mount act
 and lifecycle acceptance remain required; no build, test, Docker/VM action, or live-app
 interaction was performed for this source change.
 
+### 2026-08-03 Container noninteractive command handoff
+
+**User task:** run one deliberate diagnostic or maintenance command in a selected
+running container, review its actual standard output/error and reported exit status,
+and understand the connection boundary if output reading is stopped. This is neither a
+terminal emulator nor a generic Docker API editor.
+
+**HIG/API read:** Apple’s [sheets](https://developer.apple.com/design/human-interface-guidelines/sheets),
+[toolbars](https://developer.apple.com/design/human-interface-guidelines/toolbars),
+[menus](https://developer.apple.com/design/human-interface-guidelines/menus),
+[progress indicators](https://developer.apple.com/design/human-interface-guidelines/progress-indicators),
+SwiftUI [`Form`](https://developer.apple.com/documentation/swiftui/form),
+[`LabeledContent`](https://developer.apple.com/documentation/swiftui/labeledcontent),
+[`TextEditor`](https://developer.apple.com/documentation/swiftui/texteditor), and
+[`View.sheet`](https://developer.apple.com/documentation/swiftui/view/sheet(isPresented:onDismiss:content:));
+Docker’s [`docker container exec`](https://docs.docker.com/reference/cli/docker/container/exec/)
+and [Engine API v1.43 Exec](https://docs.docker.com/reference/api/engine/version/v1.43/).
+
+**Native choice:** a selected-record **Run Command…** action lives in the system-managed
+secondary toolbar area and matching contextual menu. It opens one document-modal
+`NavigationStack` + automatic `Form`, whose standard sections identify the selected
+container/current state, accept a Program plus literal one-per-line arguments, state
+the fixed stdin/TTY policy, and show native indeterminate progress, error, result, and
+selectable monospaced output. Standard sheet toolbar actions own Run, Done, and the
+explicit **Stop Reading Output** control. There is no custom terminal frame, glass,
+card, prompt, output color system, shell tokenizer, or web-style command panel.
+
+**Data/action behavior:** the typed client sends only Docker’s documented
+`POST /containers/{id}/exec` with `AttachStdin: false`, `AttachStdout: true`,
+`AttachStderr: true`, `Tty: false`, and a nonempty `Cmd` array, followed by the
+attached `POST /exec/{id}/start` with `Detach: false`, `Tty: false`. It does not supply
+environment, user, working-directory, privilege, console-size, detach, or arbitrary
+request fields. The non-TTY stdcopy stream remains split into standard output and
+standard error, retaining a clearly marked 2 MB prefix per stream; a post-stream
+`GET /exec/{id}/json` displays Docker’s exit code only when actually reported. A
+stopped/unlisted selection is visibly unavailable and reaches no Docker command; a
+Docker 404/409/transport response is shown verbatim as a command failure. Moby’s pinned
+exec handler runs the process with a background context, so stopping reading closes
+only Morbstack’s socket attachment and is explicitly not represented as killing the
+command. Fixture mode overrides the command client with an explicit no-action error.
+
+**Rejected alternative:** `docker debug` requires Docker’s separate toolbox/shell
+workflow and is not an Engine exec substitute; no fake shell, `-it` control, stdin
+field, or “Cancel command” claim was added. A person who needs a shell can explicitly
+enter `/bin/sh` and its arguments, but this initial workflow remains noninteractive.
+
+**Evidence:** focused pure tests cover literal one-line-per-argument construction,
+shell-syntax preservation, deliberate empty arguments, and invalid program rejection.
+No build, test, Docker/VM action, app launch, XCUITest, or Computer Use review ran in
+this parallel source lane. Before acceptance, an evidence owner must validate a current
+bundle in light/dark and normal/narrow sheet widths; keyboard tab order/focus/default
+Run/escape behavior; VoiceOver labels and the argument-editor hint; stopped/paused,
+missing-program, stdout/stderr, nonzero-exit, output-cap, Engine error, and
+Stop-Reading states; secondary-toolbar overflow/context-menu selection; fixture-mode
+wording; and a real Engine command that has no host side effects.
+
 ### 2026-08-03 Trailing inspector surface correction
 
 The current real-window audit found that compact selected-record details could read as

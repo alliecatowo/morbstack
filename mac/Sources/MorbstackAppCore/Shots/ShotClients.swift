@@ -113,6 +113,11 @@ final class ShotDockerClient: DockerClient, @unchecked Sendable {
             status: 503,
             message: "Run Local Image is unavailable in fixture mode; no Docker action was performed.")
     }
+    override func executeContainerCommand(id: String, command: [String]) async throws -> DockerExecResult {
+        throw DockerClientError.http(
+            status: 503,
+            message: "Run Command is unavailable in fixture mode; no Docker command was performed.")
+    }
     override func startContainer(id: String) async throws {}
     override func stopContainer(id: String) async throws {}
     override func restartContainer(id: String) async throws {}
