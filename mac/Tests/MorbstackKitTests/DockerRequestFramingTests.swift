@@ -277,6 +277,12 @@ final class DockerHijackDetectionTests: XCTestCase {
             head("GET", "/v1.47/exec/deadbeef/json")))
         XCTAssertFalse(DockerHijackDetection.isHijackCandidate(
             head("GET", "/v1.47/exec/deadbeef/start")))
+        XCTAssertFalse(DockerHijackDetection.isHijackCandidate(
+            head("GET", "/v1.47/containers/abc/attach?stream=1")))
+        XCTAssertFalse(DockerHijackDetection.isHijackCandidate(
+            head("POST", "/v1.47/containers/abc/attach/ws")))
+        XCTAssertFalse(DockerHijackDetection.isHijackCandidate(
+            head("POST", "/v1.47/containers/abc/resize?h=40&w=120")))
     }
 
     func testOnlyTheEngineCanConfirmAHijack() {
@@ -540,6 +546,46 @@ final class DockerFramedRelayTests: XCTestCase {
         wait(for: [wired.done], timeout: 10)
     }
 
+    /// A normal `docker attach` need not send Upgrade headers. Docker confirms its
+    /// raw bidirectional stream with a `200` and Docker stream content type, so the
+    /// relay must wait for that response rather than treating the request itself as
+    /// a raw splice. Closing stdin still has to leave a final stdout/stderr frame
+    /// readable.
+    func testAttachedContainerDrainsMultiplexedOutputAfterStdinHalfClose() throws {
+        let wired = try makeRelay()
+        let attach = "POST /v1.47/containers/abc/attach?stream=1&stdin=1&stdout=1&stderr=1 HTTP/1.1\r\n"
+            + "Host: morbstack\r\nContent-Length: 0\r\n\r\n"
+        write(attach, to: wired.client)
+        XCTAssertEqual(
+            readAvailable(wired.guest, atLeast: attach.utf8.count),
+            Data(attach.utf8))
+
+        let stdout = Data([1, 0, 0, 0, 0, 0, 0, 3]) + Data("out".utf8)
+        let stderr = Data([2, 0, 0, 0, 0, 0, 0, 3]) + Data("err".utf8)
+        let response = Data((
+            "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\n\r\n").utf8)
+            + stdout + stderr
+        write(response, to: wired.guest)
+        XCTAssertEqual(readAvailable(wired.client, atLeast: response.count), response)
+
+        let stdin = Data("raw stdin\n".utf8)
+        write(stdin, to: wired.client)
+        XCTAssertEqual(readAvailable(wired.guest, atLeast: stdin.count), stdin)
+        shutdown(wired.client, SHUT_WR)
+        var buffer = [UInt8](repeating: 0, count: 16)
+        let eof = buffer.withUnsafeMutableBytes { raw -> Int in
+            POSIXSocketSupport.readSome(wired.guest, into: raw.baseAddress!, count: raw.count)
+        }
+        XCTAssertEqual(eof, 0, "closing attach stdin must half-close only the Engine write side")
+
+        let tail = Data([1, 0, 0, 0, 0, 0, 0, 5]) + Data("later".utf8)
+        write(tail, to: wired.guest)
+        shutdown(wired.guest, SHUT_WR)
+        XCTAssertEqual(readAvailable(wired.client, atLeast: tail.count), tail)
+        XCTAssertEqual(policy.framingFailures, [])
+        wait(for: [wired.done], timeout: 10)
+    }
+
     /// Attached non-TTY exec is the CLI's normal noninteractive path.  The create
     /// and inspect calls remain ordinary HTTP; only the successful start response
     /// hijacks the connection, where Docker multiplexes stdout and stderr with its
@@ -649,21 +695,48 @@ final class DockerFramedRelayTests: XCTestCase {
         wait(for: [wired.done], timeout: 10)
     }
 
-    /// `docker logs -f` and `docker events`: an endless response on a framed
-    /// connection must simply flow.
-    func testEndlessResponseStreamIsUnaffectedByFraming() throws {
+    /// TTY resize is a normal bounded Engine call, never an attach. Its success
+    /// response must leave the connection in the request loop for the next command.
+    func testContainerResizeRemainsFramedOnAReusedConnection() throws {
+        let wired = try makeRelay()
+        let resize = "POST /v1.47/containers/abc/resize?h=40&w=120 HTTP/1.1\r\n"
+            + "Host: morbstack\r\nContent-Length: 0\r\n\r\n"
+        write(resize, to: wired.client)
+        XCTAssertEqual(readAvailable(wired.guest, atLeast: resize.utf8.count), Data(resize.utf8))
+
+        let resized = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+        write(resized, to: wired.guest)
+        XCTAssertEqual(readAvailable(wired.client, atLeast: resized.utf8.count), Data(resized.utf8))
+
+        write(Self.ping, to: wired.client)
+        XCTAssertEqual(readAvailable(wired.guest, atLeast: Self.ping.utf8.count), Data(Self.ping.utf8))
+        XCTAssertEqual(policy.seen.map { $0.head.target }, [
+            "/v1.47/containers/abc/resize?h=40&w=120",
+            "/_ping",
+        ])
+
+        wired.relay.cancel()
+        wait(for: [wired.done], timeout: 10)
+    }
+
+    /// `docker logs --follow` streams the attach-format bytes in an ordinary HTTP
+    /// response: it does not upgrade and it does not set Content-Type. The relay
+    /// must preserve that distinction and copy the unfinished stream verbatim.
+    func testLogsFollowStreamsWithoutEnteringHijackMode() throws {
         let wired = try makeRelay()
         let follow = "GET /v1.47/containers/abc/logs?follow=1&stdout=1 HTTP/1.1\r\n\r\n"
         write(follow, to: wired.client)
-        _ = readAvailable(wired.guest, atLeast: follow.utf8.count)
+        XCTAssertEqual(readAvailable(wired.guest, atLeast: follow.utf8.count), Data(follow.utf8))
 
-        write("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\n\r\n", to: wired.guest)
-        _ = readAvailable(wired.client, atLeast: 70)
-        for index in 0..<50 {
-            write("line \(index)\n", to: wired.guest)
-        }
-        let streamed = readAvailable(wired.client, atLeast: 300)
-        XCTAssertTrue(String(decoding: streamed, as: UTF8.self).contains("line 49"))
+        let first = Data("HTTP/1.1 200 OK\r\n\r\n".utf8)
+            + Data([1, 0, 0, 0, 0, 0, 0, 6]) + Data("line 0".utf8)
+        write(first, to: wired.guest)
+        XCTAssertEqual(readAvailable(wired.client, atLeast: first.count), first)
+
+        let next = Data([2, 0, 0, 0, 0, 0, 0, 6]) + Data("line 1".utf8)
+        write(next, to: wired.guest)
+        XCTAssertEqual(readAvailable(wired.client, atLeast: next.count), next)
+        XCTAssertEqual(policy.framingFailures, [])
 
         wired.relay.cancel()
         wait(for: [wired.done], timeout: 10)

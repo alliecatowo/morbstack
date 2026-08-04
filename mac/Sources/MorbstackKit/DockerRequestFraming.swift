@@ -559,9 +559,20 @@ enum DockerHijackDetection {
         let components = path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
         guard let last = components.last else { return false }
 
-        // `POST /containers/{id}/attach` and its websocket sibling.
-        if last == "attach" { return true }
-        if components.count >= 2, components[components.count - 2] == "attach", last == "ws" {
+        // `POST /containers/{id}/attach` and its `GET` websocket sibling are
+        // the only container-attach routes that may switch this connection to raw
+        // stdin/stdout/stderr. `resize` and `logs?follow=1` stay ordinary HTTP.
+        if head.method.uppercased() == "POST",
+           components.count >= 3,
+           components[components.count - 3] == "containers",
+           last == "attach" {
+            return true
+        }
+        if head.method.uppercased() == "GET",
+           components.count >= 4,
+           components[components.count - 4] == "containers",
+           components[components.count - 2] == "attach",
+           last == "ws" {
             return true
         }
         // Only `POST /exec/{id}/start` attaches an exec stream. In particular,
