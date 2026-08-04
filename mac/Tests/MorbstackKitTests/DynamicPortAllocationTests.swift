@@ -104,7 +104,7 @@ final class DynamicPortAllocationTests: XCTestCase {
         let original = Data(
             "POST /v1.47/containers/create HTTP/1.1\r\nX-Test: original\r\ncontent-length: 12\r\n\r\n".utf8)
         let rewritten = try XCTUnwrap(
-            DockerDynamicCreateTransaction.rewritingContentLength(in: original, bodyLength: 345))
+            HTTPRequestHeadRewriting.replacingContentLength(in: original, bodyLength: 345))
         XCTAssertEqual(
             String(decoding: rewritten, as: UTF8.self),
             "POST /v1.47/containers/create HTTP/1.1\r\nX-Test: original\r\nContent-Length: 345\r\n\r\n")
@@ -113,7 +113,7 @@ final class DynamicPortAllocationTests: XCTestCase {
     func testContentLengthRewriteRefusesDuplicateOrAbsentHeaders() {
         let duplicate = Data("POST / HTTP/1.1\nContent-Length: 1\nContent-Length: 1\n\n".utf8)
         let absent = Data("POST / HTTP/1.1\n\n".utf8)
-        XCTAssertNil(DockerDynamicCreateTransaction.rewritingContentLength(in: duplicate, bodyLength: 1))
-        XCTAssertNil(DockerDynamicCreateTransaction.rewritingContentLength(in: absent, bodyLength: 1))
+        XCTAssertNil(HTTPRequestHeadRewriting.replacingContentLength(in: duplicate, bodyLength: 1))
+        XCTAssertNil(HTTPRequestHeadRewriting.replacingContentLength(in: absent, bodyLength: 1))
     }
 }

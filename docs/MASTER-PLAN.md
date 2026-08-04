@@ -91,13 +91,13 @@ previous code assumed at connection granularity anyway.
 | # | Item | State |
 | --- | --- | --- |
 | 1.1 | `docker run -P` end to end | first run **PASS**; stop/start/restart **FAIL** — the durable session EOFs 6 ms after its successful first allocation |
-| 1.2 | Explicit `-p` in every form incl. UDP, ranges, `127.0.0.1:`, and the ambiguity case | **PASS**, incl. first-ever UDP run |
+| 1.2 | Explicit `-p` in every form incl. UDP, ranges, `127.0.0.1:`, and the ambiguity case | **PASS**, incl. first-ever UDP run. Fixed, dynamic (`-p 80`) and `-P`, plus the `-p 8080:80 -p 8080:81` ambiguity refusal, re-confirmed through the real CLI after 1.0 landed |
 | 1.3 | Bind mounts: `/tmp`, `/var`, `/etc`, `$HOME`, symlink-traversing paths | **PASS** — `runs-here`, re-run through the real CLI after 1.0 landed. `/etc`, `/var`, `/Library` and symlink traversal all refused with corrective messages; `/tmp`, `/private/tmp` and `$HOME` serve real Mac content; container writes land on the Mac. See `docs/audit/PROXY-FRAMING.md` §3.2 |
 | 1.4 | `host.docker.internal` | **PARTIAL** — needs an explicit `--add-host` |
 | 1.5 | Disk grow, fail-closed across crash/retry | **FAIL** — host/guest contract mismatch (`keyNotFound: 'device'`); image grew to 72 GiB while the guest filesystem stayed 62.4 G, and a *refused* grow still mutated configured capacity |
 | 1.6 | Live-share / hot reload | `source-only`; first compile was today, listener now binds |
-| 1.7 | Compose, BuildKit, buildx | `runs-here` — 3-service fixture, no regression |
-| 1.8 | `logs -f`, `exec`, `cp`, `stats`, volumes, networks, context | **PASS** post-rebuild |
+| 1.7 | Compose, BuildKit, buildx | `runs-here` — 3-service fixture, no regression; re-run at 12.9 s after the 1.0 framing change, plus a classic non-BuildKit build |
+| 1.8 | `logs -f`, `exec`, `cp`, `stats`, volumes, networks, context | **PASS** post-rebuild; re-run after the 1.0 framing change incl. `attach`, `run -it`, a real-TTY `exec`, and a decisive raw-splice proof (`PROXY-FRAMING.md` §3.4) |
 | 1.9 | Testcontainers (Java/Go/Node/Python) | **untested** |
 | 1.10 | Dev Containers | **untested** |
 | 1.11 | Clean-profile CP-01–CP-07 on a machine that never had Docker | **never run — the release gate** |

@@ -10,6 +10,16 @@ import Foundation
 /// This is "socket-activation-lite": the socket exists whenever the daemon runs, but
 /// the VM only boots when a client actually connects. Combined with the auto-suspend
 /// timer in ``Daemon``, an idle Morbstack costs no guest memory at all.
+///
+/// # Admission
+///
+/// Every request on every connection is framed and offered to the admission checks —
+/// not just the first one. The proxy used to peek at a connection's opening request
+/// and then splice the socket raw forever, which meant that in normal use (the CLI
+/// pings, then reuses the connection for the real work) `POST /containers/create` was
+/// never inspected at all: a `-v /etc/hosts:/x` bind quietly resolved inside the guest
+/// and container writes to it vanished. ``DockerFramedRelay`` owns the framing;
+/// this class owns the policy, in ``admit(_:body:)``.
 public final class DockerProxy {
 
     /// How long a client will wait for the VM to become usable.
@@ -19,12 +29,8 @@ public final class DockerProxy {
     /// than this layer's generic one.
     public static let bootTimeout: TimeInterval = 50
 
-    /// Ordinary Docker create documents are small JSON. This is a strict upper bound
-    /// for the non-consuming admission peek, not a request-size limit for the Engine:
-    /// a larger or chunked request simply bypasses this best-effort preflight and is
-    /// relayed byte-for-byte as it was before.
-    private static let createPreflightPeekLimit = 256 * 1024
-    private static let createPreflightPeekBudget: TimeInterval = 0.25
+    /// How long the host publish-all allocator connection may take to open.
+    private static let allocatorConnectTimeout: TimeInterval = 20
 
     private let vm: VMManager
     private let log: MorbLog
@@ -38,12 +44,8 @@ public final class DockerProxy {
     /// Set by ``Daemon`` around a deliberate shutdown; see ``beginOrderlyShutdown()``.
     private var _orderlyShutdown = false
     /// Live relays, keyed by a sequence number rather than by object identity so the
-    /// key exists *before* the relay does — see ``startRelay(clientFD:guestFD:leaseObservation:)``.
-    private var relays: [UInt64: FDRelay] = [:]
-    /// Bounded dynamic-create exchanges. They own descriptors until their complete
-    /// `201` has been associated (or rejected), so daemon stop must cancel them just
-    /// as it cancels ordinary opaque relays.
-    private var dynamicCreateTransactions: [UInt64: DockerDynamicCreateTransaction] = [:]
+    /// key exists *before* the relay does — see ``startRelay(clientFD:guestFD:)``.
+    private var relays: [UInt64: DockerFramedRelay] = [:]
     private var relaySequence: UInt64 = 0
 
     /// Called on the proxy's queue when the last active relay finishes.
@@ -120,13 +122,10 @@ public final class DockerProxy {
         server.stop()
         countLock.lock()
         let inFlight = Array(relays.values)
-        let inFlightTransactions = Array(dynamicCreateTransactions.values)
         relays.removeAll()
-        dynamicCreateTransactions.removeAll()
         _activeConnections = 0
         countLock.unlock()
         for relay in inFlight { relay.cancel() }
-        for transaction in inFlightTransactions { transaction.cancel() }
     }
 
     // MARK: - Connection handling
@@ -138,250 +137,137 @@ public final class DockerProxy {
         _activeConnections += 1
         countLock.unlock()
 
-        // Do the short, non-consuming preflight away from the Unix listener's serial
-        // accept queue. A local client that dribbles a request head must not delay
-        // unrelated Docker clients from connecting.
+        // Leave the Unix listener's serial accept queue immediately: a client that
+        // dribbles a request head must not delay unrelated Docker clients.
         relayQueue.async { [weak self] in
             guard let self else {
                 Darwin.close(clientFD)
                 return
             }
-            self.preflightThenRelay(clientFD: clientFD)
+            self.establish(clientFD: clientFD)
         }
     }
 
-    private func preflightThenRelay(clientFD: Int32) {
-        switch inspectDockerRequest(in: clientFD) {
-        case .other:
-            relayAfterPreflight(clientFD: clientFD, createBody: nil, leaseObservation: nil)
-
-        case .create(let create):
-            switch DockerPortPublicationPreflight.inspectContainerCreate(
-                body: create.body,
-                hostNetworkPortPublishing: forwarder.hostNetworkPortPublishing)
-            {
-            case .rejected(let message):
-                rejectContainerCreate(
-                    clientFD: clientFD,
-                    statusCode: 500,
-                    reason: "Internal Server Error",
-                    message: message)
-
-            case .allowed:
-                switch DockerPortPublicationPreflight.dynamicPortCreatePlan(
-                    in: create.body,
-                    hostNetworkPortPublishing: forwarder.hostNetworkPortPublishing)
-                {
-                case .rejected(let message):
-                    rejectContainerCreate(
-                        clientFD: clientFD,
-                        statusCode: 500,
-                        reason: "Internal Server Error",
-                        message: message)
-                    return
-
-                case .supported(let plan):
-                    beginDynamicPortCreate(
-                        clientFD: clientFD,
-                        create: create,
-                        plan: plan)
-                    return
-
-                case .notDynamic:
-                    break
-                }
-
-                // A successful snapshot is still not enough. Hold the real listeners
-                // before the create reaches dockerd; a failed bind here has the same
-                // Docker-style error, but no guest side effect to roll back.
-                let plan = DockerPortPublicationPreflight.fixedPortLeasePlan(
-                    in: create.body,
-                    hostNetworkPortPublishing: forwarder.hostNetworkPortPublishing)
-                let lease: PortForwarder.PortLease?
-                do {
-                    if let plan {
-                        lease = try forwarder.reserveExplicitPorts(plan)
-                    } else {
-                        lease = nil
-                    }
-                } catch {
-                    rejectContainerCreate(
-                        clientFD: clientFD,
-                        statusCode: 500,
-                        reason: "Internal Server Error",
-                        message: error.localizedDescription)
-                    return
-                }
-                // Bind validation needs the VM's actual attached share list and the
-                // guest's post-boot mount report, so it runs after `ensureRunning`.
-                relayAfterPreflight(
-                    clientFD: clientFD,
-                    createBody: create.body,
-                    leaseObservation: lease.map(PortLeaseObservation.create))
-            }
-
-        case .containerLifecycle(let request):
-            let containerIdentifier = request.containerIdentifier
-            if forwarder.requiresPublishAllAllocator(containerIdentifier: containerIdentifier) {
-                beginPublishAllStart(
-                    clientFD: clientFD,
-                    containerID: containerIdentifier,
-                    operation: request.operation)
-            } else if let lease = forwarder.claimStartLease(containerIdentifier: containerIdentifier) {
-                relayAfterPreflight(
-                    clientFD: clientFD,
-                    createBody: nil,
-                    leaseObservation: .start(lease))
-            } else if DockerPortPublicationPreflight.isFullContainerID(containerIdentifier) {
-                // A VM/daemon stop intentionally closes every held listener. Before
-                // this one exact immutable-ID lifecycle request reaches dockerd, give the
-                // forwarder a bounded chance to rebuild a fixed-port lease from the
-                // guest's persistent HostConfig.PortBindings. Names and ID prefixes
-                // retain the raw relay: they can resolve to a different container
-                // between inspect and the lifecycle operation.
-                bootstrapStoppedContainerStartLease(
-                    clientFD: clientFD,
-                    containerID: containerIdentifier,
-                    operation: request.operation)
-            } else {
-                relayAfterPreflight(clientFD: clientFD, createBody: nil, leaseObservation: nil)
-            }
-        }
-    }
-
-    private enum DockerRequestInspection {
-        case other
-        case create(ContainerCreateRequest)
-        case containerLifecycle(ContainerLifecycleRequest)
-    }
-
-    /// A complete create request as seen non-consumingly by `MSG_PEEK`.
+    /// Boots the VM if needed, opens the Docker API vsock, and starts framing.
     ///
-    /// `rawRequest` is consumed only by the dynamic transaction, in exactly this
-    /// length. A following request remains unread in the client socket until the
-    /// transaction has associated its `201` and hands the socket back here.
-    private struct ContainerCreateRequest {
-        let head: HTTPRequestHead
-        let headBytes: Data
-        let body: Data
-        let rawRequest: Data
+    /// Admission has deliberately moved *behind* this point. Every check the proxy
+    /// owns needs either the running VM's share list (bind sources) or a host listener
+    /// it can only hold while the stack is up (published ports), and the first thing
+    /// any real client sends is a `/_ping` that boots the VM regardless.
+    private func establish(clientFD: Int32) {
+        vm.ensureRunning(timeout: DockerProxy.bootTimeout) { [weak self] result in
+            guard let self else {
+                Darwin.close(clientFD)
+                return
+            }
+            switch result {
+            case .failure(let error):
+                if self.isShuttingDown {
+                    self.log.info("client arrived during shutdown; rejected cleanly (\(error))")
+                } else {
+                    self.log.error("docker client rejected: \(error)")
+                }
+                self.writeGatewayError(to: clientFD, message: "\(error)")
+                Darwin.close(clientFD)
+                self.connectionFinished()
+
+            case .success:
+                self.vm.connectVsock(port: MorbVsockPorts.dockerAPI) { [weak self] vsockResult in
+                    guard let self else {
+                        Darwin.close(clientFD)
+                        return
+                    }
+                    switch vsockResult {
+                    case .failure(let error):
+                        // Same reasoning as above: the vsock connect is the next thing
+                        // to fail once the guest is on its way out.
+                        if self.isShuttingDown {
+                            self.log.info("client arrived during shutdown; rejected cleanly (\(error))")
+                        } else {
+                            self.log.error("docker relay could not reach the guest: \(error)")
+                        }
+                        self.writeGatewayError(to: clientFD, message: "\(error)")
+                        Darwin.close(clientFD)
+                        self.connectionFinished()
+
+                    case .success(let guestFD):
+                        self.startRelay(clientFD: clientFD, guestFD: guestFD)
+                    }
+                }
+            }
+        }
     }
+
+    private func startRelay(clientFD: Int32, guestFD: Int32) {
+        // Each relay gets its own serial completion queue; the concurrent parent lets
+        // many Docker connections make progress at once.
+        let perRelayQueue = DispatchQueue(label: "dev.morbstack.relay", target: relayQueue)
+
+        // The key is minted before the relay so the completion handler can capture it
+        // by value. Capturing a `var identifier` that is only assigned *after* the
+        // initialiser returns is both a data race and a leak: a relay built on a
+        // descriptor that is already dead can complete before the assignment lands,
+        // find `nil`, and skip the removal — after which the entry is inserted and
+        // never taken out again.
+        //
+        // The lock is held across construction *and* insertion for the same reason:
+        // it makes an early completion block until the dictionary is consistent.
+        countLock.lock()
+        relaySequence &+= 1
+        let key = relaySequence
+        let relay = DockerFramedRelay(
+            clientFD: clientFD,
+            guestFD: guestFD,
+            queue: perRelayQueue,
+            policy: self,
+            log: log
+        ) { [weak self] in
+            guard let self else { return }
+            self.countLock.lock()
+            self.relays.removeValue(forKey: key)  // tolerates an entry stop() already took
+            self.countLock.unlock()
+            self.connectionFinished()
+        }
+        relays[key] = relay
+        countLock.unlock()
+
+        relay.start()
+    }
+
+    private func connectionFinished() {
+        countLock.lock()
+        _activeConnections = max(0, _activeConnections - 1)
+        let remaining = _activeConnections
+        countLock.unlock()
+        guard remaining == 0 else { return }
+        queue.async { [weak self] in
+            self?.idleHandler?()
+        }
+    }
+
+    // MARK: - Request classification
 
     /// The two bodyless Engine endpoints whose successful `204` means a container
-    /// has started and a held fixed-port listener set may be activated. They share the lease
-    /// protocol, but their request bytes are always relayed unchanged.
-    private enum ContainerLifecycleOperation: String {
+    /// has started and a held fixed-port listener set may be activated. They share the
+    /// lease protocol, but their request bytes are always relayed unchanged.
+    enum ContainerLifecycleOperation: String {
         case start
         case restart
     }
 
-    private struct ContainerLifecycleRequest {
+    struct ContainerLifecycleRequest {
         let containerIdentifier: String
         let operation: ContainerLifecycleOperation
     }
 
-    private enum PortLeaseObservation {
-        case create(PortForwarder.PortLease)
-        case start(PortForwarder.PortLease)
-        case publishAllStart(PublishAllPortAllocator.Session)
-    }
-
-    /// Performs a bounded `MSG_PEEK` for only the normal fixed-length create and
-    /// bodyless start/restart shapes this lease protocol can prove. No bytes are
-    /// removed from `clientFD`; every other request remains intact for ``FDRelay``,
-    /// including upgraded, chunked, and otherwise opaque Engine traffic.
-    private func inspectDockerRequest(in clientFD: Int32) -> DockerRequestInspection {
-        let deadline = Date().addingTimeInterval(DockerProxy.createPreflightPeekBudget)
-
-        while Date() < deadline {
-            let remainingMilliseconds = max(1, Int32((deadline.timeIntervalSinceNow * 1_000).rounded(.up)))
-            var descriptor = pollfd(fd: clientFD, events: Int16(POLLIN), revents: 0)
-            let polled = POSIXSocketSupport.retryOnInterrupt {
-                withUnsafeMutablePointer(to: &descriptor) { poll($0, 1, remainingMilliseconds) }
-            }
-            guard polled > 0 else { return .other }
-
-            guard let bytes = peekClientBytes(clientFD) else { return .other }
-            let parsed: (head: HTTPRequestHead, consumed: Int)?
-            do {
-                parsed = try MinimalHTTP.parseRequestHead(bytes)
-            } catch {
-                return .other
-            }
-            guard let parsed else {
-                // The complete header is not visible yet. Keep waiting only while it
-                // can still fit in the bounded peek buffer.
-                guard bytes.count < DockerProxy.createPreflightPeekLimit else { return .other }
-                // `MSG_PEEK` leaves the partial head readable, so `poll` would wake
-                // immediately again. Yield briefly rather than spinning a relay worker
-                // while the local client finishes writing its request.
-                usleep(1_000)
-                continue
-            }
-
-            if let lifecycleRequest = containerLifecycleRequest(in: parsed.head) {
-                let transferEncoding = parsed.head.headers["transfer-encoding"]?
-                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                let contentLength: Int
-                if let rawLength = parsed.head.headers["content-length"] {
-                    guard let parsedLength = Int(rawLength) else { return .other }
-                    contentLength = parsedLength
-                } else {
-                    contentLength = 0
-                }
-                // Recovery is permitted only for a truly bodyless request. Any
-                // transfer coding, including a nonchunked one we do not implement,
-                // leaves this request byte-for-byte opaque to the ordinary relay.
-                guard transferEncoding.isEmpty, contentLength == 0 else {
-                    return .other
-                }
-                return .containerLifecycle(lifecycleRequest)
-            }
-
-            guard isContainerCreate(parsed.head) else { return .other }
-            guard
-                !(parsed.head.headers["transfer-encoding"] ?? "").lowercased().contains("chunked"),
-                let contentLength = parsed.head.headers["content-length"].flatMap(Int.init),
-                contentLength >= 0,
-                contentLength <= DockerProxy.createPreflightPeekLimit - parsed.consumed
-            else {
-                return .other
-            }
-
-            let bodyEnd = parsed.consumed + contentLength
-            guard bytes.count >= bodyEnd else {
-                usleep(1_000)
-                continue
-            }
-            let headBytes = Data(bytes[0..<parsed.consumed])
-            let body = Data(bytes[parsed.consumed..<bodyEnd])
-            return .create(ContainerCreateRequest(
-                head: parsed.head,
-                headBytes: headBytes,
-                body: body,
-                rawRequest: Data(bytes[0..<bodyEnd])))
-        }
-        return .other
-    }
-
-    private func peekClientBytes(_ clientFD: Int32) -> Data? {
-        var buffer = [UInt8](repeating: 0, count: DockerProxy.createPreflightPeekLimit)
-        let count = buffer.withUnsafeMutableBytes { raw -> Int in
-            guard let base = raw.baseAddress else { return -1 }
-            return Darwin.recv(clientFD, base, raw.count, Int32(MSG_PEEK))
-        }
-        guard count > 0 else { return nil }
-        return Data(buffer[0..<count])
-    }
-
-    private func isContainerCreate(_ request: HTTPRequestHead) -> Bool {
+    func isContainerCreate(_ request: HTTPRequestHead) -> Bool {
         guard request.method.uppercased() == "POST" else { return false }
         let path = request.target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first ?? ""
         let components = path.split(separator: "/", omittingEmptySubsequences: true)
         return components.suffix(2).map(String.init) == ["containers", "create"]
     }
 
-    private func containerLifecycleRequest(in request: HTTPRequestHead) -> ContainerLifecycleRequest? {
+    func containerLifecycleRequest(in request: HTTPRequestHead) -> ContainerLifecycleRequest? {
         guard request.method.uppercased() == "POST" else { return nil }
         let path = request.target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first ?? ""
         let components = path.split(separator: "/", omittingEmptySubsequences: true)
@@ -399,592 +285,296 @@ public final class DockerProxy {
             operation: operation)
     }
 
-    /// Performs the bounded recovery query for a stopped container whose previously
-    /// held fixed-port lease was released with the old VM generation. It deliberately
-    /// happens only after `ensureRunning` and off the VM queue: the inspect uses a
-    /// fresh blocking vsock connection, while VM lifecycle work must stay responsive.
-    private func bootstrapStoppedContainerStartLease(
-        clientFD: Int32,
-        containerID: String,
-        operation: ContainerLifecycleOperation
-    ) {
-        vm.ensureRunning(timeout: DockerProxy.bootTimeout) { [weak self] result in
-            guard let self else {
-                Darwin.close(clientFD)
-                return
-            }
-            switch result {
-            case .failure(let error):
-                if self.isShuttingDown {
-                    self.log.info("client arrived during shutdown; rejected cleanly (\(error))")
-                } else {
-                    self.log.error("Docker \(operation.rawValue) rejected before fixed-port lease recovery: \(error)")
-                }
-                self.writeGatewayError(to: clientFD, message: "\(error)")
-                Darwin.close(clientFD)
-                self.connectionFinished()
+    // MARK: - Engine-shaped errors
 
-            case .success:
-                // `ensureRunning` completes from VMManager's serial lifecycle
-                // queue. Do not make its inspect timeout part of that queue's work.
-                self.relayQueue.async { [weak self] in
-                    guard let self else {
-                        Darwin.close(clientFD)
-                        return
-                    }
-                    do {
-                        _ = try self.forwarder.reserveStoppedContainerStartLease(
-                            containerID: containerID)
-                    } catch {
-                        // This is deliberately different from an unavailable or
-                        // unsupported inspect document, which reserve... reports as
-                        // nil and which keeps the historical raw lifecycle relay. Here a
-                        // concrete HostConfig publication was proved but Mac bind
-                        // ownership could not be obtained, so do not start a
-                        // container whose promised endpoint Morbstack cannot hold.
-                        self.rejectContainerLifecycle(
-                            clientFD: clientFD,
-                            statusCode: 500,
-                            reason: "Internal Server Error",
-                            message: error.localizedDescription,
-                            operation: operation)
-                        return
-                    }
+    /// Writes a minimal HTTP 502 so `docker ps` shows a real message instead of
+    /// "connection reset by peer".
+    private func writeGatewayError(to fd: Int32, message: String) {
+        POSIXSocketSupport.writeAll(
+            fd,
+            DockerEngineErrorResponse.bytes(
+                statusCode: 502,
+                reason: "Bad Gateway",
+                message: "morbstack: \(message)"))
+    }
+}
 
-                    if let lease = self.forwarder.claimStartLease(containerIdentifier: containerID) {
-                        self.relayAfterPreflight(
-                            clientFD: clientFD,
-                            createBody: nil,
-                            leaseObservation: .start(lease))
-                    } else if self.forwarder.stoppedContainerUsesPublishAllPorts(containerID: containerID) {
-                        self.beginPublishAllStart(
-                            clientFD: clientFD,
-                            containerID: containerID,
-                            operation: operation)
-                    } else {
-                        self.relayAfterPreflight(clientFD: clientFD, createBody: nil, leaseObservation: nil)
-                    }
-                }
-            }
-        }
+// MARK: - Per-request admission
+
+extension DockerProxy: DockerRequestAdmissionPolicy {
+
+    /// Only `containers/create` needs its body in memory. Everything else — a build
+    /// context, a `docker cp` archive, an image push — streams through the framer
+    /// without being copied.
+    func requiresBodyInspection(_ head: HTTPRequestHead) -> Bool {
+        isContainerCreate(head)
     }
 
-    /// Opens the per-container host allocator session before Moby receives the
-    /// exact start request. The session does not allocate anything eagerly; it
-    /// waits until Moby has expanded the image's effective `EXPOSE` set.
-    private func beginPublishAllStart(
-        clientFD: Int32,
-        containerID: String,
-        operation: ContainerLifecycleOperation
-    ) {
-        vm.connectVsock(port: MorbVsockPorts.publishAllAllocator) { [weak self] result in
-            guard let self else {
-                Darwin.close(clientFD)
-                return
-            }
-            switch result {
-            case .failure(let error):
-                self.rejectContainerLifecycle(
-                    clientFD: clientFD,
-                    statusCode: 500,
-                    reason: "Internal Server Error",
-                    message: "could not reach the host publish-all allocator: \(error.localizedDescription)",
-                    operation: operation)
-            case .success(let fd):
-                do {
-                    let session = PublishAllPortAllocator.Session(
-                        fd: fd,
-                        containerID: containerID,
-                        forwarder: self.forwarder,
-                        log: self.log,
-                        remainsAvailableForRestartPolicy: true)
-                    try session.start()
-                    self.forwarder.adoptPublishAllSession(session, forContainerID: containerID)
-                    self.relayAfterPreflight(
-                        clientFD: clientFD,
-                        createBody: nil,
-                        leaseObservation: .publishAllStart(session))
-                } catch {
-                    Darwin.close(fd)
-                    self.rejectContainerLifecycle(
-                        clientFD: clientFD,
-                        statusCode: 500,
-                        reason: "Internal Server Error",
-                        message: "could not register the host publish-all allocator: \(error.localizedDescription)",
-                        operation: operation)
-                }
-            }
-        }
+    func requestWasRefused(_ message: String) {
+        log.warn("docker request refused before relay: \(message)")
     }
 
-    // MARK: - Bounded dynamic published-port create transaction
+    func framingFailed(_ description: String) {
+        log.warn("docker connection could not be framed: \(description)")
+    }
 
-    /// Starts Phase 1's only request-transforming path: an empty, zero, or bounded
-    /// TCP/UDP host-port allocation request in a normal create body.
+    /// The verdict for one request.
     ///
-    /// The original request remains in the Unix socket until this point. It is read
-    /// with an exact byte count — never a generous buffer — so a following request
-    /// remains available for a fresh preflight after the `201` is associated.
-    private func beginDynamicPortCreate(
-        clientFD: Int32,
-        create: ContainerCreateRequest,
-        plan: DockerDynamicPortCreatePlan
-    ) {
-        guard dynamicCreateDoesNotExpectContinue(create) else {
-            rejectContainerCreate(
-                clientFD: clientFD,
+    /// Runs on the relay's request worker, one request at a time per connection, and
+    /// independently across connections. Everything it touches — the forwarder ledger,
+    /// the VM's share snapshot — is already safe from any thread.
+    func admit(_ request: DockerRequestFramer.Request, body: Data?) -> DockerRequestAdmission {
+        if isContainerCreate(request.head), let body {
+            return admitContainerCreate(request: request, body: body)
+        }
+        if let lifecycle = containerLifecycleRequest(in: request.head),
+           request.framing == .empty
+        {
+            return admitContainerLifecycle(lifecycle)
+        }
+        return .forward
+    }
+
+    /// Preserves the original preflight order exactly: publication shape, then the
+    /// dynamic allocation plan, then the fixed-port reservation, and finally bind
+    /// sources — which is why a bind rejection has to hand back a lease it may
+    /// already have taken.
+    private func admitContainerCreate(
+        request: DockerRequestFramer.Request,
+        body: Data
+    ) -> DockerRequestAdmission {
+        switch DockerPortPublicationPreflight.inspectContainerCreate(
+            body: body,
+            hostNetworkPortPublishing: forwarder.hostNetworkPortPublishing)
+        {
+        case .rejected(let message):
+            return .reject(statusCode: 500, reason: "Internal Server Error", message: message)
+        case .allowed:
+            break
+        }
+
+        switch DockerPortPublicationPreflight.dynamicPortCreatePlan(
+            in: body,
+            hostNetworkPortPublishing: forwarder.hostNetworkPortPublishing)
+        {
+        case .rejected(let message):
+            return .reject(statusCode: 500, reason: "Internal Server Error", message: message)
+
+        case .supported(let plan):
+            return admitDynamicPortCreate(request: request, plan: plan)
+
+        case .notDynamic:
+            break
+        }
+
+        // A successful snapshot is still not enough. Hold the real listeners before
+        // the create reaches dockerd; a failed bind here has the same Docker-style
+        // error, but no guest side effect to roll back.
+        let plan = DockerPortPublicationPreflight.fixedPortLeasePlan(
+            in: body,
+            hostNetworkPortPublishing: forwarder.hostNetworkPortPublishing)
+        let lease: PortForwarder.PortLease?
+        do {
+            lease = try plan.map { try forwarder.reserveExplicitPorts($0) }
+        } catch {
+            return .reject(
                 statusCode: 500,
                 reason: "Internal Server Error",
-                message: "dynamic published ports do not support Expect: 100-continue requests")
-            return
-        }
-        guard consumeExactly(clientFD, expected: create.rawRequest) else {
-            // No Engine request has crossed the boundary. A client that disappeared
-            // cannot consume a useful HTTP diagnosis, so cleanly finish its slot.
-            Darwin.close(clientFD)
-            connectionFinished()
-            return
+                message: error.localizedDescription)
         }
 
+        if case .rejected(let message) = inspectBindSources(in: body) {
+            if let lease {
+                forwarder.abandon(lease, reason: "bind source validation rejected the create")
+            }
+            return .reject(statusCode: 400, reason: "Bad Request", message: message)
+        }
+
+        guard let lease else { return .forward }
+        return .forwardObserving(createObserver(for: lease))
+    }
+
+    private func admitDynamicPortCreate(
+        request: DockerRequestFramer.Request,
+        plan: DockerDynamicPortCreatePlan
+    ) -> DockerRequestAdmission {
         let reservation: PortForwarder.DynamicPortReservation
         do {
             reservation = try forwarder.reserveDynamicPorts(
                 plan.requestedPublications,
                 alongside: plan.fixedPlan)
         } catch {
-            rejectContainerCreate(
-                clientFD: clientFD,
+            return .reject(
                 statusCode: 500,
                 reason: "Internal Server Error",
                 message: error.localizedDescription)
-            return
         }
 
         let rewrittenBody: Data
         let rewrittenHead: Data
         do {
             rewrittenBody = try plan.rewrittenBody(with: reservation.publications)
-            guard let head = DockerDynamicCreateTransaction.rewritingContentLength(
-                in: create.headBytes,
+            guard let head = HTTPRequestHeadRewriting.replacingContentLength(
+                in: request.rawHead,
                 bodyLength: rewrittenBody.count)
             else {
-                throw MorbError.protocolViolation("dynamic published-port create did not have one rewritable Content-Length header")
+                throw MorbError.protocolViolation(
+                    "dynamic published-port create did not have one rewritable Content-Length header")
             }
             rewrittenHead = head
         } catch {
-            forwarder.abandon(reservation.lease, reason: "the dynamic published-port create request could not be rewritten")
-            rejectContainerCreate(
-                clientFD: clientFD,
+            forwarder.abandon(
+                reservation.lease,
+                reason: "the dynamic published-port create request could not be rewritten")
+            return .reject(
                 statusCode: 500,
                 reason: "Internal Server Error",
                 message: "morbstack could not prepare the dynamic published-port allocation")
-            return
         }
 
-        relayDynamicCreateAfterPreflight(
-            clientFD: clientFD,
-            createBody: rewrittenBody,
-            rewrittenRequest: rewrittenHead + rewrittenBody,
-            lease: reservation.lease,
-            closeClientAfterResponse: dynamicCreateRequestsConnectionClose(create))
-    }
-
-    private func dynamicCreateDoesNotExpectContinue(_ create: ContainerCreateRequest) -> Bool {
-        !(create.head.headers["expect"] ?? "").lowercased().contains("100-continue")
-    }
-
-    private func dynamicCreateRequestsConnectionClose(_ create: ContainerCreateRequest) -> Bool {
-        let values = (create.head.headers["connection"] ?? "")
-            .split(separator: ",")
-            .map { String($0).trimmingCharacters(in: .whitespaces).lowercased() }
-        return values.contains("close")
-    }
-
-    /// Reads exactly a request we just saw through `MSG_PEEK`. Each `read(2)` is
-    /// capped at the remaining byte count, so a later pipelined request stays in the
-    /// kernel buffer until the associated create response hands the client socket
-    /// back to this proxy for a fresh preflight.
-    private func consumeExactly(_ fd: Int32, expected: Data) -> Bool {
-        var received = Data()
-        received.reserveCapacity(expected.count)
-        while received.count < expected.count {
-            let remaining = expected.count - received.count
-            var bytes = [UInt8](repeating: 0, count: min(16 * 1024, remaining))
-            let count = bytes.withUnsafeMutableBytes { raw -> Int in
-                guard let base = raw.baseAddress else { return -1 }
-                return POSIXSocketSupport.readSome(fd, into: base, count: raw.count)
-            }
-            guard count > 0 else { return false }
-            received.append(contentsOf: bytes[0..<count])
+        if case .rejected(let message) = inspectBindSources(in: rewrittenBody) {
+            forwarder.abandon(
+                reservation.lease,
+                reason: "bind source validation rejected the dynamic published-port create")
+            return .reject(statusCode: 400, reason: "Bad Request", message: message)
         }
-        return received == expected
+
+        let lease = reservation.lease
+        return .forwardRewritten(
+            request: rewrittenHead + rewrittenBody,
+            hold: DockerHeldCreate(
+                associate: { [forwarder] containerID in
+                    forwarder.associate(lease, withContainerID: containerID)
+                },
+                abandon: { [forwarder] reason in
+                    forwarder.abandon(lease, reason: reason)
+                }))
     }
 
-    private func relayDynamicCreateAfterPreflight(
-        clientFD: Int32,
-        createBody: Data,
-        rewrittenRequest: Data,
-        lease: PortForwarder.PortLease,
-        closeClientAfterResponse: Bool
-    ) {
-        vm.ensureRunning(timeout: DockerProxy.bootTimeout) { [weak self] result in
-            guard let self else {
-                Darwin.close(clientFD)
-                return
-            }
-            switch result {
-            case .failure(let error):
-                if self.isShuttingDown {
-                    self.log.info("client arrived during shutdown; rejected cleanly (\(error))")
-                } else {
-                    self.log.error("dynamic Docker create rejected: \(error)")
-                }
-                self.writeGatewayError(to: clientFD, message: "\(error)")
-                Darwin.close(clientFD)
-                self.forwarder.abandon(lease, reason: "the VM was unavailable before dynamic published-port create could be relayed")
-                self.connectionFinished()
+    private func admitContainerLifecycle(
+        _ lifecycle: ContainerLifecycleRequest
+    ) -> DockerRequestAdmission {
+        let containerIdentifier = lifecycle.containerIdentifier
 
-            case .success:
-                let shareSnapshot = self.vm.shareMountSnapshot
-                switch DockerBindMountPreflight.inspectContainerCreate(
-                    body: createBody,
-                    shares: shareSnapshot.shares,
-                    guestShareStates: shareSnapshot.guestShareStates,
-                    guestTmpAliasMounted: shareSnapshot.guestTmpAliasMounted)
-                {
-                case .allowed:
-                    break
-                case .rejected(let message):
-                    self.forwarder.abandon(lease, reason: "bind source validation rejected the dynamic published-port create")
-                    self.rejectContainerCreate(
-                        clientFD: clientFD,
-                        statusCode: 400,
-                        reason: "Bad Request",
-                        message: message)
+        if forwarder.requiresPublishAllAllocator(containerIdentifier: containerIdentifier) {
+            return admitPublishAllStart(containerID: containerIdentifier)
+        }
+        if let lease = forwarder.claimStartLease(containerIdentifier: containerIdentifier) {
+            return .forwardObserving(startObserver(for: lease))
+        }
+        guard DockerPortPublicationPreflight.isFullContainerID(containerIdentifier) else {
+            // Names and ID prefixes can resolve to a different container between an
+            // inspect and the lifecycle operation, so they keep the raw relay.
+            return .forward
+        }
+
+        // A VM/daemon stop intentionally closes every held listener. Before this one
+        // exact immutable-ID lifecycle request reaches dockerd, give the forwarder a
+        // bounded chance to rebuild a fixed-port lease from the guest's persistent
+        // HostConfig.PortBindings.
+        do {
+            _ = try forwarder.reserveStoppedContainerStartLease(containerID: containerIdentifier)
+        } catch {
+            // Deliberately different from an unavailable or unsupported inspect
+            // document, which reserve... reports as nil and which keeps the historical
+            // raw lifecycle relay. Here a concrete HostConfig publication was proved
+            // but Mac bind ownership could not be obtained, so do not start a container
+            // whose promised endpoint Morbstack cannot hold.
+            return .reject(
+                statusCode: 500,
+                reason: "Internal Server Error",
+                message: error.localizedDescription)
+        }
+
+        if let lease = forwarder.claimStartLease(containerIdentifier: containerIdentifier) {
+            return .forwardObserving(startObserver(for: lease))
+        }
+        if forwarder.stoppedContainerUsesPublishAllPorts(containerID: containerIdentifier) {
+            return admitPublishAllStart(containerID: containerIdentifier)
+        }
+        return .forward
+    }
+
+    /// Opens the per-container host allocator session before Moby receives the exact
+    /// start request. The session does not allocate anything eagerly; it waits until
+    /// Moby has expanded the image's effective `EXPOSE` set.
+    private func admitPublishAllStart(containerID: String) -> DockerRequestAdmission {
+        let fd: Int32
+        switch vm.connectVsockBlocking(
+            port: MorbVsockPorts.publishAllAllocator,
+            timeout: DockerProxy.allocatorConnectTimeout)
+        {
+        case .failure(let error):
+            return .reject(
+                statusCode: 500,
+                reason: "Internal Server Error",
+                message: "could not reach the host publish-all allocator: \(error.localizedDescription)")
+        case .success(let opened):
+            fd = opened
+        }
+
+        do {
+            let session = PublishAllPortAllocator.Session(
+                fd: fd,
+                containerID: containerID,
+                forwarder: forwarder,
+                log: log,
+                remainsAvailableForRestartPolicy: true)
+            try session.start()
+            forwarder.adoptPublishAllSession(session, forContainerID: containerID)
+            return .forwardObserving(
+                DockerPortLeaseResponseObserver(kind: .start) { outcome in
+                    session.complete(succeeded: outcome == .startSucceeded)
+                })
+        } catch {
+            Darwin.close(fd)
+            return .reject(
+                statusCode: 500,
+                reason: "Internal Server Error",
+                message: "could not register the host publish-all allocator: \(error.localizedDescription)")
+        }
+    }
+
+    private func inspectBindSources(in body: Data) -> DockerBindMountPreflight.Verdict {
+        let shareSnapshot = vm.shareMountSnapshot
+        return DockerBindMountPreflight.inspectContainerCreate(
+            body: body,
+            shares: shareSnapshot.shares,
+            guestShareStates: shareSnapshot.guestShareStates,
+            guestTmpAliasMounted: shareSnapshot.guestTmpAliasMounted)
+    }
+
+    private func createObserver(for lease: PortForwarder.PortLease) -> DockerPortLeaseResponseObserver {
+        DockerPortLeaseResponseObserver(kind: .create) { [forwarder] outcome in
+            switch outcome {
+            case .created(let containerID):
+                guard forwarder.associate(lease, withContainerID: containerID) else {
+                    forwarder.abandon(
+                        lease,
+                        reason: "Docker create returned an already-leased or unusable container identity")
                     return
                 }
-                self.vm.connectVsock(port: MorbVsockPorts.dockerAPI) { [weak self] vsockResult in
-                    guard let self else {
-                        Darwin.close(clientFD)
-                        return
-                    }
-                    switch vsockResult {
-                    case .failure(let error):
-                        if self.isShuttingDown {
-                            self.log.info("client arrived during shutdown; rejected cleanly (\(error))")
-                        } else {
-                            self.log.error("dynamic Docker create relay could not reach the guest: \(error)")
-                        }
-                        self.writeGatewayError(to: clientFD, message: "\(error)")
-                        Darwin.close(clientFD)
-                        self.forwarder.abandon(lease, reason: "the Docker API vsock connection failed for dynamic published-port create")
-                        self.connectionFinished()
-                    case .success(let guestFD):
-                        self.startDynamicCreateTransaction(
-                            clientFD: clientFD,
-                            guestFD: guestFD,
-                            request: rewrittenRequest,
-                            lease: lease,
-                            closeClientAfterResponse: closeClientAfterResponse)
-                    }
-                }
+            case .failed:
+                forwarder.abandon(lease, reason: "Docker create returned an error response")
+            case .unrecognized:
+                forwarder.abandon(
+                    lease,
+                    reason: "Docker create response was not a bounded identity-bearing HTTP response")
+            case .startSucceeded:
+                break
             }
         }
     }
 
-    private func relayAfterPreflight(
-        clientFD: Int32,
-        createBody: Data?,
-        leaseObservation: PortLeaseObservation?
-    ) {
-
-        vm.ensureRunning(timeout: DockerProxy.bootTimeout) { [weak self] result in
-            guard let self else {
-                Darwin.close(clientFD)
-                return
-            }
-            switch result {
-            case .failure(let error):
-                if self.isShuttingDown {
-                    self.log.info("client arrived during shutdown; rejected cleanly (\(error))")
-                } else {
-                    self.log.error("docker client rejected: \(error)")
-                }
-                self.writeGatewayError(to: clientFD, message: "\(error)")
-                Darwin.close(clientFD)
-                self.finishLeaseObservation(leaseObservation, reason: "the VM was unavailable before Docker create/start could be relayed")
-                self.connectionFinished()
-            case .success:
-                if let createBody {
-                    let shareSnapshot = self.vm.shareMountSnapshot
-                    switch DockerBindMountPreflight.inspectContainerCreate(
-                        body: createBody,
-                        shares: shareSnapshot.shares,
-                        guestShareStates: shareSnapshot.guestShareStates,
-                        guestTmpAliasMounted: shareSnapshot.guestTmpAliasMounted)
-                    {
-                    case .allowed:
-                        break
-                    case .rejected(let message):
-                        self.rejectContainerCreate(
-                            clientFD: clientFD,
-                            statusCode: 400,
-                            reason: "Bad Request",
-                            message: message)
-                        self.finishLeaseObservation(leaseObservation, reason: "bind source validation rejected the create")
-                        return
-                    }
-                }
-                self.vm.connectVsock(port: MorbVsockPorts.dockerAPI) { [weak self] vsockResult in
-                    guard let self else {
-                        Darwin.close(clientFD)
-                        return
-                    }
-                    switch vsockResult {
-                    case .failure(let error):
-                        // Same reasoning as above: the vsock connect is the next thing
-                        // to fail once the guest is on its way out.
-                        if self.isShuttingDown {
-                            self.log.info("client arrived during shutdown; rejected cleanly (\(error))")
-                        } else {
-                            self.log.error("docker relay could not reach the guest: \(error)")
-                        }
-                        self.writeGatewayError(to: clientFD, message: "\(error)")
-                        Darwin.close(clientFD)
-                        self.finishLeaseObservation(leaseObservation, reason: "the Docker API vsock connection failed")
-                        self.connectionFinished()
-                    case .success(let guestFD):
-                        self.startRelay(
-                            clientFD: clientFD,
-                            guestFD: guestFD,
-                            leaseObservation: leaseObservation)
-                    }
-                }
-            }
-        }
-    }
-
-    private func startRelay(
-        clientFD: Int32,
-        guestFD: Int32,
-        leaseObservation: PortLeaseObservation?
-    ) {
-        // Each relay gets its own serial queue; the concurrent parent lets many
-        // Docker connections make progress at once.
-        let perRelayQueue = DispatchQueue(label: "dev.morbstack.relay", target: relayQueue)
-
-        // The key is minted before the relay so the completion handler can capture it
-        // by value. Capturing a `var identifier` that is only assigned *after* the
-        // initialiser returns is both a data race and a leak: `DispatchIO` fires its
-        // cleanup handler asynchronously, so a relay built on a descriptor that is
-        // already dead can complete before the assignment lands, find `nil`, and skip
-        // the removal — after which the entry is inserted and never taken out again.
-        //
-        // The lock is held across construction *and* insertion for the same reason:
-        // it makes an early completion block until the dictionary is consistent,
-        // rather than racing the insert. `FDRelay.init` never takes `countLock`, so
-        // this cannot deadlock.
-        let responseObserver = makeLeaseResponseObserver(for: leaseObservation)
-        countLock.lock()
-        relaySequence &+= 1
-        let key = relaySequence
-        let relay = FDRelay(
-            fdA: clientFD,
-            fdB: guestFD,
-            queue: perRelayQueue,
-            observer: { direction, data in
-                guard direction == .secondToFirst else { return }
-                responseObserver?.receive(data)
-            }
-        ) { [weak self] in
-            responseObserver?.relayFinished()
-            guard let self else { return }
-            self.countLock.lock()
-            self.relays.removeValue(forKey: key)  // tolerates an entry stop() already took
-            self.countLock.unlock()
-            self.connectionFinished()
-        }
-        relays[key] = relay
-        countLock.unlock()
-
-        relay.start()
-    }
-
-    /// Registers and starts the one-way bounded transaction for a rewritten dynamic
-    /// create. The transaction owns both descriptors; unlike `FDRelay`, it must keep
-    /// the complete `201` private until its lease is associated.
-    private func startDynamicCreateTransaction(
-        clientFD: Int32,
-        guestFD: Int32,
-        request: Data,
-        lease: PortForwarder.PortLease,
-        closeClientAfterResponse: Bool
-    ) {
-        let transactionQueue = DispatchQueue(
-            label: "dev.morbstack.dynamic-create-transaction",
-            target: relayQueue)
-
-        countLock.lock()
-        relaySequence &+= 1
-        let key = relaySequence
-        let transaction = DockerDynamicCreateTransaction(
-            clientFD: clientFD,
-            guestFD: guestFD,
-            request: request,
-            closeClientAfterResponse: closeClientAfterResponse,
-            queue: transactionQueue,
-            associate: { [forwarder] containerID in
-                forwarder.associate(lease, withContainerID: containerID)
-            },
-            abandon: { [forwarder] reason in
-                forwarder.abandon(lease, reason: reason)
-            },
-            reportTransactionError: { [weak self] message in
-                self?.writeEngineError(
-                    to: clientFD,
-                    statusCode: 500,
-                    reason: "Internal Server Error",
-                    message: message)
-            }
-        ) { [weak self] handoffClientFD in
-            guard let self else {
-                if let handoffClientFD { Darwin.close(handoffClientFD) }
-                return
-            }
-            self.countLock.lock()
-            self.dynamicCreateTransactions.removeValue(forKey: key)
-            self.countLock.unlock()
-            if let handoffClientFD {
-                self.relayQueue.async { [weak self] in
-                    self?.preflightThenRelay(clientFD: handoffClientFD)
-                }
+    private func startObserver(for lease: PortForwarder.PortLease) -> DockerPortLeaseResponseObserver {
+        DockerPortLeaseResponseObserver(kind: .start) { [forwarder] outcome in
+            let succeeded: Bool
+            if case .startSucceeded = outcome {
+                succeeded = true
             } else {
-                self.connectionFinished()
+                succeeded = false
             }
+            _ = forwarder.completeStart(lease, succeeded: succeeded)
         }
-        dynamicCreateTransactions[key] = transaction
-        countLock.unlock()
-
-        transaction.start()
-    }
-
-    private func makeLeaseResponseObserver(
-        for observation: PortLeaseObservation?
-    ) -> DockerPortLeaseResponseObserver? {
-        guard let observation else { return nil }
-        switch observation {
-        case .create(let lease):
-            return DockerPortLeaseResponseObserver(kind: .create) { [forwarder] outcome in
-                switch outcome {
-                case .created(let containerID):
-                    guard forwarder.associate(lease, withContainerID: containerID) else {
-                        forwarder.abandon(lease, reason: "Docker create returned an already-leased or unusable container identity")
-                        return
-                    }
-                case .failed:
-                    forwarder.abandon(lease, reason: "Docker create returned an error response")
-                case .unrecognized:
-                    forwarder.abandon(lease, reason: "Docker create response was not a bounded identity-bearing HTTP response")
-                case .startSucceeded:
-                    break
-                }
-            }
-
-        case .start(let lease):
-            return DockerPortLeaseResponseObserver(kind: .start) { [forwarder] outcome in
-                let succeeded: Bool
-                if case .startSucceeded = outcome {
-                    succeeded = true
-                } else {
-                    succeeded = false
-                }
-                _ = forwarder.completeStart(lease, succeeded: succeeded)
-            }
-
-        case .publishAllStart(let session):
-            return DockerPortLeaseResponseObserver(kind: .start) { outcome in
-                session.complete(succeeded: outcome == .startSucceeded)
-            }
-        }
-    }
-
-    /// The response observer owns create/lifecycle cleanup once a relay exists. These
-    /// earlier error branches have no guest response to observe, so they must retire
-    /// the provisional reservation explicitly.
-    private func finishLeaseObservation(_ observation: PortLeaseObservation?, reason: String) {
-        guard let observation else { return }
-        switch observation {
-        case .create(let lease): forwarder.abandon(lease, reason: reason)
-        case .start(let lease): _ = forwarder.completeStart(lease, succeeded: false)
-        case .publishAllStart(let session): session.complete(succeeded: false)
-        }
-    }
-
-    private func connectionFinished() {
-        countLock.lock()
-        _activeConnections = max(0, _activeConnections - 1)
-        let remaining = _activeConnections
-        countLock.unlock()
-        guard remaining == 0 else { return }
-        queue.async { [weak self] in
-            self?.idleHandler?()
-        }
-    }
-
-    private func rejectContainerCreate(
-        clientFD: Int32,
-        statusCode: Int,
-        reason: String,
-        message: String
-    ) {
-        log.warn("docker container create rejected before relay: \(message)")
-        writeEngineError(to: clientFD, statusCode: statusCode, reason: reason, message: message)
-        Darwin.close(clientFD)
-        connectionFinished()
-    }
-
-    /// Rejects a recognized start or restart before it reaches the Engine. This is
-    /// reserved for the case where an inspect-derived fixed-port publication was
-    /// understood but a real Mac listener could not be retained; opaque or
-    /// unsupported inspect documents intentionally use the ordinary relay instead.
-    private func rejectContainerLifecycle(
-        clientFD: Int32,
-        statusCode: Int,
-        reason: String,
-        message: String,
-        operation: ContainerLifecycleOperation
-    ) {
-        log.warn("docker container \(operation.rawValue) rejected before relay: \(message)")
-        writeEngineError(to: clientFD, statusCode: statusCode, reason: reason, message: message)
-        Darwin.close(clientFD)
-        connectionFinished()
-    }
-
-    /// Writes a minimal HTTP 502 so `docker ps` shows a real message instead of
-    /// "connection reset by peer".
-    private func writeGatewayError(to fd: Int32, message: String) {
-        writeEngineError(to: fd, statusCode: 502, reason: "Bad Gateway", message: "morbstack: \(message)")
-    }
-
-    /// Writes a Docker-style JSON error without forwarding the rejected request.
-    ///
-    /// Port preflight failures are deliberately `500`, matching the class Docker
-    /// clients already treat as an Engine-side publication failure. The body remains
-    /// the standard `{ "message": ... }` shape the Docker CLI reads.
-    private func writeEngineError(to fd: Int32, statusCode: Int, reason: String, message: String) {
-        let sanitized = message
-            .replacingOccurrences(of: "\n", with: " ")
-            .replacingOccurrences(of: "\r", with: " ")
-            .replacingOccurrences(of: "\"", with: "'")
-        let body = "{\"message\":\"\(sanitized)\"}"
-        let response = """
-            HTTP/1.1 \(statusCode) \(reason)\r
-            Content-Type: application/json\r
-            Content-Length: \(body.utf8.count)\r
-            Connection: close\r
-            \r
-            \(body)
-            """
-        POSIXSocketSupport.writeAll(fd, Data(response.utf8))
     }
 }

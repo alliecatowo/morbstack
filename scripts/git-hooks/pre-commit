@@ -20,7 +20,12 @@
 set -uo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-cd "$REPO_ROOT"
+# `|| exit` matters here: this script sets -uo pipefail but deliberately NOT -e,
+# so without it a failed cd would fall through and run the checks against
+# whatever directory the caller happened to be in — reporting a pass for a tree
+# it never looked at. A gate that can silently check the wrong thing is worse
+# than no gate.
+cd "$REPO_ROOT" || exit 1
 
 STAGED="$(git diff --cached --name-only --diff-filter=ACMR)"
 [ -n "$STAGED" ] || exit 0

@@ -291,10 +291,16 @@ transition safely into raw relay mode for ordinary Engine traffic. It must also 
 the transformed create response without releasing it before container-ID association.
 
 `MinimalHTTP` is deliberately a read-only parser and `FDRelay` deliberately has no
-byte-mutation hook. Phase 1 therefore adds a separate
-`DockerDynamicCreateTransaction` with explicit ownership, rather than weakening the
-raw relay. Broader forms must extend that transaction deliberately rather than turning
-either existing primitive into a partial generic HTTP proxy.
+byte-mutation hook. Phase 1 therefore added a separate transaction with explicit
+ownership, rather than weakening the raw relay.
+
+That transaction (`DockerDynamicCreateTransaction`) has since been folded into
+`DockerFramedRelay`, which frames every request on a connection rather than only the
+first — see `docs/audit/PROXY-FRAMING.md`. The ownership rule is unchanged: the
+rewritten create's response is held privately until container-ID association succeeds,
+and only that one request shape is transformed. `FDRelay` itself is untouched and still
+carries the K8s and port-forward relays. Broader forms must extend the framed relay's
+admission protocol deliberately rather than turning it into a generic HTTP proxy.
 
 ## Delivery plan and acceptance evidence
 

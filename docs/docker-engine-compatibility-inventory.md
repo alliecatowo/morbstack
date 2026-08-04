@@ -231,8 +231,12 @@ evidence that exists; relay-reviewed is never a synonym for compatible.
   and Docker-style errors.
 - `mac/Sources/MorbstackKit/Relay.swift` — bidirectional raw descriptor relay and
   passive response observation.
-- `mac/Sources/MorbstackKit/DockerDynamicCreateTransaction.swift` — narrow request
-  rewrite/response-association ownership for dynamic TCP/UDP create.
+- `mac/Sources/MorbstackKit/DockerRequestFraming.swift` — HTTP/1.1 request framing for
+  the client-to-guest direction, hijack classification, and head rewriting.
+- `mac/Sources/MorbstackKit/DockerFramedRelay.swift` — the per-connection relay that
+  frames every request until the Engine hijacks, and owns the request
+  rewrite/response-association hold-back for dynamic TCP/UDP create. It replaced the
+  former `DockerDynamicCreateTransaction`; see `docs/audit/PROXY-FRAMING.md`.
 - `mac/Sources/MorbstackKit/DockerPortPublicationPreflight.swift` — supported and
   rejected published-port shapes.
 - `mac/Sources/MorbstackKit/DockerBindMountPreflight.swift` — host bind-share

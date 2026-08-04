@@ -50,6 +50,7 @@
 
 [tools]
 rust = "stable"
+shellcheck = "latest"
 
 # Task files are discovered in ./mise-tasks by default; stated explicitly so the
 # location is greppable from the config rather than implied.

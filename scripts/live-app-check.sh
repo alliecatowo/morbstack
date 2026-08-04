@@ -79,6 +79,7 @@ DOCKER_CONFIG=$(mktemp -d "${TMPDIR:-/tmp}/morblive-dockercfg.XXXXXXXX")
 export DOCKER_CONFIG
 export DOCKER_HOST="unix://$SOCKET"
 
+# shellcheck disable=SC2329  # invoked by the `trap ... EXIT` on the next line.
 cleanup_config() {
   rm -rf "$DOCKER_CONFIG"
 }
@@ -186,6 +187,8 @@ fi
 # nothing else, so setting them directly tests exactly what the sidebar depends on
 # without making the harness depend on a compose binary.
 WEB_SPEC="$NGINX_IMAGE|$PROJECT|web|80/tcp=$PORT|$VOLUME:/morbshot"
+# shellcheck disable=SC2016  # a Go text/template for `docker inspect`; $p and $b
+# are template range variables and MUST NOT be expanded by the shell.
 WEB_TEMPLATE='{{.Config.Image}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{range $p, $b := .HostConfig.PortBindings}}{{$p}}={{range $b}}{{.HostPort}}{{end}}{{end}}|{{range .Mounts}}{{.Name}}:{{.Destination}}{{end}}'
 
 if needs_create "$WEB" "$WEB_SPEC" "$WEB_TEMPLATE"; then
@@ -216,6 +219,9 @@ fi
 #
 # No single quotes anywhere in LOGGER_CMD: it is passed through one layer of shell
 # quoting here and another inside the container.
+# shellcheck disable=SC2016  # deliberate: this is a script for the CONTAINER's
+# shell to expand, not ours. Expanding $s or $i here would bake in this shell's
+# (empty) values and the container would print nothing.
 LOGGER_CMD='s=x; while [ ${#s} -lt 20000 ]; do s=$s$s; done;
 i=0
 while :; do

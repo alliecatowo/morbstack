@@ -60,19 +60,32 @@ should be treated as suspect for that reason.
   the automatic Docker-Desktop-compatible alias is still absent. The #18/#19
   rows stay **FAIL** for the documented behaviour they test.
 
-**A new and more serious finding supersedes part of #9's reasoning.** The
-`/etc` and `/var` bind guards exist and are correct, but they never run for
-ordinary CLI traffic: `DockerProxy` inspects only the *first* HTTP request on
-each client connection and then splices the connection raw, so the Docker
-CLI's keep-alive reuse means `POST /containers/create` is almost always
-un-inspected. Proven by sending one identical create body two ways — HTTP 400
-(rejected) as the first request on a fresh connection, HTTP 201 (accepted) as
-the second request on a keep-alive connection. Consequently
-`-v /etc/hosts:/x` still silently serves the **guest's** file
-(`e3998dbe…` vs the Mac's `c7dd0e2e…`), `-v /var/log:/x` silently serves the
-guest's directory, and container writes to those paths are silently lost. The
-same bypass disables the create-time port-publication preflight. This is
-fail-open and is the top open item.
+**A new and more serious finding superseded part of #9's reasoning — and has
+since been fixed.** The `/etc` and `/var` bind guards existed and were correct,
+but they never ran for ordinary CLI traffic: `DockerProxy` inspected only the
+*first* HTTP request on each client connection and then spliced the connection
+raw, so the Docker CLI's keep-alive reuse meant `POST /containers/create` was
+almost always un-inspected. Proven by sending one identical create body two
+ways — HTTP 400 (rejected) as the first request on a fresh connection, HTTP 201
+(accepted) as the second request on a keep-alive connection. Consequently
+`-v /etc/hosts:/x` silently served the **guest's** file
+(`e3998dbe…` vs the Mac's `c7dd0e2e…`), `-v /var/log:/x` silently served the
+guest's directory, container writes to those paths were silently lost, and the
+same bypass disabled the create-time port-publication preflight. This was
+fail-open and was the top open item.
+
+**Fixed and verified live.** The proxy now frames every HTTP/1.1 request on a
+connection — `Content-Length`, chunked, pipelined, bodyless — and only splices
+raw once the Engine has actually hijacked the connection (`101`, or a `2xx`
+carrying Docker's raw/multiplexed stream type). A body too large to inspect is
+refused with a Docker-shaped `400` rather than relayed unchecked, as are the
+ambiguous framings that would let a request smuggle past admission. The
+original experiment now returns **identical 400s on both framings**, and the
+full bind-mount and port matrices were re-run through the real CLI with no
+streaming regression (`logs -f`, `exec -it`, `attach`, `cp`, `events`,
+BuildKit, the 3-service compose fixture). Design, evidence and residual risk:
+**`docs/audit/PROXY-FRAMING.md`**; status rows in `docs/MASTER-PLAN.md` §1.0
+and §1.3.
 
 ### Current delivery state (not a replacement for this audit)
 
@@ -189,6 +202,19 @@ image inclusion and live acceptance; it is not counted as verified parity. The e
 dynamic transaction and unsupported boundary are in
 [`dynamic-port-allocation.md`](dynamic-port-allocation.md); no event-derived endpoint
 is counted as synchronous support.
+
+*Update (proxy framing).* Two of the caveats above have moved. This admission path was
+one of the guards silently defeated by the keep-alive bypass described earlier in this
+document, so its "recognized path" only ever applied to a create that happened to be
+the first request on its connection — which, for the `docker` CLI, it never is. It now
+applies to every create. The **chunked framing** exclusion is also gone: a chunked
+create body is decoded for inspection and relayed byte-for-byte, and the bounded
+dynamic hold-back runs inside the connection relay rather than only at connection
+setup. The **live VM run** has now happened: fixed (`-p 8099:80`), bounded dynamic
+(`-p 80` → `0.0.0.0:53119`), `-P` (`0.0.0.0:32768`), and the
+`-p 8080:80 -p 8080:81` ambiguity refusal were all exercised through the real CLI —
+see `docs/audit/PROXY-FRAMING.md` §3.3. Lease survival across VM/daemon shutdown and
+raw host-port range allocation remain open.
 
 ## Historical priority list — what the original audit identified
 

@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 #MISE description="Report staleness and drift: is what is RUNNING what you actually BUILT?"
 set -uo pipefail
-cd "${MISE_PROJECT_ROOT:-$PWD}"
+# `|| exit` matters: this task sets -uo pipefail but deliberately not -e, and a
+# staleness report generated from the wrong directory would confidently say
+# "no drift" about a tree it never looked at.
+cd "${MISE_PROJECT_ROOT:-$PWD}" || exit 1
 
 # Every serious error in this project's history came from trusting a NAME over
 # its CONTENTS:
@@ -46,7 +49,7 @@ INITRD_BUILT="${MORBSTACK_HOME}/data/kernel/initrd.img"
 # under that same version. Resolve both rather than hardcoding "0.1.0-m0", so this
 # keeps working after a version bump instead of quietly checking nothing.
 INITRD_STAGED="${MORBSTACK_HOME}/data/runtime/current/kernel/initrd.img"
-BUNDLE_INITRD=$(ls -1 "${BUNDLE}"/Contents/Resources/runtime/*/kernel/initrd.img 2>/dev/null | head -1)
+BUNDLE_INITRD=$(find "${BUNDLE}/Contents/Resources/runtime" -type f -path '*/kernel/initrd.img' 2>/dev/null | head -1)
 BUNDLE_INITRD="${BUNDLE_INITRD:-${BUNDLE}/Contents/Resources/runtime/<version>/kernel/initrd.img}"
 
 # A check that silently does not run is the same disease this task exists to

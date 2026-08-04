@@ -56,6 +56,18 @@ echo "==> cargo fmt --check"
 echo "==> cargo clippy -D warnings"
 (cd guest/morbinit && cargo clippy --all-targets -- -D warnings) || status=1
 
+# Same rule as clippy: CI shellchecks these, so this gate must too. shellcheck is
+# pinned in mise.toml, so `mise run check` supplies it rather than expecting a
+# brew install. Keep the invocation byte-identical to ci.yml's — a local gate that
+# lints a different set than CI is a gate that lies.
+echo "==> shellcheck"
+if command -v shellcheck >/dev/null 2>&1; then
+	shellcheck scripts/*.sh scripts/git-hooks/pre-commit || status=1
+	shellcheck --shell=bash mise-tasks/* || status=1
+else
+	echo "warning: shellcheck not found; run 'mise install' (CI will still lint)" >&2
+fi
+
 if [ "$status" -ne 0 ]; then
 	echo "error: mise run check failed (see output above)" >&2
 fi
