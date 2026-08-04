@@ -152,6 +152,53 @@ enum TrackCImageInspector {
 
 // MARK: - Pull log
 
+/// The honest lifecycle of one explicit Engine image-pull request.
+///
+/// A Docker pull is a stream: HTTP success alone is not a result, because the daemon
+/// reports registry failures as JSON lines in a 200 response. The Images sheet keeps
+/// the entered reference and the terminal result together, so a successful pull does
+/// not disappear before the person can see what completed and a failure has a real retry
+/// state instead of being only the last line of an output viewport.
+enum TrackCImagePullState: Equatable {
+    case ready
+    case pulling(reference: String)
+    case succeeded(reference: String)
+    case failed(reference: String, message: String)
+
+    var isWorking: Bool {
+        if case .pulling = self { return true }
+        return false
+    }
+
+    var allowsPull: Bool {
+        switch self {
+        case .ready, .failed: return true
+        case .pulling, .succeeded: return false
+        }
+    }
+
+    var reference: String? {
+        switch self {
+        case .ready: return nil
+        case .pulling(let reference), .succeeded(let reference), .failed(let reference, _):
+            return reference
+        }
+    }
+
+    var failureMessage: String? {
+        if case .failed(_, let message) = self { return message }
+        return nil
+    }
+
+    /// Docker is the parser and authority for reference syntax. The UI performs only
+    /// the one safe normalization it can guarantee: outer whitespace never belongs to a
+    /// reference, and an empty input cannot begin a request.
+    static func reference(from input: String) -> String? {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
 enum TrackCPullLog {
 
     /// How many lines the log keeps. A multi-layer pull emits thousands of progress

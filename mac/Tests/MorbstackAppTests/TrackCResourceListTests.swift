@@ -207,6 +207,39 @@ final class TrackCResourceListTests: XCTestCase {
 
     // MARK: - Pull log
 
+    func testPullReferenceTrimsOnlyOuterWhitespace() {
+        XCTAssertEqual(
+            TrackCImagePullState.reference(from: " \n  nginx:alpine\t "),
+            "nginx:alpine")
+        XCTAssertEqual(
+            TrackCImagePullState.reference(from: "registry.example:5000/team/image:1.2"),
+            "registry.example:5000/team/image:1.2",
+            "Docker, not the presentation layer, owns reference syntax validation")
+        XCTAssertNil(TrackCImagePullState.reference(from: " \n\t "))
+    }
+
+    func testPullStateKeepsTerminalResultDistinctFromInFlightWork() {
+        XCTAssertTrue(TrackCImagePullState.ready.allowsPull)
+        XCTAssertFalse(TrackCImagePullState.ready.isWorking)
+        XCTAssertNil(TrackCImagePullState.ready.reference)
+
+        let working = TrackCImagePullState.pulling(reference: "nginx:alpine")
+        XCTAssertTrue(working.isWorking)
+        XCTAssertFalse(working.allowsPull)
+        XCTAssertEqual(working.reference, "nginx:alpine")
+
+        let succeeded = TrackCImagePullState.succeeded(reference: "nginx:alpine")
+        XCTAssertFalse(succeeded.isWorking)
+        XCTAssertFalse(succeeded.allowsPull, "a completed result should remain reviewable")
+        XCTAssertEqual(succeeded.reference, "nginx:alpine")
+
+        let failed = TrackCImagePullState.failed(reference: "private/image", message: "denied")
+        XCTAssertFalse(failed.isWorking)
+        XCTAssertTrue(failed.allowsPull, "a failure must expose a real retry state")
+        XCTAssertEqual(failed.reference, "private/image")
+        XCTAssertEqual(failed.failureMessage, "denied")
+    }
+
     func testLayerKeyRecognisesALayerIDAndNothingElse() {
         XCTAssertEqual(TrackCPullLog.layerKey("a1b2c3d4e5f6: Downloading  4.2MB/91MB"), "a1b2c3d4e5f6")
         XCTAssertEqual(

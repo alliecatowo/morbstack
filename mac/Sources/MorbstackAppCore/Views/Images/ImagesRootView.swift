@@ -76,7 +76,7 @@ struct ImagesRootView: View {
 
     @State private var pullReference = ""
     @State private var pullLines: [String] = []
-    @State private var isPulling = false
+    @State private var pullState: TrackCImagePullState = .ready
     @State private var showingPull = false
     @State private var showingPublicImageDiscovery = false
     /// A public discovery result can fill the existing Pull Image form only after its
@@ -123,6 +123,12 @@ struct ImagesRootView: View {
     private var selectedImage: ImageSummary? {
         guard let selection else { return nil }
         return model.images.first { $0.id == selection }
+    }
+
+    private var isPulling: Bool { pullState.isWorking }
+
+    private var pullReferenceToSubmit: String? {
+        TrackCImagePullState.reference(from: pullReference)
     }
 
     var body: some View {
@@ -396,39 +402,29 @@ struct ImagesRootView: View {
     // MARK: Pull sheet
 
     private var pullSheet: some View {
-        Form {
-            Section {
-                TextField(
-                    "Image Reference",
-                    text: $pullReference,
-                    prompt: Text("nginx:alpine"))
-                    .font(.system(.body, design: .monospaced))
-                    .disabled(isPulling)
-                    .focused($pullReferenceIsFocused)
-                    .onSubmit { Task { await pull() } }
-            }
+        NavigationStack {
+            Form {
+                Section("Image") {
+                    TextField(
+                        "Reference",
+                        text: $pullReference,
+                        prompt: Text("nginx:alpine"))
+                        .font(.system(.body, design: .monospaced))
+                        .disabled(isPulling || !pullState.allowsPull)
+                        .focused($pullReferenceIsFocused)
+                        .onSubmit { Task { await pull() } }
+                }
 
-            if isPulling {
-                Section {
-                    ProgressView()
-                        .controlSize(.small)
-                        .accessibilityLabel("Pulling image")
+                pullStateSection
+
+                if !pullLines.isEmpty {
+                    Section("Docker Output") {
+                        pullLog
+                    }
                 }
             }
-
-            if !pullLines.isEmpty {
-                Section("Pull Progress") {
-                    pullLog
-                }
-            }
-
-            Section {
-                Button(isPulling ? "Pulling…" : "Pull") {
-                    Task { await pull() }
-                }
-                .keyboardShortcut(.return, modifiers: [])
-                .disabled(isPulling || pullReference.trimmingCharacters(in: .whitespaces).isEmpty)
-            }
+            .navigationTitle("Pull Image")
+            .toolbar { pullSheetToolbar }
         }
         // Docker's pull stream has no cancellation contract in this screen. Keep
         // the system sheet visible while it is active instead of offering a Cancel
@@ -436,6 +432,83 @@ struct ImagesRootView: View {
         .interactiveDismissDisabled(isPulling)
         .frame(minWidth: 420, idealWidth: 480, minHeight: 260)
         .onAppear { pullReferenceIsFocused = true }
+        .onChange(of: pullReference) { _, _ in
+            guard !isPulling else { return }
+            if pullState != .ready {
+                pullState = .ready
+                // Output belongs to the reference that just completed. Once the person
+                // edits it, retaining that transcript would falsely make it look like
+                // Docker had attempted the new reference.
+                pullLines = []
+            }
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var pullSheetToolbar: some ToolbarContent {
+        if !isPulling {
+            ToolbarItem(placement: .cancellationAction) {
+                Button(pullState == .ready ? "Cancel" : "Done") {
+                    showingPull = false
+                }
+            }
+        }
+
+        if pullState.allowsPull {
+            ToolbarItem(placement: .confirmationAction) {
+                Button(pullState.failureMessage == nil ? "Pull" : "Try Again") {
+                    Task { await pull() }
+                }
+                .disabled(pullReferenceToSubmit == nil)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var pullStateSection: some View {
+        switch pullState {
+        case .ready:
+            Section("Scope") {
+                Text(
+                    "Pulls exactly the reference you enter through the local Docker engine. "
+                        + "Registry access and authentication remain Docker's responsibility.")
+                    .foregroundStyle(.secondary)
+            }
+        case .pulling(let reference):
+            Section("Status") {
+                ProgressView("Pulling \(reference)")
+                    .controlSize(.small)
+                    .accessibilityLabel("Pulling \(reference)")
+                Text("Docker does not provide a safe cancellation contract for this request.")
+                    .foregroundStyle(.secondary)
+            }
+        case .succeeded(let reference):
+            Section("Result") {
+                Label("Image Pulled", systemImage: "checkmark.circle")
+                LabeledContent("Reference") {
+                    Text(reference)
+                        .font(.system(.body, design: .monospaced))
+                        .textSelection(.enabled)
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                }
+                Text("Docker completed the pull stream. Local images were refreshed.")
+                    .foregroundStyle(.secondary)
+            }
+        case .failed(let reference, let message):
+            Section("Couldn’t Pull Image") {
+                LabeledContent("Reference") {
+                    Text(reference)
+                        .font(.system(.body, design: .monospaced))
+                        .textSelection(.enabled)
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                }
+                Text(message)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 
     private var pullLog: some View {
@@ -808,6 +881,7 @@ struct ImagesRootView: View {
         guard !isPulling else { return }
         pullReference = reference ?? ""
         pullLines = []
+        pullState = .ready
         showingPull = true
     }
 
@@ -925,10 +999,10 @@ struct ImagesRootView: View {
 
     @MainActor
     private func pull() async {
-        let reference = pullReference.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !reference.isEmpty, !isPulling else { return }
+        guard let reference = pullReferenceToSubmit, pullState.allowsPull else { return }
 
-        isPulling = true
+        pullReference = reference
+        pullState = .pulling(reference: reference)
         pullLines = []
 
         let buffer = TrackCPullBuffer()
@@ -948,16 +1022,13 @@ struct ImagesRootView: View {
             try await model.client.pull(ref: reference) { line in buffer.append(line) }
             pump.cancel()
             pullLines = TrackCPullLog.appending(contentsOf: buffer.drain(), to: pullLines)
-            pullReference = ""
-            showingPull = false
             await model.refreshAll()
+            pullState = .succeeded(reference: reference)
         } catch {
             pump.cancel()
             pullLines = TrackCPullLog.appending(contentsOf: buffer.drain(), to: pullLines)
-            let detail = MorbErrorMessage.text(for: error)
-            pullLines = TrackCPullLog.appending("error: \(detail)", to: pullLines)
+            pullState = .failed(reference: reference, message: MorbErrorMessage.text(for: error))
         }
-        isPulling = false
     }
 
     @MainActor
