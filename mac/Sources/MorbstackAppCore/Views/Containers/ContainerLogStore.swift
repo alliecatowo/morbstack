@@ -47,17 +47,14 @@ struct TrackBRenderedLine: Identifiable {
         let spans = TrackBAnsi.spans(line.text)
         self.plain = spans.count == 1 ? spans[0].text : spans.reduce(into: "") { $0 += $1.text }
         self.lowered = plain.lowercased()
-        self.attributed = Self.render(spans: spans, stream: line.stream)
+        self.attributed = Self.render(spans: spans)
     }
 
-    /// Builds the attributed text for one line.
-    ///
-    /// stderr is tinted, but only where the program did not already choose a colour:
-    /// overriding a deliberate green "OK" with red because it happened to go to stderr
-    /// would be the viewer lying about what the program said.
-    private static func render(spans: [TrackBAnsiSpan], stream: StdStream) -> AttributedString {
-        let stderrTint = ContainerLogPalette.ansi(.red)
-
+    /// Builds the attributed payload for one line. ANSI is the program's explicit
+    /// presentation; standard error is a Docker source channel, not an error severity.
+    /// The transcript presents the latter as labelled metadata instead of repainting
+    /// every stderr message as a warning.
+    private static func render(spans: [TrackBAnsiSpan]) -> AttributedString {
         guard !spans.isEmpty else { return AttributedString("") }
 
         var result = AttributedString()
@@ -67,8 +64,6 @@ struct TrackBRenderedLine: Identifiable {
 
             if let color = span.style.color {
                 container.foregroundColor = ContainerLogPalette.ansi(color)
-            } else if stream == .stderr {
-                container.foregroundColor = stderrTint
             }
             if span.style.bold {
                 container.font = .system(size: 11.5, weight: .bold, design: .monospaced)
@@ -81,6 +76,24 @@ struct TrackBRenderedLine: Identifiable {
             result.append(piece)
         }
         return result
+    }
+}
+
+extension StdStream {
+
+    /// The Docker multiplex channel is source metadata, not a severity classifier.
+    var logTranscriptLabel: String {
+        switch self {
+        case .stdout: return "stdout"
+        case .stderr: return "stderr"
+        }
+    }
+
+    var logTranscriptAccessibilityLabel: String {
+        switch self {
+        case .stdout: return "Standard output"
+        case .stderr: return "Standard error"
+        }
     }
 }
 
@@ -193,8 +206,8 @@ final class TrackBLogStore {
     ///
     /// Previews and deterministic fixture runs can provide a known scrollback without
     /// opening a Docker stream. Lines still go through the same
-    /// `TrackBRenderedLine` pipeline as live output, so ANSI parsing, stderr tinting and
-    /// the filter index are exercised for real rather than faked.
+    /// `TrackBRenderedLine` pipeline as live output, so ANSI parsing, stream-source
+    /// metadata, and the filter index are exercised for real rather than faked.
     func seed(_ lines: [LogLine], isStreaming: Bool = true) {
         stop()
         self.lines.removeAll()

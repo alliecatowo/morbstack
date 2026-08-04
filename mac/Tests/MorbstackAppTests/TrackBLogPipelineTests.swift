@@ -291,6 +291,18 @@ final class TrackBLogFilterTests: XCTestCase {
     }
 }
 
+// MARK: - Transcript source semantics
+
+final class TrackBLogTranscriptSemanticsTests: XCTestCase {
+
+    func testDockerStreamLabelsDescribeSourceWithoutInventingSeverity() {
+        XCTAssertEqual(StdStream.stdout.logTranscriptLabel, "stdout")
+        XCTAssertEqual(StdStream.stderr.logTranscriptLabel, "stderr")
+        XCTAssertEqual(StdStream.stdout.logTranscriptAccessibilityLabel, "Standard output")
+        XCTAssertEqual(StdStream.stderr.logTranscriptAccessibilityLabel, "Standard error")
+    }
+}
+
 // MARK: - Export
 
 final class TrackBLogExportTests: XCTestCase {

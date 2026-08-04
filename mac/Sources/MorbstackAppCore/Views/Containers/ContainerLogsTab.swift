@@ -17,7 +17,7 @@ struct ContainerLogsTab: View {
     @State private var store: TrackBLogStore
     @State private var copied = false
     @State private var viewportHeight: CGFloat = 0
-    @State private var currentErrorID: Int?
+    @State private var currentStandardErrorID: Int?
     @State private var scrollTarget: Int?
 
     private let streamsLive: Bool
@@ -51,15 +51,34 @@ struct ContainerLogsTab: View {
                 .font(.caption)
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
+
+            streamStatus
         }
         .padding(8)
     }
 
     private var lineCount: String {
+        let visible = store.visibleLines.count
         if store.isFiltering {
-            return "\(store.visibleLines.count) of \(store.lines.count) lines"
+            return "\(visible) of \(store.lines.count) \(store.lines.count == 1 ? "line" : "lines")"
         }
-        return "\(store.lines.count) lines"
+        return "\(visible) \(visible == 1 ? "line" : "lines")"
+    }
+
+    @ViewBuilder
+    private var streamStatus: some View {
+        if store.isStreaming {
+            ProgressView()
+                .controlSize(.small)
+                .accessibilityLabel("Streaming container output")
+                .help("Streaming container output")
+        } else if let errorText = store.errorText {
+            Label("Stream interrupted", systemImage: "exclamationmark.triangle")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Log stream interrupted: \(errorText)")
+                .help(errorText)
+        }
     }
 
     private func start() {
@@ -84,12 +103,12 @@ struct ContainerLogsTab: View {
                     .accessibilityLabel("Show timestamps")
                     .help("Show timestamps")
 
-                Button("Jump to Next Error", systemImage: "exclamationmark.triangle") {
-                    jumpToNextError()
+                Button("Jump to Next Standard Error Line", systemImage: "arrow.down.to.line") {
+                    jumpToNextStandardErrorLine()
                 }
-                .accessibilityLabel("Jump to next error")
-                .help("Jump to next error")
-                .disabled(!hasErrors)
+                .accessibilityLabel("Jump to next standard error line")
+                .help("Jump to the next line written to standard error")
+                .disabled(!hasStandardErrorLines)
 
                 Divider()
 
@@ -120,19 +139,21 @@ struct ContainerLogsTab: View {
         }
     }
 
-    private var hasErrors: Bool {
+    private var hasStandardErrorLines: Bool {
         store.visibleLines.contains { $0.stream == .stderr }
     }
 
-    private func jumpToNextError() {
-        let errors = store.visibleLines.filter { $0.stream == .stderr }
-        guard !errors.isEmpty else { return }
-        if let current = currentErrorID, let index = errors.firstIndex(where: { $0.id == current }) {
-            currentErrorID = errors[(index + 1) % errors.count].id
+    private func jumpToNextStandardErrorLine() {
+        let standardErrorLines = store.visibleLines.filter { $0.stream == .stderr }
+        guard !standardErrorLines.isEmpty else { return }
+        if let current = currentStandardErrorID,
+           let index = standardErrorLines.firstIndex(where: { $0.id == current })
+        {
+            currentStandardErrorID = standardErrorLines[(index + 1) % standardErrorLines.count].id
         } else {
-            currentErrorID = errors[0].id
+            currentStandardErrorID = standardErrorLines[0].id
         }
-        scrollTarget = currentErrorID
+        scrollTarget = currentStandardErrorID
     }
 
     private func copyVisibleLines() {
@@ -149,12 +170,12 @@ struct ContainerLogsTab: View {
             ScrollView(.vertical) {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     if store.lines.hasDropped { droppedMarker }
-                    ForEach(Array(numberedVisibleLines), id: \.line.id) { entry in
+                    ForEach(store.visibleLines) { line in
                         TrackBLogRow(
-                            line: entry.line,
-                            showsTimestamp: store.showsTimestamps && entry.showsTimestamp,
-                            isCurrentError: entry.line.id == currentErrorID)
-                        .id(entry.line.id)
+                            line: line,
+                            showsTimestamp: store.showsTimestamps,
+                            isCurrentStandardError: line.id == currentStandardErrorID)
+                        .id(line.id)
                     }
                     Color.clear
                         .frame(height: 1)
@@ -203,17 +224,6 @@ struct ContainerLogsTab: View {
         }
     }
 
-    private var numberedVisibleLines: [(line: TrackBRenderedLine, showsTimestamp: Bool)] {
-        var previousTimestamp: Date?
-        return store.visibleLines.map { line in
-            let isBlank = line.plain.trimmingCharacters(in: .whitespaces).isEmpty
-            let repeatsPrevious = line.timestamp != nil && line.timestamp == previousTimestamp
-            let shows = !isBlank && !repeatsPrevious
-            previousTimestamp = line.timestamp
-            return (line, shows)
-        }
-    }
-
     private var droppedMarker: some View {
         Label(
             "\(store.lines.droppedCount) earlier lines were dropped. Showing the most recent \(TrackBLogStore.capacity).",
@@ -228,7 +238,13 @@ struct ContainerLogsTab: View {
         if store.isFiltering {
             ContentUnavailableView.search(text: store.query)
         } else if store.isStreaming {
-            ProgressView()
+            ProgressView("Loading Logs")
+        } else if let errorText = store.errorText {
+            ContentUnavailableView {
+                Label("Log Stream Unavailable", systemImage: "exclamationmark.triangle")
+            } description: {
+                Text(errorText)
+            }
         } else {
             ContentUnavailableView {
                 Label("No Output", systemImage: "text.alignleft")
@@ -258,28 +274,29 @@ struct TrackBLogRow: View {
 
     let line: TrackBRenderedLine
     let showsTimestamp: Bool
-    var isCurrentError: Bool = false
+    var isCurrentStandardError: Bool = false
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            Text(showsTimestamp ? (line.timestamp.map(Formatters.logTime) ?? "") : "")
-                .font(.caption.monospaced())
-                .monospacedDigit()
-                .foregroundStyle(.tertiary)
-                .lineLimit(1)
-                .frame(width: 78, alignment: .leading)
-
-            if line.stream == .stderr {
-                Image(systemName: isCurrentError
-                    ? "exclamationmark.triangle.fill"
-                    : "exclamationmark.triangle")
-                    .font(.caption2)
-                    .foregroundStyle(isCurrentError ? .primary : .secondary)
-                    .accessibilityHidden(true)
+            if showsTimestamp {
+                Text(line.timestamp.map(Formatters.logTime) ?? "—")
+                    .font(.caption.monospaced())
+                    .monospacedDigit()
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .frame(width: 78, alignment: .leading)
+                    .accessibilityLabel(line.timestamp.map(Formatters.absoluteDate) ?? "No timestamp")
             }
 
+            Text(line.stream.logTranscriptLabel)
+                .font(.caption2.monospaced())
+                .foregroundStyle(isCurrentStandardError ? .primary : .secondary)
+                .lineLimit(1)
+                .frame(width: 42, alignment: .leading)
+                .accessibilityLabel(line.stream.logTranscriptAccessibilityLabel)
+
             Text(line.attributed)
-                .font(.body.monospaced().weight(isCurrentError ? .semibold : .regular))
+                .font(.body.monospaced().weight(isCurrentStandardError ? .medium : .regular))
                 .lineSpacing(2)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
