@@ -2,6 +2,14 @@
 
 Date: 2026-08-03. Host: macOS 26.4 (Darwin 25.4.0), Apple Silicon, 8 vCPU / 8192 MiB VM.
 
+> **Staleness note (2026-08-04):** the publish-all allocator this document exercises
+> (vsock port 2379, `guest/morbinit/src/publish_all.rs`,
+> `PublishAllPortAllocator.swift`) and the patched-Moby engine it depended on were
+> both deleted under TECH-1, in favor of a Morbstack userland-proxy wrapper invoked
+> through dockerd's own stock `--userland-proxy-path` hook. The dated results below
+> are left unchanged as a record of that candidate; they describe a mechanism that no
+> longer exists in the tree. See `docs/design/PATCH-FREE-PUBLISH-ALL.md`.
+
 ## Evidence scope
 
 This is a dated result for the candidate exercised on 2026-08-03, not a blanket

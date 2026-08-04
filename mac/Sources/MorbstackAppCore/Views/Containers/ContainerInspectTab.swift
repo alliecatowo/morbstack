@@ -49,57 +49,55 @@ struct ContainerInspectTab: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            // The document's own commands live in the document's own bar. Putting
+            // them in the window toolbar made the toolbar churn on every inspector
+            // tab switch, which defeats motor memory for the whole route.
             HStack(spacing: 8) {
-                DocumentSearchField(text: $query, prompt: "Search document")
+                DocumentSearchField(text: $query, prompt: "Search JSON")
                 if !query.isEmpty {
                     Text(matchCaption)
                         .font(.caption)
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                 }
+
+                if !matches.isEmpty {
+                    Button { step(-1) } label: {
+                        Image(systemName: "chevron.up")
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Previous match")
+                    .help("Previous match")
+
+                    Button { step(1) } label: {
+                        Image(systemName: "chevron.down")
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Next match")
+                    .help("Next match")
+                }
+
+                Button {
+                    MorbPasteboard.copy(json)
+                    didCopy = true
+                    Task {
+                        try? await Task.sleep(for: .seconds(1.4))
+                        didCopy = false
+                    }
+                } label: {
+                    Image(systemName: didCopy ? "checkmark" : "doc.on.doc")
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Copy raw inspect JSON")
+                .help("Copy raw inspect JSON")
             }
             .padding(8)
 
             Divider()
             content
         }
-        .toolbar { toolbarContent }
         .task(id: json) { prepare() }
         .onChange(of: query) { _, _ in recomputeMatches() }
-    }
-
-    @ToolbarContentBuilder
-    private var toolbarContent: some ToolbarContent {
-        if !matches.isEmpty {
-            ToolbarItemGroup(placement: .primaryAction) {
-                Button { step(-1) } label: {
-                    Image(systemName: "chevron.up")
-                }
-                .accessibilityLabel("Previous match")
-                .help("Previous match")
-
-                Button { step(1) } label: {
-                    Image(systemName: "chevron.down")
-                }
-                .accessibilityLabel("Next match")
-                .help("Next match")
-            }
-        }
-
-        ToolbarItem(id: "inspect.copy", placement: .secondaryAction) {
-            Button {
-                MorbPasteboard.copy(json)
-                didCopy = true
-                Task {
-                    try? await Task.sleep(for: .seconds(1.4))
-                    didCopy = false
-                }
-            } label: {
-                Image(systemName: didCopy ? "checkmark" : "doc.on.doc")
-            }
-            .accessibilityLabel("Copy inspect document")
-            .help("Copy inspect document")
-        }
     }
 
     private var matchCaption: String {
@@ -110,7 +108,7 @@ struct ContainerInspectTab: View {
     private var content: some View {
         if let errorText {
             ContentUnavailableView {
-                Label("Inspect Document Unavailable", systemImage: "exclamationmark.triangle")
+                Label("Raw Inspect JSON Unavailable", systemImage: "exclamationmark.triangle")
             } description: {
                 Text(errorText)
             }
@@ -121,7 +119,7 @@ struct ContainerInspectTab: View {
             ContentUnavailableView {
                 Label("Nothing to Inspect", systemImage: "curlybraces")
             } description: {
-                Text("The engine did not return an inspect document for this container.")
+                Text("The engine did not return raw inspect JSON for this container.")
             }
         } else {
             ScrollViewReader { proxy in

@@ -42,9 +42,9 @@ The foundation. Everything here is about making it impossible to *not know* some
 | 0.6 | CI actually runs, on every push, and is red when it should be | push and confirm |
 | 0.7 | Pre-commit hook installed and documented (`mise run install-hooks`) | **done**, not yet installed locally |
 | 0.8 | Guest image rebuild is part of the loop | **done** — and the loop is `guest-image` → `app` → restart, because the daemon boots `runtime/current` staged from the bundle, not `data/kernel/`. A self-referential manifest check also froze the staged image permanently; fixed in `9f81cf4`. |
-| 0.9 | **Remove the Docker-to-build-Docker bootstrap.** `build-patched-dockerd` needs `docker buildx`. Publish the built engine as a pinned, SHA-verified release artifact so a contributor with no Docker can build Morbstack. | **open** |
-| 0.10 | A `mise run doctor` that reports staleness: is the initrd older than `guest/`? is the running daemon's inode the one on disk? is the patched dockerd in the image? | **open** |
-| 0.11 | Complete the security review of the untrusted-input surfaces: vsock 1024/2375/2376/2377/2378/2379/2381 and the MCP server (2380 was removed in `51dc543`) | **open — treat as unreviewed** |
+| 0.9 | ~~Remove the Docker-to-build-Docker bootstrap.~~ **Done 2026-08-04 (TECH-1).** Morbstack ships unmodified upstream dockerd; there is no patched engine to build, so `build-patched-dockerd`, `build-engine.yml`, and the Docker-to-build-Docker bootstrap are deleted rather than fixed. See `docs/design/PATCH-FREE-PUBLISH-ALL.md`. | **done** |
+| 0.10 | A `mise run doctor` that reports staleness: is the initrd older than `guest/`? is the running daemon's inode the one on disk? | **open** |
+| 0.11 | Complete the security review of the untrusted-input surfaces: vsock 1024/2375/2376/2377/2378/2381/2382 and the MCP server (2379 and 2380 were removed — 2380 in `51dc543`, 2379 with the rest of the publish-all path on 2026-08-04) | **open — treat as unreviewed** |
 
 **0.10 is not optional polish.** Every serious error in the last two days came from trusting a name
 over its contents: a daemon at the right path with an old inode mapped, an initrd predating its own
@@ -118,7 +118,7 @@ would hurt most:
 1. `VMManager.swift` (2,097 LOC) — no test boots or restores a VM.
 2. `MorbDiskGrowth` journal — no test; it mutates a 68 GB disk image.
 3. Live-share transport + both guest modules (~1,850 LOC, self-described "authority boundary").
-4. `PublishAllPortAllocator` + guest `publish_all.rs` — untested on both sides.
+4. ~~`PublishAllPortAllocator` + guest `publish_all.rs`~~ — moot, both deleted 2026-08-04 (TECH-1); the replacement port-lease channel already has unit tests on both sides.
 5. The vsock relay's half-close, backpressure and cancellation behaviour under load.
 
 ---
@@ -129,7 +129,7 @@ Cheap, and it protects everything else.
 
 | # | Item |
 | --- | --- |
-| 2.1 | Retract or qualify **"unmodified upstream dockerd"** in README, site, comparison, architecture, parity, roadmap. It is false: the Moby patch adds 174 lines and `mkinitramfs.sh` hard-fails without it. |
+| 2.1 | ~~Retract "unmodified upstream dockerd".~~ **Done 2026-08-04, but by making the claim TRUE rather than by retracting it.** It was false while the ~174-line Moby patch existed; TECH-1 deleted the patch, so `dockerd` and `containerd` are now genuinely unmodified upstream and the original wording is correct again. Note the claim was retracted across ~26 sites on 08-03 and then restored on 08-04 — a two-step that is only defensible because the *code* changed in between. Verified: `strings dist/guest-bin/dockerd \| grep -c morbstack` → 0. | **done** |
 | 2.2 | Collapse the six overlapping status documents into one generated from a machine-checkable source. |
 | 2.3 | Ship `scripts/fetch-scan-tools.sh` or stop referencing it five times — `morb scan` cites a file that does not exist. |
 | 2.4 | Resolve `.local` vs `.test`: `domains.md:37` chose `.test`, `MorbLocalDomain.swift:17` hardcodes `morb.local`. |

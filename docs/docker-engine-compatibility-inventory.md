@@ -61,7 +61,7 @@ copy and diagnostics:
 | `POST /containers/create` | Intercepted only when the bounded preflight can read a fixed-length JSON create request. Bind-source policy and published-port policy can reject it before forwarding; all other create framing stays raw relay. | Container, bind-mount, port, and malformed/request-framing scenarios below. |
 | `POST /containers/{id}/start` and `/restart` | A bodyless request may be observed to activate a held fixed-port TCP/UDP lease, or an exact full-ID stopped container may have a bounded inspect recovery before relay. Name/prefix identifiers, bodies, and unsupported forms remain raw relay. | Start/restart, failed start, restart, VM-stop recovery, name/prefix, and keep-alive scenarios. |
 | `-p` published ports | Phase 1 has source-level support for compatible fixed TCP/UDP and bounded dynamic TCP/IPv4-UDP create shapes. It reserves the complete real Mac loopback listener/socket set before a successful create can be returned. Docker CLI `create -p` and `run -p` share that create shape; `create` retains an inactive held lease until a later start. Exact coverage and gaps are in [dynamic-port-allocation.md](dynamic-port-allocation.md). | The `-p` matrix in that document plus clean-profile CP-04 and CP-06. Until then it is **implemented pending live acceptance**, not established drop-in parity. |
-| `-P` / `PublishAllPorts` | Kept outside the bounded request-rewrite path, but source-implemented through the version-pinned Moby patch, guest broker, and host allocator. The patched Engine resolves its own effective exposed-port set at start and asks the host to hold the complete supported TCP/UDP set. | Guest image/bundle inclusion and the full `-P` acceptance matrix in [the source-level contract](#publish-all--p-source-level-contract). Until then this is **implemented pending live acceptance**, not established drop-in parity. |
+| `-P` / `PublishAllPorts` | Kept outside the bounded request-rewrite path; served by the unmodified upstream Engine's own `--userland-proxy-path` hook instead of a request rewrite. The Engine resolves its own effective exposed-port set at start and execs Morbstack's userland-proxy wrapper once per resulting binding; the wrapper leases the Mac endpoint from the host over vsock before the Engine lets the container start succeed. | The full `-P` acceptance matrix in [the source-level contract](#publish-all--p-source-level-contract). Until it runs, this is **implemented pending live acceptance** (in progress 2026-08-04), not established drop-in parity. |
 | Host bind mounts on create | An interceptable request is checked against the running VM's declared/attached shared paths. An unshared, escaping, unmounted, nonabsolute, or required-missing bind source gets a Docker-style pre-create error. Exact guest Docker-socket sources (`/var/run/docker.sock` and `/run/docker.sock`) are intentionally passed to the guest without a Mac share check for Docker-outside-of-Docker/Dev Containers. Engine-owned malformed/unknown grammar remains with `dockerd`. | Valid `-v` and `--mount`, missing source, symlink escape, unshared source, share remount, Compose, Dev Containers workspace, and Docker-socket fixtures. |
 
 The fixed-length dynamic create transaction is intentionally narrow: it rejects
@@ -163,39 +163,54 @@ must be reviewed at the exact Moby tag bundled in the candidate, not only at `ma
 [Moby create/image resolution](https://github.com/moby/moby/blob/master/daemon/create.go),
 and [Moby network port-map expansion](https://github.com/moby/moby/blob/master/daemon/network.go).
 
-The version-pinned source implementation follows this boundary: the patch at
-`guest/moby-patches/0001-morbstack-publish-all-host-allocator.patch` runs after
-Moby has expanded the effective port map; `guest/morbinit/src/publish_all.rs` brokers
-the per-container request on vsock 2379; and the host
-`PublishAllPortAllocator`/`PortForwarder` holds and releases the full TCP/UDP set.
-It deliberately leaves `HostConfig.PublishAllPorts` intact so Moby can reallocate on a
-later start. This is source-level integration only: the guest image and signed bundle
-have not been verified to include it, and no live Docker/VM acceptance has run.
+The source implementation follows this boundary without touching the Engine at all:
+Morbstack ships the unmodified upstream Engine and starts it with
+`--userland-proxy-path=/usr/local/bin/morbstack-docker-proxy` (a multi-call symlink
+to `morbinit`, `guest/morbinit/src/proxy_wrapper.rs`) — a stock dockerd flag, the
+same hook Docker Desktop's vpnkit uses. Stock dockerd execs that wrapper once per
+published port, *after* it has already expanded the effective port map (including
+`-P`/`EXPOSE`-derived allocations) and *before* it lets the container start succeed.
+The wrapper connects to the host over the guest-initiated vsock port-lease channel
+(host port 2382, `mac/Sources/MorbstackKit/GuestPortLease.swift`), asks it to bind
+the Mac-side endpoint, and only then execs the stock `docker-proxy` with dockerd's
+original argv — so the in-guest listener and fd-3 readiness signal are unmodified
+upstream behavior throughout. Lease lifetime equals that stock proxy process's
+lifetime (EOF releases the Mac listener), so `HostConfig.PublishAllPorts` never needs
+touching and the Engine reallocates on its own on a later start, exactly as it would
+natively. This is source-implemented and unit-tested on both sides; the guest image
+and signed bundle have not been verified to include it, and live Docker/VM acceptance
+is in progress (2026-08-04).
 
-A correct normal-CLI `-P` implementation has this non-negotiable boundary:
+A correct normal-CLI `-P` implementation has this non-negotiable boundary. The
+wrapper design satisfies most of these by construction rather than by bookkeeping,
+because it delegates to the real Engine instead of reimplementing any part of its
+decision:
 
-1. **Resolve where the Engine resolves.** The guest Engine integration must use the
-   exact immutable image/config result that its create operation will persist. A
-   proxy-side image inspect can race a mutable tag and does not establish this fact.
-2. **Allocate before persistence.** For every eligible effective publication, ask a
-   host allocator to select and hold a real Mac loopback endpoint before the Engine
-   persists the matching binding. The guest Engine must receive the selected concrete
-   mapping atomically in its create path.
-3. **Preserve Docker's effective-port semantics.** Merge image `EXPOSE`, explicit
-   `--expose`, and explicit `-p` with Docker's own precedence. Do not clear
-   `PublishAllPorts` and materialize a guessed map: that changes image-reference and
-   later lifecycle semantics.
-4. **Make lifecycle ownership explicit.** Create failure, client disconnect, start
-   failure, destroy, VM shutdown, Engine restart, stop, start, and restart need an
-   atomic release/rebind protocol. Do not assume a `-P` allocation persists across
-   Docker lifecycle transitions without observing the selected Engine's behavior.
-5. **Fail before side effects for unsupported protocols/forms.** Initial support must
-   either have a real host allocator for TCP, UDP, and SCTP as the effective image
-   requires, or reject the complete operation before guest side effects. It must not
-   claim `-P` while exposing only an arbitrary TCP subset.
-6. **Return ordinary Engine-visible truth.** `docker port`, `docker inspect`, the
-   create/start responses, host reachability, and the forwarder ledger must agree on
-   exactly the same mappings.
+1. **Resolve where the Engine resolves.** Satisfied trivially: the unmodified
+   upstream Engine resolves the image/config itself and the wrapper never inspects
+   or re-derives that result — it only reacts to the concrete binding dockerd
+   already decided on.
+2. **Allocate before persistence.** dockerd execs the wrapper per binding after
+   expanding the effective port map but before it lets the container start
+   succeed; the wrapper must obtain the host's `OK` before it execs the stock
+   `docker-proxy`, so the Mac endpoint is held before the Engine's own start
+   response can report success.
+3. **Preserve Docker's effective-port semantics.** Satisfied trivially: nothing
+   clears or reinterprets `HostConfig.PublishAllPorts`; the Engine's own
+   `EXPOSE`/`--expose`/`-p` precedence is untouched.
+4. **Make lifecycle ownership explicit.** Satisfied by construction, not by a
+   separate release protocol: lease lifetime equals the stock `docker-proxy`
+   process's lifetime, so create failure, client disconnect, start failure,
+   destroy, stop, start, restart, and Engine/VM restart all resolve to "the
+   proxy process exited, so the lease ends" with nothing to reconcile.
+5. **Fail before side effects for unsupported protocols/forms.** TCP and UDP go
+   through the lease; SCTP passes straight through to the stock guest-side proxy
+   with no Mac listener (matches Docker Desktop's own behavior, a documented
+   residual gap, not a silent claim of support).
+6. **Return ordinary Engine-visible truth.** Satisfied trivially: `docker port`,
+   `docker inspect`, and the create/start responses come straight from the
+   unmodified Engine; only host reachability and the forwarder ledger are
+   Morbstack's own state, and they are driven directly by the same lease grant.
 
 The first acceptance matrix for `-P` must cover, at minimum: image-provided TCP,
 UDP, and SCTP exposures; explicit `--expose`; explicit `-p` precedence; multiple

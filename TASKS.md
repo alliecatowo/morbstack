@@ -79,8 +79,15 @@ records with mDNSResponder **is** Bonjour, and `LocalOnly` registration keeps th
 resolution (detect and report — see [orbstack#2274](https://github.com/orbstack/orbstack/issues/2274)).
 **Rewrote:** DIF-4, DOC-4.
 
-### SP-4 · Remove the Docker-to-build-Docker bootstrap · `decided`
-**Decision:** [docs/design/ENGINE-BUILD-DECISION.md](docs/design/ENGINE-BUILD-DECISION.md). Publish
+### SP-4 · Remove the Docker-to-build-Docker bootstrap · `decided` — **superseded by TECH-1 (2026-08-04)**
+**Superseded:** TECH-1 decided in favor of the userland-proxy wrapper, which needs no downstream-patched
+engine at all — the release-artifact question this spike answered no longer applies, because there is no
+non-upstream engine artifact to publish, sign, or fetch. `build-engine.yml`,
+`scripts/build-morbstack-dockerd.sh`, `scripts/fetch-moby-source.sh`, and the guest patch are all deleted.
+Kept below for the historical record.
+**Original decision (2026-08-03, no longer current):**
+[docs/design/ENGINE-BUILD-DECISION.md](docs/design/ENGINE-BUILD-DECISION.md) (now a superseded stub).
+Publish
 `morbstack-dockerd` as a pinned, SHA-256-verified GitHub Release artifact built by a new
 `build-engine.yml` workflow on a Linux runner (ships Docker/Buildx natively — the `macos-26` runners
 CI otherwise uses do not), fetched by `scripts/fetch-guest-assets.sh` exactly like every other
@@ -103,15 +110,16 @@ host-router design SP-2/SP-3 rejected; `MorbLocalDomain.Name` kept + tested for 
 `TarLite` now feeds a FILES column in the `morb migrate volumes` report, with ustar tests.
 **Rewrites:** DIF-6, DIF-13, MOD-1.
 
-### SP-6 · `-P` session persistence root cause · `in-flight` (source correction; runtime pending)
-**Deliverable:** prove direct and restart-policy allocation ownership over a real guest/host lifecycle.
-`3960359` makes direct one-shot allocator sessions close their guest fd at the observed
-outcome, installs a durable owner before direct lifecycle admission for restart-policy
-containers, and serializes direct/recovery registration by immutable container ID. It is a
-source correction, not a result: prove normal start/restart, automatic policy restart on a
-keep-alive API connection, direct/recovery contention, and VM restart against the rebuilt
-candidate before closing this spike.
-**Rewrites:** EN-2.
+### SP-6 · `-P` session persistence root cause · `closed` — **moot by construction (2026-08-04)**
+**Closed as moot.** TECH-1 deleted the publish-all allocator and its guest fd/session lifecycle entirely —
+there is no longer a per-container broker session to own, register, or contend over. The failure class
+this spike existed to root-cause (a fd/session whose ownership could be lost or double-registered across
+direct and restart-policy allocation paths) is eliminated by construction under the wrapper: a port lease
+is a single vsock connection held open by the stock `docker-proxy` process, so lease lifetime equals
+proxy process lifetime, and EOF is the only release signal. Nothing survives a stop/start/restart/VM-restart
+to lose track of. The original source correction (`3960359`) is now dead code, deleted with the rest of
+the publish-all path. See `docs/design/PATCH-FREE-PUBLISH-ALL.md`.
+**Rewrites:** EN-2 (rescoped to prove the wrapper, not this spike's mechanism).
 
 ### SP-7 · Status-documentation consolidation · `open`
 **Deliverable:** a design for one generated status document and the machine-checkable source it comes
@@ -138,7 +146,7 @@ the author.
 | ID | Ticket | Deliverable | State |
 | --- | --- | --- | --- |
 | EN-1 | **Docker proxy request framing** | The 2026-08-03 candidate framed every request until a legitimate hijack, rejected too-large and ambiguous bodies fail-closed, returned `400` for fresh and second keep-alive creates, and completed stream/BuildKit/Compose regressions. `33fd00e` and `f79a090` changed this boundary after that candidate, so current-source rebuilt-guest acceptance remains required. See `docs/audit/PROXY-FRAMING.md`. | `in-flight` (current-candidate acceptance) |
-| EN-2 | `-P` across stop/start/restart | `3960359` is source-covered for direct/durable session ownership and direct-FD retirement; prove TCP/UDP reachability, automatic restart policy on a keep-alive client, direct/recovery contention, and VM restart after rebuilding the candidate. | `in-flight` (SP-6 runtime acceptance) |
+| EN-2 | `-P` across stop/start/restart | Rescoped by TECH-1/SP-6: prove `-P` under the userland-proxy wrapper — TCP/UDP reachability, stop/start/restart, restart-policy recovery, and VM restart — against the current wrapper implementation (`guest/morbinit/src/proxy_wrapper.rs`, `mac/Sources/MorbstackKit/GuestPortLease.swift`). | `open`; runtime acceptance in progress 2026-08-04 |
 | EN-3 | Bind mounts `/etc`, `/var`, unshared roots | The 2026-08-03 candidate recorded refusals for `/etc`, `/var`, `/Library`, and symlink traversal, plus working `/tmp`, `/private/tmp`, and `$HOME` bind writes. `33fd00e` then changed bind-admission and relay behavior; rebuild the guest and rerun this exact matrix before assigning those results to the current source. See `docs/audit/PROXY-FRAMING.md`. | `in-flight` (post-`33fd00e` rebuilt-guest acceptance) |
 | EN-4 | `morb disk grow` | Fix `keyNotFound: 'device'` host/guest contract mismatch. Image grew to 72 GiB while the guest filesystem stayed 62.4 G, and a **refused** grow still mutated configured capacity. Add the journal tests it never had. | `in-flight` (`codex/parity-en4-disk-grow`) |
 | EN-5 | Reclaim the 72 GiB `disk.img` | Safe reclamation path for the test artifact left on the dev machine | `open` |
@@ -160,8 +168,8 @@ the author.
 | OPS-5 | shellcheck locally | Not installed; CI shellchecks but developers cannot | `open` |
 | OPS-6 | `.gitignore` / tracked `dist/` audit | 7 tracked files under `dist/`; confirm intent | `open` |
 | OPS-7 | Build warnings | `DockerAPI.swift:65` and `UDPListener.swift:101` form `UnsafeRawPointer` to a generic `T` in socket-option code — real, not cosmetic | `open` |
-| OPS-8 | **Security review of untrusted-input surfaces** | vsock 1024/2375/2376/2377/2378/2379/2381 and the MCP server. (2380, the listener probe, was DELETED in `51dc543` together with its host side; four docs still described it as live, which would have sent this review at a port that does not exist.) **Attempted three times, blocked by a model-side safety classifier every time. Treat as UNREVIEWED.** Needs a fresh session or an explicit permission rule. Gates REL-5. | `blocked` (tooling) |
-| OPS-9 | CI guest-image job | Per SP-4: delete the "Require Docker Buildx" failing step, add `fetch-guest-assets.sh --morbstack-dockerd-only` (new flag) to download the pinned `morbstack-dockerd` Release asset instead of building it on the macOS runner | `open` |
+| OPS-8 | **Security review of untrusted-input surfaces** | vsock 1024/2375/2376/2377/2378/2381/2382 and the MCP server. (2379, the publish-all allocator, and 2380, the listener probe, are both DELETED — 2380 in `51dc543`, 2379 with the rest of the publish-all path in TECH-1 on 2026-08-04. New surface added by TECH-1: the 2382 host-side port-lease listener's request-line parser — `GuestPortLease.parseRequest` in `mac/Sources/MorbstackKit/GuestPortLease.swift` — and the wrapper's reply parser — `parse_reply`/`parse_invocation` in `guest/morbinit/src/proxy_wrapper.rs`. Both parse guest-controlled input and need review.) **Attempted three times, blocked by a model-side safety classifier every time. Treat as UNREVIEWED.** Needs a fresh session or an explicit permission rule. Gates REL-5. | `blocked` (tooling) |
+| OPS-9 | CI guest-image job | Per TECH-1: no rewrite needed — the guest-image job needs no Docker/buildx and no engine-artifact release fetch, because Morbstack ships unmodified upstream dockerd fetched like every other pinned third-party guest binary. `build-engine.yml` and the "Require Docker Buildx" step are deleted. Remaining work is just confirming the job passes on hosted runners. | `open` |
 
 ## Tests — coverage runs backwards from risk
 
@@ -170,7 +178,7 @@ the author.
 | TST-1 | `VMManager.swift` (2,097 LOC) | No test boots or restores a VM | `open` |
 | TST-2 | `MorbDiskGrowth` journal | No test; it mutates a 68 GB disk image | `open` |
 | TST-3 | Live-share transport + both guest modules | ~1,850 LOC, self-described "authority boundary", zero tests | `open` |
-| TST-4 | `PublishAllPortAllocator` + guest `publish_all.rs` | Untested on both sides | `open` |
+| TST-4 | ~~`PublishAllPortAllocator` + guest `publish_all.rs`~~ — moot, both deleted 2026-08-04 (TECH-1) | The publish-all allocator this ticket targeted no longer exists; its replacement, the port-lease channel (`GuestPortLease.swift` / `proxy_wrapper.rs`), already has unit tests on both sides (`GuestPortLease.parseRequest`, `proxy_wrapper.rs`'s `parse_invocation`/`parse_reply`/`lease_line` tests). Superseding coverage question, if any gap remains, belongs to EN-2. | `done` (moot) |
 | TST-5 | vsock relay under load | Half-close, backpressure, cancellation | `open` |
 | TST-6 | Keep-alive regression test | Assert the **second** request on a reused connection is inspected. Its absence is why EN-1 shipped. Focused source coverage exists; the recorded runtime result belongs to the dated matrix and must be rerun with EN-1. | `done` (source coverage; current runtime pending) |
 
@@ -208,7 +216,7 @@ the author.
 
 | ID | Ticket | Deliverable | State |
 | --- | --- | --- | --- |
-| REL-1 | `scripts/release.sh`, `docs/RELEASING.md`, `.github/workflows/release.yml` | All referenced by name as the source of truth; **none exist**. Shape now set by SP-4. | `open` |
+| REL-1 | `scripts/release.sh`, `docs/RELEASING.md`, `.github/workflows/release.yml` | All referenced by name as the source of truth; **none exist**. Shape now set by TECH-1, not SP-4: there is no non-upstream engine artifact to build or release, so drop the engine-artifact shape from these notes entirely. Release contents are all stock, pinned upstream artifacts (dockerd, containerd, the Docker CLI, Buildx, etc.) plus Morbstack's own binaries (`morbstackd`, `morb`, the guest image, `morbstack-docker-proxy`). | `open` |
 | REL-2 | Notarization | Not one `notarytool` call in the repo | `blocked` (SP-9) |
 | REL-3 | Homebrew cask | | `blocked` (SP-9) |
 | REL-4 | Sparkle update channel | `docs/sparkle.md` referenced and absent | `blocked` (SP-9) |
@@ -239,21 +247,20 @@ for a one-maintainer open-source project.
 
 Spikes first — each delivers a decision or a measured result, not code.
 
-### TECH-1 · Patch-free `-P` via `--userland-proxy-path` · `open` (spike)
-**Deliverable:** a decision — keep the 174-line Moby patch, or replace it with a Morbstack userland-proxy
-wrapper. `--userland-proxy-path` is a stock dockerd flag (verified against today's dockerd reference);
-Docker Desktop's vpnkit uses exactly this hook — dockerd execs the proxy per published port with
-`-proto/-host-ip/-host-port/-container-ip/-container-port`, the proxy asks the host to bind, and
-`EADDRINUSE` propagates back so container start fails honestly (verified, vpnkit `docs/ports.md`). A
-wrapper that reserves the Mac port over the existing vsock 2379 broker and then provides the guest-local
-listener appears to preserve `docker port`/`inspect` agreement, restart reallocation, and the fail-closed
-bar, with **unmodified upstream dockerd**. Must pin in Moby 29.x source: portmapper's retry-on-proxy-failure
-behavior for dynamic allocations, and whether the wrapper can wrap/exec stock `docker-proxy`. Contrast with
-Lima's reactive `/proc/net/tcp` discovery (patch-free but fail-open — rejected reasoning must be recorded
-either way). If the wrapper wins: delete the patch, retire the Docker-to-build-Docker bootstrap, and
-collapse SP-4/OPS-9 and the `build-engine.yml` plan; evaluate how much create-preflight TCP lease machinery
-it obsoletes (bind-mount admission stays regardless).
-**Rewrites:** SP-4, SP-6, OPS-9, REL-1, EN-1/EN-2 scope, `docs/design/ENGINE-BUILD-DECISION.md`.
+### TECH-1 · Patch-free `-P` via `--userland-proxy-path` · `decided` / `done` (2026-08-04)
+**Decision: the wrapper won.** The 174-line downstream Moby patch, the scripts and CI job that built a
+patched `morbstack-dockerd`, and the vsock 2379 publish-all allocator protocol are all deleted. Morbstack
+now ships the unmodified upstream dockerd (stock static Docker 29.7.1 binaries, archive-hash-pinned).
+`--userland-proxy-path` is a stock dockerd flag — the same hook Docker Desktop's vpnkit uses — and pinning
+it against Moby v29.7.1 source confirmed the contract this decision needed: dockerd execs the configured
+proxy once per published port, after resolving the effective port set (including `-P`/`EXPOSE` dynamic
+allocations), and fails the container start with no retry if the proxy reports failure on its fd-3 status
+pipe. Morbstack's wrapper (`guest/morbinit/src/proxy_wrapper.rs`) leases the Mac-side endpoint from the
+host over a new guest-initiated vsock channel (host port 2382) before exec'ing the stock `docker-proxy`,
+giving fail-closed semantics without any non-upstream engine artifact to build, sign, or release. Full
+rationale, the verified Moby contract, and the wire protocol: `docs/design/PATCH-FREE-PUBLISH-ALL.md`.
+**Rewrote:** SP-4 (superseded), SP-6 (closed as moot), OPS-9, REL-1, EN-1/EN-2 scope,
+`docs/design/ENGINE-BUILD-DECISION.md` (now a superseded stub).
 
 ### TECH-2 · Hot-reload foundation ruling · `open` (spike)
 **Deliverable:** a written ruling that the `fchmod(2)`→`IN_ATTRIB` bridge is a best-effort accelerant, not
@@ -287,7 +294,7 @@ suspend-to-zero with ~500ms resume unlocks — the single biggest lifecycle leve
 | TECH-5 | Drive the memory balloon | `VMManager` attaches the balloon device but never sets `targetVirtualMachineMemorySize`. Shrink on idle, restore on wake; measure real host RSS reclaim with MorbBench. | `open` |
 | TECH-6 | Sleep/wake + clock correctness | Zero power-event handlers exist and `clock_sync` is observe-only. Register `NSWorkspace` wake notifications; implement guest `clock_settime` (CAP_SYS_TIME) behind the existing MRB0 message; acceptance: guest clock within tolerance after a forced overnight-sleep test, TLS-in-container works on wake. | `open` |
 | TECH-7 | Host disk-pressure policy | Nothing watches Mac free space while sparse `disk.img` grows. Define and implement low-space detection → honest warning/pause before guest I/O errors. | `open` |
-| TECH-8 | Shared framing core for the 8 vsock protocols | Factor the line/frame parsing primitives shared by MRB0, stream/datagram-dial, payload-install, publish-all, probe, live-share so OPS-8 reviews one hardened core plus thin grammars. No multiplexing — §3.1's reasoning stands. | `open` |
+| TECH-8 | Shared framing core for the vsock protocols | Factor the line/frame parsing primitives shared by MRB0, stream/datagram-dial, payload-install, live-share, and the port-lease channel (2382, replacing the deleted publish-all/probe protocols as of 2026-08-04) so OPS-8 reviews one hardened core plus thin grammars. No multiplexing — §3.1's reasoning stands. | `open` |
 | TECH-9 | Crypto/parser assurance in morbinit | Hygiene is good (published SHA-256 vectors, constant-time HMAC compare — verified). Extend to full NIST CAVP vector sets; differential-fuzz `jsonlite` and the line protocols against reference implementations host-side (zero-crate rule constrains the shipped binary, not tests). | `open` |
 | TECH-10 | "Proper" fault-drill matrix | Scripted drills for P1–P7 in TECHNOLOGY-AUDIT.md: VM panic → recovery policy, kill -9 daemon mid-pull, torn `disk.img`/`config.toml`, guest disk full, cross-version daemon/guest matrix, concurrent CLI storm. Each drill's outcome recorded and surfaced by `morb doctor`. | `open` |
 | TECH-11 | Quarterly `apple/container` watch | One-page delta per release, focused on `container machine` (the only credible threat vector) and the kernel recipe (input to the btrfs kernel fork). | `open` |
@@ -299,7 +306,7 @@ architecture audit may file overlapping `ARCH-` tickets; merge rather than dupli
 
 | ID | Ticket | Deliverable | State |
 | --- | --- | --- | --- |
-| CONC-1 | **Publish-all vsock fd double-close** | `Session.deinit` closed `fd` unconditionally while `beginPublishAllLifecycleSession`'s `catch` closed the same `fd` explicitly, so every handshake failure closed one descriptor twice. Between the two closes that number can already belong to an unrelated `accept()`/vsock connect on another queue, so the second close severs a live connection elsewhere. Fixed: `closeOwnedDescriptor()` guard, session constructed outside the `do` so the failure path closes exactly once. **Same family as SP-6** — an owned fd with two uncoordinated close paths. | `done` |
+| CONC-1 | **Publish-all vsock fd double-close** | `Session.deinit` closed `fd` unconditionally while `beginPublishAllLifecycleSession`'s `catch` closed the same `fd` explicitly, so every handshake failure closed one descriptor twice. Between the two closes that number can already belong to an unrelated `accept()`/vsock connect on another queue, so the second close severs a live connection elsewhere. Fixed: `closeOwnedDescriptor()` guard, session constructed outside the `do` so the failure path closes exactly once. **Same family as SP-6** — an owned fd with two uncoordinated close paths. **2026-08-04:** the code this fixed was deleted with the rest of the publish-all path under TECH-1; the fix and this ticket are now historical record only, superseded rather than reverted. | `done` |
 | CONC-2 | Stale-generation probe overwrites fresh diagnostics | `VMManager.beginControlProbe` calls `noteGuestPinged`/`noteDockerDataOnDisk`/`noteGuestShares` on the probe queue **before** the `generation == probeGeneration` guard (`VMManager.swift:1661-1684`). A probe from a superseded boot returning `.ready` after `invalidateControlReadiness()` clobbers the freshly-reset snapshots, so `morb status`/`morb doctor` can report the wrong boot's data. Fix: move the three `note*` calls inside the generation-checked block — they are already duplicated there. | `open` |
 | CONC-3 | `whenGuestPowersOff` registration races `guestDidStop` | Both are scheduled onto the same serial queue from different triggers with no ordering guarantee (`VMManager.swift:936-947` vs `:2073-2081`). Losing the race burns the full 5 s `guestPowerOffTimeout` on every clean stop where the guest powers off faster than the control-ack round trip — contradicting the comment at `:2078` that says releasing early "saves the five seconds its deadline would otherwise burn". | `open` |
 | CONC-4 | `Daemon.shutdown()` bypasses `forwarderQueue` | `Daemon.swift:1300` calls `forwarder.stop()` directly on `controlQueue`, while every other call site funnels through `forwarderQueue` precisely so "a fast running → stopped → running flap cannot reorder into a stop that lands after the start it preceded" (`Daemon.swift:109-116`). Currently masked by the `exit(0)` shortly after; becomes live the moment shutdown grows a longer tail. | `open` |

@@ -1,5 +1,9 @@
 # Technology foundations audit
 
+> **Staleness note (2026-08-04):** Bet 6 below (patching Moby for the `-P` allocator)
+> was decided by TECH-1 — see the dated resolution note at the end of that section.
+> Everything else in this audit is unaffected.
+
 **Date:** 2026-08-03. **Scope:** is the technology Morbstack is built on sound, and what would
 make it genuinely better than Docker Desktop and OrbStack rather than merely comparable.
 Companion to [MASTER-AUDIT.md](MASTER-AUDIT.md) (what exists) and
@@ -315,6 +319,15 @@ disciplined engineering against a real problem — but it is the expensive answe
 the ecosystem answers cheaply, and the repo currently contains no recorded reasoning for why
 the cheap answers were rejected. Either that reasoning gets written (and survives contact
 with the vpnkit precedent), or the patch goes.
+
+> **Resolved 2026-08-04.** TECH-1 decided for the wrapper, exactly as sketched above. The
+> Moby patch, `build-morbstack-dockerd.sh`, `fetch-moby-source.sh`, `build-engine.yml`, and
+> the vsock 2379 publish-all allocator protocol are all deleted. Morbstack now ships
+> unmodified upstream `dockerd`, started with `--userland-proxy-path` pointed at a Morbstack
+> wrapper (`guest/morbinit/src/proxy_wrapper.rs`) that leases the Mac endpoint from the host
+> over a new guest-initiated vsock channel (host port 2382) before exec'ing the stock
+> `docker-proxy`. See `docs/design/PATCH-FREE-PUBLISH-ALL.md` for the full design and the
+> verified Moby v29.7.1 contract this decision rests on.
 
 ### Bet 7 — Zero-dependency Rust PID 1
 

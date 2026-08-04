@@ -417,6 +417,7 @@ final class AppModel {
         if let newImages { images = newImages }
         if let newVolumes { volumes = newVolumes }
         if let newNetworks { networks = newNetworks }
+        mergeVolumeUsageFromDisk()
 
         resolvePendingTourContainer()
 
@@ -456,6 +457,20 @@ final class AppModel {
         guard engine.isRunning else { return }
         if let usage = await fetch({ try await self.client.diskUsage() }) {
             disk = usage
+            mergeVolumeUsageFromDisk()
+        }
+    }
+
+    /// `GET /volumes` never reports usage, so Size and In use on the Volumes screen
+    /// come from the most recent `/system/df` scan. Merged rather than replaced: a
+    /// volume the scan has not seen keeps `nil`, which the UI renders as unknown, not
+    /// as zero.
+    private func mergeVolumeUsageFromDisk() {
+        guard let usage = disk?.volumeUsage, !usage.isEmpty else { return }
+        for index in volumes.indices {
+            guard let data = usage[volumes[index].name] else { continue }
+            if volumes[index].size == nil { volumes[index].size = data.size }
+            if volumes[index].refCount == nil { volumes[index].refCount = data.refCount }
         }
     }
 

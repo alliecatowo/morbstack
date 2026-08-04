@@ -268,6 +268,20 @@ public final class PortForwarder {
         let generation: Int
     }
 
+    /// One Mac endpoint held for a guest userland-proxy process.
+    ///
+    /// `tcpListener == nil && !ownsUDPForward` marks an *adopted* lease: the
+    /// endpoint was already held by a fixed create/start lease (explicit `-p`
+    /// goes through the create preflight *and* execs the wrapper), so the
+    /// fixed lifecycle keeps ownership and releasing this record is a no-op.
+    private struct GuestProxyLeaseRecord {
+        var binding: DockerPortBinding
+        let endpoint: DockerHostEndpoint
+        let transport: GuestPortLease.Transport
+        let tcpListener: TCPListener?
+        let ownsUDPForward: Bool
+    }
+
     private struct LeaseRecord {
         let lease: PortLease
         var tcpListeners: [DockerHostEndpoint: TCPListener]
@@ -283,9 +297,6 @@ public final class PortForwarder {
         var containerID: String?
         var startClaimed = false
         var isForwarding = false
-        /// `PublishAllPorts` allocations belong to one Engine start only. Moby keeps
-        /// the config dynamic, so a later stop must close rather than pause them.
-        var releaseOnStop = false
     }
 
     enum PortLeaseError: LocalizedError {
@@ -352,14 +363,20 @@ public final class PortForwarder {
     /// matching start handoff (or container destruction/daemon stop).
     private var leases: [UUID: LeaseRecord] = [:]
     private var leaseByContainerID: [String: UUID] = [:]
-    /// Persistent host sessions for `-P` containers owned by Engine restart
-    /// policy. They survive individual container restarts but are discarded with
-    /// the VM generation, then rebuilt from the Engine's persisted metadata.
-    private var publishAllRestartSessions: [String: PublishAllPortAllocator.Session] = [:]
-    /// One-shot direct lifecycle sessions.  They are kept in this ledger until
-    /// their observed Docker reply, so recovery cannot register a second guest
-    /// route for the same immutable container ID while the request is in flight.
-    private var publishAllDirectSessions: [String: PublishAllPortAllocator.Session] = [:]
+    /// Mac endpoints held on behalf of guest userland-proxy processes (the
+    /// `morbstack-docker-proxy` wrapper stock dockerd execs per published
+    /// port). Keyed by an opaque token owned by ``GuestPortLeaseServer``;
+    /// released when the wrapper's lease connection reaches EOF.
+    private var proxyLeases: [UInt64: GuestProxyLeaseRecord] = [:]
+    private var proxyLeaseSequence: UInt64 = 0
+    /// Endpoints the proxy leases own outright, per transport. The event
+    /// reconciliation must neither close nor re-open these: their lifecycle
+    /// is the guest proxy process, not the container snapshot.
+    private var proxyLeasedTCP: [DockerHostEndpoint: UInt64] = [:]
+    private var proxyLeasedUDP: [DockerHostEndpoint: UInt64] = [:]
+    /// UDP proxy-lease forwards, separate from `udpForwards` so the snapshot
+    /// diff can never touch them, but served by the same flow machinery.
+    private var proxyUDPForwards: [DockerHostEndpoint: UDPForward] = [:]
     private var relays: [UInt64: FDRelay] = [:]
     private var relaySequence: UInt64 = 0
     /// Live forwarded connections, counted **per generation**.
@@ -410,7 +427,13 @@ public final class PortForwarder {
         defer { lock.unlock() }
         let tcp = forwards.keys.sorted(by: Self.endpointOrder).compactMap { forwards[$0]?.binding.description }
         let udp = udpForwards.keys.sorted(by: Self.endpointOrder).compactMap { udpForwards[$0]?.binding.description }
-        return tcp + udp
+        // Owned proxy leases only: adopted ones are already visible through
+        // the fixed lease's own forward entry.
+        let proxied = proxyLeases.values
+            .filter { $0.tcpListener != nil || $0.ownsUDPForward }
+            .sorted { Self.endpointOrder($0.endpoint, $1.endpoint) }
+            .map(\.binding.description)
+        return tcp + udp + proxied
     }
 
     private static func endpointOrder(_ lhs: DockerHostEndpoint, _ rhs: DockerHostEndpoint) -> Bool {
@@ -499,88 +522,6 @@ public final class PortForwarder {
         return reservation
     }
 
-    /// Reserves the complete effective `docker -P` set reported by patched Moby.
-    /// The Unix/vsock bridge has already proved the immutable container ID; all
-    /// entries are held as one transaction and are released on the next stop so Moby
-    /// can allocate a fresh set on restart.
-    func reservePublishAllPorts(
-        containerID: String,
-        requests: [DockerPublishAllPortRequest]
-    ) throws -> [Int] {
-        guard DockerPortPublicationPreflight.isFullContainerID(containerID),
-              !requests.isEmpty,
-              requests.count <= DockerPortPublicationPreflight.maximumSynchronousFixedPortBindings
-        else {
-            throw PortLeaseError.unavailable("invalid Docker publish-all allocation request")
-        }
-
-        // Moby reaches this hook only after it has stopped the previous instance.
-        // The Engine event stream is asynchronous, so its `die`/`stop` event may not
-        // have released our old ephemeral lease yet. Retire only a prior `-P` lease
-        // for this same immutable container before atomically choosing its replacement.
-        lock.lock()
-        let previous = leaseByContainerID[containerID].flatMap { identifier in
-            leases[identifier]?.releaseOnStop == true ? identifier : nil
-        }
-        lock.unlock()
-        if let previous {
-            releaseLease(previous, reason: "Moby began a fresh publish-all allocation")
-        }
-
-        var fixedTCP: [DockerExplicitTCPPortBinding] = []
-        var fixedUDP: [DockerExplicitUDPPortBinding] = []
-        var dynamic: [DockerDynamicPortPublication] = []
-        dynamic.reserveCapacity(requests.count)
-        for request in requests {
-            guard let address = DockerHostAddress(dockerHostIP: request.hostIP),
-                  portExposure.permits(address),
-                  (0...65535).contains(request.requestedHostPort),
-                  (1...65535).contains(request.containerPort)
-            else {
-                throw PortLeaseError.unavailable(
-                    "unsupported Docker publish-all host publication; enable local-network port publishing for wildcard or non-loopback addresses")
-            }
-            if request.requestedHostPort == 0 {
-                dynamic.append(DockerDynamicPortPublication(
-                    transport: request.transport,
-                    hostIP: request.hostIP,
-                    hostPort: 0,
-                    containerPort: request.containerPort))
-            } else if request.transport == .tcp {
-                fixedTCP.append(DockerExplicitTCPPortBinding(
-                    hostIP: request.hostIP,
-                    hostPort: request.requestedHostPort,
-                    containerPort: request.containerPort))
-            } else {
-                fixedUDP.append(DockerExplicitUDPPortBinding(
-                    hostIP: request.hostIP,
-                    hostPort: request.requestedHostPort,
-                    containerPort: request.containerPort))
-            }
-        }
-
-        guard case .reserved(let reservation) = try reservePorts(
-            fixedTCP: fixedTCP,
-            fixedUDP: fixedUDP,
-            dynamic: dynamic,
-            releaseOnStop: true)
-        else {
-            throw PortLeaseError.unavailable("publish-all allocation became stale")
-        }
-        guard associate(reservation.lease, withContainerID: containerID) else {
-            abandon(reservation.lease, reason: "publish-all allocation could not be associated with its container")
-            throw PortLeaseError.unavailable("publish-all allocation lost its container identity")
-        }
-        var dynamicPublications = reservation.publications.makeIterator()
-        return try requests.map { request in
-            guard request.requestedHostPort == 0 else { return request.requestedHostPort }
-            guard let publication = dynamicPublications.next() else {
-                throw PortLeaseError.unavailable("publish-all allocation returned the wrong number of ports")
-            }
-            return publication.hostPort
-        }
-    }
-
     /// Rebuilds the complete fixed TCP/UDP lease after VM stop. Recovery is all or
     /// nothing: inspect must prove every retained binding before the host opens one
     /// socket, otherwise the lifecycle request remains an ordinary raw relay.
@@ -637,28 +578,6 @@ public final class PortForwarder {
         }
     }
 
-    /// Inspects an immutable stopped container only to decide whether the
-    /// publish-all host session is needed. The effective endpoint set stays in
-    /// Moby because only Moby has merged image `EXPOSE` metadata at this point.
-    func stoppedContainerUsesPublishAllPorts(
-        containerID: String,
-        timeout: TimeInterval = 5
-    ) -> Bool {
-        guard DockerPortPublicationPreflight.isFullContainerID(containerID) else { return false }
-        let inspectBody: Data
-        do {
-            inspectBody = try getEngineJSON(
-                path: DockerAPIDecoding.containerInspectPath(containerID: containerID),
-                timeout: timeout)
-        } catch {
-            log.info("could not inspect stopped container \(String(containerID.prefix(12))) for publish-all recovery: \(error)")
-            return false
-        }
-        return DockerPortPublicationPreflight.stoppedContainerUsesPublishAllPorts(
-            in: inspectBody,
-            expectedContainerID: containerID)
-    }
-
     /// The one ledger lock covers all fixed TCP/UDP binds and dynamic TCP/UDP
     /// allocation. A failed bind rolls every listener from this request back before
     /// Docker sees a create/start success, so the host never reports a partial lease.
@@ -667,8 +586,7 @@ public final class PortForwarder {
         fixedUDP: [DockerExplicitUDPPortBinding],
         dynamic: [DockerDynamicPortPublication],
         guestDialPort: DockerGuestDialPort = .publishedHostPort,
-        startLeaseAssociation: StartLeaseAssociation? = nil,
-        releaseOnStop: Bool = false
+        startLeaseAssociation: StartLeaseAssociation? = nil
     ) throws -> PortLeaseReservationAttempt {
         let leaseID = UUID()
         var tcpListeners: [DockerHostEndpoint: TCPListener] = [:]
@@ -891,8 +809,7 @@ public final class PortForwarder {
                 lease: lease,
                 tcpListeners: tcpListeners,
                 udpListeners: udpListeners,
-                containerID: startLeaseAssociation?.containerID,
-                releaseOnStop: releaseOnStop)
+                containerID: startLeaseAssociation?.containerID)
             if let startLeaseAssociation {
                 leaseByContainerID[startLeaseAssociation.containerID] = lease.identifier
             }
@@ -957,96 +874,6 @@ public final class PortForwarder {
         record.startClaimed = true
         leases[identifier] = record
         return record.lease
-    }
-
-    /// `PublishAllPorts` cannot use a retained fixed-port start claim: Moby must
-    /// ask the host allocator again for every start/restart, including an immediate
-    /// stop→start before event reconciliation has observed the stop.
-    func requiresPublishAllAllocator(containerIdentifier: String) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        guard DockerPortPublicationPreflight.isFullContainerID(containerIdentifier),
-              let identifier = leaseByContainerID[containerIdentifier],
-              let record = leases[identifier]
-        else { return false }
-        return record.releaseOnStop
-    }
-
-    /// Returns the one host allocator session allowed to route one exact `-P`
-    /// lifecycle request.  Holding the ledger lock across the short registration
-    /// handshake is intentional: guest registration is last-writer-wins, so two
-    /// host callers must never register the same container concurrently.
-    func beginPublishAllLifecycleSession(containerID: String) throws -> PublishAllPortAllocator.Session {
-        guard DockerPortPublicationPreflight.isFullContainerID(containerID) else {
-            throw MorbError.protocolViolation("publish-all requires an immutable container ID")
-        }
-
-        lock.lock()
-        if let session = publishAllRestartSessions[containerID], session.isLive {
-            lock.unlock()
-            return session
-        }
-        if let session = publishAllDirectSessions[containerID], session.isLive {
-            lock.unlock()
-            throw MorbError.vm("a publish-all lifecycle request is already in progress for this container")
-        }
-        lock.unlock()
-
-        // A policy container needs its durable session before this direct request
-        // reaches Moby.  Otherwise the successful direct start can leave a closed
-        // one-shot guest route in front of an immediate policy restart.
-        let inspect = try getEngineJSON(
-            path: DockerAPIDecoding.containerInspectPath(containerID: containerID), timeout: 5)
-        let durable = DockerPortPublicationPreflight.restartPolicyUsesPublishAllPorts(
-            in: inspect, expectedContainerID: containerID)
-
-        lock.lock()
-        defer { lock.unlock() }
-        if let session = publishAllRestartSessions[containerID], session.isLive { return session }
-        if let session = publishAllDirectSessions[containerID], session.isLive {
-            throw MorbError.vm("a publish-all lifecycle request is already in progress for this container")
-        }
-
-        let fd = try vm.connectVsockBlocking(
-            port: MorbVsockPorts.publishAllAllocator, timeout: 5).get()
-        // Constructed OUTSIDE the do/catch on purpose. The session takes ownership of `fd`
-        // the moment it exists, so the failure path must close it through the session's own
-        // guarded close rather than closing `fd` directly — otherwise the explicit close here
-        // and the session's deinit both fire on the same descriptor, and between them that
-        // number can already belong to an unrelated accept() or vsock connect on another queue.
-        let session = PublishAllPortAllocator.Session(
-            fd: fd,
-            containerID: containerID,
-            forwarder: self,
-            log: log,
-            remainsAvailableForRestartPolicy: durable)
-        do {
-            try session.start()
-            if durable {
-                publishAllRestartSessions[containerID] = session
-            } else {
-                publishAllDirectSessions[containerID] = session
-            }
-            return session
-        } catch {
-            session.closeOwnedDescriptor()
-            throw error
-        }
-    }
-
-    /// Completes a direct API observation and retires only its one-shot owner.
-    /// Durable policy sessions remain installed for future Engine-owned restarts.
-    func completePublishAllLifecycleSession(
-        _ session: PublishAllPortAllocator.Session,
-        containerID: String,
-        succeeded: Bool
-    ) {
-        session.complete(succeeded: succeeded)
-        lock.lock()
-        if publishAllDirectSessions[containerID] === session {
-            publishAllDirectSessions.removeValue(forKey: containerID)
-        }
-        lock.unlock()
     }
 
     /// Promotes a lease after Docker's normal `204` start reply is observed. The
@@ -1200,13 +1027,6 @@ public final class PortForwarder {
     /// socket for a later start. UDP flows are closed before the held socket returns
     /// to drain-only mode, so no datagram can cross a stopped-container lifecycle.
     private func deactivateLease(_ identifier: UUID, reason: String) {
-        lock.lock()
-        let releaseOnStop = leases[identifier]?.releaseOnStop ?? false
-        lock.unlock()
-        if releaseOnStop {
-            releaseLease(identifier, reason: reason)
-            return
-        }
         var tcpListeners: [TCPListener] = []
         var udpListeners: [UDPListener] = []
         var flows: [UDPFlow] = []
@@ -1344,6 +1164,212 @@ public final class PortForwarder {
         log.info("released fixed-port lease \(leasePortDescription(record.lease)) — \(reason)")
     }
 
+    // MARK: - Guest userland-proxy leases
+
+    /// Binds the Mac endpoint for one guest userland-proxy invocation, or
+    /// throws the honest refusal the wrapper relays into dockerd's
+    /// container-start error. See ``GuestPortLease`` for the channel contract.
+    ///
+    /// Deliberately independent of ``start()``/``stop()`` generations: a
+    /// restart-policy container's proxy asks the moment dockerd boots, which
+    /// can precede the daemon's forwarder start by a beat. Accept handlers
+    /// read the *current* generation at accept time instead of capturing one.
+    ///
+    /// Three ownership cases:
+    /// - **Fresh** — nothing holds the endpoint: bind it, forward it, own it
+    ///   until ``releaseGuestProxyPort(_:reason:)``.
+    /// - **Adopted** — a fixed create/start lease already holds the exact
+    ///   socket (explicit `-p` runs through the create preflight *and* execs
+    ///   the wrapper): succeed without taking ownership; the fixed lifecycle
+    ///   keeps it.
+    /// - **Takeover** — an event-discovered forward (no lease identity) still
+    ///   holds the socket from a previous container lifecycle the snapshot
+    ///   has not caught up with: displace it. The wrapper is authoritative —
+    ///   it speaks for the start that is happening *now*.
+    func leaseGuestProxyPort(_ request: GuestPortLease.Request) throws -> UInt64 {
+        guard let endpoint = DockerHostEndpoint(hostIP: request.hostIP, port: request.hostPort) else {
+            throw PortLeaseError.unavailable(
+                "invalid published host endpoint \(request.hostIP):\(request.hostPort)")
+        }
+        guard portExposure.permits(endpoint.address) else {
+            throw PortLeaseError.unavailable(
+                "Docker requested \(endpoint.description), but local-network port publishing is disabled in Morbstack Settings")
+        }
+        let binding = DockerPortBinding(
+            hostIP: request.hostIP,
+            hostPort: request.hostPort,
+            containerPort: request.containerPort,
+            guestPort: request.hostPort,
+            networkProtocol: request.transport.rawValue,
+            containerID: "",
+            containerName: request.containerIP)
+
+        switch request.transport {
+        case .tcp:
+            return try leaseGuestProxyTCP(endpoint: endpoint, binding: binding)
+        case .udp:
+            return try leaseGuestProxyUDP(endpoint: endpoint, binding: binding)
+        }
+    }
+
+    private func leaseGuestProxyTCP(
+        endpoint: DockerHostEndpoint,
+        binding: DockerPortBinding
+    ) throws -> UInt64 {
+        var displaced: TCPListener?
+        lock.lock()
+        proxyLeaseSequence &+= 1
+        let token = proxyLeaseSequence
+        guard proxyLeasedTCP[endpoint] == nil else {
+            lock.unlock()
+            throw PortLeaseError.addressInUse(endpoint: endpoint, protocolName: "tcp")
+        }
+        for record in leases.values
+        where record.tcpListeners[endpoint] != nil
+            && !record.withdrawnTCPHostEndpoints.contains(endpoint) {
+            // Adopted: the create/start lease lifecycle keeps ownership.
+            proxyLeases[token] = GuestProxyLeaseRecord(
+                binding: binding, endpoint: endpoint, transport: .tcp,
+                tcpListener: nil, ownsUDPForward: false)
+            lock.unlock()
+            return token
+        }
+        if let forward = forwards[endpoint] {
+            guard forward.leaseID == nil else {
+                lock.unlock()
+                throw PortLeaseError.addressInUse(endpoint: endpoint, protocolName: "tcp")
+            }
+            displaced = forward.listener
+            forwards.removeValue(forKey: endpoint)
+        }
+        failedBinds.removeValue(forKey: endpoint)
+        lock.unlock()
+        displaced?.stop()
+
+        let listener = TCPListener(
+            port: endpoint.port,
+            queue: acceptQueue,
+            hostAddress: endpoint.address)
+        listener.setConnectionHandler { [weak self] fd in
+            guard let self else {
+                Darwin.close(fd)
+                return
+            }
+            self.handleAccepted(clientFD: fd, binding: binding, generation: self.currentGeneration)
+        }
+        do {
+            try listener.start()
+        } catch TCPListenerError.addressInUse {
+            throw PortLeaseError.addressInUse(endpoint: endpoint, protocolName: "tcp")
+        } catch {
+            throw PortLeaseError.unavailable(
+                "could not bind \(endpoint.description): \(error.localizedDescription)")
+        }
+
+        lock.lock()
+        proxyLeases[token] = GuestProxyLeaseRecord(
+            binding: binding, endpoint: endpoint, transport: .tcp,
+            tcpListener: listener, ownsUDPForward: false)
+        proxyLeasedTCP[endpoint] = token
+        lock.unlock()
+        log.info("guest proxy lease bound: \(binding.description) on \(endpoint.description)")
+        return token
+    }
+
+    private func leaseGuestProxyUDP(
+        endpoint: DockerHostEndpoint,
+        binding: DockerPortBinding
+    ) throws -> UInt64 {
+        var displaced: UDPForward?
+        lock.lock()
+        proxyLeaseSequence &+= 1
+        let token = proxyLeaseSequence
+        guard proxyLeasedUDP[endpoint] == nil else {
+            lock.unlock()
+            throw PortLeaseError.addressInUse(endpoint: endpoint, protocolName: "udp")
+        }
+        for record in leases.values
+        where record.udpListeners[endpoint] != nil
+            && !record.withdrawnUDPHostEndpoints.contains(endpoint) {
+            proxyLeases[token] = GuestProxyLeaseRecord(
+                binding: binding, endpoint: endpoint, transport: .udp,
+                tcpListener: nil, ownsUDPForward: false)
+            lock.unlock()
+            return token
+        }
+        if let forward = udpForwards[endpoint] {
+            guard forward.leaseID == nil else {
+                lock.unlock()
+                throw PortLeaseError.addressInUse(endpoint: endpoint, protocolName: "udp")
+            }
+            displaced = forward
+            udpForwards.removeValue(forKey: endpoint)
+        }
+        failedUDPBinds.removeValue(forKey: endpoint)
+        lock.unlock()
+        if let displaced {
+            displaced.listener.stop()
+            for flow in displaced.flows.values { flow.close() }
+        }
+
+        let listener = UDPListener(port: endpoint.port, queue: acceptQueue, hostAddress: endpoint.address)
+        listener.setDatagramHandler { [weak self, weak listener] datagram, client in
+            guard let self, let listener else { return }
+            self.handleUDPDatagram(
+                datagram, from: client, binding: binding, listener: listener,
+                generation: self.currentGeneration)
+        }
+        do {
+            try listener.start()
+        } catch UDPListener.Error.addressInUse {
+            throw PortLeaseError.addressInUse(endpoint: endpoint, protocolName: "udp")
+        } catch {
+            throw PortLeaseError.unavailable(
+                "could not bind \(endpoint.description)/udp: \(error.localizedDescription)")
+        }
+
+        lock.lock()
+        proxyLeases[token] = GuestProxyLeaseRecord(
+            binding: binding, endpoint: endpoint, transport: .udp,
+            tcpListener: nil, ownsUDPForward: true)
+        proxyLeasedUDP[endpoint] = token
+        proxyUDPForwards[endpoint] = UDPForward(binding: binding, listener: listener)
+        lock.unlock()
+        log.info("guest proxy lease bound: \(binding.description) on \(endpoint.description)/udp")
+        return token
+    }
+
+    /// Releases one wrapper-held endpoint. The trigger is the lease
+    /// connection's EOF — the guest proxy process exiting — so stop, restart,
+    /// `docker rm -f`, dockerd shutdown, and VM teardown all funnel here.
+    func releaseGuestProxyPort(_ token: UInt64, reason: String) {
+        var udpFlows: [UDPFlow] = []
+        var udpListener: UDPListener?
+        lock.lock()
+        guard let record = proxyLeases.removeValue(forKey: token) else {
+            lock.unlock()
+            return
+        }
+        if record.tcpListener != nil, proxyLeasedTCP[record.endpoint] == token {
+            proxyLeasedTCP.removeValue(forKey: record.endpoint)
+        }
+        if record.ownsUDPForward, proxyLeasedUDP[record.endpoint] == token {
+            proxyLeasedUDP.removeValue(forKey: record.endpoint)
+            if let forward = proxyUDPForwards.removeValue(forKey: record.endpoint) {
+                udpFlows = Array(forward.flows.values)
+                udpListener = forward.listener
+            }
+        }
+        lock.unlock()
+
+        record.tcpListener?.stop()
+        udpListener?.stop()
+        for flow in udpFlows { flow.close() }
+        if record.tcpListener != nil || record.ownsUDPForward {
+            log.info("guest proxy lease released: \(record.binding.description) — \(reason)")
+        }
+    }
+
     // MARK: - Lifecycle
 
     /// Begins watching the Docker event stream and publishing ports. Idempotent.
@@ -1362,9 +1388,6 @@ public final class PortForwarder {
 
         log.info("port forwarding active; watching the Docker event stream")
         startRetryTimer()
-        workQueue.async { [weak self] in
-            self?.recoverPublishAllRestartPolicySessions()
-        }
         DispatchQueue.global(qos: .utility).async { [weak self] in
             self?.runEventStream(generation: generation)
         }
@@ -1377,7 +1400,7 @@ public final class PortForwarder {
     ///   once you know the guest went with them.
     public func stop(reason: String? = nil) {
         lock.lock()
-        guard running || !leases.isEmpty || !publishAllRestartSessions.isEmpty || !publishAllDirectSessions.isEmpty else {
+        guard running || !leases.isEmpty || !proxyLeases.isEmpty else {
             lock.unlock()
             return
         }
@@ -1390,10 +1413,15 @@ public final class PortForwarder {
         let closingLeases = leases.values
         leases.removeAll()
         leaseByContainerID.removeAll()
-        let restartSessions = publishAllRestartSessions.values
-        publishAllRestartSessions.removeAll()
-        let directSessions = publishAllDirectSessions.values
-        publishAllDirectSessions.removeAll()
+        // Proxy leases die with the VM that spawned their guest processes;
+        // the lease connections are collapsing anyway, and the server's EOF
+        // release then finds nothing left to do.
+        let closingProxyLeases = proxyLeases.values
+        proxyLeases.removeAll()
+        proxyLeasedTCP.removeAll()
+        proxyLeasedUDP.removeAll()
+        let closingProxyUDP = proxyUDPForwards.values
+        proxyUDPForwards.removeAll()
         let inFlight = Array(relays.values)
         relays.removeAll()
         // Stale completions are allowed to arrive; they find no entry for their
@@ -1424,11 +1452,12 @@ public final class PortForwarder {
             for listener in lease.udpListeners.values { listener.stop() }
         }
         for relay in inFlight { relay.cancel() }
-        for session in restartSessions {
-            session.invalidate(reason: reason ?? "port-forwarder-stop")
+        for lease in closingProxyLeases {
+            lease.tcpListener?.stop()
         }
-        for session in directSessions {
-            session.invalidate(reason: reason ?? "port-forwarder-stop")
+        for forward in closingProxyUDP {
+            forward.listener.stop()
+            for flow in forward.flows.values { flow.close() }
         }
 
         let because = reason.map { " (\($0))" } ?? ""
@@ -1520,7 +1549,7 @@ public final class PortForwarder {
     private func expireUDPFlows(now: Date) {
         var expired: [UDPFlow] = []
         lock.lock()
-        for forward in udpForwards.values {
+        for forward in [udpForwards.values, proxyUDPForwards.values].joined() {
             let clients = forward.flows.compactMap { client, flow in
                 flow.idle(at: now, timeout: PortForwarder.udpFlowIdleTimeout) ? client : nil
             }
@@ -1706,7 +1735,6 @@ public final class PortForwarder {
                     self.log.warn("could not reconcile fixed-port leases: \(error)")
                 }
                 self.apply(bindings: bindings, generation: generation, reason: reason)
-                self.recoverPublishAllRestartPolicySessions()
             } catch {
                 guard self.isCurrent(generation) else { return }
                 self.log.warn("could not read published ports (\(reason)): \(error)")
@@ -1740,62 +1768,6 @@ public final class PortForwarder {
         let existing = try DockerAPIDecoding.containerIDs(containersJSON: body)
         for (containerID, identifier) in associated where !existing.contains(containerID) {
             releaseLease(identifier, reason: "container is absent from Docker's all-container snapshot")
-        }
-    }
-
-    /// Re-registers the host endpoint for persisted Engine restart policies after
-    /// each VM generation. Moby's patched `-P` path waits at the guest broker while
-    /// this recovery query runs, so dockerd never falls back to a guest-owned port.
-    /// This executes only on `workQueue`, alongside the Engine snapshot readers.
-    private func recoverPublishAllRestartPolicySessions() {
-        lock.lock()
-        guard running else { lock.unlock(); return }
-        lock.unlock()
-
-        let allContainers: Data
-        do {
-            allContainers = try getEngineJSON(path: DockerAPIDecoding.allContainersPath, timeout: 10)
-        } catch {
-            log.info("publish-all restart-policy recovery will retry after Engine is ready: \(error)")
-            return
-        }
-        guard let identifiers = try? DockerAPIDecoding.containerIDs(containersJSON: allContainers) else {
-            log.warn("could not decode containers while recovering publish-all restart policies")
-            return
-        }
-
-        var wanted: Set<String> = []
-        for containerID in identifiers.sorted() {
-            guard let inspect = try? getEngineJSON(
-                path: DockerAPIDecoding.containerInspectPath(containerID: containerID),
-                timeout: 5),
-                DockerPortPublicationPreflight.restartPolicyUsesPublishAllPorts(
-                    in: inspect,
-                    expectedContainerID: containerID)
-            else { continue }
-            wanted.insert(containerID)
-        }
-
-        lock.lock()
-        let stale = publishAllRestartSessions.filter {
-            !wanted.contains($0.key) || !$0.value.isLive
-        }.map(\.value)
-        publishAllRestartSessions = publishAllRestartSessions.filter {
-            wanted.contains($0.key) && $0.value.isLive
-        }
-        let missing = wanted.filter { publishAllRestartSessions[$0] == nil }
-        lock.unlock()
-        for session in stale { session.invalidate(reason: "restart-policy-reconciliation") }
-
-        for containerID in missing {
-            do {
-                // Registration is serialized with direct lifecycle admission by
-                // `beginPublishAllLifecycleSession`; it inspects the persisted
-                // restart policy and installs this as the one durable owner.
-                _ = try beginPublishAllLifecycleSession(containerID: containerID)
-            } catch {
-                log.info("could not register publish-all restart-policy allocator for \(String(containerID.prefix(12))): \(error)")
-            }
         }
     }
 
@@ -1884,8 +1856,8 @@ public final class PortForwarder {
     private func apply(bindings: [DockerPortBinding], generation: Int, reason: String) {
         let tcpReconciliation = PortForwardPlan.reconcileTCPListeners(bindings, exposure: portExposure)
         let udpReconciliation = PortForwardPlan.reconcileUDPListeners(bindings, exposure: portExposure)
-        var tcpDesired = tcpReconciliation.listeners
-        var udpDesired = udpReconciliation.listeners
+        let tcpDesired = tcpReconciliation.listeners
+        let udpDesired = udpReconciliation.listeners
 
         let newTCPConflicts = updateTCPConflicts(tcpReconciliation.conflicts)
         let newUDPConflicts = updateUDPConflicts(udpReconciliation.conflicts)
@@ -1958,6 +1930,23 @@ public final class PortForwarder {
         reason: String
     ) {
 
+        // Endpoints owned by a guest proxy lease are invisible to the
+        // snapshot diff: the wrapper's connection lifetime, not the container
+        // snapshot, opens and closes them. The snapshot still supplies the
+        // one thing the wrapper could not know — the real container identity
+        // — which is adopted for `morb status` display.
+        lock.lock()
+        var desired = desired
+        for (endpoint, token) in proxyLeasedTCP {
+            guard let snapshot = desired.removeValue(forKey: endpoint) else { continue }
+            if var record = proxyLeases[token] {
+                record.binding.containerID = snapshot.containerID
+                record.binding.containerName = snapshot.containerName
+                proxyLeases[token] = record
+            }
+        }
+        lock.unlock()
+
         lock.lock()
         for (endpoint, desiredBinding) in desired {
             guard var forward = forwards[endpoint], forwardTargetMatches(forward.binding, desiredBinding) else {
@@ -2012,6 +2001,15 @@ public final class PortForwarder {
         reason: String
     ) {
         lock.lock()
+        var desired = desired
+        for (endpoint, token) in proxyLeasedUDP {
+            guard let snapshot = desired.removeValue(forKey: endpoint) else { continue }
+            if var record = proxyLeases[token] {
+                record.binding.containerID = snapshot.containerID
+                record.binding.containerName = snapshot.containerName
+                proxyLeases[token] = record
+            }
+        }
         for (endpoint, desiredBinding) in desired {
             guard let forward = udpForwards[endpoint], forwardTargetMatches(forward.binding, desiredBinding) else {
                 continue
@@ -2283,11 +2281,21 @@ public final class PortForwarder {
         let needsDial: Bool
         guard let endpoint = PortForwardPlan.endpoint(for: binding) else { return }
         lock.lock()
-        guard running, self.generation == generation,
-              let forward = udpForwards[endpoint],
-              forward.listener === listener,
-              forwardTargetMatches(forward.binding, binding)
-        else {
+        guard running, self.generation == generation else {
+            lock.unlock()
+            return
+        }
+        // Proxy-leased publications live in their own map. For them the
+        // listener object's identity is the whole currency check — their
+        // binding never changes underneath the listener. Event-discovered
+        // forwards keep the stricter target match.
+        let forward: UDPForward
+        if let event = udpForwards[endpoint], event.listener === listener,
+           forwardTargetMatches(event.binding, binding) {
+            forward = event
+        } else if let proxied = proxyUDPForwards[endpoint], proxied.listener === listener {
+            forward = proxied
+        } else {
             lock.unlock()
             return
         }
@@ -2296,6 +2304,7 @@ public final class PortForwarder {
             needsDial = false
         } else {
             let activeFlowCount = udpForwards.values.reduce(0) { $0 + $1.flows.count }
+                + proxyUDPForwards.values.reduce(0) { $0 + $1.flows.count }
             guard activeFlowCount < PortForwarder.maximumUDPFlows else {
                 lock.unlock()
                 log.warn(
@@ -2416,6 +2425,9 @@ public final class PortForwarder {
     ) {
         lock.lock()
         if let endpoint, let forward = udpForwards[endpoint], forward.flows[client] === flow {
+            forward.flows.removeValue(forKey: client)
+        }
+        if let endpoint, let forward = proxyUDPForwards[endpoint], forward.flows[client] === flow {
             forward.flows.removeValue(forKey: client)
         }
         lock.unlock()

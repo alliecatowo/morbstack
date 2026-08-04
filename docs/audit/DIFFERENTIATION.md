@@ -259,12 +259,16 @@ performance target with no implementation behind it.
 1. **Rebuild the guest image and run CP-01–CP-07.** Nothing on this page is
    real until the guest matches the source. This is one day of machine time
    and it invalidates or confirms three headline features at once.
-2. **Fix the "unmodified upstream dockerd" claim** in all twelve places, one
-   commit, before anyone external reads it. Either qualify it honestly ("upstream
-   engine plus one 174-line version-pinned patch, published in-tree") or drop the
-   claim. The second-order problem is worse than the first: needing `docker
-   buildx` to build Morbstack's engine (`scripts/build-morbstack-dockerd.sh:44-47`)
-   is a bootstrap dependency on the product you are replacing.
+2. ~~**Fix the "unmodified upstream dockerd" claim.**~~ **Resolved 2026-08-04
+   (TECH-1), the other direction from what this item recommended:** rather than
+   qualifying the claim, the downstream patch it was about was deleted entirely.
+   Morbstack now ships unmodified upstream `dockerd`, published ports go through
+   dockerd's own `--userland-proxy-path` hook, and the "unmodified upstream
+   dockerd" claim is true again — restored across the docs it had been corrected
+   away from (see `docs/TRUTHFULNESS-PASS.md`'s third-pass section). The
+   second-order bootstrap problem (needing `docker buildx` to build Morbstack's
+   own engine) is resolved the same way: there is no patched engine left to
+   build.
 3. **Ship exec + a PTY** (A3.1). Two weeks, removes the most conspicuous
    daily-use gap.
 4. **Prove hot reload** (A2) — rebuild, matrix, publish, enable by default.

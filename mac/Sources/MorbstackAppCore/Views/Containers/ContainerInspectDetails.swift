@@ -102,12 +102,12 @@ struct TrackBInspectDetails: Equatable {
 
         var cpuSharesDescription: String {
             guard let cpuShares else { return "Not reported" }
-            return cpuShares > 0 ? "\(cpuShares) shares" : "Default"
+            return cpuShares > 0 ? "\(cpuShares) share\(cpuShares == 1 ? "" : "s")" : "Default"
         }
 
         var pidsLimitDescription: String {
             guard let pidsLimit else { return "Not reported" }
-            return pidsLimit > 0 ? "\(pidsLimit) processes" : "No limit"
+            return pidsLimit > 0 ? "\(pidsLimit) process\(pidsLimit == 1 ? "" : "es")" : "No limit"
         }
     }
 

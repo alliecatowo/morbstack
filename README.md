@@ -6,11 +6,13 @@
 **The Docker you wish Docker shipped.**
 
 Morbstack is a free, Apache-2.0, native replacement for Docker Desktop on
-macOS. It runs upstream Moby — `containerd` unmodified, and `dockerd` with a
-single ~174-line Morbstack patch for host-side port allocation — inside a
-single shared, lightweight Linux VM powered by `Virtualization.framework`,
-with everything else — the CLI, the daemon, and the app — thin, native Swift
-glue.
+macOS. It runs unmodified upstream Moby — `dockerd` and `containerd`,
+stock, no downstream patch — inside a single shared, lightweight Linux VM
+powered by `Virtualization.framework`. Published ports (including
+`docker run -P`) are held on the Mac by a small Morbstack userland proxy,
+invoked through dockerd's own stock `--userland-proxy-path` hook — no
+engine patch required. Everything else — the CLI, the daemon, and the
+app — is thin, native Swift glue.
 
 <!--
   TODO(human): the CI badge URL below assumes the repo is published as
@@ -31,14 +33,14 @@ glue.
   "analytics" or "sentry" in that tree are deterministic fixture strings used for
   local app/UI-test data — not code
   that runs, and not data that goes anywhere.)
-- **Real upstream Moby, one small pinned patch.** Morbstack doesn't
-  reimplement Docker Engine — it fetches the real static Docker release
-  binaries and runs them, with a single ~174-line Morbstack patch to
-  `dockerd` (in-repo, version-pinned) that adds the host-side port
-  allocator `docker run -P` needs. `containerd`, `runc`, the `docker` CLI,
-  Compose, and Buildx are all unmodified upstream builds. The API surface,
-  the CLI, and Compose files behave the way real Docker does. See
-  [`docs/compat.md`](docs/compat.md).
+- **Unmodified upstream Docker Engine.** Morbstack doesn't reimplement
+  Docker Engine — it fetches the real static Docker release binaries
+  (`dockerd`, `containerd`, `runc`, the `docker` CLI, Compose, Buildx) and
+  runs them verbatim, archive-hash-pinned. Published ports are made
+  reachable from the Mac by a small Morbstack userland proxy that dockerd
+  execs through its own stock `--userland-proxy-path` flag — no engine
+  patch, no fork. The API surface, the CLI, and Compose files behave the
+  way real Docker does. See [`docs/compat.md`](docs/compat.md).
 - **Native SwiftUI, zero web views.** The app is AppKit/SwiftUI, not an
   embedded browser — see "The five differentiation domains" in
   [`docs/architecture.md`](docs/architecture.md).
@@ -261,7 +263,7 @@ graph TB
 
     subgraph Guest["Linux guest VM (Virtualization.framework)"]
         Init["morbinit<br/>(PID 1, Rust)"]
-        Engine["dockerd (+ Morbstack patch)<br/>/ containerd (unmodified)"]
+        Engine["dockerd / containerd<br/>(unmodified upstream)"]
         Containers["containers"]
         VFS["VirtioFS shares<br/>(/Users, /Volumes, /private/tmp)"]
 
@@ -284,9 +286,11 @@ graph TB
   `~/.morbstack/run/docker.sock` to the guest over vsock, and mirrors
   published container ports onto `127.0.0.1` (never `0.0.0.0`).
 - **Guest**: `morbinit`, a static Rust binary, runs as PID 1, brings up
-  networking and the data disk, and supervises `dockerd` (carrying
-  Morbstack's single host-port-allocator patch) and unmodified upstream
-  `containerd`.
+  networking and the data disk, and supervises unmodified upstream
+  `dockerd` and `containerd`. `dockerd` is started with
+  `--userland-proxy-path` pointed at a multi-call symlink to `morbinit`
+  itself, so every published port is leased from the Mac through a stock
+  dockerd hook rather than an engine patch.
 - **Wire protocols**: vsock port 1024 carries MRB0-framed JSON guest
   control; port 2375 is a raw relay of the Docker Engine API; port 2376
   is a one-line-handshake stream-dial used for published ports (and the
@@ -303,7 +307,7 @@ Rancher Desktop) is in [`docs/comparison.md`](docs/comparison.md).
 |---|---|---|
 | Price | Free forever | Free for personal use; paid for larger companies |
 | License | Apache-2.0, source available | Proprietary |
-| Engine | Upstream `dockerd` + one ~174-line Morbstack patch | Unmodified upstream `dockerd` |
+| Engine | Unmodified upstream `dockerd` (published ports via stock `--userland-proxy-path`) | Unmodified upstream `dockerd` |
 | Host UI | Native SwiftUI | Electron |
 | Telemetry | None | Present |
 

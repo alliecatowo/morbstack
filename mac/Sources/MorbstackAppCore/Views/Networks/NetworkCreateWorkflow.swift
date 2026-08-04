@@ -256,6 +256,7 @@ struct NetworkCreateSheet: View {
                 get: { requestForConfirmation != nil },
                 set: { if !$0 { requestForConfirmation = nil } }
             ),
+            titleVisibility: .visible,
             presenting: requestForConfirmation
         ) { request in
             Button("Create Network") {
@@ -277,10 +278,13 @@ struct NetworkCreateSheet: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        if !state.isCreating {
-            ToolbarItem(placement: .cancellationAction) {
-                Button(state.isTerminalSuccess ? "Done" : "Cancel") { dismiss() }
-            }
+        // Keep this item visible even while Docker's create request is in flight, rather
+        // than hiding it, so the sheet is never left with zero controls; the request
+        // cannot be safely cancelled (see the Progress section copy), so it is disabled
+        // instead of removed.
+        ToolbarItem(placement: .cancellationAction) {
+            Button(state.isTerminalSuccess ? "Done" : "Cancel") { dismiss() }
+                .disabled(state.isCreating)
         }
         if isEditingEnabled {
             ToolbarItem(placement: .confirmationAction) {

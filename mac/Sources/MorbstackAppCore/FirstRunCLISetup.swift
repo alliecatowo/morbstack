@@ -501,6 +501,9 @@ struct FirstRunCLISetupSheet: View {
                 Image(systemName: "arrow.down")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
+                    // Decorative: the source and destination lines above and below
+                    // already carry the relationship for VoiceOver.
+                    .accessibilityHidden(true)
                 Text(item.destination)
                     .font(.caption.monospaced())
                     .textSelection(.enabled)

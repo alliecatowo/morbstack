@@ -78,7 +78,7 @@ enum FixtureDiagnostics {
                 detail: "image and volume totals match their fixture records",
                 passed: disk.imagesTotal == imageBytes && disk.volumesTotal == volumeBytes && disk.total >= 0),
             Check(
-                name: "inspect document",
+                name: "inspect JSON",
                 detail: "a representative fixture inspect response parses as JSON",
                 passed: firstInspectIsJSON),
             Check(

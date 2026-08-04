@@ -58,7 +58,7 @@ mod mounts;
 mod net;
 mod netaddr;
 mod proxy;
-mod publish_all;
+mod proxy_wrapper;
 mod sha256;
 mod shares;
 mod supervisor;
@@ -95,6 +95,17 @@ const REPLY_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+
+    // Multi-call dispatch: dockerd execs this same binary as
+    // `morbstack-docker-proxy` (its `--userland-proxy-path`), once per
+    // published port. That mode must win before any PID-1 or --version
+    // handling — dockerd owns the argv, and `-version` there means the
+    // *proxy's* version probe, not morbinit's.
+    if let Some(argv0) = args.first() {
+        if proxy_wrapper::is_wrapper_invocation(argv0) {
+            proxy_wrapper::run(&args);
+        }
+    }
 
     if args.iter().any(|a| a == "--version") {
         println!("{}", VERSION);
@@ -402,16 +413,10 @@ fn real_init() {
         ));
     }
 
-    // `docker run -P` / `--publish-all` asks patched Moby to reserve the
-    // complete effective EXPOSE set through this guest-to-host broker at each
-    // container start. It is independent from the data-plane dialers above.
-    if let Err(e) = publish_all::spawn_publish_all_allocator() {
-        log::log(&format!(
-            "FATAL: could not bind vsock publish-all allocator port {}: {} — Docker -P will fail clearly",
-            publish_all::VSOCK_PUBLISH_ALL_ALLOCATOR_PORT,
-            e
-        ));
-    }
+    // `docker run -P` needs no guest-side broker: stock dockerd execs the
+    // morbstack-docker-proxy wrapper (see proxy_wrapper.rs) per published
+    // port, and the wrapper leases the Mac endpoint host-side over its own
+    // guest-initiated vsock connection.
 
     // Kubernetes payload install (vsock 2377 -> the persistent disk). Bound
     // unconditionally even though Kubernetes is off: this is the channel the

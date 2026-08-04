@@ -468,9 +468,6 @@ extension DockerProxy: DockerRequestAdmissionPolicy {
     ) -> DockerRequestAdmission {
         let containerIdentifier = lifecycle.containerIdentifier
 
-        if forwarder.requiresPublishAllAllocator(containerIdentifier: containerIdentifier) {
-            return admitPublishAllStart(containerID: containerIdentifier)
-        }
         if let lease = forwarder.claimStartLease(containerIdentifier: containerIdentifier) {
             return .forwardObserving(startObserver(for: lease))
         }
@@ -501,38 +498,11 @@ extension DockerProxy: DockerRequestAdmissionPolicy {
         if let lease = forwarder.claimStartLease(containerIdentifier: containerIdentifier) {
             return .forwardObserving(startObserver(for: lease))
         }
-        if forwarder.stoppedContainerUsesPublishAllPorts(containerID: containerIdentifier) {
-            return admitPublishAllStart(containerID: containerIdentifier)
-        }
+        // `-P` needs no admission here: stock dockerd resolves the effective
+        // EXPOSE set itself and execs the morbstack-docker-proxy wrapper per
+        // publication, which leases the Mac endpoint over vsock 2382 before
+        // the start can succeed (see GuestPortLease.swift).
         return .forward
-    }
-
-    /// Opens the per-container host allocator session before Moby receives the exact
-    /// start request. The session does not allocate anything eagerly; it waits until
-    /// Moby has expanded the image's effective `EXPOSE` set.
-    private func admitPublishAllStart(containerID: String) -> DockerRequestAdmission {
-        do {
-            let session = try forwarder.beginPublishAllLifecycleSession(containerID: containerID)
-            // Capture the forwarder, not `self`. The observer outlives this call —
-            // it fires when Moby answers the start — so capturing `self` would keep
-            // the whole proxy alive for the duration of every publish-all start, and
-            // `[weak self]` would silently drop the completion if the proxy went
-            // away mid-flight, leaving the session open forever. The forwarder is
-            // the only thing the closure actually needs.
-            let forwarder = self.forwarder
-            return .forwardObserving(
-                DockerPortLeaseResponseObserver(kind: .start) { outcome in
-                    forwarder.completePublishAllLifecycleSession(
-                        session,
-                        containerID: containerID,
-                        succeeded: outcome == .startSucceeded)
-                })
-        } catch {
-            return .reject(
-                statusCode: 500,
-                reason: "Internal Server Error",
-                message: "could not register the host publish-all allocator: \(error.localizedDescription)")
-        }
     }
 
     private func rewrittenCreateRequest(

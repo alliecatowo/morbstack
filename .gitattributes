@@ -1,4 +1,0 @@
-# Unified diffs embed their own leading marker and context indentation. Those
-# bytes must be preserved verbatim so `git apply --check` can validate Moby
-# patches; they are not source-file whitespace errors.
-guest/moby-patches/*.patch -whitespace

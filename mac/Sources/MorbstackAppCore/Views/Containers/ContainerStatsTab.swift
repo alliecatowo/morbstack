@@ -72,6 +72,16 @@ enum ContainerStatsPresentation {
         let transmittedCount = samples.lazy.filter { $0.transmittedBytesPerSecond != nil }.count
         return receivedCount >= 2 || transmittedCount >= 2
     }
+
+    /// Tick labels must resolve the window they describe. A 30-second window labelled
+    /// at minute resolution prints the same "3:16 PM" at every tick — six identical
+    /// labels carry no information. Windows shorter than 2.5 minutes get seconds.
+    static func timeAxisFormat(first: Date?, last: Date?) -> Date.FormatStyle {
+        guard let first, let last, last.timeIntervalSince(first) >= 150 else {
+            return .dateTime.hour().minute().second()
+        }
+        return .dateTime.hour().minute()
+    }
 }
 
 struct ContainerStatsTab: View {
@@ -252,15 +262,22 @@ struct ContainerStatsTab: View {
         roundedUpperBound(max(10, (probe.cpuSeries.max() ?? 0) * 1.2))
     }
 
-    /// A memory limit is semantically meaningful, so it anchors the scale whenever
-    /// Docker reports one.  The scale expands only if Docker reports usage above its
-    /// own limit, keeping the anomalous reading visible rather than clipping it.
+    /// Memory scales to the data, not the limit.  A container using 1 MB under a
+    /// 256 MB limit must not render as a flat line pinned to the axis — that hides
+    /// every real change in the series.  The limit stays on screen as the dashed
+    /// reference rule while it is close enough to the data to be legible; when it is
+    /// orders of magnitude away, the rule clips out and the Memory Limit form below
+    /// carries the exact figure instead.
     private func memoryUpperBound(_ probe: TrackBStatsProbe) -> Double {
         let peak = probe.memorySeries.max() ?? 0
+        let dataBound = roundedUpperBound(peak * 1.2, minimum: 1_024 * 1_024)
         if let limit = probe.latest?.memLimit, limit > 0 {
-            return max(Double(limit), roundedUpperBound(peak * 1.1, minimum: 1))
+            let limitBound = roundedUpperBound(Double(limit) * 1.05, minimum: 1)
+            // Peak above the limit is an anomaly worth keeping visible; a limit
+            // within 4x of the data is context worth drawing to scale.
+            if Double(limit) <= dataBound * 4 { return max(dataBound, limitBound) }
         }
-        return roundedUpperBound(peak * 1.2, minimum: 1_024 * 1_024)
+        return dataBound
     }
 
     private func roundedUpperBound(_ value: Double, minimum: Double = 10) -> Double {
@@ -279,10 +296,11 @@ struct ContainerStatsTab: View {
 
     private func sampleCadenceDescription(_ probe: TrackBStatsProbe) -> String {
         let seconds = Int(hub.minimumInterval)
+        let secondsLabel = "\(seconds) second\(seconds == 1 ? "" : "s")"
         if probe.history.count < 2 {
-            return "Statistics update about every \(seconds) seconds."
+            return "Statistics update about every \(secondsLabel)."
         }
-        return "Showing \(probe.history.count) readings, sampled about every \(seconds) seconds."
+        return "Showing \(probe.history.count) reading\(probe.history.count == 1 ? "" : "s"), sampled about every \(secondsLabel)."
     }
 
     private func subscribe() {
@@ -398,7 +416,8 @@ private struct NetworkActivitySection: View {
                         AxisMarks(values: .automatic(desiredCount: 4)) { _ in
                             AxisGridLine()
                             AxisTick()
-                            AxisValueLabel(format: .dateTime.hour().minute())
+                            AxisValueLabel(format: ContainerStatsPresentation.timeAxisFormat(
+                                first: samples.first?.timestamp, last: samples.last?.timestamp))
                         }
                     }
                     .chartYAxis {
@@ -561,7 +580,7 @@ private struct StatsChartSection: View {
             return "Waiting for enough readings to show a time trend."
         }
         let duration = max(0, Int(last.timestamp.timeIntervalSince(first.timestamp).rounded()))
-        return "\(samples.count) readings over \(durationDescription(duration))."
+        return "\(samples.count) reading\(samples.count == 1 ? "" : "s") over \(durationDescription(duration))."
     }
 
     private var chartSummary: String {
@@ -570,7 +589,7 @@ private struct StatsChartSection: View {
         }
         let minimum = samples.map(\.value).min() ?? 0
         let maximum = samples.map(\.value).max() ?? 0
-        return "\(samples.count) readings from \(spokenTimestamp(first.timestamp)) to \(spokenTimestamp(last.timestamp)). "
+        return "\(samples.count) reading\(samples.count == 1 ? "" : "s") from \(spokenTimestamp(first.timestamp)) to \(spokenTimestamp(last.timestamp)). "
             + "The current value is \(spokenValueLabel(last.value)). "
             + "Values range from \(spokenValueLabel(minimum)) to \(spokenValueLabel(maximum))."
     }
@@ -608,7 +627,10 @@ private struct StatsChartSection: View {
                         RuleMark(y: .value(reference.label, reference.value))
                             .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
                             .foregroundStyle(.secondary)
-                            .annotation(position: .trailing, alignment: .bottom) {
+                            // Inside the plot area: a trailing annotation renders
+                            // beyond the right edge and gets clipped to "Me…" at
+                            // inspector widths.
+                            .annotation(position: .top, alignment: .leading) {
                                 Text(reference.label)
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
@@ -622,7 +644,8 @@ private struct StatsChartSection: View {
                     AxisMarks(values: .automatic(desiredCount: 4)) { _ in
                         AxisGridLine()
                         AxisTick()
-                        AxisValueLabel(format: .dateTime.hour().minute())
+                        AxisValueLabel(format: ContainerStatsPresentation.timeAxisFormat(
+                            first: samples.first?.timestamp, last: samples.last?.timestamp))
                     }
                 }
                 .chartYAxis {

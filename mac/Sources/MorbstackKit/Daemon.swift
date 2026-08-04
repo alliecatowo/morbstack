@@ -94,6 +94,10 @@ public final class Daemon {
     private let vm: VMManager
     private let proxy: DockerProxy
     private let forwarder: PortForwarder
+    /// Serves the guest userland-proxy wrapper's port-lease channel
+    /// (vsock 2382). Held here so its EOF watchers outlive the closure
+    /// registered with the VM manager.
+    private let portLeaseServer: GuestPortLeaseServer
     private let liveShareTransport: MorbLiveShareTransport
     private let k8s: K8sManager
     private let controlServer: UnixSocketServer
@@ -195,6 +199,17 @@ public final class Daemon {
             portExposure: config.allowLANPortPublishing ? .localNetwork : .loopbackOnly)
         self.forwarder = portForwarder
         self.proxy = DockerProxy(vm: vm, log: logger, forwarder: portForwarder)
+        // The guest-initiated port-lease channel: stock dockerd's userland
+        // proxy (the morbstack-docker-proxy wrapper) asks here, per published
+        // port, for the Mac endpoint before its container start may succeed.
+        // Registered once; VMManager re-installs it on every VM generation,
+        // so a restart-policy container's lease request at guest boot always
+        // finds a listener.
+        let leaseServer = GuestPortLeaseServer(forwarder: portForwarder, log: logger)
+        self.portLeaseServer = leaseServer
+        vm.setGuestInitiatedConnectionHandler(port: MorbVsockPorts.hostPortLease) { fd in
+            leaseServer.handleConnection(fd: fd)
+        }
         self.liveShareTransport = MorbLiveShareTransport(vm: vm, config: config, log: logger)
         self.k8s = K8sManager(vm: vm, log: logger)
         self.controlServer = UnixSocketServer(path: MorbPaths.controlSocket.path, queue: controlQueue)

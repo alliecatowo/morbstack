@@ -2,6 +2,13 @@
 
 **Date:** 2026-08-03 · **Decided by:** orchestrator session · **Verdict: MERGE, as a fast-forward, once the test target compiles.**
 
+> **Staleness note (2026-08-04):** this decision's guest-image analysis below refers to
+> `guest/moby-patches/0001-morbstack-publish-all-host-allocator.patch` and `build-patched-dockerd`,
+> both since deleted under TECH-1 — Morbstack now ships unmodified upstream dockerd, and
+> `-P` is served through dockerd's own `--userland-proxy-path` hook instead. The dated
+> findings below (build staleness, missing green suite) are left as recorded evidence for
+> the branch state at the time; they no longer describe a mechanism that exists in the tree.
+
 ## The merge is not a merge
 
 ```

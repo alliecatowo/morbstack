@@ -207,45 +207,59 @@ struct ImageArchiveImportSheet: View {
     let cancel: () -> Void
 
     var body: some View {
-        Form {
-            Section("Image Archive") {
-                LabeledContent("File") {
-                    Text(operation.request.archiveURL.path)
-                        .font(.system(.body, design: .monospaced))
-                        .textSelection(.enabled)
-                        .lineLimit(2)
-                        .truncationMode(.middle)
-                }
-                LabeledContent("Size", value: Formatters.bytesString(operation.request.bytes))
-            }
-
-            Section("Progress") {
-                switch operation.phase {
-                case .uploading:
-                    ProgressView(
-                        value: min(Double(operation.bytesSent) / Double(operation.request.bytes), 1)) {
-                            Text(operation.isCancellationRequested ? "Cancelling upload…" : "Sending archive to Docker")
-                        } currentValueLabel: {
-                            Text("\(Formatters.bytesString(operation.bytesSent)) of \(Formatters.bytesString(operation.request.bytes))")
-                        }
-                case .waitingForDocker:
-                    ProgressView("Waiting for Docker to load archive")
-                    Text("Morbstack finished sending the complete file. Docker may still be unpacking layers or registering tags. This phase cannot be safely cancelled.")
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            if operation.phase == .uploading {
-                Section {
-                    Button(operation.isCancellationRequested ? "Cancelling…" : "Cancel", role: .cancel) {
-                        cancel()
+        // A document-modal sheet without its own title bar or toolbar reads as an
+        // orphaned form; wrapping it in NavigationStack with a title and a toolbar Cancel
+        // matches the house pattern used by the other sheets in this route (see
+        // ImageTagSheet and LocalImageRunSheet).
+        NavigationStack {
+            Form {
+                Section("Image Archive") {
+                    LabeledContent("File") {
+                        Text(operation.request.archiveURL.path)
+                            .font(.system(.body, design: .monospaced))
+                            .textSelection(.enabled)
+                            .lineLimit(2)
+                            .truncationMode(.middle)
                     }
-                    .disabled(!operation.canCancel)
+                    LabeledContent("Size", value: Formatters.bytesString(operation.request.bytes))
                 }
+
+                Section("Progress") {
+                    switch operation.phase {
+                    case .uploading:
+                        ProgressView(
+                            value: min(Double(operation.bytesSent) / Double(operation.request.bytes), 1)) {
+                                Text(operation.isCancellationRequested ? "Cancelling upload…" : "Sending archive to Docker")
+                            } currentValueLabel: {
+                                Text("\(Formatters.bytesString(operation.bytesSent)) of \(Formatters.bytesString(operation.request.bytes))")
+                            }
+                    case .waitingForDocker:
+                        ProgressView("Waiting for Docker to load archive")
+                        Text("Morbstack finished sending the complete file. Docker may still be unpacking layers or registering tags. This phase cannot be safely cancelled.")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .formStyle(.automatic)
+            .navigationTitle("Loading Image Archive")
+            .toolbar { toolbarContent }
+        }
+        .frame(minWidth: 500, idealWidth: 560)
+    }
+
+    // Preserves the original row's exact behavior: the cancel affordance exists only
+    // during the uploading phase, since waitingForDocker cannot be safely cancelled
+    // (see the copy in the Progress section above) and previously showed no control.
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        if operation.phase == .uploading {
+            ToolbarItem(placement: .cancellationAction) {
+                Button(operation.isCancellationRequested ? "Cancelling…" : "Cancel", role: .cancel) {
+                    cancel()
+                }
+                .disabled(!operation.canCancel)
             }
         }
-        .formStyle(.automatic)
-        .frame(minWidth: 500, idealWidth: 560)
     }
 }
 

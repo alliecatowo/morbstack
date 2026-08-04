@@ -458,6 +458,11 @@ struct ComposeFileEditorSheet: View {
                             editor.sourceKind?.editorAccessibilityLabel ?? "Source file")
                         .padding(.horizontal, 12)
                         .padding(.bottom, 12)
+                        // The editor is the sheet's reason to exist. At the minimum
+                        // sheet height it wins the fight for space; the summary Form
+                        // above scrolls within its cap instead.
+                        .frame(minHeight: 200)
+                        .layoutPriority(1)
                 }
             }
             .navigationTitle(editor.displayName)
@@ -465,14 +470,15 @@ struct ComposeFileEditorSheet: View {
                 editor.isDirty
                     ? "Unsaved changes"
                     : (editor.isEnvironmentFile && !environmentValuesAreRevealed ? "Values redacted" : "Saved"))
+            // A document-modal sheet wants text Cancel/Save in the standard
+            // placements — six symbol-only glyphs where every other macOS sheet has
+            // words was the strongest "web app" tell in the whole product. Document
+            // commands that are not Save or Cancel share one labelled menu.
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button { editor.requestClose() } label: {
-                        Image(systemName: "xmark")
-                    }
-                    .accessibilityLabel("Close source file")
-                    .help("Close source file")
-                    .disabled(validation.isRunning || projectOperations.isRunning)
+                    Button("Cancel") { editor.requestClose() }
+                        .help("Close this source file")
+                        .disabled(validation.isRunning || projectOperations.isRunning)
                 }
                 if editor.isEnvironmentFile {
                     ToolbarItem(placement: .secondaryAction) {
@@ -489,22 +495,16 @@ struct ComposeFileEditorSheet: View {
                 }
                 if editor.sourceKind == .composeYAML {
                     ToolbarItem(placement: .secondaryAction) {
-                        Button {
-                            validation.requestValidation(
-                                using: editor,
-                                isProjectOperationPresented: projectOperations.isPresented)
-                        } label: {
-                            Image(systemName: "checkmark.seal")
-                        }
-                        .disabled(!validation.canRequestValidation || editor.isDirty || projectOperations.isPresented)
-                        .accessibilityLabel("Validate saved Compose document")
-                        .help(
-                            editor.isDirty
-                                ? "Save or discard edits before validating this Compose document"
-                                : "Validate the saved Compose document opened in this editor")
-                    }
-                    ToolbarItem(placement: .secondaryAction) {
                         Menu {
+                            Button("Validate Saved Compose File…") {
+                                validation.requestValidation(
+                                    using: editor,
+                                    isProjectOperationPresented: projectOperations.isPresented)
+                            }
+                            .disabled(!validation.canRequestValidation || editor.isDirty || projectOperations.isPresented)
+
+                            Divider()
+
                             Button("Build Project Images…") {
                                 projectOperations.request(.build, using: editor)
                             }
@@ -526,17 +526,17 @@ struct ComposeFileEditorSheet: View {
                                 projectOperations.request(.down, using: editor)
                             }
                         } label: {
-                            Image(systemName: "play.square.stack")
+                            Label("Project commands", systemImage: "play.square.stack")
                         }
                         .disabled(
                             !projectOperations.canRequestOperation
                                 || editor.isDirty
                                 || validation.isPresented)
-                        .accessibilityLabel("Reviewed Compose project commands")
+                        .accessibilityLabel("Compose project commands")
                         .help(
                             editor.isDirty
-                                ? "Save or discard edits before reviewing a Compose project command"
-                                : "Review Compose project commands for this saved source")
+                                ? "Save or discard edits before validating or running a Compose project command"
+                                : "Validate this saved file or review a Compose project command")
                     }
                 }
                 ToolbarItem(placement: .secondaryAction) {
@@ -548,12 +548,9 @@ struct ComposeFileEditorSheet: View {
                     .help("Discard unsaved source changes")
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button { editor.requestSave() } label: {
-                        Image(systemName: "square.and.arrow.down")
-                    }
-                    .disabled(!editor.isDirty)
-                    .accessibilityLabel("Review and save source file")
-                    .help("Review and save source file")
+                    Button("Save") { editor.requestSave() }
+                        .disabled(!editor.isDirty)
+                        .help("Review and save this source file")
                 }
             }
         }
@@ -592,7 +589,7 @@ struct ComposeFileEditorSheet: View {
             Text(editor.saveError ?? "")
         }
         .alert(
-            "Couldn’t Validate Compose Document",
+            "Couldn’t Validate Compose File",
             isPresented: Binding(
                 get: { validation.requestError != nil },
                 set: { if !$0 { validation.requestError = nil } })

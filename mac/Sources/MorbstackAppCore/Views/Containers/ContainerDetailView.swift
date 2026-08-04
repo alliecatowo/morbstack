@@ -144,7 +144,7 @@ struct ContainerDetailView: View {
             guard !Task.isCancelled else { return }
             inspectJSON = json
             details = TrackBInspectDetails(json: json)
-            inspectError = details == nil ? "The engine returned a document that is not JSON." : nil
+            inspectError = details == nil ? "The engine's response was not valid JSON." : nil
         } catch {
             guard !Task.isCancelled else { return }
             // A previously loaded document describes an earlier engine state.  Do not

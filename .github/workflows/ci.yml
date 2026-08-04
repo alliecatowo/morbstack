@@ -37,11 +37,8 @@ jobs:
           filters: |
             guest_image:
               - 'guest/morbinit/**'
-              - 'guest/moby-patches/**'
               - 'scripts/mkinitramfs.sh'
               - 'scripts/fetch-guest-assets.sh'
-              - 'scripts/build-morbstack-dockerd.sh'
-              - 'scripts/fetch-moby-source.sh'
               - 'mise-tasks/guest-image'
               - 'dist/guest-bin/PROVENANCE.txt'
               - 'dist/CROSS_COMPILE.md'
@@ -251,14 +248,11 @@ jobs:
       # Kernel/k8s payload fetches are skipped here on purpose: they're
       # not inputs to mise run guest-image (see scripts/mkinitramfs.sh),
       # and skipping them keeps this job's network footprint to what the
-      # initramfs itself actually needs. morbstack-dockerd is different: it
-      # is a pinned downstream release built/attested on Linux by
-      # build-engine.yml, so this macOS job only verifies and embeds it; it
-      # never needs Docker or Buildx itself.
+      # initramfs itself actually needs. Every engine binary is a stock,
+      # hash-pinned upstream artifact — building Morbstack needs no Docker.
       - name: Fetch guest assets
         run: |
           ./scripts/fetch-guest-assets.sh --docker-only
-          ./scripts/fetch-guest-assets.sh --morbstack-dockerd-only
           ./scripts/fetch-guest-assets.sh --alpine-only
           ./scripts/fetch-guest-assets.sh --fsutils-only
 

@@ -267,8 +267,9 @@ enum TrackCDiskMath {
     ///
     /// Exactness, per category:
     ///
-    ///   * **images** — exact. A dangling image's `Size` is reported per image and the
-    ///     app already has the list.
+    ///   * **images** — exact. `DockerClient.diskUsage` computes it the way
+    ///     `docker system df` does: `LayersSize` minus the unique bytes of in-use
+    ///     images, so shared base layers are never counted twice.
     ///   * **volumes** — exact when usage data is present; an unused volume with an
     ///     unknown size contributes zero rather than a guess.
     ///   * **containers** — exact at the boundaries (all running, or none running) and a
@@ -283,9 +284,10 @@ enum TrackCDiskMath {
         volumes: [VolumeSummary]
     ) -> [TrackCDiskSegment] {
 
-        let imagesReclaimable = min(
-            max(0, usage.imagesTotal),
-            images.filter(\.isDangling).reduce(Int64(0)) { $0 + max(0, $1.size) })
+        // The engine-derived figure (LayersSize minus in-use unique bytes) rather than
+        // a sum of dangling images' `Size`, which double-counts shared layers. The
+        // header, this row, and `docker system df` now all say the same number.
+        let imagesReclaimable = min(max(0, usage.imagesTotal), max(0, usage.imagesReclaimable))
 
         let volumesReclaimable = min(
             max(0, usage.volumesTotal),

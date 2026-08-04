@@ -406,6 +406,14 @@ struct VolumesRootView: View {
         content
             .navigationTitle("Volumes")
             .navigationSubtitle(subtitle)
+            // The menu-bar mirror of the toolbar's remove-unused command, so it stays
+            // reachable when the toolbar overflows at narrow widths.
+            .focusedSceneValue(
+                \.routeMaintenanceCommand,
+                RouteMaintenanceCommand(
+                    title: "Remove Unused Volumes…",
+                    isEnabled: unusedCount > 0 && !isPerformingVolumeOperation && removalProgress == nil,
+                    perform: { reviewUnusedVolumes() }))
             .searchable(text: $query, placement: .toolbar, prompt: "Name, driver, label, or mount point")
             .toolbar { toolbarContent }
             .sheet(item: $unusedRemovalPlan) { plan in
@@ -569,7 +577,8 @@ struct VolumesRootView: View {
             Button {
                 chooseVolumeArchiveDestination()
             } label: {
-                Image(systemName: "square.and.arrow.down")
+                // SF Symbol convention: up = export/share, down = import/save.
+                Image(systemName: "square.and.arrow.up")
             }
             .accessibilityLabel("Export selected volume")
             .help(volumeArchiveExportHelp)
@@ -637,6 +646,9 @@ struct VolumesRootView: View {
             TableColumn("Size", sortUsing: TrackCVolumeComparator(key: .size)) { volume in
                 Text(volume.size.map(Formatters.bytesString) ?? "—")
                     .monospacedDigit()
+                    .help(volume.size == nil
+                        ? "Sizes come from the Disk scan. Open Disk to compute them."
+                        : "Bytes on disk, from the most recent Disk scan")
             }
             .width(min: 72, ideal: 92, max: 130)
             TableColumn("In use", sortUsing: TrackCVolumeComparator(key: .refCount)) { volume in
@@ -665,6 +677,7 @@ struct VolumesRootView: View {
         } else if volume.refCount == nil {
             Text("—")
                 .accessibilityLabel("Usage unreported")
+                .help("Usage comes from the Disk scan. Open Disk to compute it.")
         } else {
             Text("Unused")
         }
@@ -828,7 +841,7 @@ struct VolumesRootView: View {
             ContentUnavailableView(
                 "No Volume Selected",
                 systemImage: "externaldrive",
-                description: Text("Pick a volume to see its guest mount point and what is using it."))
+                description: Text("Select a volume to see its guest mount point and what is using it."))
         }
     }
 
@@ -1033,7 +1046,7 @@ struct VolumesRootView: View {
         var failures: [String] = []
 
         for (index, name) in names.enumerated() {
-            removalProgress = "Removing \(index + 1) of \(names.count) volumes…"
+            removalProgress = "Removing \(index + 1) of \(names.count) volume\(names.count == 1 ? "" : "s")…"
             do {
                 try await model.client.removeVolume(name: name)
                 removed += 1
@@ -1048,7 +1061,7 @@ struct VolumesRootView: View {
             // is the native acknowledgement for a completed destructive operation.
         } else if removed > 0 {
             operationAlert = VolumeOperationAlert(
-                title: "Removed \(removed) of \(names.count) volumes",
+                title: "Removed \(removed) of \(names.count) volume\(names.count == 1 ? "" : "s")",
                 message: "Still in use: \(failures.prefix(3).joined(separator: ", ")).",
                 focusID: failures.first)
         } else {

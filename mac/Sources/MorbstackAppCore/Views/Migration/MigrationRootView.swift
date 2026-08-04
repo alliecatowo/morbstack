@@ -213,7 +213,8 @@ struct MigrationRootView: View {
         }
 
         if !runtimes.isEmpty {
-            ToolbarItem(id: "migration.inspector", placement: .secondaryAction) {
+            // `.automatic`, matching every other route's inspector toggle placement.
+            ToolbarItem(id: "migration.inspector", placement: .automatic) {
                 Button {
                     showsInspector.toggle()
                 } label: {
@@ -321,6 +322,17 @@ struct MigrationRootView: View {
         }
     }
 
+    /// The short status word for a named volume's migration disposition.
+    private func dispositionLabel(
+        for disposition: MigrationVolumePlanDisposition
+    ) -> String {
+        switch disposition {
+        case .eligible: return "Eligible"
+        case .destinationExists: return "Destination Exists"
+        case .unsupportedDriver: return "Unsupported Driver"
+        }
+    }
+
     @ViewBuilder
     private func transferSection(for runtime: MigrationRuntime) -> some View {
         Section {
@@ -332,8 +344,8 @@ struct MigrationRootView: View {
                 } else if let plan = plan(for: runtime), let images = plan.imagePlan {
                     LabeledContent(
                         "Would Copy",
-                        value: "\(images.wouldCopy.count) images · \(Formatters.bytesString(images.wouldCopyBytes))")
-                    LabeledContent("Already Present", value: "\(images.alreadyPresent.count) images")
+                        value: "\(images.wouldCopy.count) image\(images.wouldCopy.count == 1 ? "" : "s") · \(Formatters.bytesString(images.wouldCopyBytes))")
+                    LabeledContent("Already Present", value: "\(images.alreadyPresent.count) image\(images.alreadyPresent.count == 1 ? "" : "s")")
                     Text(
                         images.items.isEmpty
                             ? "No tagged images matched this comparison."
@@ -363,50 +375,35 @@ struct MigrationRootView: View {
                         .controlSize(.small)
                 } else if let volumes = plan(for: runtime)?.volumePlan {
                     LabeledContent("Named Volume Eligibility", value: "Read Only")
-                    LabeledContent("Eligible", value: "\(volumes.eligible.count) volumes")
-                    LabeledContent("Destination Exists", value: "\(volumes.destinationExisting.count) volumes")
-                    LabeledContent("Unsupported Driver", value: "\(volumes.unsupported.count) volumes")
+                    LabeledContent("Eligible", value: "\(volumes.eligible.count) volume\(volumes.eligible.count == 1 ? "" : "s")")
+                    LabeledContent("Destination Exists", value: "\(volumes.destinationExisting.count) volume\(volumes.destinationExisting.count == 1 ? "" : "s")")
+                    LabeledContent("Unsupported Driver", value: "\(volumes.unsupported.count) volume\(volumes.unsupported.count == 1 ? "" : "s")")
 
                     if volumes.items.isEmpty {
-                        ContentUnavailableView {
-                            Label("No Named Volumes", systemImage: "externaldrive")
-                        } description: {
-                            Text("The selected source reported no named volumes.")
-                        }
-                        .frame(height: 128)
+                        // A form row, not a full-height unavailable panel: inside a
+                        // 340pt inspector Form the framed panel clipped its neighbours.
+                        Text("The selected source reported no named volumes.")
+                            .foregroundStyle(.secondary)
                     } else {
-                        Table(volumes.items) {
-                            TableColumn("Volume") { volume in
-                                Text(volume.name)
-                                    .font(.body.monospaced())
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                            }
-                            .width(min: 120, ideal: 160)
-
-                            TableColumn("Driver") { volume in
-                                Text(volume.driver)
-                                    .lineLimit(1)
-                            }
-                            .width(min: 72, ideal: 96)
-
-                            TableColumn("Eligibility") { volume in
-                                VStack(alignment: .leading, spacing: 2) {
-                                    switch volume.disposition {
-                                    case .eligible:
-                                        Text("Eligible")
-                                    case .destinationExists:
-                                        Text("Destination Exists")
-                                    case .unsupportedDriver:
-                                        Text("Unsupported Driver")
-                                    }
-                                    Text(volume.reason)
-                                        .font(.caption)
+                        // Stacked rows instead of a nested Table: three columns with
+                        // 372pt of minimum width cannot fit a 340pt inspector without
+                        // overdrawing — the exact defect the Disk route was cited for.
+                        List(volumes.items) { volume in
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack(alignment: .firstTextBaseline) {
+                                    Text(volume.name)
+                                        .font(.body.monospaced())
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                    Spacer(minLength: 8)
+                                    Text(dispositionLabel(for: volume.disposition))
                                         .foregroundStyle(.secondary)
-                                        .lineLimit(2)
                                 }
+                                Text("\(volume.driver) — \(volume.reason)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
                             }
-                            .width(min: 180, ideal: 260)
                         }
                         .frame(minHeight: 120, idealHeight: 180, maxHeight: 260)
                         .accessibilityLabel("Read-only named volume eligibility")
@@ -733,7 +730,7 @@ private struct MigrationImageSelectionSheet: View {
                         LabeledContent("Destination", value: destination)
                         LabeledContent(
                             "Selected",
-                            value: "\(selectedItems.count) of \(candidates.count) images")
+                            value: "\(selectedItems.count) of \(candidates.count) image\(candidates.count == 1 ? "" : "s")")
                         LabeledContent("Estimated Size", value: Formatters.bytesString(selectedBytes))
                     }
 
@@ -945,7 +942,7 @@ private struct MigrationImageProgressSheet: View {
                         ProgressView(value: Double(completed), total: Double(total)) {
                             Text(phaseTitle)
                         } currentValueLabel: {
-                            Text("\(completed) of \(total) images")
+                            Text("\(completed) of \(total) image\(total == 1 ? "" : "s")")
                                 .monospacedDigit()
                         }
                     } else {
@@ -977,10 +974,12 @@ private struct MigrationImageProgressSheet: View {
             }
             .navigationTitle("Importing Images")
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
+                // Deliberately NOT `.cancellationAction`: that placement binds Escape,
+                // and a stray Escape must not silently abandon a running transfer.
+                // Stopping mid-import is a decision, not a dismissal.
+                ToolbarItem(placement: .destructiveAction) {
                     Button(
                         cancellationRequested ? "Stopping Remaining Images" : "Stop Remaining Images",
-                        role: .cancel,
                         action: onCancelRemaining)
                     .disabled(cancellationRequested)
                 }
@@ -1113,7 +1112,7 @@ private struct MigrationVolumeSelectionSheet: View {
                         LabeledContent("Destination", value: destination)
                         LabeledContent(
                             "Selected",
-                            value: "\(selectedItems.count) of \(candidates.count) eligible volumes")
+                            value: "\(selectedItems.count) of \(candidates.count) eligible volume\(candidates.count == 1 ? "" : "s")")
                         Text(
                             "Only source volumes that are currently local-driver and missing from Morbstack appear here. This screen begins with nothing selected.")
                             .foregroundStyle(.secondary)

@@ -315,8 +315,8 @@ Failure:
 | 2376 | Stream-dial: host requests a connection to an arbitrary guest-local TCP port (used for published container ports) |
 | 2377 | Bulk payload install: host streams large files into the guest (used for the Kubernetes payload) |
 | 2378 | Datagram-dial: framed UDP relay for published container ports |
-| 2379 | Publish-all allocator: patched Moby asks the host to reserve `docker -P` endpoints |
 | 2381 | Live-share receiver: authenticated host FSEvents invalidations for explicitly selected VirtioFS project roots |
+| 2382 | Host-side port lease: the guest userland-proxy wrapper asks the host to bind a published port; guest-initiated |
 
 Port 2375 is the conventional plaintext Docker Engine API port; it is used
 here only on the host<->guest vsock link, which is not reachable from the
@@ -340,7 +340,12 @@ persistent ext4 disk keeps the cost proportional to the feature's use. See
 §3.4.
 
 New ports must be added to this table before use. Do not reuse 1024, 2375,
-2376, 2377, 2378, 2379, or 2381 for anything else.
+2376, 2377, 2378, 2381, or 2382 for anything else. Ports 2379 and 2380 are
+retired — 2379 was the publish-all allocator for a patched Moby that no
+longer ships (see §3.6); 2380 never shipped past a decision draft. Neither
+may be reused: this document has a specific, dated failure mode of
+describing a retired port as live, and reuse would resurrect exactly that
+confusion for a reader following an old link or a stale mental model.
 
 ### 3.1 The vsock 2375 <-> `docker.sock` relay, end to end
 
@@ -733,6 +738,79 @@ one rescan for every selected root. A short matching-path echo coalescing
 window prevents the guest's metadata nudge from recursively re-entering the
 host stream. A disconnect tears down both the stream and capability before a
 new connection attempts a fresh boot/session handshake.
+
+### 3.6 The vsock 2382 host port-lease protocol (published ports)
+
+Transport: vsock, but backwards from every other entry in this registry —
+**port 2382 is a listener on the host**, and the guest connects out to it
+(`VMADDR_CID_HOST`). It is the registry's only guest-initiated channel; every
+other port above is a guest listener the host dials into.
+
+Morbstack ships the unmodified upstream `dockerd` (stock static Docker
+29.7.1 binaries, archive-hash-pinned) rather than a downstream-patched
+engine. `docker run -P`, and every other published port, is served through
+dockerd's own stock `--userland-proxy-path` flag: morbinit starts dockerd
+with `--userland-proxy-path=/usr/local/bin/morbstack-docker-proxy`, a
+multi-call symlink to morbinit itself
+(`guest/morbinit/src/proxy_wrapper.rs`). Stock dockerd execs that wrapper
+once per published port — after it has resolved the effective port set,
+including the dynamic allocations `-P`/`EXPOSE` only dockerd can compute,
+and before it lets the container start succeed.
+
+The wrapper's exchange with the host is one bounded ASCII request and one
+bounded ASCII reply:
+
+```text
+guest -> host:  LEASE <tcp|udp> <host-ip> <host-port> <container-ip> <container-port>\n
+host  -> guest: OK\n
+           or:  ERR <reason>\n
+```
+
+`LEASE` carries the exact five values dockerd passed the wrapper on its
+argv (`-proto`, `-host-ip`, `-host-port`, `-container-ip`,
+`-container-port`); `container-ip` may be `-` when dockerd did not supply
+one. The request line is capped at 256 bytes including the newline and must
+arrive within 10 s of the connection opening
+(`GuestPortLease.maxRequestLineBytes` /
+`GuestPortLease.requestTimeout`, `mac/Sources/MorbstackKit/GuestPortLease.swift`);
+the wrapper itself gives up waiting for the reply after 12 s
+(`LEASE_REPLY_TIMEOUT_MS`, `proxy_wrapper.rs`) — both bounds sit comfortably
+inside dockerd's own 16 s proxy-startup budget so a timeout is attributed to
+the right layer. This is deliberately treated as an untrusted-input surface
+(the guest is running arbitrary containers): the host's parser accepts only
+the exact six-field grammar and rejects anything else with a reason that
+becomes the wire `ERR` text, and addresses are re-validated with `inet_pton`
+before anything binds.
+
+On `OK`, the host has already bound (or adopted, for an explicit `-p`
+preflight lease) the Mac-side listener and is forwarding to the guest
+endpoint; the wrapper then `exec`s the stock `docker-proxy` with dockerd's
+original argv, so the in-guest listener, UDP relay, and fd-3 readiness
+signal are all unmodified upstream behavior. The lease connection is
+carried across that `exec` — it is deliberately not close-on-exec — so it
+stays open for exactly the stock proxy process's lifetime. **EOF is the
+release signal.** There is no separate release verb: the proxy exiting for
+any reason (container stop, restart, dockerd shutdown, VM stop) closes the
+descriptor, and the host tears down the Mac listener on that EOF. Lease
+lifetime equals proxy process lifetime by construction, which is what makes
+stop/start/restart and restart-policy-across-VM-boot correct without any
+session bookkeeping to fall out of sync.
+
+On `ERR <reason>` — typically another Mac process already owns the
+port — or when the host is unreachable at all, the wrapper reports the
+failure on dockerd's fd-3 status pipe (`"1\n<reason>"`) and exits non-zero
+instead of exec'ing the stock proxy. dockerd then fails the container start
+with that honest error and does not retry a different port. This
+fail-closed behavior is the entire point of the channel: it gives a Mac
+port collision the same semantics a busy port has on native Linux, instead
+of the reactive-discovery failure mode where a container starts and reports
+success while its published port silently does not answer on the Mac.
+
+Two invocations never reach the host at all and are handled by the wrapper
+as a direct pass-through to the stock proxy: a `-v`/`-version` probe (there
+is nothing to lease), and `-proto sctp` (macOS has no SCTP listener to
+offer — matching Docker Desktop's own behavior — though the guest-side
+proxy still runs, so container-to-container SCTP traffic works).
 
 ## 4. Versioning and compatibility rules
 

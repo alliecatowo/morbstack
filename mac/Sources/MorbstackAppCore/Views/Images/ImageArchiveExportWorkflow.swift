@@ -131,45 +131,53 @@ struct ImageArchiveExportSheet: View {
     let cancel: () -> Void
 
     var body: some View {
-        Form {
-            Section("Image Archive") {
-                LabeledContent("Image") {
-                    Text(operation.imageLabel)
-                        .textSelection(.enabled)
-                        .lineLimit(2)
-                        .truncationMode(.middle)
-                }
-                LabeledContent("Destination") {
-                    Text(operation.outputURL.path)
-                        .font(.system(.body, design: .monospaced))
-                        .textSelection(.enabled)
-                        .lineLimit(2)
-                        .truncationMode(.middle)
-                }
-            }
-
-            Section("Progress") {
-                if let totalBytes = operation.totalBytes, totalBytes > 0 {
-                    ProgressView(
-                        value: min(Double(operation.bytesWritten) / Double(totalBytes), 1)) {
-                        Text(operation.isCancellationRequested ? "Cancelling export…" : "Saving image archive")
-                    } currentValueLabel: {
-                        Text("\(Formatters.bytesString(operation.bytesWritten)) of \(Formatters.bytesString(totalBytes))")
+        // A document-modal sheet without its own title bar or toolbar reads as an
+        // orphaned form; wrapping it in NavigationStack with a title and a toolbar Cancel
+        // matches the house pattern used by the other sheets in this route (see
+        // ImageTagSheet and LocalImageRunSheet).
+        NavigationStack {
+            Form {
+                Section("Image Archive") {
+                    LabeledContent("Image") {
+                        Text(operation.imageLabel)
+                            .textSelection(.enabled)
+                            .lineLimit(2)
+                            .truncationMode(.middle)
                     }
-                } else {
-                    ProgressView(operation.isCancellationRequested ? "Cancelling export…" : "Saving image archive")
-                    LabeledContent("Written", value: Formatters.bytesString(operation.bytesWritten))
+                    LabeledContent("Destination") {
+                        Text(operation.outputURL.path)
+                            .font(.system(.body, design: .monospaced))
+                            .textSelection(.enabled)
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                    }
+                }
+
+                Section("Progress") {
+                    if let totalBytes = operation.totalBytes, totalBytes > 0 {
+                        ProgressView(
+                            value: min(Double(operation.bytesWritten) / Double(totalBytes), 1)) {
+                            Text(operation.isCancellationRequested ? "Cancelling export…" : "Saving image archive")
+                        } currentValueLabel: {
+                            Text("\(Formatters.bytesString(operation.bytesWritten)) of \(Formatters.bytesString(totalBytes))")
+                        }
+                    } else {
+                        ProgressView(operation.isCancellationRequested ? "Cancelling export…" : "Saving image archive")
+                        LabeledContent("Written", value: Formatters.bytesString(operation.bytesWritten))
+                    }
                 }
             }
-
-            Section {
-                Button(operation.isCancellationRequested ? "Cancelling…" : "Cancel", role: .cancel) {
-                    cancel()
+            .formStyle(.automatic)
+            .navigationTitle("Exporting Image")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(operation.isCancellationRequested ? "Cancelling…" : "Cancel", role: .cancel) {
+                        cancel()
+                    }
+                    .disabled(operation.isCancellationRequested)
                 }
-                .disabled(operation.isCancellationRequested)
             }
         }
-        .formStyle(.automatic)
         .frame(minWidth: 460, idealWidth: 520)
     }
 }

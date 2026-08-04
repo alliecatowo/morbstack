@@ -5,6 +5,12 @@ traffic. This document records the defect, the design that replaced it, and the
 verification that the replacement holds — including the streaming paths it would have
 been easy to break while fixing it.
 
+> **Staleness note (2026-08-04):** the `-P` findings below (§"Phase 1.1", the durable
+> publish-all session, vsock port 2379) describe the publish-all allocator and patched
+> Moby, both deleted under TECH-1 in favor of a userland-proxy wrapper through
+> dockerd's stock `--userland-proxy-path` hook. Left unchanged as dated evidence; see
+> `docs/design/PATCH-FREE-PUBLISH-ALL.md`.
+
 ## Evidence scope
 
 **Dated runtime evidence — 2026-08-03 candidate only.** The matrix below proved that

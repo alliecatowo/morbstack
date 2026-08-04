@@ -871,18 +871,35 @@ class DockerClient: @unchecked Sendable {
         let layersSize = int64(object["LayersSize"])
 
         let images = object["Images"] as? [[String: Any]] ?? []
-        let danglingImageBytes = images
-            .filter { int64($0["Containers"]) <= 0 }
-            .reduce(Int64(0)) { $0 + int64($1["Size"]) }
+        // Docker's own accounting: reclaimable images = LayersSize minus the unique
+        // bytes of images that have containers (`Size - SharedSize` per in-use image).
+        // Summing unused images' `Size` instead double-counts every shared base layer
+        // and overstated reclaimable space by ~8% on a real store — a prune preview
+        // that under-delivers.
+        let imagesTotalBytes = layersSize > 0
+            ? layersSize
+            : images.reduce(Int64(0)) { $0 + int64($1["Size"]) }
+        let inUseUniqueImageBytes = images
+            .filter { int64($0["Containers"]) > 0 }
+            .reduce(Int64(0)) { $0 + max(0, int64($1["Size"]) - int64($1["SharedSize"])) }
+        let reclaimableImageBytes = max(0, imagesTotalBytes - inUseUniqueImageBytes)
 
         let volumes = object["Volumes"] as? [[String: Any]] ?? []
         var volumeBytes: Int64 = 0
         var reclaimableVolumeBytes: Int64 = 0
+        var volumeUsage: [String: DiskUsage.VolumeUsageData] = [:]
         for volume in volumes {
             let usage = volume["UsageData"] as? [String: Any]
             let size = max(0, int64(usage?["Size"]))
             volumeBytes += size
             if int64(usage?["RefCount"]) <= 0 { reclaimableVolumeBytes += size }
+            // Keep the per-volume figures: `GET /volumes` never reports usage, so
+            // this scan is the Volumes screen's only source for Size and In use.
+            if let name = volume["Name"] as? String, usage != nil {
+                volumeUsage[name] = DiskUsage.VolumeUsageData(
+                    size: size,
+                    refCount: usage?["RefCount"] != nil ? Int(int64(usage?["RefCount"])) : nil)
+            }
         }
 
         let buildCache = object["BuildCache"] as? [[String: Any]] ?? []
@@ -908,11 +925,13 @@ class DockerClient: @unchecked Sendable {
 
         return DiskUsage(
             layersSize: layersSize,
-            imagesTotal: layersSize > 0 ? layersSize : images.reduce(Int64(0)) { $0 + int64($1["Size"]) },
+            imagesTotal: imagesTotalBytes,
             volumesTotal: volumeBytes,
             buildCacheTotal: cacheBytes,
             containersTotal: containerBytes,
-            reclaimable: danglingImageBytes + reclaimableVolumeBytes + reclaimableCacheBytes + reclaimableContainerBytes)
+            reclaimable: reclaimableImageBytes + reclaimableVolumeBytes + reclaimableCacheBytes + reclaimableContainerBytes,
+            imagesReclaimable: reclaimableImageBytes,
+            volumeUsage: volumeUsage)
     }
 
     /// Every BuildKit cache record `/system/df` knows about.

@@ -164,6 +164,12 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
     private var configuredDiskSizeGiB: Int
 
     private var virtualMachine: VZVirtualMachine?
+    /// Guest-initiated vsock handlers, re-installed on every VM this manager
+    /// creates. See ``setGuestInitiatedConnectionHandler(port:handler:)``.
+    private var guestListenerHandlers: [UInt32: (Int32) -> Void] = [:]
+    /// The live listeners (and their delegates, which VZ does not retain) for
+    /// the *current* VM object. Replaced wholesale when a new VM is built.
+    private var guestListeners: [UInt32: (VZVirtioSocketListener, GuestVsockAcceptDelegate)] = [:]
     private var consoleHandle: FileHandle?
 
     private let stateLock = NSLock()
@@ -717,6 +723,90 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
         }
     }
 
+    /// Registers a handler for **guest-initiated** vsock connections to `port`.
+    ///
+    /// Everything else on the vsock link is host-initiated; this is the one
+    /// reversed channel (the userland-proxy wrapper's port-lease requests,
+    /// ``MorbVsockPorts/hostPortLease``). The handler receives a `dup`'d
+    /// descriptor it owns outright, and is invoked on the VM queue — it must
+    /// hand off to its own queue immediately rather than block.
+    ///
+    /// The registration is durable across VM generations: it is re-installed
+    /// on every VZVirtualMachine this manager creates, cold-boot or restore,
+    /// so a lease request arriving the moment dockerd starts a restart-policy
+    /// container is always answerable.
+    public func setGuestInitiatedConnectionHandler(
+        port: UInt32,
+        handler: @escaping (Int32) -> Void
+    ) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.guestListenerHandlers[port] = handler
+            if let vm = self.virtualMachine {
+                self.installGuestVsockListener(on: vm, port: port, handler: handler)
+            }
+        }
+    }
+
+    /// Installs every registered guest-initiated listener on a fresh VM.
+    /// Must run on the VM queue with `vm` current.
+    private func installGuestVsockListeners(on vm: VZVirtualMachine) {
+        for (port, handler) in guestListenerHandlers {
+            installGuestVsockListener(on: vm, port: port, handler: handler)
+        }
+    }
+
+    private func installGuestVsockListener(
+        on vm: VZVirtualMachine,
+        port: UInt32,
+        handler: @escaping (Int32) -> Void
+    ) {
+        guard let device = vm.socketDevices.first as? VZVirtioSocketDevice else {
+            log.warn("cannot serve guest vsock port \(port): the VM has no virtio-socket device")
+            return
+        }
+        let delegate = GuestVsockAcceptDelegate(handler: handler, log: log)
+        let listener = VZVirtioSocketListener()
+        listener.delegate = delegate
+        device.setSocketListener(listener, forPort: port)
+        // The device retains the listener but not the delegate; keep both so
+        // the accept callback cannot dangle for the VM's lifetime.
+        guestListeners[port] = (listener, delegate)
+    }
+
+    /// Accepts one guest-initiated connection, `dup`s the descriptor out of the
+    /// `VZVirtioSocketConnection` (same ownership rule as ``connectVsock``),
+    /// and hands it to the registered handler.
+    private final class GuestVsockAcceptDelegate: NSObject, VZVirtioSocketListenerDelegate {
+        private let handler: (Int32) -> Void
+        private let log: MorbLog
+
+        init(handler: @escaping (Int32) -> Void, log: MorbLog) {
+            self.handler = handler
+            self.log = log
+        }
+
+        func listener(
+            _ listener: VZVirtioSocketListener,
+            shouldAcceptNewConnection connection: VZVirtioSocketConnection,
+            from socketDevice: VZVirtioSocketDevice
+        ) -> Bool {
+            let original = connection.fileDescriptor
+            guard original >= 0 else {
+                connection.close()
+                return false
+            }
+            let owned = dup(original)
+            connection.close()
+            guard owned >= 0 else {
+                log.warn("dup of a guest-initiated vsock descriptor failed: \(String(cString: strerror(errno)))")
+                return false
+            }
+            handler(owned)
+            return true
+        }
+    }
+
     /// Opens a vsock connection to `port` in the guest.
     ///
     /// The returned descriptor is `dup`'d out of the `VZVirtioSocketConnection` and the
@@ -813,6 +903,7 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
             let vm = VZVirtualMachine(configuration: configuration, queue: queue)
             vm.delegate = self
             virtualMachine = vm
+            installGuestVsockListeners(on: vm)
             log.info("starting VM: \(configuration.cpuCount) vCPU, \(configuration.memorySize / (1024 * 1024)) MiB")
             vm.start { [weak self] result in
                 guard let self else { return done.fire(.failure(CompletionOnce.managerGone)) }
@@ -1174,6 +1265,7 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
             let vm = VZVirtualMachine(configuration: configuration, queue: queue)
             vm.delegate = self
             virtualMachine = vm
+            installGuestVsockListeners(on: vm)
             log.info("restoring VM from \(saveURL.path)")
             vm.restoreMachineStateFrom(url: saveURL) { [weak self] error in
                 guard let self else { return done.fire(.failure(CompletionOnce.managerGone)) }
@@ -1521,6 +1613,10 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
     private func releaseVirtualMachine(_ vm: VZVirtualMachine) {
         vm.delegate = nil
         virtualMachine = nil
+        // The listener objects belong to the departing VM's socket device;
+        // the handler registrations persist and are re-installed on the next
+        // VM (see setGuestInitiatedConnectionHandler).
+        guestListeners.removeAll()
         closeConsole()
         invalidateControlReadiness()
     }
@@ -2113,8 +2209,12 @@ public enum MorbVsockPorts {
     /// The stream transport preserves each UDP payload with explicit frames; see
     /// ``DatagramDial`` for the handshake and data-plane contract.
     public static let datagramDial: UInt32 = 2378
-    /// Per-container host allocator sessions used by patched Moby for `docker -P`.
-    public static let publishAllAllocator: UInt32 = 2379
     /// Bounded host-to-guest shared-file event receiver.
     public static let liveShareReceiver: UInt32 = 2381
+    /// Host-side port-lease channel — the registry's one **guest-initiated**
+    /// entry. The guest's userland-proxy wrapper (`morbstack-docker-proxy`,
+    /// which stock dockerd execs per published port) connects out to the host
+    /// on this port, asks for the Mac endpoint, and holds the connection for
+    /// the proxy process's lifetime; EOF releases the Mac listener.
+    public static let hostPortLease: UInt32 = 2382
 }

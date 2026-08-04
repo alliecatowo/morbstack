@@ -649,10 +649,10 @@ struct DiskRootView: View {
         } else {
             ContentUnavailableView(
                 label: {
-                    Label("Select a Storage Item", systemImage: "internaldrive")
+                    Label("No Storage Item Selected", systemImage: "internaldrive")
                 },
                 description: {
-                    Text("Choose a category or resource to inspect its details.")
+                    Text("Select a category or resource to inspect its details.")
                 })
         }
     }

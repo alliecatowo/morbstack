@@ -348,7 +348,7 @@ final class MorbstackFixtureUITests: XCTestCase {
         let actions = app.buttons["Actions for shopfront"]
         XCTAssertTrue(actions.waitForExistence(timeout: 10))
         actions.click()
-        let stop = app.menuItems["Stop 5 Running Services"]
+        let stop = app.menuItems["Stop 5 Running Services…"]
         XCTAssertTrue(stop.waitForExistence(timeout: 10))
         XCTAssertTrue(stop.isEnabled)
         stop.click()
@@ -381,6 +381,14 @@ final class MorbstackFixtureUITests: XCTestCase {
         XCTAssertTrue(
             window.waitForExistence(timeout: 15),
             "The real Morbstack window did not appear. The test must never substitute an offscreen renderer.")
+
+        // Every fixture window must carry its provenance on screen, in a place that
+        // survives sidebar collapse and screenshot cropping. A fixture window without
+        // this banner has already been mistaken for live evidence once.
+        let banner = app.staticTexts["Developer fixtures — not connected to a Docker Engine."]
+        XCTAssertTrue(
+            banner.waitForExistence(timeout: 10),
+            "A --tour-fixtures window must show the non-dismissible fixture provenance banner.")
         return app
     }
 

@@ -162,7 +162,7 @@ final class ComposeSourceValidationModel {
     ) {
         guard canRequestValidation else { return }
         guard !isProjectOperationPresented else {
-            requestError = "Finish the current reviewed Compose project command before validating this document."
+            requestError = "Finish the current reviewed Compose project command before validating this file."
             return
         }
         do {
@@ -579,10 +579,10 @@ struct ComposeSourceValidationSheet: View {
 
     private var navigationTitle: String {
         switch validation.phase {
-        case .review: "Validate Compose Document"
-        case .running: "Validating Compose Document"
-        case .result(_, let result): "Compose Document: \(result.title)"
-        case .idle: "Compose Document Validation"
+        case .review: "Validate Compose File"
+        case .running: "Validating Compose File"
+        case .result(_, let result): "Compose File: \(result.title)"
+        case .idle: "Compose File Validation"
         }
     }
 
@@ -682,12 +682,10 @@ struct ComposeSourceValidationSheet: View {
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         if case .review = validation.phase {
+            // Match the sibling review sheet in ComposeProjectOperation.swift: a plain
+            // text Cancel in .cancellationAction, not a symbol-only button.
             ToolbarItem(placement: .cancellationAction) {
-                Button { validation.requestDismissal() } label: {
-                    Image(systemName: "xmark")
-                }
-                .accessibilityLabel("Cancel Compose source validation")
-                .help("Cancel validation")
+                Button("Cancel") { validation.requestDismissal() }
             }
             ToolbarItem(placement: .confirmationAction) {
                 Button("Validate") { validation.approve() }

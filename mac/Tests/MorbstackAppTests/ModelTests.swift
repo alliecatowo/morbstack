@@ -614,11 +614,14 @@ final class DockerEventTests: XCTestCase {
 final class DiskUsageTests: XCTestCase {
 
     func testFoldsASystemDFDocument() {
+        // One in-use image (1 GB, 400 MB of it shared base layers) and one unused
+        // image (500 MB, sharing the same 400 MB base). LayersSize is the on-disk
+        // truth: 1 GB + the unused image's unique 100 MB.
         let usage = DockerClient.diskUsage(from: [
-            "LayersSize": 4_000_000_000,
+            "LayersSize": 1_100_000_000,
             "Images": [
-                ["Size": 1_000_000_000, "Containers": 2],
-                ["Size": 500_000_000, "Containers": 0],  // dangling → reclaimable
+                ["Size": 1_000_000_000, "SharedSize": 400_000_000, "Containers": 2],
+                ["Size": 500_000_000, "SharedSize": 400_000_000, "Containers": 0],
             ],
             "Volumes": [
                 ["UsageData": ["Size": 300_000_000, "RefCount": 1]],
@@ -636,12 +639,17 @@ final class DiskUsageTests: XCTestCase {
 
         // `LayersSize` is the honest image total: per-image `Size` double-counts every
         // shared base layer.
-        XCTAssertEqual(usage.layersSize, 4_000_000_000)
-        XCTAssertEqual(usage.imagesTotal, 4_000_000_000)
+        XCTAssertEqual(usage.layersSize, 1_100_000_000)
+        XCTAssertEqual(usage.imagesTotal, 1_100_000_000)
         XCTAssertEqual(usage.volumesTotal, 500_000_000)
         XCTAssertEqual(usage.buildCacheTotal, 150_000_000)
         XCTAssertEqual(usage.containersTotal, 30_000_000)
-        // 500M dangling image + 200M unused volume + 50M idle cache + 20M exited container
+        // Docker's own formula: LayersSize (1.1 GB) minus in-use unique bytes
+        // (1 GB − 400 MB shared = 600 MB) → 500 MB, not the unused image's 500 MB
+        // `Size` (which would double-count the shared 400 MB whenever more images
+        // overlapped).
+        XCTAssertEqual(usage.imagesReclaimable, 500_000_000)
+        // 500M images + 200M unused volume + 50M idle cache + 20M exited container
         XCTAssertEqual(usage.reclaimable, 770_000_000)
     }
 

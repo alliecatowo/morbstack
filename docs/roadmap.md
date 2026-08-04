@@ -33,8 +33,8 @@ The launch track is written out in full after the 1.x section.
 
 ## M0 — Proof (~6 weeks) — done
 
-Goal: prove the core bet (real upstream Docker Engine, one shared VM, fast
-boot) actually works before investing in the surrounding product.
+Goal: prove the core bet (unmodified upstream Docker Engine, one shared VM,
+fast boot) actually works before investing in the surrounding product.
 
 - `Virtualization.framework` VM boots the pinned kernel and `morbinit`. **Done.**
 - `dockerd` inside the guest is reachable from the host via a
@@ -216,8 +216,9 @@ rather than a sequence of writing tasks.
   section favouring it. Every competitor claim is cited; every Morbstack
   number traces to a file in this repository. Notable finding: Docker
   Desktop is itself on `Virtualization.framework` now, so "uses Apple's
-  hypervisor" is not a differentiator — the real upstream engine (one small
-  pinned Morbstack patch to `dockerd`; `containerd` unmodified) and the
+  hypervisor" is not a differentiator — the unmodified upstream engine
+  (`dockerd`/`containerd`, no downstream patch; published ports served
+  through dockerd's own stock `--userland-proxy-path` hook) and the
   licence are.
 
 - **Packaging and distribution.** See `docs/RELEASING.md`,

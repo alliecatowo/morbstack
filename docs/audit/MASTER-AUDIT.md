@@ -1,5 +1,12 @@
 # Morbstack master audit — 2026-08-03
 
+> **Staleness note (2026-08-04):** this audit's engine/`-P` findings (the Moby patch,
+> `build-morbstack-dockerd.sh`, the publish-all allocator) describe a mechanism
+> deleted under TECH-1. Morbstack now ships unmodified upstream `dockerd`; `-P` is
+> served through its stock `--userland-proxy-path` hook instead, with no engine patch
+> and no Docker-to-build-Docker bootstrap. Findings left unchanged as dated evidence;
+> see `docs/design/PATCH-FREE-PUBLISH-ALL.md`.
+
 Independent audit of `code/native-content-continuation` (273 commits, tip `54de308`), covering the
 app, the service, and the repository itself. Companion documents:
 

@@ -117,9 +117,12 @@ enum Formatters {
     }
 
     /// Collapses a duration into the shortest honest unit: `3s`, `4m`, `2h`, `6d`.
-    static func compactDuration(since date: Date) -> String {
+    ///
+    /// Takes an explicit `now` so callers can tick the value from a `TimelineView` —
+    /// a relative duration rendered once is stale data presented as live.
+    static func compactDuration(since date: Date, at now: Date = .now) -> String {
         guard date.timeIntervalSince1970 > 0 else { return "—" }
-        let seconds = Int(max(0, -date.timeIntervalSinceNow))
+        let seconds = Int(max(0, now.timeIntervalSince(date)))
         switch seconds {
         case ..<60: return "\(seconds)s"
         case ..<3600: return "\(seconds / 60)m"

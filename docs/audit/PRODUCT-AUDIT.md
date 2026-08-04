@@ -1,5 +1,12 @@
 # Product / competitive audit — 2026-08-03
 
+> **Staleness note (2026-08-04):** the `-P`/publish-all findings below
+> (`guest/moby-patches/0001-morbstack-publish-all-host-allocator.patch`,
+> `scripts/build-morbstack-dockerd.sh`, `dist/guest-bin/morbstack-dockerd`) describe a
+> mechanism deleted under TECH-1. Morbstack now ships unmodified upstream `dockerd`;
+> `-P` is served through its stock `--userland-proxy-path` hook instead. Findings left
+> unchanged as dated evidence; see `docs/design/PATCH-FREE-PUBLISH-ALL.md`.
+
 **Scope:** the high-value local-development ergonomics people pay OrbStack or
 Docker Desktop for, what subsystem in this repo would have to exist to deliver
 each, and where Morbstack actually stands — measured against source, not

@@ -66,6 +66,9 @@ pub const WNOHANG: c_int = 1;
 pub const AF_VSOCK: c_int = 40;
 pub const SOCK_STREAM: c_int = 1;
 pub const VMADDR_CID_ANY: u32 = 0xffffffff;
+/// The well-known CID of the host, from `linux/vm_sockets.h`. Guest-initiated
+/// connections (the userland-proxy wrapper's port-lease channel) dial this.
+pub const VMADDR_CID_HOST: u32 = 2;
 
 // ---- descriptor-confined filesystem operations ----------------------------
 
@@ -179,6 +182,7 @@ mod raw {
         pub fn openat(dirfd: c_int, pathname: *const c_char, flags: c_int, mode: c_int) -> c_int;
         pub fn fchmod(fd: c_int, mode: u32) -> c_int;
         pub fn bind(sockfd: c_int, addr: *const c_void, addrlen: u32) -> c_int;
+        pub fn connect(sockfd: c_int, addr: *const c_void, addrlen: u32) -> c_int;
         pub fn listen(sockfd: c_int, backlog: c_int) -> c_int;
         pub fn accept(sockfd: c_int, addr: *mut c_void, addrlen: *mut u32) -> c_int;
         pub fn close(fd: c_int) -> c_int;
@@ -511,6 +515,43 @@ pub fn uname_release() -> io::Result<String> {
     // within the buffer we just initialized.
     let cstr = unsafe { std::ffi::CStr::from_ptr(buf.release.as_ptr()) };
     Ok(cstr.to_string_lossy().into_owned())
+}
+
+/// Connect to an AF_VSOCK peer — in practice the host (``VMADDR_CID_HOST``),
+/// which is the only reachable CID from inside the guest.
+///
+/// Returns a plain `std::fs::File` for the same reason `VsockListener::accept`
+/// does: `File`'s `Read`/`Write` are `read(2)`/`write(2)` on the wrapped fd.
+/// The descriptor is deliberately **not** close-on-exec: the userland-proxy
+/// wrapper's whole design is that the lease connection survives its `exec` of
+/// the stock `docker-proxy`, so the host can treat "process exited" and
+/// "lease released" as the same event.
+pub fn vsock_connect(cid: u32, port: u32) -> io::Result<std::fs::File> {
+    let fd = unsafe { raw::socket(AF_VSOCK, SOCK_STREAM, 0) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let addr = SockAddrVm {
+        svm_family: AF_VSOCK as u16,
+        svm_reserved1: 0,
+        svm_port: port,
+        svm_cid: cid,
+        svm_zero: [0; 4],
+    };
+    let ret = unsafe {
+        raw::connect(
+            fd,
+            &addr as *const SockAddrVm as *const c_void,
+            std::mem::size_of::<SockAddrVm>() as u32,
+        )
+    };
+    if ret < 0 {
+        let err = io::Error::last_os_error();
+        unsafe { raw::close(fd) };
+        return Err(err);
+    }
+    // SAFETY: `fd` is a freshly connected, uniquely-owned descriptor.
+    Ok(unsafe { std::fs::File::from_raw_fd(fd) })
 }
 
 /// A bound, listening AF_VSOCK socket. `accept()` hands back a plain

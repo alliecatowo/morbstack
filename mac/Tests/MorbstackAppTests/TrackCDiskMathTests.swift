@@ -82,36 +82,28 @@ final class TrackCDiskMathTests: XCTestCase {
         XCTAssertEqual(segments.map(\.bytes), [8_000, 1_000, 3_000, 2_000])
     }
 
-    func testDanglingImageBytesBecomeTheImagesReclaimableFigure() throws {
+    func testEngineImageReclaimableBecomesTheImagesReclaimableFigure() throws {
         let usage = DiskUsage(
             layersSize: 10_000, imagesTotal: 10_000, volumesTotal: 0,
-            buildCacheTotal: 0, containersTotal: 0, reclaimable: 7_000)
-        let images = [
-            image(id: "sha256:aa", tags: ["nginx:latest"], size: 3_000),
-            image(id: "sha256:bb", tags: [], size: 4_000),
-            image(id: "sha256:cc", tags: ["<none>:<none>"], size: 3_000),
-        ]
+            buildCacheTotal: 0, containersTotal: 0, reclaimable: 7_000,
+            imagesReclaimable: 7_000)
 
-        let segments = TrackCDiskMath.segments(usage: usage, containers: [], images: images, volumes: [])
+        let segments = TrackCDiskMath.segments(usage: usage, containers: [], images: [], volumes: [])
         let imagesSegment = try XCTUnwrap(segments.first { $0.category == .images })
 
         XCTAssertEqual(imagesSegment.reclaimableBytes, 7_000)
-        XCTAssertFalse(imagesSegment.isEstimate, "dangling sizes are reported per image, so this is exact")
+        XCTAssertFalse(imagesSegment.isEstimate, "the figure uses Docker's own df accounting, so it is exact")
     }
 
     func testImagesReclaimableNeverExceedsTheCategoryTotal() throws {
-        // Per-image sizes double-count shared base layers, so the sum of dangling images
-        // can legitimately exceed `LayersSize`. The per-category reclaimable value must
-        // never exceed the daemon-reported category total.
+        // Defensive clamp: whatever the engine-derived figure claims, the per-category
+        // reclaimable value must never exceed the daemon-reported category total.
         let usage = DiskUsage(
             layersSize: 8_000, imagesTotal: 8_000, volumesTotal: 0,
-            buildCacheTotal: 0, containersTotal: 0, reclaimable: 20_000)
-        let images = [
-            image(id: "sha256:aa", tags: [], size: 9_000),
-            image(id: "sha256:bb", tags: [], size: 9_000),
-        ]
+            buildCacheTotal: 0, containersTotal: 0, reclaimable: 20_000,
+            imagesReclaimable: 20_000)
 
-        let segments = TrackCDiskMath.segments(usage: usage, containers: [], images: images, volumes: [])
+        let segments = TrackCDiskMath.segments(usage: usage, containers: [], images: [], volumes: [])
         let imagesSegment = try XCTUnwrap(segments.first { $0.category == .images })
 
         XCTAssertEqual(imagesSegment.reclaimableBytes, 8_000)
@@ -176,11 +168,11 @@ final class TrackCDiskMathTests: XCTestCase {
     func testBuildCacheTakesWhateverTheEngineCountedThatTheOthersDidNot() throws {
         let usage = DiskUsage(
             layersSize: 1_000, imagesTotal: 1_000, volumesTotal: 1_000,
-            buildCacheTotal: 4_000, containersTotal: 0, reclaimable: 3_500)
-        let images = [image(id: "sha256:aa", tags: [], size: 1_000)]  // 1_000 reclaimable
+            buildCacheTotal: 4_000, containersTotal: 0, reclaimable: 3_500,
+            imagesReclaimable: 1_000)
         let volumes = [volume(name: "orphan", size: 1_000, refCount: 0)]  // 1_000 reclaimable
 
-        let segments = TrackCDiskMath.segments(usage: usage, containers: [], images: images, volumes: volumes)
+        let segments = TrackCDiskMath.segments(usage: usage, containers: [], images: [], volumes: volumes)
         let cache = try XCTUnwrap(segments.first { $0.category == .buildCache })
 
         XCTAssertEqual(cache.reclaimableBytes, 1_500)
@@ -190,10 +182,10 @@ final class TrackCDiskMathTests: XCTestCase {
     func testBuildCacheResidualIsClampedWhenOurFiguresOvershootTheEngines() throws {
         let usage = DiskUsage(
             layersSize: 5_000, imagesTotal: 5_000, volumesTotal: 0,
-            buildCacheTotal: 1_000, containersTotal: 0, reclaimable: 1_000)
-        let images = [image(id: "sha256:aa", tags: [], size: 5_000)]
+            buildCacheTotal: 1_000, containersTotal: 0, reclaimable: 1_000,
+            imagesReclaimable: 5_000)
 
-        let segments = TrackCDiskMath.segments(usage: usage, containers: [], images: images, volumes: [])
+        let segments = TrackCDiskMath.segments(usage: usage, containers: [], images: [], volumes: [])
         let cache = try XCTUnwrap(segments.first { $0.category == .buildCache })
 
         XCTAssertEqual(cache.reclaimableBytes, 0, "a negative residual must not become negative storage")
@@ -207,7 +199,8 @@ final class TrackCDiskMathTests: XCTestCase {
             for reclaimable in [Int64(0), 10_000, 1_000_000] {
                 let usage = DiskUsage(
                     layersSize: imagesTotal, imagesTotal: imagesTotal, volumesTotal: 2_000,
-                    buildCacheTotal: 3_000, containersTotal: 4_000, reclaimable: reclaimable)
+                    buildCacheTotal: 3_000, containersTotal: 4_000, reclaimable: reclaimable,
+                    imagesReclaimable: reclaimable)
                 let segments = TrackCDiskMath.segments(
                     usage: usage,
                     containers: [container(id: "a", state: "exited")],

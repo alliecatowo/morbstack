@@ -804,6 +804,19 @@ struct DiskUsage: Sendable, Equatable {
     var buildCacheTotal: Int64
     var containersTotal: Int64
     var reclaimable: Int64
+    /// The image share of `reclaimable`, computed with Docker's own accounting
+    /// (`LayersSize` minus the unique bytes of in-use images) so the Disk screen's
+    /// per-category rows agree with `docker system df`.
+    var imagesReclaimable: Int64 = 0
+    /// Per-volume usage from the same `/system/df` scan, keyed by volume name.
+    /// `GET /volumes` never reports usage, so this is the only size source the
+    /// Volumes screen has; it is merged into ``VolumeSummary`` after a Disk scan.
+    var volumeUsage: [String: VolumeUsageData] = [:]
+
+    struct VolumeUsageData: Sendable, Equatable {
+        var size: Int64?
+        var refCount: Int?
+    }
 
     static let zero = DiskUsage(
         layersSize: 0, imagesTotal: 0, volumesTotal: 0,

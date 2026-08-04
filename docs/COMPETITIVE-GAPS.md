@@ -115,8 +115,8 @@ WSL competitor. Compete there deliberately or not at all; do not drift into it.
 
 ## Where we must stop claiming a win
 
-- **"Unmodified upstream dockerd"** — false. The Moby patch adds 174 lines and `mkinitramfs.sh` hard-fails without it. It is in the README, the site, and four docs.
-- **Building Morbstack currently requires Docker** (`build-patched-dockerd` needs `docker buildx`). Awkward for a Docker replacement; fix by publishing the engine as a pinned release artifact.
+- **"Unmodified upstream dockerd"** — resolved 2026-08-04 (TECH-1). This claim was false while the 174-line downstream Moby patch existed and `mkinitramfs.sh` hard-failed without it; the patch is now deleted and Morbstack ships stock, archive-hash-pinned Docker 29.7.1 binaries, with published ports served through dockerd's own stock `--userland-proxy-path` hook. The claim is true again and has been restored across the README, the site, and the docs it was previously removed from — see `docs/TRUTHFULNESS-PASS.md`'s third-pass section.
+- **Building Morbstack currently requires Docker** — resolved 2026-08-04 as a side effect of the same decision: there is no patched engine to build, so nothing in the default build path (`build-patched-dockerd`, `docker buildx`) is needed at all.
 
 ## Deliberately not chasing
 

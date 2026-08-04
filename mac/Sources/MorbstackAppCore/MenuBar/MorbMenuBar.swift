@@ -339,8 +339,12 @@ struct MorbMenuBarContent: View {
                     }
                 }
                 .buttonStyle(.plain)
-                .help("Open http://127.0.0.1:\(port.hostPort) — container port \(port.containerPort)")
-                .accessibilityLabel("Open port \(port.hostPort) for \(port.owner)")
+                // Interpolating an `Int` into these literals selects the
+                // `LocalizedStringKey` overload, which groups digits — and a port is
+                // an identifier, so the tooltip would read "18,099" and VoiceOver
+                // would speak "eighteen thousand ninety-nine".
+                .help("Open http://127.0.0.1:\(Formatters.identifier(port.hostPort)) — container port \(Formatters.identifier(port.containerPort))")
+                .accessibilityLabel("Open port \(Formatters.identifier(port.hostPort)) for \(port.owner)")
             }
 
             if allPorts.count > ports.count {
@@ -360,11 +364,14 @@ struct MorbMenuBarContent: View {
                 TrackDAppBridge.revealMainWindow()
             }
             .buttonStyle(.plain)
-            .keyboardShortcut("o", modifiers: .command)
+            // No keyboard shortcut here: ⌘O is File > Open at app scope, and this footer
+            // row shadowing it would silently steal the shortcut from the real command.
             .help("Open the Morbstack main window")
             .accessibilityHint("Opens the main Morbstack window")
 
-            Button("Review Disk Cleanup…", systemImage: "trash") {
+            // No ellipsis: this navigates straight to the Disk screen, it does not open a
+            // dialog.
+            Button("Review Disk Cleanup", systemImage: "trash") {
                 TrackDAppBridge.reveal(.disk, in: model)
             }
             .buttonStyle(.plain)

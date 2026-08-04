@@ -62,7 +62,7 @@ to keep those two things from blurring together.
 
 | | Hypervisor | VM topology | Container runtime | Filesystem sharing | Networking | Host UI | x86 emulation |
 |---|---|---|---|---|---|---|---|
-| **Morbstack** | `Virtualization.framework` | one shared VM for all containers | upstream `dockerd` (+ one ~174-line Morbstack patch) + unmodified `containerd` (static 29.7.1) | VirtioFS, same-absolute-path bind mounts | outbound NAT only (M0); no `morbnet`/DNS/host-routable IPs yet | native SwiftUI, zero web views (planned; not part of M0) | Rosetta binfmt (working); qemu fallback (inert, no binary shipped) |
+| **Morbstack** | `Virtualization.framework` | one shared VM for all containers | unmodified upstream `dockerd` + `containerd` (static 29.7.1); published ports via a Morbstack userland proxy through dockerd's stock `--userland-proxy-path` hook | VirtioFS, same-absolute-path bind mounts | outbound NAT only (M0); no `morbnet`/DNS/host-routable IPs yet | native SwiftUI, zero web views (planned; not part of M0) | Rosetta binfmt (working); qemu fallback (inert, no binary shipped) |
 | **Docker Desktop** | `Virtualization.framework` — confirmed by local inspection (below); historically HyperKit on older releases | one shared LinuxKit VM | Moby `dockerd` inside the VM (Docker CLI 27.4.0 on the inspected copy) | VirtioFS (`com.docker.osxfs` binary present) | own virtual network stack + `vpnkit`-descended NAT, `host.docker.internal` DNS | Electron (`com.electron.dockerdesktop` bundle identifier, confirmed locally) | Rosetta (`VZLinuxRosettaDirectoryShare` symbols present) with a bundled `qemu-system-aarch64`/`qemu-img` as a secondary path |
 | **OrbStack** | undisclosed, described only as "a lightweight Linux virtual machine with a shared kernel...similar to WSL 2" — closed source, cannot verify independently ([OrbStack architecture docs](https://docs.orbstack.dev/architecture), accessed 2026-08-02) | one shared VM for all containers and "machines" | runs "the Docker engine" per OrbStack's own docs; peripheral host-side services described as custom-built, not off-the-shelf — whether `dockerd` itself is patched is unverifiable from outside (closed source) | "VirtioFS with custom dynamic caching and optimizations" (OrbStack docs) | custom userspace network stack with NAT and a custom DNS server (OrbStack docs) | closed-source native app (not Electron, per OrbStack's own marketing; not independently verified here) | Rosetta ("boots an ARM64 Linux kernel, but paired with an x86-64 userspace filesystem, using Rosetta 2" — OrbStack docs) |
 | **Podman Desktop + podman machine** | Apple Virtualization Framework (`applehv`) is the macOS default as of Podman 5.x, replacing QEMU ([Podman machine providers, DeepWiki summary of upstream docs](https://deepwiki.com/containers/podman/13.1-machine-providers-and-vm-configuration), accessed 2026-08-02) | one shared VM (the "machine") per configured machine, containers share it | `podman`/`libpod` + `crun`/`runc` — **not** `dockerd**; Docker CLI/API compatibility is via `podman-docker`/socket emulation, not the real Docker Engine | 9p/virtiofs-backed volume mounts (implementation detail of the machine image) | rootless slirp4netns-derived networking by default | Podman Desktop itself is an Electron-independent Node/Electron app — **note**: could not fully verify Podman Desktop's UI toolkit from primary sources in this pass; treat as unconfirmed | Rosetta supported on Apple silicon machines ([Podman Desktop docs](https://podman-desktop.io/docs/podman/rosetta), accessed 2026-08-02) |
@@ -179,9 +179,11 @@ licensing terms, Morbstack is tied with four established projects, not
 uniquely differentiated from all of them. Its real differentiation is
 narrower and specific: it is the only one of the six in this document that
 is simultaneously (a) free with no commercial-use asterisk, (b) built
-around real, off-the-shelf upstream `dockerd`/`containerd` — `containerd`
-unmodified, `dockerd` with a single small pinned Morbstack patch — rather
-than a different engine or a closed one, and (c) aimed at drop-in Docker Desktop
+around unmodified, off-the-shelf upstream `dockerd`/`containerd` — no
+downstream engine patch, published ports made reachable by a small
+Morbstack userland proxy dockerd execs through its own
+`--userland-proxy-path` flag — rather than a different engine or a closed
+one, and (c) aimed at drop-in Docker Desktop
 replacement rather than a CLI-only tool (Colima) or a different API
 surface entirely (Podman, Apple `container`). Whether it *achieves* that
 combination today is a feature-completeness and quality question, covered
@@ -499,9 +501,10 @@ only kind worth writing.
   Apple silicon, and you're comfortable with a CLI that doesn't speak the
   Docker API and has no Compose story today.
 - **Use Morbstack if:** you want a free-forever, Apache-2.0, source-visible
-  Docker Desktop replacement built around a real upstream Docker Engine
-  (one small, pinned, in-repo Morbstack patch to `dockerd`; `containerd`
-  unmodified) — **and** you are comfortable being an early adopter of pre-alpha
+  Docker Desktop replacement built around an unmodified upstream Docker
+  Engine (published ports served through dockerd's own stock
+  `--userland-proxy-path` hook, not an engine patch) — **and** you are
+  comfortable being an early adopter of pre-alpha
   software with one maintainer, no security audit, unverified-newly-added
   Docker host aliases, missing zero-config discovery/buildx-out-of-the-box,
   and the inotify limitation documented in §6. If any of those gaps would

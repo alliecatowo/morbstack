@@ -84,6 +84,14 @@ struct ContainersRootView: View {
         content
             .navigationTitle("Containers")
             .navigationSubtitle(subtitle)
+            // The menu-bar mirror of the options menu's prune command, so it stays
+            // reachable when the toolbar overflows at narrow widths.
+            .focusedSceneValue(
+                \.routeMaintenanceCommand,
+                RouteMaintenanceCommand(
+                    title: "Remove Stopped Containers…",
+                    isEnabled: stoppedCount > 0 && !isPruning,
+                    perform: { isShowingPruneConfirmation = true }))
             .searchable(text: $search, placement: .toolbar, prompt: "Name, image, or project")
             .toolbar { toolbarContent }
             .confirmationDialog(
@@ -302,7 +310,7 @@ struct ContainersRootView: View {
             ContentUnavailableView {
                 Label("No Container Selected", systemImage: "shippingbox")
             } description: {
-                Text("Select a container to see its configuration, logs, statistics, and inspect document.")
+                Text("Select a container to see its configuration, logs, statistics, and raw inspect JSON.")
             }
         }
     }

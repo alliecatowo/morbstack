@@ -379,6 +379,14 @@ struct ImagesRootView: View {
         content
             .navigationTitle("Images")
             .navigationSubtitle(subtitle)
+            // The menu-bar mirror of the toolbar's prune command, so it stays
+            // reachable when the toolbar overflows at narrow widths.
+            .focusedSceneValue(
+                \.routeMaintenanceCommand,
+                RouteMaintenanceCommand(
+                    title: "Prune Dangling Layers…",
+                    isEnabled: reclaimableDanglingCount > 0 && !busy,
+                    perform: { showsPruneConfirmation = true }))
             .searchable(text: $query, placement: .toolbar, prompt: "Repository, tag, digest")
             .toolbar { toolbarContent }
             .focusedSceneValue(
@@ -756,9 +764,13 @@ struct ImagesRootView: View {
             }
             .width(min: 68, ideal: 82, max: 110)
             TableColumn("Created", sortUsing: ImageTableComparator(key: .created)) { image in
-                Text(Formatters.compactDuration(since: image.createdAt))
-                    .monospacedDigit()
-                    .help(Formatters.absoluteDate(image.createdAt))
+                // A minute tick is enough here — image ages are hours and days — but
+                // it keeps a long-lived window from showing last week's "2h".
+                TimelineView(.periodic(from: .now, by: 60)) { context in
+                    Text(Formatters.compactDuration(since: image.createdAt, at: context.date))
+                        .monospacedDigit()
+                        .help(Formatters.absoluteDate(image.createdAt))
+                }
             }
             .width(min: 80, ideal: 96, max: 130)
             TableColumn("In use", sortUsing: ImageTableComparator(key: .used)) { image in
@@ -928,7 +940,8 @@ struct ImagesRootView: View {
                     Button {
                         chooseImageArchiveForLoading()
                     } label: {
-                        Label("Load Image Archive…", systemImage: "square.and.arrow.up")
+                        // SF Symbol convention: up = export/share, down = import/save.
+                        Label("Load Image Archive…", systemImage: "square.and.arrow.down")
                     }
                     .disabled(!canImportImages)
                     .help(imageImportHelp("Load a local Docker image archive"))
@@ -936,7 +949,8 @@ struct ImagesRootView: View {
                     Button {
                         chooseImageArchiveDestination(for: image)
                     } label: {
-                        Label("Export Image Archive…", systemImage: "square.and.arrow.down")
+                        // SF Symbol convention: up = export/share, down = import/save.
+                        Label("Export Image Archive…", systemImage: "square.and.arrow.up")
                     }
                     .disabled(!canExportImages)
                     .help(imageExportHelp("Export this image as a Docker archive"))
@@ -961,12 +975,14 @@ struct ImagesRootView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         } else {
             ContentUnavailableView {
-                Label("Select an Image", systemImage: "square.on.square")
+                Label("No Image Selected", systemImage: "square.on.square")
             } description: {
                 Text("Select a local image to inspect its identity, history, tags, and container references.")
             } actions: {
-                Button("Select First Image") {
-                    selection = sections.tagged.first?.id ?? sections.dangling.first?.id
+                // Offer a goal, not a workaround: "select the first row" is not a task
+                // anyone has. Pulling an image is.
+                Button("Pull an Image") {
+                    presentPull()
                 }
             }
         }

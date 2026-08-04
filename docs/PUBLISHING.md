@@ -41,7 +41,7 @@ decision from step 1):
 ```sh
 gh repo create morbstack/morbstack \
   --public \
-  --description "The Docker Desktop replacement for macOS: real upstream Docker Engine (one small, pinned patch to dockerd; containerd unmodified) in a fast, native SwiftUI shell. Free forever, Apache-2.0." \
+  --description "The Docker Desktop replacement for macOS: unmodified upstream Docker Engine in a fast, native SwiftUI shell. Free forever, Apache-2.0." \
   --homepage "https://morbstack.dev" \
   --source=. \
   --remote=origin

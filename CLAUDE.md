@@ -74,19 +74,22 @@ Morbstack appends `data/run/docker.sock`. Prefer something like
 ### 1.5 `mise run app` does NOT rebuild the guest image
 
 The `app` task assembles and signs the bundle from host binaries only. The
-bootable initramfs (`morbinit` as PID 1, the patched Docker engine, the Alpine
-rootfs) is built by a **separate** task:
+bootable initramfs (`morbinit` as PID 1, the unmodified upstream Docker engine, the
+Alpine rootfs) is built by a **separate** task:
 
 ```sh
-mise run guest-image     # cross-builds morbinit + patched dockerd, writes $MORBSTACK_HOME/data/kernel/initrd.img
+mise run guest-image     # cross-builds morbinit, fetches pinned stock dockerd, writes $MORBSTACK_HOME/data/kernel/initrd.img
 ```
 
-If you changed anything under `guest/morbinit/` or `guest/moby-patches/` and only
-ran `mise run app`, **you tested the old guest**. This has produced false
-"the fix didn't work" conclusions before.
+If you changed anything under `guest/morbinit/` and only ran `mise run app`,
+**you tested the old guest**. This has produced false "the fix didn't work"
+conclusions before.
 
 `guest-image` needs the `aarch64-unknown-linux-musl` cross toolchain
-(`dist/CROSS_COMPILE.md`) *and* a working `docker buildx` for the Moby build.
+(`dist/CROSS_COMPILE.md`). As of 2026-08-04 (TECH-1) it does not need Docker or
+`docker buildx` at all — the guest engine is fetched as a pinned, hash-verified
+upstream binary like every other third-party guest asset, not built locally. See
+`docs/design/PATCH-FREE-PUBLISH-ALL.md`.
 
 ### 1.6 The offscreen renderer is not visual evidence
 
@@ -181,7 +184,7 @@ Caveats worth knowing:
 | `mac/Sources/morb`, `morbstackd` | CLI and daemon executables |
 | `mac/Sources/MorbShots`, `MorbLive` | fixture/route probes (see §1.6) |
 | `guest/morbinit` | Rust PID 1 for the guest, std-only, no third-party crates |
-| `guest/moby-patches` | the pinned Moby patch (`docker-v29.7.1`, commit `c5b8ce92…`) |
+| `guest/morbinit/src/proxy_wrapper.rs` | the userland-proxy wrapper that makes published ports (including `-P`) reachable via dockerd's stock `--userland-proxy-path` hook — no engine patch (see `docs/design/PATCH-FREE-PUBLISH-ALL.md`) |
 | `scripts/` | asset fetch (all sha256-pinned), initramfs build, DMG |
 | `dist/` | vendored payloads; only `PROVENANCE.txt`/`TOOLCHAIN.plist`/`CROSS_COMPILE.md` are tracked |
 

@@ -6,9 +6,13 @@ working" has a precise, checkable answer rather than a marketing claim.
 
 ## What "drop-in" means
 
-- **Unmodified `docker` CLI.** Morbstack does not ship or require a
-  patched Docker CLI. Any stock `docker` binary (Homebrew, official
-  release, etc.) works against Morbstack's relayed Engine API.
+- **Unmodified `docker` CLI, and an unmodified Engine behind it.** Morbstack
+  does not ship or require a patched Docker CLI — any stock `docker` binary
+  (Homebrew, official release, etc.) works against Morbstack's relayed
+  Engine API. Nor does it ship a patched `dockerd`: the guest runs the
+  unmodified upstream engine, archive-hash-pinned; published ports are
+  made reachable through dockerd's own stock `--userland-proxy-path` hook
+  rather than any engine-side change.
 - **Docker contexts are respected, never stomped.** Morbstack adds itself
   as a context; it does not silently rewrite the user's existing default
   context or any other context they've configured. If the user has a
@@ -25,7 +29,7 @@ working" has a precise, checkable answer rather than a marketing claim.
   process-level status report; that report never contacts an endpoint or
   exposes a `DOCKER_HOST` value.
 - **Upstream Engine behind a transparent socket relay.** The API surface over
-  `~/.morbstack/run/docker.sock` is supplied by the bundled upstream `dockerd`,
+  `~/.morbstack/run/docker.sock` is supplied by the bundled, unmodified upstream `dockerd`,
   and ordinary client traffic is relayed without a client endpoint whitelist.
   Morbstack intentionally intercepts bounded container-create and selected
   start/restart shapes to enforce bind-share safety and make host port publication

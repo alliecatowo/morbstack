@@ -56,7 +56,9 @@ private struct KubernetesDiagnosisSheet: View {
                 LabeledContent("Nodes", value: "\(diagnosis.status.nodesReady) of \(diagnosis.status.nodes) ready")
                 LabeledContent("Pods", value: "\(diagnosis.status.podsReady) of \(diagnosis.status.pods) ready")
                 LabeledContent("API Forward") {
-                    Text(diagnosis.hostAPIServerPort.map { "127.0.0.1:\($0)" } ?? "Not published")
+                    // `Formatters.identifier` keeps the port digits-only regardless of
+                    // which `Text` overload the type-checker lands on.
+                    Text(diagnosis.hostAPIServerPort.map { "127.0.0.1:\(Formatters.identifier($0))" } ?? "Not published")
                         .font(.system(.body, design: .monospaced))
                         .textSelection(.enabled)
                 }
@@ -214,7 +216,6 @@ struct KubernetesRootView: View {
     /// from the guest-reported `.starting` phase: the former prevents duplicate
     /// mutations, while the latter describes real k3s readiness after the request.
     @State private var lifecycleInFlight: KubernetesLifecycleRequest?
-    @State private var kubeconfigCopied = false
     @State private var hasKubeconfig = false
     @State private var isGeneratingKubeconfig = false
     @State private var diagnosis: K8s.Diagnosis?
@@ -228,7 +229,7 @@ struct KubernetesRootView: View {
         guard model.engine.isRunning else { return "Engine stopped" }
         switch status.phase {
         case .ready:
-            return "\(status.nodesReady) of \(status.nodes) nodes ready · \(status.podsReady) of \(status.pods) pods ready"
+            return "\(status.nodesReady) of \(status.nodes) node\(status.nodes == 1 ? "" : "s") ready · \(status.podsReady) of \(status.pods) pod\(status.pods == 1 ? "" : "s") ready"
         case .starting:
             return "Starting Kubernetes"
         case .stopped, .notInstalled:
@@ -403,7 +404,9 @@ struct KubernetesRootView: View {
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         if resourceControlsAreAvailable {
-            ToolbarItem(id: "kubernetes.resources", placement: .navigation) {
+            // `.principal` keeps the resource picker centered with the window title
+            // instead of crowding the leading edge ahead of it under `.navigation`.
+            ToolbarItem(id: "kubernetes.resources", placement: .principal) {
                 Picker("Kubernetes resource", selection: $resource) {
                     ForEach(KubernetesResource.allCases) { resource in
                         Text(resource.rawValue).tag(resource)
@@ -429,16 +432,16 @@ struct KubernetesRootView: View {
         ToolbarItem(id: "kubernetes.actions", placement: .secondaryAction) {
             Menu {
                 if status.enabled {
-                    Button("Disable Kubernetes", role: .destructive) {
+                    Button("Disable Kubernetes…", role: .destructive) {
                         lifecycleRequest = .disable
                     }
                 } else {
-                    Button("Enable Kubernetes") {
+                    Button("Enable Kubernetes…") {
                         lifecycleRequest = .enable
                     }
                 }
                 Divider()
-                Button("Diagnose Kubernetes") {
+                Button("Diagnose Kubernetes…") {
                     Task { await presentRecoveryGuidance() }
                 }
                 .disabled(isDiagnosing)
@@ -451,7 +454,9 @@ struct KubernetesRootView: View {
                 }
                 .disabled(!hasKubeconfig)
             } label: {
-                Image(systemName: kubeconfigCopied ? "checkmark" : "ellipsis.circle")
+                // "More actions" must stay visually stable so it can be found by shape;
+                // the glyph no longer swaps to a checkmark after a kubeconfig copy.
+                Image(systemName: "ellipsis.circle")
             }
             .accessibilityLabel("Kubernetes actions")
             .help("Kubernetes actions")
@@ -462,7 +467,10 @@ struct KubernetesRootView: View {
         }
 
         if resourceControlsAreAvailable {
-            ToolbarItem(id: "kubernetes.inspector", placement: .primaryAction) {
+            // `.automatic`, like every other route's inspector toggle: the toggle is
+            // chrome, not this screen's primary action, and placement consistency is
+            // what lets motor memory find it.
+            ToolbarItem(id: "kubernetes.inspector", placement: .automatic) {
                 Button {
                     showsInspector.toggle()
                 } label: {
@@ -494,11 +502,6 @@ struct KubernetesRootView: View {
     private func copyKubeconfigPath() {
         guard hasKubeconfig else { return }
         MorbPasteboard.copy(K8s.defaultKubeconfigURL.path)
-        kubeconfigCopied = true
-        Task {
-            try? await Task.sleep(for: .seconds(1.4))
-            kubeconfigCopied = false
-        }
     }
 
     private func generateKubeconfig() async {
@@ -922,7 +925,10 @@ struct KubernetesRootView: View {
             }
             .width(min: 120, ideal: 128, max: 180)
             TableColumn("Ready", sortUsing: KubernetesPodComparator(key: .ready)) { pod in
-                Text("\(pod.readyContainers)/\(pod.totalContainers)")
+                // A count of ready containers is not an identifier, but LocalizedStringKey
+                // interpolation would still group its digits (e.g. "1,000/1,200"); `verbatim`
+                // renders the plain ratio without implying an opaque ID.
+                Text(verbatim: "\(pod.readyContainers)/\(pod.totalContainers)")
                     .monospacedDigit()
             }
             .width(min: 48, ideal: 56, max: 64)
@@ -939,9 +945,13 @@ struct KubernetesRootView: View {
             .width(min: 92, ideal: 110, max: 150)
             TableColumn("Age", sortUsing: KubernetesPodComparator(key: .age)) { pod in
                 if let age = pod.age {
-                    Text(Formatters.compactDuration(since: age))
-                        .monospacedDigit()
-                        .help(Formatters.absoluteDate(age))
+                    // Ticks locally so a young pod's age does not freeze at "8s"
+                    // until the next poll — same rule as the container list.
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        Text(Formatters.compactDuration(since: age, at: context.date))
+                            .monospacedDigit()
+                            .help(Formatters.absoluteDate(age))
+                    }
                 } else {
                     Text("—")
                         .accessibilityLabel("Age unavailable")
@@ -999,9 +1009,11 @@ struct KubernetesRootView: View {
             .width(min: 130, ideal: 160, max: 220)
             TableColumn("Age", sortUsing: KubernetesNodeComparator(key: .age)) { node in
                 if let age = node.age {
-                    Text(Formatters.compactDuration(since: age))
-                        .monospacedDigit()
-                        .help(Formatters.absoluteDate(age))
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        Text(Formatters.compactDuration(since: age, at: context.date))
+                            .monospacedDigit()
+                            .help(Formatters.absoluteDate(age))
+                    }
                 } else {
                     Text("—")
                         .accessibilityLabel("Age unavailable")
@@ -1047,7 +1059,7 @@ struct KubernetesRootView: View {
                     }
                     LabeledContent("Namespace", value: pod.namespace)
                     LabeledContent("Status", value: pod.phase.label)
-                    LabeledContent("Ready", value: "\(pod.readyContainers) of \(pod.totalContainers) containers")
+                    LabeledContent("Ready", value: "\(pod.readyContainers) of \(pod.totalContainers) container\(pod.totalContainers == 1 ? "" : "s")")
                     LabeledContent("Restarts", value: "\(pod.restarts)")
                     LabeledContent("Node", value: pod.node.isEmpty ? "Not scheduled" : pod.node)
                     LabeledContent("Age", value: pod.age.map(Formatters.absoluteDate) ?? "Unavailable")
@@ -1088,7 +1100,7 @@ struct KubernetesRootView: View {
             .formStyle(.columns)
         } else {
             ContentUnavailableView {
-                Label("No Selection", systemImage: "sidebar.right")
+                Label("No Row Selected", systemImage: "sidebar.right")
             } description: {
                 Text("Select a row to view its details.")
             }

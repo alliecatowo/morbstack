@@ -38,7 +38,6 @@ struct ContainerLogsTab: View {
             Divider()
             logSurface
         }
-        .toolbar { toolbarContent }
         .onAppear { if streamsLive { start() } }
         .onDisappear { if streamsLive { store.stop() } }
         .onChange(of: container.isRunning) { _, isRunning in
@@ -73,6 +72,11 @@ struct ContainerLogsTab: View {
                 .foregroundStyle(.secondary)
 
             streamStatus
+
+            // The log document's commands live with the log document. In the window
+            // toolbar they appeared and disappeared with the inspector tab, churning
+            // the route's toolbar on every tab switch.
+            logOptionsMenu
         }
         .padding(8)
     }
@@ -105,14 +109,11 @@ struct ContainerLogsTab: View {
         store.start(client: client, containerID: container.id)
     }
 
-    @ToolbarContentBuilder
-    private var toolbarContent: some ToolbarContent {
-        // Follow, timestamps, error navigation, and export are all commands for the
-        // selected log document, not additional primary container lifecycle actions.
-        // A single semantic menu lets the system place/overflow them as one unit at
-        // narrow widths while preserving each native control and its state.
-        ToolbarItem(id: "logs.options", placement: .secondaryAction) {
-            Menu {
+    // Follow, timestamps, error navigation, and export are all commands for the
+    // selected log document. They live in the document's own bar rather than the
+    // window toolbar, which must not mutate when the inspector switches tabs.
+    private var logOptionsMenu: some View {
+        Menu {
                 Toggle("Follow Output", isOn: Binding(
                     get: { store.tail.followEnabled },
                     set: { store.tail.setFollow($0) }))
@@ -152,12 +153,14 @@ struct ContainerLogsTab: View {
                 }
                 .accessibilityLabel("Clear scrollback")
                 .help("Clear scrollback")
-            } label: {
-                Label("Log options", systemImage: "text.alignleft")
-            }
-            .accessibilityLabel("Log options")
-            .help("Follow, display, and export options for this log")
+        } label: {
+            Label("Log options", systemImage: "text.alignleft")
+                .labelStyle(.iconOnly)
         }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .accessibilityLabel("Log options")
+        .help("Follow, display, and export options for this log")
     }
 
     private var hasStandardErrorLines: Bool {

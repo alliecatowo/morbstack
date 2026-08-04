@@ -106,9 +106,16 @@ const CONTAINERD_SOCK: &str = "/run/containerd/containerd.sock";
 /// `/tmp` are tmpfs (see `mounts.rs`), so these are recreated every boot.
 const RUNTIME_DIRS: &[&str] = &["/run/containerd", "/var/run", "/var/lib/containerd"];
 
-/// The helper dockerd shells out to for published-port forwarding. Installed
-/// alongside the other Docker engine binaries by `scripts/mkinitramfs.sh`.
+/// The stock upstream userland proxy, installed alongside the other Docker
+/// engine binaries by `scripts/mkinitramfs.sh`. The Morbstack wrapper execs
+/// it after the Mac-side port lease is granted.
 const DOCKER_PROXY_BIN: &str = "/usr/local/bin/docker-proxy";
+
+/// The Morbstack userland-proxy wrapper (a multi-call link to morbinit
+/// itself; see `proxy_wrapper.rs`). Preferred as `--userland-proxy-path`:
+/// it leases the published host port on the Mac — fail-closed — and then
+/// execs ``DOCKER_PROXY_BIN`` with the original argv.
+const MORBSTACK_PROXY_BIN: &str = "/usr/local/bin/morbstack-docker-proxy";
 
 /// The Docker CLI, used for the one-shot offline image load (see
 /// `load_baked_in_image`).
@@ -218,10 +225,25 @@ pub fn default_services(docker_data_on_disk: bool) -> Vec<ServiceSpec> {
 
     // dockerd validates the userland proxy at startup and refuses to run if
     // it cannot resolve the helper — a hard `exit 1`, not a warning. We ship
-    // docker-proxy next to dockerd, so point at it explicitly rather than
-    // relying on a PATH lookup; if the image somehow lacks it, disabling the
-    // userland proxy is strictly better than crash-looping.
-    if Path::new(DOCKER_PROXY_BIN).exists() {
+    // both proxies next to dockerd, so point at one explicitly rather than
+    // relying on a PATH lookup; if the image somehow lacks both, disabling
+    // the userland proxy is strictly better than crash-looping.
+    //
+    // Preference order is load-bearing: the Morbstack wrapper is what makes
+    // a published port fail closed when the Mac cannot bind it (it leases
+    // the endpoint host-side, then execs the stock proxy). Falling back to
+    // the bare stock proxy keeps containers working guest-side, but Mac
+    // reachability then depends only on the event-driven forwarder, which
+    // cannot refuse a start.
+    if Path::new(MORBSTACK_PROXY_BIN).exists() && Path::new(DOCKER_PROXY_BIN).exists() {
+        dockerd_args.push("--userland-proxy-path".to_string());
+        dockerd_args.push(MORBSTACK_PROXY_BIN.to_string());
+    } else if Path::new(DOCKER_PROXY_BIN).exists() {
+        log::log(&format!(
+            "{} not found — falling back to the stock {} (published ports lose \
+             fail-closed Mac binding)",
+            MORBSTACK_PROXY_BIN, DOCKER_PROXY_BIN
+        ));
         dockerd_args.push("--userland-proxy-path".to_string());
         dockerd_args.push(DOCKER_PROXY_BIN.to_string());
     } else {
@@ -1852,9 +1874,10 @@ mod tests {
         // branch we take, dockerd must never be left to guess.
         for on_disk in [true, false] {
             let args = dockerd_args(on_disk);
-            let pinned_path = args
-                .windows(2)
-                .any(|w| w[0] == "--userland-proxy-path" && w[1] == DOCKER_PROXY_BIN);
+            let pinned_path = args.windows(2).any(|w| {
+                w[0] == "--userland-proxy-path"
+                    && (w[1] == MORBSTACK_PROXY_BIN || w[1] == DOCKER_PROXY_BIN)
+            });
             let disabled = args.iter().any(|a| a == "--userland-proxy=false");
             assert!(
                 pinned_path || disabled,

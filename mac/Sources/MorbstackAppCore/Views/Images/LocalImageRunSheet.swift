@@ -112,10 +112,13 @@ struct LocalImageRunSheet: View {
 
     @ToolbarContentBuilder
     private var sheetToolbar: some ToolbarContent {
-        if !state.isWorking {
-            ToolbarItem(placement: .cancellationAction) {
-                Button(closeTitle) { dismiss() }
-            }
+        // Keep Cancel visible even while Docker's create request is in flight, rather
+        // than hiding it, so the sheet is never left with zero controls; it is disabled
+        // instead of removed because the request cannot be safely cancelled once Docker
+        // has it (see the Progress section copy).
+        ToolbarItem(placement: .cancellationAction) {
+            Button(closeTitle) { dismiss() }
+                .disabled(state.isWorking)
         }
         if isEditingEnabled {
             ToolbarItem(placement: .confirmationAction) {
@@ -191,8 +194,13 @@ struct LocalImageRunSheet: View {
     private var environmentSection: some View {
         Section {
             DisclosureGroup("Environment Variables (\(environment.count))") {
-                ForEach(environment.indices, id: \.self) { index in
-                    environmentRow(at: index)
+                // Each entry carries its own stable UUID identity (see
+                // LocalImageEnvironmentEntry in Models.swift), so binding the ForEach
+                // directly to the collection keeps a row's focus and field values attached
+                // to that entry when another row is removed, instead of the positional
+                // `.indices` misidentifying whatever entry now sits at that index.
+                ForEach($environment) { $entry in
+                    environmentRow(entry: $entry)
                 }
                 Button("Add Environment Variable", systemImage: "plus") {
                     environment.append(LocalImageEnvironmentEntry())
@@ -207,28 +215,39 @@ struct LocalImageRunSheet: View {
     }
 
     @ViewBuilder
-    private func environmentRow(at index: Int) -> some View {
-        Text("Environment Variable \(index + 1)")
-            .font(.headline)
-        TextField("Name", text: $environment[index].name, prompt: Text("LOG_LEVEL"))
-            .font(.system(.body, design: .monospaced))
+    private func environmentRow(entry: Binding<LocalImageEnvironmentEntry>) -> some View {
+        // Only used for the accessibility ordinal below; identity and removal both key
+        // off the entry's own id, never this position.
+        let number = (environment.firstIndex(where: { $0.id == entry.wrappedValue.id }) ?? 0) + 1
+        HStack {
+            TextField("Name", text: entry.name, prompt: Text("LOG_LEVEL"))
+                .font(.system(.body, design: .monospaced))
+                .disabled(!isEditingEnabled)
+                .accessibilityLabel("Environment variable \(number) name")
+            TextField("Value", text: entry.value, prompt: Text("debug"))
+                .font(.system(.body, design: .monospaced))
+                .disabled(!isEditingEnabled)
+                .accessibilityLabel("Environment variable \(number) value")
+            Button(role: .destructive) {
+                environment.removeAll { $0.id == entry.wrappedValue.id }
+            } label: {
+                Image(systemName: "minus.circle.fill")
+            }
+            .buttonStyle(.borderless)
             .disabled(!isEditingEnabled)
-            .accessibilityLabel("Environment variable \(index + 1) name")
-        TextField("Value", text: $environment[index].value, prompt: Text("debug"))
-            .font(.system(.body, design: .monospaced))
-            .disabled(!isEditingEnabled)
-            .accessibilityLabel("Environment variable \(index + 1) value")
-        Button("Remove Environment Variable \(index + 1)", role: .destructive) {
-            environment.remove(at: index)
+            .accessibilityLabel("Remove environment variable \(number)")
         }
-        .disabled(!isEditingEnabled)
     }
 
     private var publishedPortsSection: some View {
         Section {
             DisclosureGroup("Published Ports (\(publishedPorts.count))") {
-                ForEach(publishedPorts.indices, id: \.self) { index in
-                    publishedPortRow(at: index)
+                // See the environment ForEach above: binding directly to the collection
+                // (stable UUID identity from LocalImagePortMappingEntry) keeps a row
+                // attached to its own entry across removal, instead of misidentifying by
+                // position.
+                ForEach($publishedPorts) { $entry in
+                    publishedPortRow(entry: $entry)
                 }
                 Button("Add Published Port", systemImage: "plus") {
                     publishedPorts.append(LocalImagePortMappingEntry())
@@ -243,35 +262,42 @@ struct LocalImageRunSheet: View {
     }
 
     @ViewBuilder
-    private func publishedPortRow(at index: Int) -> some View {
-        Text("Published Port \(index + 1)")
-            .font(.headline)
-        TextField("Host Port", text: $publishedPorts[index].hostPort, prompt: Text("8080"))
-            .font(.system(.body, design: .monospaced))
-            .disabled(!isEditingEnabled)
-            .accessibilityLabel("Published port \(index + 1) host port")
-        TextField("Container Port", text: $publishedPorts[index].containerPort, prompt: Text("80"))
-            .font(.system(.body, design: .monospaced))
-            .disabled(!isEditingEnabled)
-            .accessibilityLabel("Published port \(index + 1) container port")
-        Picker("Protocol", selection: $publishedPorts[index].transport) {
-            ForEach(LocalImagePortTransport.allCases, id: \.self) { transport in
-                Text(transport.displayName).tag(transport)
+    private func publishedPortRow(entry: Binding<LocalImagePortMappingEntry>) -> some View {
+        // Only used for the accessibility ordinal below; identity and removal both key
+        // off the entry's own id, never this position.
+        let number = (publishedPorts.firstIndex(where: { $0.id == entry.wrappedValue.id }) ?? 0) + 1
+        HStack {
+            TextField("Host Port", text: entry.hostPort, prompt: Text("8080"))
+                .font(.system(.body, design: .monospaced))
+                .disabled(!isEditingEnabled)
+                .accessibilityLabel("Published port \(number) host port")
+            TextField("Container Port", text: entry.containerPort, prompt: Text("80"))
+                .font(.system(.body, design: .monospaced))
+                .disabled(!isEditingEnabled)
+                .accessibilityLabel("Published port \(number) container port")
+            Picker("Protocol", selection: entry.transport) {
+                ForEach(LocalImagePortTransport.allCases, id: \.self) { transport in
+                    Text(transport.displayName).tag(transport)
+                }
             }
-        }
-        .pickerStyle(.menu)
-        .disabled(!isEditingEnabled)
-        Picker("Exposure", selection: $publishedPorts[index].exposure) {
-            ForEach(LocalImagePortExposure.allCases, id: \.self) { exposure in
-                Text(exposure.displayName).tag(exposure)
+            .pickerStyle(.menu)
+            .disabled(!isEditingEnabled)
+            Picker("Exposure", selection: entry.exposure) {
+                ForEach(LocalImagePortExposure.allCases, id: \.self) { exposure in
+                    Text(exposure.displayName).tag(exposure)
+                }
             }
+            .pickerStyle(.menu)
+            .disabled(!isEditingEnabled)
+            Button(role: .destructive) {
+                publishedPorts.removeAll { $0.id == entry.wrappedValue.id }
+            } label: {
+                Image(systemName: "minus.circle.fill")
+            }
+            .buttonStyle(.borderless)
+            .disabled(!isEditingEnabled)
+            .accessibilityLabel("Remove published port \(number)")
         }
-        .pickerStyle(.menu)
-        .disabled(!isEditingEnabled)
-        Button("Remove Published Port \(index + 1)", role: .destructive) {
-            publishedPorts.remove(at: index)
-        }
-        .disabled(!isEditingEnabled)
     }
 
     private var authoritySection: some View {

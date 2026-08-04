@@ -117,21 +117,18 @@ else
 fi
 
 echo
-echo "== patched Docker Engine =="
+echo "== Docker Engine =="
 
-# "Unmodified upstream dockerd" is the project's headline claim and it is false:
-# mkinitramfs.sh hard-fails without the patched build. A stock binary here means
-# `docker run -P` cannot work no matter what the host side does.
-PATCHED="dist/guest-bin/morbstack-dockerd"
-if [ ! -e "$PATCHED" ]; then
-	todo "no patched engine at ${PATCHED} — run: mise run build-patched-dockerd"
-elif [ "$(strings "$PATCHED" 2>/dev/null | grep -c morbstack)" -eq 0 ]; then
-	fail "${PATCHED} contains no morbstack symbols — it is STOCK upstream, not patched"
+# The engine is the unmodified upstream static dockerd; `docker run -P` is
+# served by the morbstack-docker-proxy wrapper (a link to morbinit inside the
+# guest image), so the checks here are presence, not patch state.
+STOCK_DOCKERD="dist/guest-bin/dockerd"
+if [ ! -e "$STOCK_DOCKERD" ]; then
+	todo "no stock engine at ${STOCK_DOCKERD} — run: scripts/fetch-guest-assets.sh --docker-only"
+elif [ -e "dist/guest-bin/morbstack-dockerd" ]; then
+	fail "dist/guest-bin/morbstack-dockerd still exists — the patched-engine pipeline was removed; delete it so nothing stale can be mistaken for the engine"
 else
-	ok "patched engine present with morbstack symbols ($(human "$PATCHED"))"
-	patch_mtime=$(mtime guest/moby-patches/0001-morbstack-publish-all-host-allocator.patch)
-	[ "$patch_mtime" -gt "$(mtime "$PATCHED")" ] && \
-		fail "the Moby patch is newer than the built engine — rebuild it"
+	ok "stock upstream engine present ($(human "$STOCK_DOCKERD"))"
 fi
 
 echo

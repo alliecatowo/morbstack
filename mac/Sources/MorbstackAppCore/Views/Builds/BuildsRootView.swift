@@ -391,7 +391,16 @@ struct BuildsRootView: View {
                             .navigationTitle("Builds")
                             .navigationSubtitle(subtitle)
                             .searchable(text: $query, placement: .toolbar, prompt: searchPrompt)
-                            .toolbar { toolbarContent }))))
+                            .toolbar { toolbarContent }
+                            // The menu-bar mirror of the options menu's prune command,
+                            // so it stays reachable when the toolbar overflows.
+                            .focusedSceneValue(
+                                \.routeMaintenanceCommand,
+                                RouteMaintenanceCommand(
+                                    title: "Prune Unused Build Cache…",
+                                    isEnabled: scope == .cache && externalBuildOperationsAreAvailable
+                                        && unusedCount > 0 && !isPruning && !isRefreshing,
+                                    perform: { showsPruneConfirmation = true }))))))
     }
 
     private func withSheetsAndImporter(_ view: some View) -> some View {
@@ -544,12 +553,17 @@ struct BuildsRootView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        ToolbarItem(id: "builds.scope", placement: .automatic) {
+        // `.principal` — the scope choice is what this window is showing, so it
+        // belongs in the center region, not sharing a glass group with commands.
+        ToolbarItem(id: "builds.scope", placement: .principal) {
             Picker("Build data", selection: $scope) {
                 Text("Cache").tag(BuildDataScope.cache)
-                Text("History")
-                    .tag(BuildDataScope.history)
-                    .disabled(!externalBuildOperationsAreAvailable)
+                // Fixture windows omit the segment entirely: `.disabled` on a
+                // segmented-picker tag does not render as disabled, so it looked
+                // live and silently snapped back.
+                if externalBuildOperationsAreAvailable {
+                    Text("History").tag(BuildDataScope.history)
+                }
             }
             .pickerStyle(.segmented)
             .labelsHidden()
@@ -574,59 +588,42 @@ struct BuildsRootView: View {
                 .disabled(!externalBuildOperationsAreAvailable || isPruning)
             }
         }
-        ToolbarItem(id: "builds.refresh", placement: .secondaryAction) {
-            Button {
-                Task { await refreshCurrentScope() }
+        // One semantic options menu instead of three loose glyphs — refresh, the
+        // builder sheet, and the infrequent destructive prune stay together and the
+        // system owns their overflow.
+        ToolbarItem(id: "builds.options", placement: .secondaryAction) {
+            Menu {
+                Button("Refresh", systemImage: "arrow.clockwise") {
+                    Task { await refreshCurrentScope() }
+                }
+                .disabled(isRefreshingCurrentScope || isPruning)
+
+                Button("View Active Builder…", systemImage: "hammer") {
+                    openBuilderSheet()
+                }
+                .disabled(!externalBuildOperationsAreAvailable || isBuilding || isSelectingMorbstackDefaultBuilder)
+
+                if scope == .cache {
+                    Divider()
+                    Button("Prune Unused Build Cache…", systemImage: "trash", role: .destructive) {
+                        showsPruneConfirmation = true
+                    }
+                    .disabled(!externalBuildOperationsAreAvailable || unusedCount == 0 || isPruning || isRefreshing)
+                }
             } label: {
-                if isRefreshingCurrentScope {
+                if isRefreshingCurrentScope || isPruning {
                     ProgressView()
                         .controlSize(.small)
-                        .accessibilityLabel("Refreshing \(scope == .cache ? "build cache" : "Buildx history")")
                 } else {
-                    Image(systemName: "arrow.clockwise")
+                    Label("Build options", systemImage: "slider.horizontal.3")
                 }
             }
-            .accessibilityLabel(scope == .cache ? "Refresh build cache" : "Refresh Buildx history")
-            .help(scope == .cache ? "Refresh the BuildKit cache records" : "Refresh completed builds reported by Buildx")
-            .disabled(isRefreshingCurrentScope || isPruning)
-        }
-        ToolbarItem(id: "builds.builder", placement: .secondaryAction) {
-            Button {
-                openBuilderSheet()
-            } label: {
-                Image(systemName: "hammer")
-            }
-            .accessibilityLabel("View active Buildx builder")
-            .help(
-                externalBuildOperationsAreAvailable
-                    ? "View the active Buildx builder"
-                    : fixtureBuildOperationMessage)
-            .disabled(!externalBuildOperationsAreAvailable || isBuilding || isSelectingMorbstackDefaultBuilder)
-        }
-        if scope == .cache {
-            ToolbarItem(id: "builds.prune", placement: .secondaryAction) {
-                Button(role: .destructive) {
-                    showsPruneConfirmation = true
-                } label: {
-                    if isPruning {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else {
-                        Image(systemName: "trash")
-                    }
-                }
-                .accessibilityLabel(isPruning ? "Pruning unused build cache" : "Prune unused build cache")
-                .help(
-                    !externalBuildOperationsAreAvailable
-                        ? fixtureBuildOperationMessage
-                        : unusedCount == 0
-                        ? "No unused build cache to prune"
-                        : "Prune \(unusedCount) unused cache record\(unusedCount == 1 ? "" : "s")")
-                .disabled(!externalBuildOperationsAreAvailable || unusedCount == 0 || isPruning || isRefreshing)
-            }
+            .accessibilityLabel("Build options")
+            .help("Refresh, builder, and cleanup options")
         }
         if scope == .cache ? !records.isEmpty : !model.buildHistory.isEmpty {
-            ToolbarItem(id: "builds.inspector", placement: .secondaryAction) {
+            // `.automatic`, matching every other route's inspector toggle placement.
+            ToolbarItem(id: "builds.inspector", placement: .automatic) {
                 Button {
                     showsInspector.toggle()
                 } label: {
@@ -719,9 +716,11 @@ struct BuildsRootView: View {
             }
             .width(min: 72, ideal: 88, max: 120)
             TableColumn("Last Used", sortUsing: BuildComparator(key: .lastUsed)) { record in
-                Text(record.lastUsedAt.map { Formatters.compactDuration(since: $0) } ?? "Never")
-                    .monospacedDigit()
-                    .help(record.lastUsedAt.map(Formatters.absoluteDate) ?? "Never used")
+                TimelineView(.periodic(from: .now, by: 60)) { context in
+                    Text(record.lastUsedAt.map { Formatters.compactDuration(since: $0, at: context.date) } ?? "Never")
+                        .monospacedDigit()
+                        .help(record.lastUsedAt.map(Formatters.absoluteDate) ?? "Never used")
+                }
             }
             .width(min: 72, ideal: 88, max: 120)
         }
@@ -753,7 +752,12 @@ struct BuildsRootView: View {
             ContentUnavailableView {
                 Label("Loading Build History", systemImage: "clock.arrow.circlepath")
             } description: {
-                ProgressView("Checking the active Buildx builder…")
+                Text("Checking the active Buildx builder…")
+            } actions: {
+                // The spinner belongs in the actions slot; `description:` expects
+                // text and renders an embedded ProgressView inconsistently.
+                ProgressView()
+                    .controlSize(.small)
             }
         case .unavailable(let detail):
             ContentUnavailableView {
@@ -825,9 +829,11 @@ struct BuildsRootView: View {
             }
             .width(min: 90, ideal: 120, max: 180)
             TableColumn("Created", sortUsing: BuildHistoryComparator(key: .createdAt)) { record in
-                Text(record.createdAt.map { Formatters.compactDuration(since: $0) } ?? "Not reported")
-                    .monospacedDigit()
-                    .help(record.createdAt.map(Formatters.absoluteDate) ?? "Buildx did not report a creation time")
+                TimelineView(.periodic(from: .now, by: 60)) { context in
+                    Text(record.createdAt.map { Formatters.compactDuration(since: $0, at: context.date) } ?? "Not reported")
+                        .monospacedDigit()
+                        .help(record.createdAt.map(Formatters.absoluteDate) ?? "Buildx did not report a creation time")
+                }
             }
             .width(min: 100, ideal: 122, max: 154)
             TableColumn("Duration", sortUsing: BuildHistoryComparator(key: .duration)) { record in
@@ -900,7 +906,7 @@ struct BuildsRootView: View {
             ContentUnavailableView(
                 "No Record Selected",
                 systemImage: "hammer",
-                description: Text("Pick a cache record to see what produced it and when it was last used."))
+                description: Text("Select a cache record to see what produced it and when it was last used."))
         }
     }
 
@@ -1142,8 +1148,10 @@ struct BuildsRootView: View {
             ContentUnavailableView {
                 Label("Loading Build Log", systemImage: "text.alignleft")
             } description: {
-                ProgressView("Reading the selected Buildx log…")
+                Text("Reading the selected Buildx log…")
             } actions: {
+                ProgressView()
+                    .controlSize(.small)
                 Button("Cancel Loading") {
                     historyLogTask?.cancel()
                 }
@@ -1172,14 +1180,27 @@ struct BuildsRootView: View {
 
     private func historyLogViewport(_ log: BuildxHistoryLog, record: BuildxHistoryRecord) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            if log.isTruncated {
-                Text("Showing the first 4 MB returned by Buildx.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding()
-                Divider()
+            // The log document's own bar. Injecting this command into the window
+            // toolbar from a detail pane made the route's toolbar mutate with the
+            // selection — the same churn defect the container inspector tabs had.
+            HStack(spacing: 8) {
+                if log.isTruncated {
+                    Text("Showing the first 4 MB returned by Buildx.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button {
+                    saveHistoryLog(log, for: record)
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Save Visible Build Log")
+                .help("Save the already-loaded bounded Buildx log")
             }
+            .padding(8)
+            Divider()
             ScrollView(.vertical) {
                 Text(log.output)
                     .font(.system(.callout, design: .monospaced))
@@ -1188,17 +1209,6 @@ struct BuildsRootView: View {
                     .padding()
             }
             .accessibilityLabel("Build log")
-        }
-        .toolbar {
-            ToolbarItem(id: "builds.history-log.save", placement: .secondaryAction) {
-                Button {
-                    saveHistoryLog(log, for: record)
-                } label: {
-                    Image(systemName: "square.and.arrow.down")
-                }
-                .accessibilityLabel("Save Visible Build Log")
-                .help("Save the already-loaded bounded Buildx log")
-            }
         }
     }
 

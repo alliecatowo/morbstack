@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Morbstack — the Docker you wish Docker shipped</title>
-<meta name="description" content="Morbstack is a free, Apache-2.0, source-visible Docker Desktop replacement for macOS: upstream Docker Engine (one small pinned patch to dockerd) in a single lightweight VM, driven by a native SwiftUI app. Pre-release.">
+<meta name="description" content="Morbstack is a free, Apache-2.0, source-visible Docker Desktop replacement for macOS: unmodified upstream Docker Engine in a single lightweight VM, driven by a native SwiftUI app. Pre-release.">
 
 <link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
 <link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32.png">
@@ -13,7 +13,7 @@
 
 <meta property="og:type" content="website">
 <meta property="og:title" content="Morbstack — the Docker you wish Docker shipped">
-<meta property="og:description" content="A free, Apache-2.0 Docker Desktop replacement for macOS. Upstream Docker Engine (one small pinned patch to dockerd), one shared lightweight VM, native SwiftUI. Pre-release — read the honest status before you install.">
+<meta property="og:description" content="A free, Apache-2.0 Docker Desktop replacement for macOS. Unmodified upstream Docker Engine, one shared lightweight VM, native SwiftUI. Pre-release — read the honest status before you install.">
 <!-- TODO(human): og:image and twitter:image must be absolute URLs per the Open Graph
      spec (relative paths are undefined behavior for crawlers/scrapers, which don't
      resolve against the page the way a browser does). Replace with
@@ -21,7 +21,7 @@
 <meta property="og:image" content="assets/og-image.png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="Morbstack — the Docker you wish Docker shipped">
-<meta name="twitter:description" content="A free, Apache-2.0 Docker Desktop replacement for macOS. Upstream Docker Engine (one small pinned patch to dockerd), one shared lightweight VM, native SwiftUI.">
+<meta name="twitter:description" content="A free, Apache-2.0 Docker Desktop replacement for macOS. Unmodified upstream Docker Engine, one shared lightweight VM, native SwiftUI.">
 <meta name="twitter:image" content="assets/og-image.png">
 
 <link rel="stylesheet" href="style.css">
@@ -68,7 +68,7 @@
         <div>
           <img class="hero-mark" src="assets/mark.svg" alt="" width="56" height="56">
           <h1>The Docker you wish Docker shipped.</h1>
-          <p class="lede">Morbstack runs upstream Moby — <code class="inline">containerd</code> unmodified, <code class="inline">dockerd</code> with a single pinned Morbstack patch — inside one shared, lightweight Linux VM on Apple's <code class="inline">Virtualization.framework</code> — free forever, Apache-2.0, no account, no telemetry.</p>
+          <p class="lede">Morbstack runs unmodified upstream Moby — <code class="inline">dockerd</code> and <code class="inline">containerd</code>, stock, no engine patch — inside one shared, lightweight Linux VM on Apple's <code class="inline">Virtualization.framework</code> — free forever, Apache-2.0, no account, no telemetry.</p>
           <div class="hero-actions">
             <a class="btn btn-primary" href="download.html">Get Morbstack</a>
             <a class="btn btn-secondary" href="docs.html">Read the docs</a>
@@ -106,8 +106,8 @@
           <p>No analytics, no crash reporting service, no "upgrade to Pro" interstitials. What you run is what's in the repo.</p>
         </div>
         <div class="card pitch-card">
-          <h3><span class="check" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M4 12l5 5L20 6"/></svg></span>Real upstream Docker Engine, one small patch</h3>
-          <p>A static upstream Docker Engine build runs inside the guest, not a reimplementation — <code class="inline">containerd</code> is unmodified, and <code class="inline">dockerd</code> carries a single ~174-line, in-repo, version-pinned Morbstack patch for host-side port allocation (<code class="inline">docker run -P</code>).</p>
+          <h3><span class="check" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M4 12l5 5L20 6"/></svg></span>Unmodified upstream Docker Engine</h3>
+          <p>A static upstream Docker Engine build runs inside the guest, not a reimplementation — <code class="inline">dockerd</code> and <code class="inline">containerd</code> are both stock, archive-hash-pinned binaries with no downstream patch. Published ports (including <code class="inline">docker run -P</code>) are held on the Mac by a small Morbstack userland proxy, invoked through dockerd's own stock <code class="inline">--userland-proxy-path</code> hook.</p>
         </div>
         <div class="card pitch-card">
           <h3><span class="check" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M4 12l5 5L20 6"/></svg></span>Native SwiftUI, zero web views</h3>
@@ -196,7 +196,7 @@
           <span class="pill pill-pass">M0 complete</span>
           <span class="pill pill-pass">Kubernetes landed</span>
         </div>
-        <p>Morbstack has passed M0 — the core bet (real upstream Docker Engine, one shared VM, fast boot) plus published ports, container outbound networking, disk persistence across a restart, and <code class="inline">docker compose up -d</code>. It now has a native macOS operations app, reviewed CLI setup, bundled Compose and Buildx, and a local Kubernetes cluster (<code class="inline">morb k8s</code>). These are implemented, not release-certified: clean-profile and real-engine acceptance remain required. <code class="inline">*.morb.local</code> DNS and the gaps below are still real.</p>
+        <p>Morbstack has passed M0 — the core bet (unmodified upstream Docker Engine, one shared VM, fast boot) plus published ports, container outbound networking, disk persistence across a restart, and <code class="inline">docker compose up -d</code>. It now has a native macOS operations app, reviewed CLI setup, bundled Compose and Buildx, and a local Kubernetes cluster (<code class="inline">morb k8s</code>). These are implemented, not release-certified: clean-profile and real-engine acceptance remain required. <code class="inline">*.morb.local</code> DNS and the gaps below are still real.</p>
 
         <div class="tally mt-5">
           <span class="pill pill-pass">20 PASS</span>

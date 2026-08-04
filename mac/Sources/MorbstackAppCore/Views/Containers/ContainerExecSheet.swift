@@ -219,10 +219,15 @@ struct ContainerExecSheet: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        ToolbarItem(placement: .cancellationAction) {
-            if state.isExecuting {
+        if state.isExecuting {
+            // `.destructiveAction`, not `.cancellationAction`: Escape resolves to whatever
+            // sits in the cancellation slot, and stopping a live output read is a real,
+            // named consequence that must never happen silently from a keypress.
+            ToolbarItem(placement: .destructiveAction) {
                 Button("Stop Reading Output") { stopReadingOutput() }
-            } else {
+            }
+        } else {
+            ToolbarItem(placement: .cancellationAction) {
                 Button(closeTitle) { dismiss() }
             }
         }

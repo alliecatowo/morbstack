@@ -12,16 +12,18 @@ See [`../README.md`](../README.md) Status section and
 
 ## What Morbstack is
 
-Morbstack is a Docker Desktop replacement for macOS. It runs upstream Moby
-inside a single lightweight Linux VM, managed via Apple's
-`Virtualization.framework` — `containerd` unmodified, `dockerd` carrying one
-small, pinned, in-repo Morbstack patch (`guest/moby-patches/0001-morbstack-publish-all-host-allocator.patch`,
-~174 lines) that adds the host-side port allocator `docker run -P` needs —
-and does all product differentiation on the macOS side: native SwiftUI host
-app, fast VM lifecycle, host-integrated filesystem sync, host-integrated
-networking and DNS, and first-class Apple platform features (App Intents,
-MCP). It is not a from-scratch container runtime — the guest is boring,
-real Docker, on purpose (see "The load-bearing decision" below).
+Morbstack is a Docker Desktop replacement for macOS. It runs unmodified
+upstream Moby inside a single lightweight Linux VM, managed via Apple's
+`Virtualization.framework` — `dockerd` and `containerd`, stock, no
+downstream engine patch. Published ports (including `docker run -P`) reach
+the Mac through a small Morbstack userland proxy, invoked via dockerd's own
+stock `--userland-proxy-path` flag (`guest/morbinit/src/proxy_wrapper.rs`;
+see §3.6 of `protocol.md`) — and does all product differentiation on the
+macOS side: native SwiftUI host app, fast VM lifecycle, host-integrated
+filesystem sync, host-integrated networking and DNS, and first-class Apple
+platform features (App Intents, MCP). It is not a from-scratch container
+runtime — the guest is boring, unmodified Docker, on purpose (see "The
+load-bearing decision" below).
 
 ## System diagram
 
@@ -63,7 +65,8 @@ real Docker, on purpose (see "The load-bearing decision" below).
                            │   from an initramfs — see "M0 boot path" below) │
                            │     - vsock control server (MRB0, port 1024)    │
                            │     - vsock stream/datagram dialers (2376/2378) │
-                           │     - vsock listener probe (port 2380)          │
+                           │     - userland-proxy wrapper dials host 2382    │
+                           │       per published port (port lease)          │
                            │     - supervises services below                 │
                            │                                                  │
                            │   containerd ── dockerd                         │
@@ -106,10 +109,10 @@ retrying a restore known to fail — see "VM lifecycle" below),
   relaying `~/.morbstack/run/docker.sock` traffic to the guest's `dockerd`
   over the vsock Docker API port (2375), and mirroring published container
   ports onto `127.0.0.1` via `PortForwarder`, which dials the guest over
-  vsock port 2376 per accepted connection (see `docs/protocol.md` §3.2). When
-  the durable host-network policy is enabled, it also probes Docker-effective
-  exposed host-network listeners over port 2380 before opening a same-port Mac
-  bridge (see `docs/protocol.md` §3.4). In
+  vsock port 2376 per accepted connection (see `docs/protocol.md` §3.2), and
+  serving the port-lease listener on vsock port 2382 that the guest's
+  userland-proxy wrapper connects to for every published port (see
+  `docs/protocol.md` §3.6). In
   later milestones this same process grows `morbnet` (userspace network
   stack), `morbdns`, and the FSEvents -> inotify bridge.
 - **morb** — the CLI. Talks to `morbstackd` exclusively over the daemon
@@ -138,13 +141,16 @@ retrying a restore known to fail — see "VM lifecycle" below),
   bringing up `eth0` + DHCP, starting and supervising `containerd` and
   `dockerd` (not a separately supervised `buildkitd` — see below), and serving the vsock control
   channel (MRB0 framing in M0; see `docs/protocol.md`).
-- **containerd + dockerd** — static Docker 29.7.1 aarch64 release binaries.
-  `containerd` is unmodified upstream. `dockerd` carries one small,
-  version-pinned Morbstack patch
-  (`guest/moby-patches/0001-morbstack-publish-all-host-allocator.patch`,
-  ~174 lines) that adds the host-side port allocator `docker run -P`
-  requires; `scripts/mkinitramfs.sh` hard-fails without the patched build
-  and installs it as `dockerd`, so this is not optional. Morbstack does not
+- **containerd + dockerd** — static Docker 29.7.1 aarch64 release binaries,
+  archive-hash-pinned. Both `containerd` and `dockerd` are unmodified
+  upstream, with no downstream Morbstack patch. `dockerd` is started with
+  `--userland-proxy-path` pointed at `morbstack-docker-proxy`, a multi-call
+  symlink to `morbinit` (`guest/morbinit/src/proxy_wrapper.rs`); dockerd
+  execs it once per published port — including `-P`/`EXPOSE`-derived
+  dynamic allocations, which only dockerd can resolve — and the wrapper
+  leases the Mac-side endpoint from the host before exec'ing the stock
+  `docker-proxy`, so publishing depends on this stock hook rather than a
+  patched build. See §3.6 of `docs/protocol.md`. Morbstack does not
   otherwise fork or reimplement the Docker Engine.
   `supervisor.rs`'s service table (`default_services`) starts exactly
   two services, `containerd` and `dockerd`; it intentionally does not
@@ -336,9 +342,12 @@ pins of its own any more.
   guest-local TCP port, then a raw splice — see `docs/protocol.md` §3.2;
   this is what makes published container ports reachable from the Mac,
   since unlike the Engine API there is no single well-known guest port to
-  relay), 2378 (framed UDP datagram dial), 2379 (publish-all allocator), and
-  2380 (read-only Docker-exposed host-network listener probe). See
-  `docs/protocol.md` §3 for the full port registry.
+  relay), 2378 (framed UDP datagram dial), and 2382 (host-side port lease:
+  the guest userland-proxy wrapper asks the host to bind a published port;
+  the registry's only guest-initiated channel — see `docs/protocol.md`
+  §3.6). Ports 2379 (publish-all allocator) and 2380 (host-network listener
+  probe) are both retired and must not be reused; see `docs/protocol.md`
+  §3 for the full, current port registry.
 - **MRB0 framed JSON** — the M0 guest control wire format (`ping`, `info`,
   `clock_sync`, `shutdown`). Deliberately simple and dependency-free so it
   can be implemented in Swift Foundation and Rust std with zero external
@@ -368,10 +377,11 @@ pins of its own any more.
 ## The load-bearing decision: one shared VM, not per-container microVMs
 
 Morbstack runs a single guest VM shared by every container, running
-upstream `dockerd`/`containerd` inside it (`dockerd` with Morbstack's one
-host-port-allocator patch; `containerd` unmodified), rather than giving each
-container (or each Compose project) its own microVM. This is the decision
-the rest of the architecture is built around, and it is deliberate:
+unmodified upstream `dockerd`/`containerd` inside it — no downstream engine
+patch, published ports served through dockerd's own stock
+`--userland-proxy-path` hook — rather than giving each container (or each
+Compose project) its own microVM. This is the decision the rest of the
+architecture is built around, and it is deliberate:
 
 - **Compose networks and `--network container:x` need a shared kernel
   network namespace set.** Docker's networking model — user-defined

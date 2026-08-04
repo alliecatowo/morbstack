@@ -1,23 +1,17 @@
 #!/usr/bin/env bash
-#MISE description="Build the bootable guest initramfs (cross-compiled morbinit + pinned patched Docker Engine)"
+#MISE description="Build the bootable guest initramfs (cross-compiled morbinit + stock upstream Docker Engine)"
 #MISE depends=["cross-build-guest"]
 set -euo pipefail
 cd "${MISE_PROJECT_ROOT:-$PWD}"
 
-# Builds the bootable initramfs: cross-compiled morbinit as /init, plus the
-# Alpine minirootfs and the static Docker engine binaries from dist/. Writes
+# Builds the bootable initramfs: cross-compiled morbinit as /init (also linked
+# as /usr/local/bin/morbstack-docker-proxy, the userland-proxy wrapper stock
+# dockerd execs per published port), plus the Alpine minirootfs and the stock
+# static Docker engine binaries from dist/. Writes
 # $MORBSTACK_HOME/data/kernel/initrd.img (default ~/.morbstack, override via the
 # MORBSTACK_HOME env var, honoured by scripts/mkinitramfs.sh itself).
 #
 # `mise run app` does NOT do this. Guest-side changes are not in the bundle until
 # this task runs.
-#
-# Keep a locally built engine when a developer is actively changing the Moby
-# patch; otherwise fetch the pinned, SHA-verified release asset. This removes
-# Docker-as-a-bootstrap-dependency for normal guest-image builds while keeping
-# scripts/build-morbstack-dockerd.sh as the reproducibility path.
-if [ ! -x "dist/guest-bin/morbstack-dockerd" ]; then
-	scripts/fetch-guest-assets.sh --morbstack-dockerd-only
-fi
 
 scripts/mkinitramfs.sh

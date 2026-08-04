@@ -4,10 +4,11 @@
 #
 # Assembles a gzipped newc cpio archive containing:
 #   - the Alpine 3.24.1 aarch64 minirootfs (dist/rootfs/alpine-minirootfs.tar.gz)
-#   - morbinit (cross-compiled Rust PID 1) installed as /init
-#   - the static Docker 29.7.1 aarch64 engine binaries (dist/guest-bin/*),
-#     with an optional version-pinned Moby-patched `morbstack-dockerd`
-#     installed into /usr/local/bin
+#   - morbinit (cross-compiled Rust PID 1) installed as /init, and linked as
+#     /usr/local/bin/morbstack-docker-proxy — the userland-proxy wrapper stock
+#     dockerd execs per published port (guest/morbinit/src/proxy_wrapper.rs)
+#   - the stock static Docker 29.7.1 aarch64 engine binaries
+#     (dist/guest-bin/*), unmodified, installed into /usr/local/bin
 #   - /usr/share/udhcpc/default.script (Alpine ships one; we only write a
 #     fallback if it's somehow missing)
 #   - empty var/lib/docker, run, etc directories for the guest to use
@@ -41,7 +42,6 @@ DEST_FILE="${DEST_DIR}/initrd.img"
 
 ROOTFS_TARBALL="${REPO_ROOT}/dist/rootfs/alpine-minirootfs.tar.gz"
 GUEST_BIN_DIR="${REPO_ROOT}/dist/guest-bin"
-PATCHED_DOCKERD_BIN="${GUEST_BIN_DIR}/morbstack-dockerd"
 APKS_DIR="${REPO_ROOT}/dist/apks"
 MORBINIT_DIR="${REPO_ROOT}/guest/morbinit"
 MORBINIT_BIN="${MORBINIT_DIR}/target/aarch64-unknown-linux-musl/release/morbinit"
@@ -78,10 +78,9 @@ if [ ! -d "${GUEST_BIN_DIR}" ] || [ -z "$(ls -A "${GUEST_BIN_DIR}" 2>/dev/null)"
 	exit 1
 fi
 
-if [ ! -x "${PATCHED_DOCKERD_BIN}" ]; then
-	echo "error: ${PATCHED_DOCKERD_BIN} is missing or not executable" >&2
-	echo "       fetch the pinned release with scripts/fetch-guest-assets.sh --morbstack-dockerd-only" >&2
-	echo "       or build it locally with scripts/build-morbstack-dockerd.sh" >&2
+if [ ! -x "${GUEST_BIN_DIR}/dockerd" ] || [ ! -x "${GUEST_BIN_DIR}/docker-proxy" ]; then
+	echo "error: ${GUEST_BIN_DIR} is missing dockerd or docker-proxy" >&2
+	echo "       run scripts/fetch-guest-assets.sh --docker-only first" >&2
 	exit 1
 fi
 
@@ -208,16 +207,23 @@ bsdtar -xzf "${ROOTFS_TARBALL}" -C "${STAGE_DIR}" --exclude "./dev/*"
 # /init: morbinit, our Rust PID 1.
 install -m 0755 "${MORBINIT_BIN}" "${STAGE_DIR}/init"
 
-# Docker engine binaries -> /usr/local/bin.
+# Docker engine binaries -> /usr/local/bin. All stock upstream: dockerd is the
+# unmodified static binary from Docker's release bundle.
 mkdir -p "${STAGE_DIR}/usr/local/bin"
 for f in "${GUEST_BIN_DIR}"/*; do
 	base="$(basename "${f}")"
 	[ "${base}" = "PROVENANCE.txt" ] && continue
+	# A leftover morbstack-dockerd from the retired downstream-patch pipeline
+	# must never shadow the stock engine.
 	[ "${base}" = "morbstack-dockerd" ] && continue
 	install -m 0755 "${f}" "${STAGE_DIR}/usr/local/bin/${base}"
 done
-install -m 0755 "${PATCHED_DOCKERD_BIN}" "${STAGE_DIR}/usr/local/bin/dockerd"
-echo "Using pinned Morbstack-patched dockerd: ${PATCHED_DOCKERD_BIN}"
+
+# The Morbstack userland-proxy wrapper: a multi-call link to morbinit itself
+# (it dispatches on argv[0]; see guest/morbinit/src/proxy_wrapper.rs). dockerd
+# execs it per published port via --userland-proxy-path; it leases the Mac
+# endpoint over vsock 2382 — fail-closed — then execs the stock docker-proxy.
+ln -sf /init "${STAGE_DIR}/usr/local/bin/morbstack-docker-proxy"
 
 # ---------------------------------------------------------------------------
 # fsutils: btrfs-progs, e2fsprogs, iptables-legacy + their full .so

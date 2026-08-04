@@ -429,7 +429,11 @@ final class PortForwardingTests: XCTestCase {
         }
     }
 
-    func testHostNetworkDoesNotRecoverAPublishAllAllocator() {
+    func testHostNetworkDoesNotRecoverAFixedPortLease() {
+        // A host-network container's ports live in the guest's own namespace;
+        // no Mac listener may be recovered for it, `-P` or not. (`-P` itself
+        // needs no host-side recovery at all any more: the guest userland
+        // proxy re-leases every published port at each start.)
         let containerID = String(repeating: "f", count: 64)
         let inspect = Data(
             """
@@ -440,10 +444,6 @@ final class PortForwardingTests: XCTestCase {
             }}
             """.utf8)
 
-        XCTAssertFalse(DockerPortPublicationPreflight.stoppedContainerUsesPublishAllPorts(
-            in: inspect, expectedContainerID: containerID))
-        XCTAssertFalse(DockerPortPublicationPreflight.restartPolicyUsesPublishAllPorts(
-            in: inspect, expectedContainerID: containerID))
         XCTAssertNil(DockerPortPublicationPreflight.stoppedContainerFixedPortLeasePlan(
             in: inspect, expectedContainerID: containerID))
     }

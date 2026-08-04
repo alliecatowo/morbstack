@@ -108,10 +108,14 @@ struct ImageTagSheet: View {
             }
             .navigationTitle("Tag Image")
             .toolbar {
+                // Keep Cancel visible even while tagging, rather than hiding it, so the
+                // sheet is never left with zero controls; it is disabled instead of
+                // removed because the request is already in flight.
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                        .disabled(isTagging)
+                }
                 if !isTagging {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("Cancel") { dismiss() }
-                    }
                     ToolbarItem(placement: .confirmationAction) {
                         Button(failure == nil ? "Tag" : "Try Again") {
                             beginTagging()

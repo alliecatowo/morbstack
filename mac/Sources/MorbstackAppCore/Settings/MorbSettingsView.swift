@@ -268,6 +268,7 @@ private struct TrackDResourceSettings: View {
     @State private var diskGrowthError: String?
     @State private var showsDiskGrowthConfirmation = false
     @State private var diskGrowthRecoveryNeeded = false
+    @State private var showsEngineRestartConfirmation = false
 
     var body: some View {
         Form {
@@ -293,7 +294,9 @@ private struct TrackDResourceSettings: View {
                     Text(store.restartSummary)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
-                    Button("Restart Engine", systemImage: "arrow.clockwise") { restartEngine() }
+                    Button("Restart Engine…", systemImage: "arrow.clockwise") {
+                        showsEngineRestartConfirmation = true
+                    }
                 }
             }
 
@@ -333,7 +336,9 @@ private struct TrackDResourceSettings: View {
                                     _ = store.save()
                                 }
                             ),
-                            format: .number
+                            // An editable disk-size field must round-trip what the user
+                            // types; grouped digits ("65,536") would not parse back as typed.
+                            format: .number.grouping(.never)
                         )
                         .multilineTextAlignment(.trailing)
                         .frame(width: 72)
@@ -428,6 +433,20 @@ private struct TrackDResourceSettings: View {
                 "Morbstack will extend the existing disk, start the VM long enough to grow its Docker filesystem, and verify the result. Disk growth can’t be undone."
             )
         }
+        .confirmationDialog(
+            "Restart Engine?",
+            isPresented: $showsEngineRestartConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Restart Engine", role: .destructive) {
+                restartEngine()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(
+                "Running containers stop immediately. Docker restarts only the ones with a restart policy; the rest stay stopped."
+            )
+        }
     }
 
     private var needsDiskGrowth: Bool {
@@ -492,7 +511,7 @@ private struct TrackDResourceSettings: View {
             .accessibilityLabel("Virtual CPUs")
             .accessibilityValue(cpuValueText)
 
-            Text("This Mac has \(store.limits.hostCores) cores.")
+            Text("This Mac has \(store.limits.hostCores) core\(store.limits.hostCores == 1 ? "" : "s").")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
 

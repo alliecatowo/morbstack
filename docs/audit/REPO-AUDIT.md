@@ -1,5 +1,12 @@
 # Repository / meta audit — 2026-08-03
 
+> **Staleness note (2026-08-04):** the `PublishAllPortAllocator.swift` /
+> `publish_all.rs` findings below describe a subsystem deleted under TECH-1
+> (replaced by a userland-proxy wrapper through dockerd's stock
+> `--userland-proxy-path` hook, host port-lease listener in
+> `GuestPortLease.swift`). Findings left unchanged as dated evidence; see
+> `docs/design/PATCH-FREE-PUBLISH-ALL.md`.
+
 Scope: architecture, code health, test reality, CI/CD, packaging, and the agent
 harness. Branch `code/native-content-continuation`, 273 commits, ~500 tracked
 files, ~186 Swift files and 22 Rust files written over roughly two days.

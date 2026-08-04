@@ -274,7 +274,15 @@ struct NetworksRootView: View {
                         .navigationTitle("Networks")
                         .navigationSubtitle(subtitle)
                         .searchable(text: $query, placement: .toolbar, prompt: "Name, driver, ID")
-                        .toolbar { toolbarContent })))
+                        .toolbar { toolbarContent }
+                        // The menu-bar mirror of the toolbar's remove-unused command,
+                        // so it stays reachable when the toolbar overflows.
+                        .focusedSceneValue(
+                            \.routeMaintenanceCommand,
+                            RouteMaintenanceCommand(
+                                title: "Remove Unused Networks…",
+                                isEnabled: unusedCount > 0 && !isPerformingNetworkOperation,
+                                perform: { reviewUnusedNetworks() })))))
     }
 
     private func withSheetsAndDialogs(_ view: some View) -> some View {
@@ -611,7 +619,7 @@ struct NetworksRootView: View {
             ContentUnavailableView(
                 "No Network Selected",
                 systemImage: "network",
-                description: Text("Pick a network to see its driver, scope and what is attached to it."))
+                description: Text("Select a network to see its driver, scope and what is attached to it."))
         }
     }
 
@@ -1040,7 +1048,7 @@ struct NetworksRootView: View {
             // The refreshed table and subtitle provide the native acknowledgement.
         } else if removed > 0 {
             operationAlert = NetworkOperationAlert(
-                title: "Removed \(removed) of \(targets.count) networks",
+                title: "Removed \(removed) of \(targets.count) network\(targets.count == 1 ? "" : "s")",
                 message: "Still in use or unavailable: \(failures.prefix(3).map(\.name).joined(separator: ", ")).",
                 focusID: failures.first?.id)
         } else {

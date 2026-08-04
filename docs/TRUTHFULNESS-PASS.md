@@ -224,3 +224,67 @@ by other concurrent workers). No code changed.
   `site/docs.html`. Flagging it here since it means the CLI's own `--help`
   output will keep making the claim I just removed from the website until
   someone with code-editing scope fixes it too.
+
+## Third pass — 2026-08-04: the engine claim flips back, for a different reason
+
+TECH-1 decided the `-P` publish-all problem this second pass's 174-line-patch
+framing was built around should be solved a different way: instead of a
+downstream-patched Moby, Morbstack now ships **unmodified upstream `dockerd`**
+(stock static Docker 29.7.1 binaries, archive-hash-pinned). Published ports —
+including `docker run -P` — are made reachable from the Mac by a small
+Morbstack userland proxy (`guest/morbinit/src/proxy_wrapper.rs`), invoked
+through dockerd's own stock `--userland-proxy-path` flag, leasing the Mac-side
+endpoint from the host over a new guest-initiated vsock channel (host port
+2382; see `docs/protocol.md` §3.6). The downstream patch
+(`guest/moby-patches/0001-morbstack-publish-all-host-allocator.patch`), the
+scripts that built it (`scripts/build-morbstack-dockerd.sh`,
+`scripts/fetch-moby-source.sh`), the `build-engine.yml` workflow, and the
+vsock 2379 publish-all allocator protocol are all **deleted**.
+
+This means the second pass's corrections above are now themselves stale in
+the opposite direction from the first pass they corrected: they carefully
+qualified "unmodified upstream dockerd" into "upstream dockerd + one small
+patch," and that qualification is no longer true. **This pass restores
+"unmodified upstream dockerd" as the accurate top-line claim** at every site
+the second pass touched, and adds the new true mechanism — the userland-proxy
+wrapper — wherever a reader needs to know how `-P` actually reaches the Mac
+without an engine patch. Runtime acceptance for the wrapper is in progress
+(2026-08-04); no document in this pass claims a `runs-here`/verified-working
+result for it, only that it is implemented and undergoing acceptance.
+
+**Sites corrected in the new form**, matching each document's existing tone
+(not one pasted sentence): `README.md` (5 sites — pitch intro, bullet list,
+Mermaid diagram node, guest architecture bullet, comparison table);
+`site/index.html` (4 — meta descriptions, hero lede, pitch card, M0 status);
+`site/comparison.html` (3 — architecture table, differentiation paragraph,
+"Use Morbstack if"); `site/docs.html` (1 — Engine API surface note);
+`docs/architecture.md` (3 — "What Morbstack is," containerd+dockerd bullet,
+"load-bearing decision" section, plus two adjacent stale references to the
+already-deleted port-2380 listener probe that were sitting in the same
+paragraphs); `docs/roadmap.md` (2 — M0 goal, competitive analysis note);
+`docs/comparison.md` (3 — architecture table, differentiation paragraph, "Use
+Morbstack if"); `docs/competitive-capability-roadmap.md` (1 — product
+promise); `docs/product-audit.md` (1 — product outcome); `docs/PUBLISHING.md`
+(1 — `gh repo create --description`). Also corrected outside that list,
+because they described the same now-deleted patch/allocator mechanism:
+`docs/compat.md` (unmodified-CLI bullet and the relay description),
+`docs/docker-engine-compatibility-inventory.md` (the `-P` ledger row and the
+full "Publish-all source-level contract" section, rewritten around the
+wrapper), `docs/dynamic-port-allocation.md` (status line, mechanism
+paragraph, and the `-P` table row), `docs/MASTER-PLAN.md` (closed item 0.9,
+updated 0.10/0.11's port list, marked the `PublishAllPortAllocator` test item
+moot), `docs/COMPETITIVE-GAPS.md` ("where we must stop claiming a win," now
+resolved), `docs/audit/BRANCH-DECISION.md` (dated staleness note, evidence
+left intact), and `docs/audit/DIFFERENTIATION.md` (punch-list item marked
+resolved the opposite way from how it was originally written).
+
+`docs/design/ENGINE-BUILD-DECISION.md` is now a superseded stub pointing at
+`docs/design/PATCH-FREE-PUBLISH-ALL.md`. `docs/protocol.md` §3 gained the
+2382 port-lease registry entry and §3.6 documenting its wire grammar; `TASKS.md`
+tickets TECH-1, SP-4, SP-6, EN-2, OPS-8, OPS-9, REL-1, TST-4, TECH-8, and
+CONC-1 were all updated to match. `docs/audit/*` dated evidence files
+(ENGINE-MATRIX.md, FUNCTIONAL-AUDIT.md, PROXY-FRAMING.md, MASTER-AUDIT.md,
+PRODUCT-AUDIT.md, REPO-AUDIT.md, TECHNOLOGY-AUDIT.md) were left as recorded
+evidence and given a short dated staleness annotation instead, per this
+repo's documented failure mode of deleting a port/mechanism and leaving docs
+describing it as live.

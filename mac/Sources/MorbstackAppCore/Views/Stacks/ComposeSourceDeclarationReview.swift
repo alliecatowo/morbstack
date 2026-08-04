@@ -235,7 +235,10 @@ struct ComposeSourceDeclarationReviewSheet: View {
                             HStack(spacing: 8) {
                                 Text(secretSourceLabel(declaration.source))
                                     .foregroundStyle(.secondary)
-                                Text("Line \(declaration.line)")
+                                // A source line number is an identifier, not a quantity;
+                                // LocalizedStringKey interpolation would otherwise group its
+                                // digits (e.g. "Line 1,200").
+                                Text("Line \(Formatters.identifier(declaration.line))")
                                     .foregroundStyle(.tertiary)
                             }
                         } label: {
@@ -273,7 +276,9 @@ struct ComposeSourceDeclarationReviewSheet: View {
             HStack(spacing: 8) {
                 Text(environmentDispositionLabel(declaration.valueDisposition))
                     .foregroundStyle(.secondary)
-                Text("Line \(declaration.line)")
+                // A source line number is an identifier, not a quantity; LocalizedStringKey
+                // interpolation would otherwise group its digits (e.g. "Line 1,200").
+                Text("Line \(Formatters.identifier(declaration.line))")
                     .foregroundStyle(.tertiary)
             }
         } label: {
@@ -307,7 +312,9 @@ struct ComposeSourceDeclarationReviewSheet: View {
             HStack(spacing: 8) {
                 Text(serviceEnvironmentSourceLabel(declaration.valueSource))
                     .foregroundStyle(.secondary)
-                Text("Line \(declaration.line)")
+                // A source line number is an identifier, not a quantity; LocalizedStringKey
+                // interpolation would otherwise group its digits (e.g. "Line 1,200").
+                Text("Line \(Formatters.identifier(declaration.line))")
                     .foregroundStyle(.tertiary)
             }
         } label: {

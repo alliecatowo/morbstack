@@ -19,9 +19,10 @@ turning an implementation detail into a marketing claim.
   accident.
 
 The product promise is uncompromising: Apache-2.0, commercial use included,
-no account, no telemetry, real upstream Docker Engine (one small, pinned,
-in-repo Morbstack patch to `dockerd`; `containerd` unmodified), and a native
-macOS app. "Better" means a first-day developer can use the Docker ecosystem
+no account, no telemetry, unmodified upstream Docker Engine (published
+ports served through dockerd's own stock `--userland-proxy-path` hook, not
+an engine patch), and a native macOS app. "Better" means a first-day
+developer can use the Docker ecosystem
 without Docker Desktop installed or an environment-variable ritual—not a
 larger feature checklist.
 

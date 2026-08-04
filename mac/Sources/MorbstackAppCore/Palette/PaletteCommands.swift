@@ -27,24 +27,30 @@ final class TrackDPaletteActivity {
 
     var status: String?
     var isBusy = false
+    /// `true` when the finished operation failed. The status row must not put a green
+    /// checkmark next to "Pull failed: …" — the outcome drives the symbol.
+    var didFail = false
 
     nonisolated func post(_ text: String, busy: Bool = true) {
         Task { @MainActor in
             self.status = text
             self.isBusy = busy
+            self.didFail = false
         }
     }
 
-    nonisolated func finish(_ text: String?) {
+    nonisolated func finish(_ text: String?, failed: Bool = false) {
         Task { @MainActor in
             self.status = text
             self.isBusy = false
+            self.didFail = failed
         }
     }
 
     func clear() {
         status = nil
         isBusy = false
+        didFail = false
     }
 }
 
@@ -206,7 +212,9 @@ enum PaletteCommandBuilder {
                             context.activity.finish("Removed \(reference)")
                             await context.model.refreshAll()
                         } catch {
-                            context.activity.finish("Could not remove \(reference): \(MorbErrorMessage.text(for: error))")
+                            context.activity.finish(
+                                "Could not remove \(reference): \(MorbErrorMessage.text(for: error))",
+                                failed: true)
                         }
                     }
                 })
@@ -255,7 +263,7 @@ enum PaletteCommandBuilder {
                 activity.finish("Pulled \(reference)")
                 await model.refreshAll()
             } catch {
-                activity.finish("Pull failed: \(MorbErrorMessage.text(for: error))")
+                activity.finish("Pull failed: \(MorbErrorMessage.text(for: error))", failed: true)
             }
         }
     }

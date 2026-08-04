@@ -217,7 +217,7 @@ struct StacksRootView: View {
     private var subtitle: String {
         var parts = [
             "\(stacks.count) project\(stacks.count == 1 ? "" : "s")",
-            "\(runningServices) of \(totalServices) services running",
+            "\(runningServices) of \(totalServices) service\(totalServices == 1 ? "" : "s") running",
         ]
         if degradedCount > 0 { parts.append("\(degradedCount) degraded") }
         let visibleServiceCount = visibleRows.reduce(into: 0) { count, row in
@@ -322,15 +322,29 @@ struct StacksRootView: View {
     private var toolbarContent: some ToolbarContent {
         // A Compose project has no one universal primary command: the useful action
         // depends on the selected project or service and already lives in its
-        // contextual menu below.  Refresh is utility work, so macOS may overflow it.
-        ToolbarItem(id: "stacks.refresh", placement: .secondaryAction) {
-            Button {
-                Task { await model.refreshAll() }
+        // contextual menu below.  Utility work — refresh and the Compose file editor —
+        // shares one semantic options menu so the toolbar stays at a handful of
+        // stable groups instead of a row of loose glyphs.
+        ToolbarItem(id: "stacks.options", placement: .secondaryAction) {
+            Menu {
+                Button("Refresh", systemImage: "arrow.clockwise") {
+                    Task { await model.refreshAll() }
+                }
+
+                if selectedStack != nil {
+                    Button("Edit Compose File…", systemImage: "doc.text") {
+                        chooseComposeFile()
+                    }
+                    .disabled(!composeSourceSelectionIsAvailable)
+                    .help(externalStackOperationsAreAvailable
+                        ? "Choose and edit a Compose YAML file"
+                        : fixtureStackOperationMessage)
+                }
             } label: {
-                Image(systemName: "arrow.clockwise")
+                Label("Stack options", systemImage: "slider.horizontal.3")
             }
-            .accessibilityLabel("Refresh stacks")
-            .help("Refresh Compose projects")
+            .accessibilityLabel("Stack options")
+            .help("Refresh and Compose file options")
         }
 
         if !services.isEmpty {
@@ -340,19 +354,6 @@ struct StacksRootView: View {
                 }
                 .accessibilityLabel(showsInspector ? "Hide inspector" : "Show inspector")
                 .help(showsInspector ? "Hide inspector" : "Show inspector")
-            }
-        }
-
-        if selectedStack != nil {
-            ToolbarItem(id: "stacks.editComposeFile", placement: .secondaryAction) {
-                Button { chooseComposeFile() } label: {
-                    Image(systemName: "doc.text")
-                }
-                .disabled(!composeSourceSelectionIsAvailable)
-                .accessibilityLabel("Edit Compose file")
-                .help(externalStackOperationsAreAvailable
-                    ? "Choose and edit a Compose YAML file"
-                    : fixtureStackOperationMessage)
             }
         }
 
@@ -431,9 +432,10 @@ struct StacksRootView: View {
         Menu {
             let secondaryActions = secondaryLifecycleActions(for: service)
             if isServiceBusy(service) {
-                ProgressView()
-                    .controlSize(.small)
-                    .accessibilityLabel("Updating \(service.composeService ?? service.displayName)")
+                // NSMenu cannot animate a ProgressView; it rendered as a dead blank
+                // row. A disabled text item states the same fact legibly.
+                Button("Updating \(service.composeService ?? service.displayName)…") {}
+                    .disabled(true)
             } else {
                 ForEach(secondaryActions, id: \.rawValue) { action in
                     Button(action.title, systemImage: action.symbol) {
@@ -574,7 +576,12 @@ struct StacksRootView: View {
             if !service.ports.isEmpty {
                 Section("Ports") {
                     ForEach(service.ports) { port in
-                        LabeledContent("\(port.containerPort)/\(port.proto)", value: port.hostPort.map(String.init) ?? "Not published")
+                        // The title must be a `String`, not a `LocalizedStringKey`
+                        // interpolation: the key overload groups integers, and a port
+                        // is an identifier — "8,080/tcp" is wrong everywhere.
+                        LabeledContent(
+                            "\(Formatters.identifier(port.containerPort))/\(port.proto)",
+                            value: port.hostPort.map(Formatters.identifier) ?? "Not published")
                     }
                 }
             }
@@ -700,9 +707,9 @@ struct StacksRootView: View {
     @ViewBuilder
     private func serviceActionItems(for service: ContainerSummary) -> some View {
         if isServiceBusy(service) {
-            ProgressView()
-                .controlSize(.small)
-                .accessibilityLabel("Updating \(service.composeService ?? service.displayName)")
+            // A menu row cannot animate; a disabled text item states the fact.
+            Button("Updating \(service.composeService ?? service.displayName)…") {}
+                .disabled(true)
         } else {
             ForEach(service.availableActions.filter { !$0.isDestructive }, id: \.rawValue) { action in
                 Button(action.title) { perform(action, on: service) }
@@ -720,14 +727,16 @@ struct StacksRootView: View {
         hidingUnavailableActions: Bool = false
     ) -> some View {
         if busyProjects.contains(stack.id) {
-            ProgressView()
-                .controlSize(.small)
-                .accessibilityLabel("Updating \(stack.title)")
+            // A menu row cannot animate; a disabled text item states the fact.
+            Button("Updating \(stack.title)…") {}
+                .disabled(true)
         } else {
             let startTargets = projectLifecycleTargets(.start, in: stack)
             let runningTargets = projectLifecycleTargets(.stop, in: stack)
+            // The ellipsis is honest: each of these opens a review before anything
+            // runs. The confirmation title reuses the same words with "?" instead.
             if !hidingUnavailableActions || !startTargets.isEmpty {
-                Button(projectLifecycleMenuTitle(.start, count: startTargets.count)) {
+                Button(projectLifecycleMenuTitle(.start, count: startTargets.count) + "…") {
                     requestProjectLifecycleAction(.start, on: stack)
                 }
                 .disabled(!externalStackOperationsAreAvailable || startTargets.isEmpty)
@@ -736,14 +745,14 @@ struct StacksRootView: View {
                     : fixtureStackOperationMessage)
             }
             if !hidingUnavailableActions || !runningTargets.isEmpty {
-                Button(projectLifecycleMenuTitle(.restart, count: runningTargets.count)) {
+                Button(projectLifecycleMenuTitle(.restart, count: runningTargets.count) + "…") {
                     requestProjectLifecycleAction(.restart, on: stack)
                 }
                 .disabled(!externalStackOperationsAreAvailable || runningTargets.isEmpty)
                 .help(externalStackOperationsAreAvailable
                     ? projectLifecycleMenuTitle(.restart, count: runningTargets.count)
                     : fixtureStackOperationMessage)
-                Button(projectLifecycleMenuTitle(.stop, count: runningTargets.count)) {
+                Button(projectLifecycleMenuTitle(.stop, count: runningTargets.count) + "…") {
                     requestProjectLifecycleAction(.stop, on: stack)
                 }
                 .disabled(!externalStackOperationsAreAvailable || runningTargets.isEmpty)

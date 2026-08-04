@@ -219,6 +219,12 @@ private struct PaletteActivityStatus: View {
             if activity.isBusy {
                 ProgressView()
                     .controlSize(.small)
+            } else if activity.didFail {
+                // "Pull failed: …" beside a green checkmark is a lie. The outcome
+                // picks the symbol; the text carries the detail either way.
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .accessibilityLabel("Failed")
             } else {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundStyle(.green)

@@ -160,16 +160,6 @@ struct DockerDynamicPortPublication: Hashable, Sendable {
     }
 }
 
-/// One effective `PublishAllPorts` mapping emitted by patched Moby at container
-/// start. Unlike a create document, this already includes image `EXPOSE` ports;
-/// the host must reserve every entry before replying to the guest allocator.
-struct DockerPublishAllPortRequest: Hashable, Sendable {
-    let transport: DockerDynamicPortTransport
-    let hostIP: String
-    let requestedHostPort: Int
-    let containerPort: Int
-}
-
 /// A bounded dynamic-host-port create document that can be transformed before it
 /// reaches the guest Engine.
 ///
@@ -328,47 +318,6 @@ public enum DockerPortPublicationPreflight {
     /// ``maximumSynchronousFixedPortBindings`` so a mixed TCP+UDP request cannot grow
     /// beyond the same bounded lease transaction.
     public static let maximumSynchronousFixedTCPBindings = maximumSynchronousFixedPortBindings
-
-    /// Proves that an inspect response belongs to the immutable ID in a pending
-    /// start/restart request and uses Engine-owned `PublishAllPorts` allocation.
-    /// No image metadata is inferred on the host: patched Moby expands `EXPOSE`
-    /// inside the guest and calls back only after this narrow proof succeeds.
-    static func stoppedContainerUsesPublishAllPorts(in body: Data, expectedContainerID: String) -> Bool {
-        guard
-            isFullContainerID(expectedContainerID),
-            let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
-            (object["Id"] as? String) == expectedContainerID,
-            let state = object["State"] as? [String: Any],
-            (state["Running"] as? Bool) == false,
-            let hostConfig = object["HostConfig"] as? [String: Any],
-            !networkModeHasContainerNamespace(in: hostConfig),
-            !isGuestHostNetwork(in: hostConfig),
-            (hostConfig["PublishAllPorts"] as? Bool) == true
-        else {
-            return false
-        }
-        return true
-    }
-
-    /// A persisted Engine restart policy may start this container before a user
-    /// issues another Docker API request after a VM boot. Register a durable host
-    /// allocator session for those `-P` containers during forwarder recovery.
-    static func restartPolicyUsesPublishAllPorts(in body: Data, expectedContainerID: String) -> Bool {
-        guard
-            isFullContainerID(expectedContainerID),
-            let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
-            (object["Id"] as? String) == expectedContainerID,
-            let hostConfig = object["HostConfig"] as? [String: Any],
-            !networkModeHasContainerNamespace(in: hostConfig),
-            !isGuestHostNetwork(in: hostConfig),
-            (hostConfig["PublishAllPorts"] as? Bool) == true,
-            let restartPolicy = hostConfig["RestartPolicy"] as? [String: Any],
-            let policyName = restartPolicy["Name"] as? String
-        else {
-            return false
-        }
-        return ["always", "unless-stopped", "on-failure"].contains(policyName)
-    }
 
     public enum Verdict: Equatable, Sendable {
         case allowed

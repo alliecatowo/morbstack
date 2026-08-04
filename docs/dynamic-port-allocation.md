@@ -1,11 +1,12 @@
 # Dynamic published-port allocation
 
 Status: bounded request-visible `-p` and the separate Engine-owned `-P` allocator
-have source implementations; live Docker/VM acceptance evidence is pending. `-P` is
-implemented by the version-pinned Moby patch plus the guest and host allocators, not
-by the bounded request rewrite. This document retains the design reasoning for why
-those paths must remain separate; it is not a release claim until the live matrix at
-the end passes.
+have source implementations; live Docker/VM acceptance evidence is in progress
+(2026-08-04). `-P` is implemented through the unmodified Engine's own
+`--userland-proxy-path` hook plus Morbstack's guest wrapper and host port-lease
+listener, not by the bounded request rewrite and not by any engine patch. This
+document retains the design reasoning for why those paths must remain separate; it
+is not a release claim until the live matrix at the end passes.
 
 ## Decision
 
@@ -77,14 +78,21 @@ semantics: upstream may release its allocated ports when a container stops and c
 new ones on a later start. Materializing fixed `PortBindings` and clearing
 `PublishAllPorts` would instead make those endpoints persistent.
 
-The source implementation now provides that atomic guest-Engine integration through
-`guest/moby-patches/0001-morbstack-publish-all-host-allocator.patch`: after Moby has
-expanded its effective port map and before it programs networking, it asks the guest
-broker and host allocator to hold the complete supported TCP/UDP set. The host keeps
-`PublishAllPorts` dynamic and releases the start-local lease on stop so Moby allocates
-again on restart. The implementation rejects unsupported protocols/forms before
-networking proceeds. A proxy-only request rewriter remains insufficient for the normal
-Docker CLI `-P image` path. Guest-image inclusion and the live matrix remain pending.
+The source implementation now provides that atomic guest-Engine integration without
+touching the Engine at all: dockerd is started with `--userland-proxy-path` pointed
+at Morbstack's wrapper (`guest/morbinit/src/proxy_wrapper.rs`), a stock hook Moby
+already execs, per published port, after it has expanded its effective port map and
+before it lets the container start succeed. The wrapper leases the Mac endpoint from
+the host over the vsock port-lease channel (§3.6, `docs/protocol.md`) before exec'ing
+the stock `docker-proxy`, so the guest Engine keeps `PublishAllPorts` untouched and
+reallocates on restart exactly as it would natively — there is no separate release
+step, since lease lifetime equals that stock proxy process's lifetime. Unsupported
+protocols/forms are rejected before the wrapper contacts the host at all (an
+unrecognized invocation fails closed rather than passing through silently). A
+proxy-only request rewriter remains insufficient for the normal Docker CLI `-P image`
+path; this mechanism does not rewrite requests, it intercepts port binding at the
+Engine's own extension point. Guest-image inclusion and the live matrix remain
+pending (in progress 2026-08-04).
 
 ## Implemented Phase 1 transaction
 
@@ -175,7 +183,7 @@ body does not completely identify.
 | `-p 8080-8081:80-81` (TCP or supported UDP) | Docker CLI validates equal spans, then emits concrete bindings | The fixed-port path preflights, reserves, associates, activates, and recovers the complete concrete set as one atomic lease. | The recognized create window is 256 KiB and the held lease rejects more than 128 distinct concrete transport endpoints before guest create; this is source-level evidence, not live Docker/VM acceptance. |
 | A recognized (within the 256 KiB preflight) fixed equal-length range with more than 128 concrete transport endpoints | Docker CLI-normalized concrete bindings | Rejected before guest create. | Holding listeners occurs under one ledger lock; the explicit cap prevents an oversized set from becoming a partial host lease. |
 | `-p 8080-8081:80` | One container port with a host-port allocation range | Rejected before guest create as a raw dynamic host-port range. | Docker's parser deliberately preserves this as a range string for Engine-side selection; Morbstack must not partially reserve it. |
-| `-P` / `--publish-all` | `HostConfig.PublishAllPorts: true` | The bounded proxy path declines it, while patched Moby asks the guest/host allocator for the complete effective TCP/UDP set at start. | Source implementation only; guest-image inclusion and the full live matrix are pending. It is not another spelling of `-p <container-port>`. |
+| `-P` / `--publish-all` | `HostConfig.PublishAllPorts: true` | The bounded proxy path declines it; the unmodified Engine's own `--userland-proxy-path` hook execs Morbstack's wrapper per binding, which leases the complete effective TCP/UDP set from the host at start. | Source implementation only; guest-image inclusion and the full live matrix are pending (in progress 2026-08-04). It is not another spelling of `-p <container-port>`. |
 
 The concrete implementation evidence is `DockerPortPublicationPreflight` for
 classification/rewrite, `DockerProxy` for the bounded request/response hand-off, and

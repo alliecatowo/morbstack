@@ -153,6 +153,30 @@ extension FocusedValues {
     }
 }
 
+/// One route-scoped collection-maintenance command (prune / remove unused), published
+/// by the route that owns it so the menu bar can mirror the toolbar.
+///
+/// The standing rule is that every important toolbar command has a menu-bar
+/// equivalent. Without this, the prune commands lived only in a route's toolbar
+/// options menu — and a command that exists only in the toolbar becomes unreachable
+/// the moment the system overflows it away at a narrow width.
+struct RouteMaintenanceCommand {
+    let title: String
+    let isEnabled: Bool
+    let perform: () -> Void
+}
+
+private struct RouteMaintenanceCommandKey: FocusedValueKey {
+    typealias Value = RouteMaintenanceCommand
+}
+
+extension FocusedValues {
+    var routeMaintenanceCommand: RouteMaintenanceCommand? {
+        get { self[RouteMaintenanceCommandKey.self] }
+        set { self[RouteMaintenanceCommandKey.self] = newValue }
+    }
+}
+
 /// The menu bar's own commands, and with them every keyboard shortcut in the app.
 ///
 /// Shortcuts live here rather than on the views they act on so that they work from
@@ -164,6 +188,7 @@ struct MorbCommands: Commands {
     @Binding var isPalettePresented: Bool
     @Binding var isCLISetupPresented: Bool
     @FocusedValue(\.routeRefreshAction) private var routeRefreshAction
+    @FocusedValue(\.routeMaintenanceCommand) private var routeMaintenanceCommand
     @FocusedValue(\.imageArchiveExportAction) private var imageArchiveExportAction
     @FocusedValue(\.imageArchiveImportAction) private var imageArchiveImportAction
     @FocusedValue(\.runLocalImageAction) private var runLocalImageAction
@@ -230,6 +255,13 @@ struct MorbCommands: Commands {
             .keyboardShortcut("r", modifiers: .command)
             .disabled(routeRefreshAction == nil)
 
+            // The selected route's prune command, mirrored from its toolbar options
+            // menu so it stays reachable when the toolbar overflows.
+            Button(routeMaintenanceCommand?.title ?? "Remove Unused Items…") {
+                routeMaintenanceCommand?.perform()
+            }
+            .disabled(routeMaintenanceCommand?.isEnabled != true)
+
             Divider()
 
             Button("Start Engine") { Task { await model.engineAction(.start) } }
@@ -273,7 +305,7 @@ struct MorbCommands: Commands {
 
             Divider()
 
-            Button("Validate Compose Document…") {
+            Button("Validate Compose File…") {
                 composeSourceValidationCommandActions?.validate()
             }
             .disabled(composeSourceValidationCommandActions?.canValidate != true)
@@ -300,14 +332,33 @@ struct RootWindow: View {
     @AppStorage(TrackDPreferences.firstRunCLISetupDeferred)
     private var isCLISetupDeferred = false
 
+    /// Owned here so every launch starts with the sidebar visible. Left to the
+    /// system, a collapsed sidebar can be restored across launches — which hides the
+    /// engine footer and, under `--tour-fixtures`, the provenance marker with it.
+    /// View ▸ Hide Sidebar still works; the choice just does not leak into the next
+    /// launch's evidence.
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
+
     var body: some View {
-        NavigationSplitView {
-            Sidebar(model: model)
-                .navigationSplitViewColumnWidth(
-                    min: 180, ideal: 220, max: 280)
-        } detail: {
-            DetailHost(model: model)
-                .frame(minWidth: 620, minHeight: 420)
+        // The fixture marker that cannot be cropped, collapsed, or mistaken: fixture
+        // launches carry a persistent banner across the full window width, laid out
+        // ABOVE the split view so no column's content can render beneath it. The
+        // window title and sidebar footer also state provenance, but the title is
+        // not drawn by Tahoe's toolbar (it shows the route's navigation title) and
+        // the footer disappears with the sidebar — a screenshot of either state must
+        // still be impossible to file as live evidence.
+        VStack(spacing: 0) {
+            if let fixture = model.fixtureProvenance {
+                FixtureDataBanner(provenance: fixture)
+            }
+            NavigationSplitView(columnVisibility: $columnVisibility) {
+                Sidebar(model: model)
+                    .navigationSplitViewColumnWidth(
+                        min: 180, ideal: 220, max: 280)
+            } detail: {
+                DetailHost(model: model)
+                    .frame(minWidth: 620, minHeight: 420)
+            }
         }
         // No `.navigationTitle` here. The window's title belongs to whatever is in the
         // detail column, and setting it at the split view as well produced a window
@@ -383,6 +434,30 @@ struct RootWindow: View {
         if cliSetup.shouldPersistFirstRunDeferral {
             isCLISetupDeferred = true
         }
+    }
+}
+
+// MARK: - Fixture banner
+
+/// The non-dismissible marker on every `--tour-fixtures` window.
+///
+/// Fixture data is Docker-shaped but fabricated, and a fixture window has already been
+/// mistaken for live evidence once. Color is supplemental per the design rulings — the
+/// words carry the meaning — but the tinted band survives cropping, sidebar collapse,
+/// and a glance from across the desk, which is the whole job.
+private struct FixtureDataBanner: View {
+
+    let provenance: FixtureProvenance
+
+    var body: some View {
+        Label(provenance.detail, systemImage: "testtube.2")
+            .font(.callout)
+            .padding(.vertical, 5)
+            .padding(.horizontal, 12)
+            .frame(maxWidth: .infinity)
+            .background(.yellow.opacity(0.22))
+            .overlay(alignment: .bottom) { Divider() }
+            .accessibilityLabel(provenance.accessibilityLabel)
     }
 }
 

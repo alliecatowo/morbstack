@@ -1,5 +1,12 @@
 # Morbstack Functional Audit — does it actually do things?
 
+> **Staleness note (2026-08-04):** the `docker run -P` findings below (the
+> "publish-all" allocator, vsock port 2379, and the patched-Moby engine) describe a
+> mechanism deleted under TECH-1. Morbstack now ships unmodified upstream `dockerd`
+> and serves published ports through its stock `--userland-proxy-path` hook instead.
+> Findings are left unchanged as dated evidence; see
+> `docs/design/PATCH-FREE-PUBLISH-ALL.md` for the current mechanism.
+
 **Date:** 2026-08-03
 **Bundle:** `dist/Morbstack.app`, built 14:54 from `8190f54`
 **Branch:** `code/native-content-continuation`

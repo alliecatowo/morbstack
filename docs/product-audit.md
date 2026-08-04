@@ -9,10 +9,10 @@ plan, not a claim that every item has shipped or been live-verified.
 Morbstack is the best macOS container stack: a free-for-everyone,
 Apache-2.0, no-account, no-telemetry, genuinely drop-in replacement for
 Docker Desktop. It must match or exceed the practical local-development
-experience of OrbStack while retaining an inspectable, real upstream Docker
-Engine — `containerd` unmodified, `dockerd` with a single small, pinned,
-in-repo Morbstack patch for host-side port allocation — and a fully native
-macOS operations app.
+experience of OrbStack while retaining an inspectable, unmodified upstream
+Docker Engine — `dockerd` and `containerd`, no downstream patch, published
+ports served through dockerd's own stock `--userland-proxy-path` hook —
+and a fully native macOS operations app.
 
 The standard is not a compelling demo. A new user must be able to install
 Morbstack on a Mac with no Docker tooling, open a terminal or IDE, and use
