@@ -282,7 +282,10 @@ struct RootWindow: View {
         // on the `List` would double the blur and make the sidebar visibly murkier than
         // every other app on screen.
         .frame(minWidth: 880, minHeight: 540)
-        .background(WindowConfigurator(size: options.windowSize))
+        .background(
+            WindowConfigurator(
+                size: options.windowSize,
+                forcedTitle: model.fixtureProvenance?.windowTitle))
         .task {
             await model.bootstrap()
             // `--tour-capture <dir>`: exercise the real window after `bootstrap()` so
@@ -445,14 +448,30 @@ struct EngineFooter: View {
     let model: AppModel
 
     var body: some View {
-        Label(model.engine.headline, systemImage: statusSymbol)
+        Label(title, systemImage: symbol)
             .lineLimit(1)
             .monospacedDigit()
             .controlSize(.small)
             .help(tooltip)
-            .accessibilityLabel(model.engine.headline)
+            .accessibilityLabel(accessibilityLabel)
             .accessibilityValue(subtitle)
-            .accessibilityHint("Engine status")
+            .accessibilityHint(accessibilityHint)
+    }
+
+    private var title: String {
+        model.fixtureProvenance?.footerTitle ?? model.engine.headline
+    }
+
+    private var symbol: String {
+        model.fixtureProvenance == nil ? statusSymbol : "testtube.2"
+    }
+
+    private var accessibilityLabel: String {
+        model.fixtureProvenance?.accessibilityLabel ?? model.engine.headline
+    }
+
+    private var accessibilityHint: String {
+        model.fixtureProvenance == nil ? "Engine status" : "Fixture data provenance"
     }
 
     private var statusSymbol: String {
@@ -466,6 +485,7 @@ struct EngineFooter: View {
     }
 
     private var subtitle: String {
+        if let fixture = model.fixtureProvenance { return fixture.detail }
         var details = ["VM: \(model.engine.vmState)"]
         if let version = model.engine.version { details.append("morbstackd \(version)") }
         if let chip = model.fileSharingChip { details.append(chip.detail) }
@@ -473,6 +493,7 @@ struct EngineFooter: View {
     }
 
     private var tooltip: String {
+        if let fixture = model.fixtureProvenance { return fixture.detail }
         let socket = model.engine.reachable ? "Control socket: connected" : "Control socket: unavailable"
         return "\(subtitle)\n\(socket)"
     }
@@ -691,22 +712,36 @@ struct EngineStoppedView: View {
 private struct WindowConfigurator: NSViewRepresentable {
 
     let size: CGSize?
+    /// Fixtures replace the route title with a system-window provenance title. Ordinary
+    /// launches leave SwiftUI's route-owned navigation title entirely untouched.
+    let forcedTitle: String?
 
     func makeNSView(context: Context) -> NSView {
         let view = NSView(frame: .zero)
-        guard let size else { return view }
+        guard size != nil || forcedTitle != nil else { return view }
         // The view has no window until it is in the hierarchy, which happens after
         // `makeNSView` returns.
         DispatchQueue.main.async {
             guard let window = view.window else { return }
-            window.setContentSize(size)
-            window.center()
-            // Restoration would otherwise overwrite the requested size on the next
-            // launch with whatever the user last dragged the window to.
-            window.isRestorable = false
+            if let size {
+                window.setContentSize(size)
+                window.center()
+                // Restoration would otherwise overwrite the requested size on the next
+                // launch with whatever the user last dragged the window to.
+                window.isRestorable = false
+            }
+            if let forcedTitle { window.title = forcedTitle }
         }
         return view
     }
 
-    func updateNSView(_ nsView: NSView, context: Context) {}
+    func updateNSView(_ nsView: NSView, context: Context) {
+        // A route's navigation title can update after the view has entered the window.
+        // Reassert provenance for fixture launches only; ordinary route titles stay
+        // system-owned and unchanged.
+        guard let forcedTitle else { return }
+        DispatchQueue.main.async {
+            nsView.window?.title = forcedTitle
+        }
+    }
 }

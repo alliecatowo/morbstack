@@ -694,6 +694,19 @@ final class LaunchOptionsTests: XCTestCase {
         XCTAssertNil(options.select)
         XCTAssertNil(options.appearance)
         XCTAssertFalse(options.isTour)
+        XCTAssertNil(options.fixtureProvenance)
+    }
+
+    func testFixtureLaunchCarriesNonLiveProvenance() {
+        let options = LaunchOptions(arguments: ["/path/to/app", "--tour-fixtures"])
+        let provenance = options.fixtureProvenance
+
+        XCTAssertEqual(provenance?.windowTitle, "Morbstack — Fixture Data")
+        XCTAssertEqual(provenance?.footerTitle, "Fixture Data")
+        XCTAssertEqual(provenance?.detail, "Developer fixtures — not connected to a Docker Engine.")
+        XCTAssertEqual(provenance?.accessibilityLabel, "Fixture data. Not connected to a Docker Engine.")
+        XCTAssertFalse(provenance?.detail.localizedCaseInsensitiveContains("running") ?? true)
+        XCTAssertFalse(provenance?.accessibilityLabel.localizedCaseInsensitiveContains("running") ?? true)
     }
 
     /// macOS appends its own arguments when launching from Xcode; an app that refused

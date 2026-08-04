@@ -76,6 +76,13 @@ struct LaunchOptions: Sendable, Equatable {
     /// `true` when the app was launched by the tour tooling rather than by a person.
     var isTour: Bool { select != nil || container != nil || windowSize != nil }
 
+    /// Developer fixture launches must carry their provenance into the window chrome.
+    /// Other developer switches still exercise the actual engine, so they intentionally
+    /// do not receive this marker.
+    var fixtureProvenance: FixtureProvenance? {
+        tourFixtures ? .developerTour : nil
+    }
+
     /// Parses the switches out of an argument vector.
     ///
     /// Unknown arguments are ignored rather than rejected: macOS itself appends things
@@ -127,6 +134,25 @@ struct LaunchOptions: Sendable, Equatable {
         else { return nil }
         return CGSize(width: width, height: height)
     }
+}
+
+/// The explicit provenance carried by a developer fixture launch.
+///
+/// Fixture clients deliberately report a reachable synthetic engine so the ordinary
+/// collection and inspector paths can be exercised without touching a person's Docker
+/// engine. That transport convenience must never surface as a claim about the person's
+/// actual engine, so window and sidebar chrome read from this separate provenance value.
+struct FixtureProvenance: Sendable, Equatable {
+    static let developerTour = FixtureProvenance(
+        windowTitle: "Morbstack — Fixture Data",
+        footerTitle: "Fixture Data",
+        detail: "Developer fixtures — not connected to a Docker Engine.",
+        accessibilityLabel: "Fixture data. Not connected to a Docker Engine.")
+
+    let windowTitle: String
+    let footerTitle: String
+    let detail: String
+    let accessibilityLabel: String
 }
 
 // MARK: - Model
@@ -196,6 +222,13 @@ final class AppModel {
     /// fixture instance is supplied by `forLaunch` for the explicit developer tour.
     @ObservationIgnored let kubernetes: any K8sClusterProviding
     @ObservationIgnored let launchOptions: LaunchOptions
+
+    /// `nil` for ordinary launches. Fixture mode is a developer aid, never evidence of
+    /// the user's local Docker state, even though it keeps the normal UI data paths
+    /// available for deterministic review.
+    var fixtureProvenance: FixtureProvenance? {
+        launchOptions.fixtureProvenance
+    }
 
     // MARK: Private
 
