@@ -571,6 +571,16 @@ enum DockerHijackDetection {
             return false
         }
 
+        // Both live and one-shot container statistics are JSON over ordinary HTTP.
+        // The live form remains open until the client cancels it; neither form is an
+        // attach-style takeover, even when a stale Upgrade header is present.
+        if head.method.uppercased() == "GET",
+           components.count >= 3,
+           components[components.count - 3] == "containers",
+           last == "stats" {
+            return false
+        }
+
         // Image pull and import share this ordinary streaming HTTP route.
         // `fromImage`/`tag` and `fromSrc=-`/`repo` are query values the relay must
         // preserve; an import archive is a request body, while pull/import progress

@@ -286,6 +286,10 @@ final class DockerHijackDetectionTests: XCTestCase {
         XCTAssertFalse(DockerHijackDetection.isHijackCandidate(
             head("GET", "/v1.47/containers/exported/export", ["connection": "Upgrade"])))
         XCTAssertFalse(DockerHijackDetection.isHijackCandidate(
+            head("GET", "/v1.47/containers/observed/stats?stream=1", ["connection": "Upgrade"])))
+        XCTAssertFalse(DockerHijackDetection.isHijackCandidate(
+            head("GET", "/v1.47/containers/observed/stats?stream=0", ["connection": "Upgrade"])))
+        XCTAssertFalse(DockerHijackDetection.isHijackCandidate(
             head("POST", "/v1.47/containers/create")))
         XCTAssertFalse(DockerHijackDetection.isHijackCandidate(
             head("POST", "/v1.47/containers/abc/exec")))
@@ -1237,6 +1241,74 @@ final class DockerFramedRelayTests: XCTestCase {
         XCTAssertEqual(importEOF, 0, "cancelling docker import must close the Engine write side")
         shutdown(imported.guest, SHUT_WR)
         wait(for: [imported.done], timeout: 10)
+    }
+
+    /// `docker stats` keeps an ordinary chunked JSON response open for successive
+    /// samples. It is not an attach stream: sample bytes stay opaque HTTP data, and
+    /// closing the client side is the only cancellation signal the Engine receives.
+    func testChunkedContainerStatsStreamStaysByteExactUntilClientCancellation() throws {
+        let wired = try makeRelay()
+        let stats = "GET /v1.47/containers/observed/stats?stream=1 HTTP/1.1\r\nHost: morbstack\r\n\r\n"
+        write(stats, to: wired.client)
+        XCTAssertEqual(readAvailable(wired.guest, atLeast: stats.utf8.count), Data(stats.utf8))
+
+        let firstSample = Data(#"{"read":"2026-08-03T12:00:00Z","cpu_stats":{"cpu_usage":{"total_usage":1000000}},"precpu_stats":{"cpu_usage":{"total_usage":750000}},"memory_stats":{"usage":1048576,"limit":2147483648}}"#.utf8)
+            + Data([0x0A])
+        let secondSample = Data(#"{"read":"2026-08-03T12:00:01Z","cpu_stats":{"cpu_usage":{"total_usage":1500000}},"precpu_stats":{"cpu_usage":{"total_usage":1000000}},"memory_stats":{"usage":1572864,"limit":2147483648}}"#.utf8)
+            + Data([0x0A])
+        let response = Data((
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                + "Transfer-Encoding: chunked\r\n\r\n").utf8)
+            + Self.chunked([firstSample, secondSample])
+        write(response, to: wired.guest)
+        XCTAssertEqual(
+            readAvailable(wired.client, atLeast: response.count),
+            response,
+            "live stats samples and chunk delimiters must reach the client unchanged")
+
+        shutdown(wired.client, SHUT_WR)
+        var buffer = [UInt8](repeating: 0, count: 16)
+        let eof = buffer.withUnsafeMutableBytes { raw -> Int in
+            POSIXSocketSupport.readSome(wired.guest, into: raw.baseAddress!, count: raw.count)
+        }
+        XCTAssertEqual(eof, 0, "cancelling docker stats must close the Engine write side")
+
+        shutdown(wired.guest, SHUT_WR)
+        XCTAssertEqual(policy.seen.map { $0.head.target }, ["/v1.47/containers/observed/stats?stream=1"])
+        XCTAssertTrue(policy.seen.allSatisfy { $0.body == nil }, "stats never has a proxy-inspected body")
+        XCTAssertEqual(policy.framingFailures, [])
+        wait(for: [wired.done], timeout: 10)
+    }
+
+    /// `docker stats --no-stream` requests one regular JSON response. A client that
+    /// reconnects after cancelling a live stream must get this independent framed
+    /// exchange, and then be able to reuse that new connection for its next request.
+    func testOneShotContainerStatsStaysFramedOnReconnectAndAllowsReuse() throws {
+        let wired = try makeRelay()
+        let stats = "GET /v1.47/containers/observed/stats?stream=0 HTTP/1.1\r\nHost: morbstack\r\n\r\n"
+        write(stats, to: wired.client)
+        XCTAssertEqual(readAvailable(wired.guest, atLeast: stats.utf8.count), Data(stats.utf8))
+
+        let sample = #"{"read":"2026-08-03T12:00:02Z","cpu_stats":{"online_cpus":2},"memory_stats":{"usage":2097152,"limit":2147483648},"networks":{"eth0":{"rx_bytes":512,"tx_bytes":1024}}}"#
+        let response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+            + "Content-Length: \(sample.utf8.count)\r\n\r\n\(sample)"
+        write(response, to: wired.guest)
+        XCTAssertEqual(
+            readAvailable(wired.client, atLeast: response.utf8.count),
+            Data(response.utf8),
+            "the one-shot stats response must stay a regular framed HTTP response")
+
+        write(Self.ping, to: wired.client)
+        XCTAssertEqual(readAvailable(wired.guest, atLeast: Self.ping.utf8.count), Data(Self.ping.utf8))
+        XCTAssertEqual(policy.seen.map { $0.head.target }, [
+            "/v1.47/containers/observed/stats?stream=0",
+            "/_ping",
+        ])
+        XCTAssertTrue(policy.seen.allSatisfy { $0.body == nil }, "one-shot stats has no inspected body")
+        XCTAssertEqual(policy.framingFailures, [])
+
+        wired.relay.cancel()
+        wait(for: [wired.done], timeout: 10)
     }
 
     /// A large uninspected body must arrive byte for byte, which is what `docker cp`
