@@ -356,6 +356,10 @@ public final class PortForwarder {
     /// policy. They survive individual container restarts but are discarded with
     /// the VM generation, then rebuilt from the Engine's persisted metadata.
     private var publishAllRestartSessions: [String: PublishAllPortAllocator.Session] = [:]
+    /// One-shot direct lifecycle sessions.  They are kept in this ledger until
+    /// their observed Docker reply, so recovery cannot register a second guest
+    /// route for the same immutable container ID while the request is in flight.
+    private var publishAllDirectSessions: [String: PublishAllPortAllocator.Session] = [:]
     private var relays: [UInt64: FDRelay] = [:]
     private var relaySequence: UInt64 = 0
     /// Live forwarded connections, counted **per generation**.
@@ -1010,6 +1014,78 @@ public final class PortForwarder {
         return record.releaseOnStop
     }
 
+    /// Returns the one host allocator session allowed to route one exact `-P`
+    /// lifecycle request.  Holding the ledger lock across the short registration
+    /// handshake is intentional: guest registration is last-writer-wins, so two
+    /// host callers must never register the same container concurrently.
+    func beginPublishAllLifecycleSession(containerID: String) throws -> PublishAllPortAllocator.Session {
+        guard DockerPortPublicationPreflight.isFullContainerID(containerID) else {
+            throw MorbError.protocolViolation("publish-all requires an immutable container ID")
+        }
+
+        lock.lock()
+        if let session = publishAllRestartSessions[containerID], session.isLive {
+            lock.unlock()
+            return session
+        }
+        if let session = publishAllDirectSessions[containerID], session.isLive {
+            lock.unlock()
+            throw MorbError.vm("a publish-all lifecycle request is already in progress for this container")
+        }
+        lock.unlock()
+
+        // A policy container needs its durable session before this direct request
+        // reaches Moby.  Otherwise the successful direct start can leave a closed
+        // one-shot guest route in front of an immediate policy restart.
+        let inspect = try getEngineJSON(
+            path: DockerAPIDecoding.containerInspectPath(containerID: containerID), timeout: 5)
+        let durable = DockerPortPublicationPreflight.restartPolicyUsesPublishAllPorts(
+            in: inspect, expectedContainerID: containerID)
+
+        lock.lock()
+        defer { lock.unlock() }
+        if let session = publishAllRestartSessions[containerID], session.isLive { return session }
+        if let session = publishAllDirectSessions[containerID], session.isLive {
+            throw MorbError.vm("a publish-all lifecycle request is already in progress for this container")
+        }
+
+        let fd = try vm.connectVsockBlocking(
+            port: MorbVsockPorts.publishAllAllocator, timeout: 5).get()
+        do {
+            let session = PublishAllPortAllocator.Session(
+                fd: fd,
+                containerID: containerID,
+                forwarder: self,
+                log: log,
+                remainsAvailableForRestartPolicy: durable)
+            try session.start()
+            if durable {
+                publishAllRestartSessions[containerID] = session
+            } else {
+                publishAllDirectSessions[containerID] = session
+            }
+            return session
+        } catch {
+            Darwin.close(fd)
+            throw error
+        }
+    }
+
+    /// Completes a direct API observation and retires only its one-shot owner.
+    /// Durable policy sessions remain installed for future Engine-owned restarts.
+    func completePublishAllLifecycleSession(
+        _ session: PublishAllPortAllocator.Session,
+        containerID: String,
+        succeeded: Bool
+    ) {
+        session.complete(succeeded: succeeded)
+        lock.lock()
+        if publishAllDirectSessions[containerID] === session {
+            publishAllDirectSessions.removeValue(forKey: containerID)
+        }
+        lock.unlock()
+    }
+
     /// Promotes a lease after Docker's normal `204` start reply is observed. The
     /// response observer runs before FDRelay writes those bytes to the client, so the
     /// service never sees a successful start while Morbstack has released its host
@@ -1338,7 +1414,7 @@ public final class PortForwarder {
     ///   once you know the guest went with them.
     public func stop(reason: String? = nil) {
         lock.lock()
-        guard running || !leases.isEmpty else {
+        guard running || !leases.isEmpty || !publishAllRestartSessions.isEmpty || !publishAllDirectSessions.isEmpty else {
             lock.unlock()
             return
         }
@@ -1353,6 +1429,8 @@ public final class PortForwarder {
         leaseByContainerID.removeAll()
         let restartSessions = publishAllRestartSessions.values
         publishAllRestartSessions.removeAll()
+        let directSessions = publishAllDirectSessions.values
+        publishAllDirectSessions.removeAll()
         let inFlight = Array(relays.values)
         relays.removeAll()
         // Stale completions are allowed to arrive; they find no entry for their
@@ -1384,6 +1462,9 @@ public final class PortForwarder {
         }
         for relay in inFlight { relay.cancel() }
         for session in restartSessions {
+            session.invalidate(reason: reason ?? "port-forwarder-stop")
+        }
+        for session in directSessions {
             session.invalidate(reason: reason ?? "port-forwarder-stop")
         }
 
@@ -1744,31 +1825,12 @@ public final class PortForwarder {
         for session in stale { session.invalidate(reason: "restart-policy-reconciliation") }
 
         for containerID in missing {
-            guard case .success(let fd) = vm.connectVsockBlocking(
-                port: MorbVsockPorts.publishAllAllocator,
-                timeout: 5)
-            else {
-                log.info("could not reconnect publish-all allocator for \(String(containerID.prefix(12))) yet")
-                continue
-            }
             do {
-                let session = PublishAllPortAllocator.Session(
-                    fd: fd,
-                    containerID: containerID,
-                    forwarder: self,
-                    log: log,
-                    remainsAvailableForRestartPolicy: true)
-                try session.start()
-                lock.lock()
-                if running, publishAllRestartSessions[containerID] == nil {
-                    publishAllRestartSessions[containerID] = session
-                    lock.unlock()
-                } else {
-                    lock.unlock()
-                    session.invalidate(reason: "restart-policy-session-discarded")
-                }
+                // Registration is serialized with direct lifecycle admission by
+                // `beginPublishAllLifecycleSession`; it inspects the persisted
+                // restart policy and installs this as the one durable owner.
+                _ = try beginPublishAllLifecycleSession(containerID: containerID)
             } catch {
-                Darwin.close(fd)
                 log.info("could not register publish-all restart-policy allocator for \(String(containerID.prefix(12))): \(error)")
             }
         }

@@ -145,7 +145,7 @@ final class PublishAllPortAllocatorTests: XCTestCase {
         rebound.stop()
     }
 
-    func testDirectPublishAllSessionEndsAfterItsObservedStart() throws {
+    func testDirectPublishAllSessionClosesItsPeerAfterItsObservedStart() throws {
         let pair = try makeSession(
             containerID: containerID("d"),
             remainsAvailableForRestartPolicy: false)
@@ -156,6 +156,16 @@ final class PublishAllPortAllocatorTests: XCTestCase {
         XCTAssertFalse(
             pair.session.isLive,
             "a direct DockerProxy start must not survive into restart-policy reconciliation")
+
+        var descriptor = pollfd(fd: pair.peerFD, events: Int16(POLLIN), revents: 0)
+        XCTAssertGreaterThan(
+            poll(&descriptor, 1, 100), 0,
+            "a direct session must close its guest peer even when the HTTP relay stays alive")
+        var byte: UInt8 = 0
+        let readCount = withUnsafeMutablePointer(to: &byte) {
+            Darwin.read(pair.peerFD, $0, 1)
+        }
+        XCTAssertEqual(readCount, 0, "the direct session must not leave an open, unserved allocator route")
     }
 
     func testOnlyRecoveryCreatedPublishAllSessionRemainsDurableAfterStart() throws {
@@ -171,6 +181,11 @@ final class PublishAllPortAllocatorTests: XCTestCase {
         XCTAssertTrue(
             pair.session.isLive,
             "restart-policy recovery owns the sole durable publish-all session type")
+
+        var descriptor = pollfd(fd: pair.peerFD, events: Int16(POLLIN), revents: 0)
+        XCTAssertEqual(
+            poll(&descriptor, 1, 0), 0,
+            "a durable recovery session must remain available after a direct lifecycle observation")
     }
 
     func testRegistrationGrammarRetainsLegacyFormAndAddsOnlyTheTraceExtension() {

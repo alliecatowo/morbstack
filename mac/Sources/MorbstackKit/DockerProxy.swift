@@ -29,9 +29,6 @@ public final class DockerProxy {
     /// than this layer's generic one.
     public static let bootTimeout: TimeInterval = 50
 
-    /// How long the host publish-all allocator connection may take to open.
-    private static let allocatorConnectTimeout: TimeInterval = 20
-
     private let vm: VMManager
     private let log: MorbLog
     private let forwarder: PortForwarder
@@ -514,33 +511,16 @@ extension DockerProxy: DockerRequestAdmissionPolicy {
     /// start request. The session does not allocate anything eagerly; it waits until
     /// Moby has expanded the image's effective `EXPOSE` set.
     private func admitPublishAllStart(containerID: String) -> DockerRequestAdmission {
-        let fd: Int32
-        switch vm.connectVsockBlocking(
-            port: MorbVsockPorts.publishAllAllocator,
-            timeout: DockerProxy.allocatorConnectTimeout)
-        {
-        case .failure(let error):
-            return .reject(
-                statusCode: 500,
-                reason: "Internal Server Error",
-                message: "could not reach the host publish-all allocator: \(error.localizedDescription)")
-        case .success(let opened):
-            fd = opened
-        }
-
         do {
-            let session = PublishAllPortAllocator.Session(
-                fd: fd,
-                containerID: containerID,
-                forwarder: forwarder,
-                log: log)
-            try session.start()
+            let session = try forwarder.beginPublishAllLifecycleSession(containerID: containerID)
             return .forwardObserving(
                 DockerPortLeaseResponseObserver(kind: .start) { outcome in
-                    session.complete(succeeded: outcome == .startSucceeded)
+                    forwarder.completePublishAllLifecycleSession(
+                        session,
+                        containerID: containerID,
+                        succeeded: outcome == .startSucceeded)
                 })
         } catch {
-            Darwin.close(fd)
             return .reject(
                 statusCode: 500,
                 reason: "Internal Server Error",

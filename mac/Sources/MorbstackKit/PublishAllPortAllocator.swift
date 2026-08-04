@@ -94,7 +94,8 @@ final class PublishAllPortAllocator {
             // owns one request/response transaction and must release its guest fd
             // before reconciliation decides whether a persisted policy needs a
             // separate durable session.
-            if !succeeded || !remainsAvailableForRestartPolicy {
+            let closesAfterOutcome = !remainsAvailableForRestartPolicy
+            if !succeeded || closesAfterOutcome {
                 finished = true
             }
             let lease = self.lease
@@ -107,6 +108,14 @@ final class PublishAllPortAllocator {
                 } else {
                     forwarder.abandon(lease, reason: "Docker publish-all start did not succeed")
                 }
+            }
+            // The relay may keep an observed HTTP/1.1 connection alive after its
+            // 204.  A one-shot session cannot rely on observer deallocation for
+            // teardown: the guest would otherwise retain an open route to a host
+            // worker that has already returned from `serve()`.
+            if closesAfterOutcome {
+                trace("event=direct-lifecycle-close fd=\(fd)")
+                _ = Darwin.shutdown(fd, SHUT_RDWR)
             }
         }
 
