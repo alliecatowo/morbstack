@@ -31,11 +31,12 @@ Status: `open` · `in-flight` · `decided` · `done` · `blocked`
 
 ## Spikes — decisions that reshape other tickets
 
-### SP-1 · Docker proxy: policy for bodies too large to buffer · `in-flight`
+### SP-1 · Docker proxy: policy for bodies too large to buffer · `done` (`runs-here`)
 **Deliverable:** a decision, in `docs/audit/PROXY-FRAMING.md`, on what the proxy does when a request
 body exceeds what it will buffer for inspection. Options: refuse with a Docker-shaped error
-(fail-closed), stream-inspect incrementally, or inspect a bounded prefix. The current code waves it
-through, which is a fail-open security decision nobody made deliberately.
+(fail-closed), stream-inspect incrementally, or inspect a bounded prefix. The framed relay now
+rejects too-large and ambiguous request framings with Docker-shaped `400` errors and inspects every
+request until a confirmed hijack; see the recorded post-fix matrix in `PROXY-FRAMING.md`.
 **Rewrites:** EN-1, and every preflight guard's threat model.
 
 ### SP-2 · `NEDNSSettings` entitlement feasibility · `decided`
@@ -85,7 +86,7 @@ callers, `assess()` has **no success path at all**), `LocalDomainClaimReconciler
 Dead code that ships is worse than a stub screen: it looks like a feature to every reader.
 **Rewrites:** DIF-6, DIF-13.
 
-### SP-6 · `-P` session persistence root cause · `open`
+### SP-6 · `-P` session persistence root cause · `in-flight` (`codex/parity-sp6-publish-all`)
 **Deliverable:** an instrumented repro proving *which* side closes the fd and why. The durable session
 EOFs 6 ms after its **successful** first allocation, so first run works and every restart fails. A
 full 64-hex container ID fails identically, which already **refutes** the name-vs-ID theory. Do not
@@ -116,10 +117,10 @@ the author.
 
 | ID | Ticket | Deliverable | State |
 | --- | --- | --- | --- |
-| EN-1 | **Docker proxy request framing** | Every request on a connection inspected until a legitimate hijack, then splice. Currently only the *first* is, and the CLI reuses connections, so `POST /containers/create` is essentially never inspected — proven: HTTP 400 fresh vs HTTP 201 second-on-keep-alive. **Every preflight guard in the codebase sits behind this.** | `in-flight` |
+| EN-1 | **Docker proxy request framing** | Every request on a connection is framed and inspected until a legitimate hijack, then spliced. Too-large and ambiguous bodies are rejected fail-closed. The fresh and second keep-alive create requests both return `400`, and stream/BuildKit/Compose regressions were rerun. See `docs/audit/PROXY-FRAMING.md`. | `done` (`runs-here`) |
 | EN-2 | `-P` across stop/start/restart | Mapping survives lifecycle | `blocked` (SP-6) |
-| EN-3 | Bind mounts `/etc`, `/var`, unshared roots | `/etc/hosts` must not serve the guest's file; writes must not vanish. The guard is correct and unit-tested — it just never runs. | `blocked` (EN-1) |
-| EN-4 | `morb disk grow` | Fix `keyNotFound: 'device'` host/guest contract mismatch. Image grew to 72 GiB while the guest filesystem stayed 62.4 G, and a **refused** grow still mutated configured capacity. Add the journal tests it never had. | `open` |
+| EN-3 | Bind mounts `/etc`, `/var`, unshared roots | `/etc`, `/var`, `/Library`, and symlink traversal are now refused before Docker sees them; `/tmp`, `/private/tmp`, and `$HOME` expose real host files and write through. See `docs/audit/PROXY-FRAMING.md`. | `done` (`runs-here`) |
+| EN-4 | `morb disk grow` | Fix `keyNotFound: 'device'` host/guest contract mismatch. Image grew to 72 GiB while the guest filesystem stayed 62.4 G, and a **refused** grow still mutated configured capacity. Add the journal tests it never had. | `in-flight` (`codex/parity-en4-disk-grow`) |
 | EN-5 | Reclaim the 72 GiB `disk.img` | Safe reclamation path for the test artifact left on the dev machine | `open` |
 | EN-6 | `host.docker.internal` without `--add-host` | Resolves by default | `open` |
 | EN-7 | Live-share / hot reload proven | First compile was today. Publish a **watcher conformance matrix**: the mechanism is a same-mode `fchmod(2)` emitting `IN_ATTRIB` only — fine for chokidar/nodemon/vite and Python watchdog, filtered out by Go tools like `air`. Also `liveSharePaths` defaults to `[]` with **no CLI or GUI writer**. | `open` |
@@ -151,14 +152,14 @@ the author.
 | TST-3 | Live-share transport + both guest modules | ~1,850 LOC, self-described "authority boundary", zero tests | `open` |
 | TST-4 | `PublishAllPortAllocator` + guest `publish_all.rs` | Untested on both sides | `open` |
 | TST-5 | vsock relay under load | Half-close, backpressure, cancellation | `open` |
-| TST-6 | Keep-alive regression test | Assert the **second** request on a reused connection is inspected. Its absence is why EN-1 shipped. | `in-flight` (EN-1) |
+| TST-6 | Keep-alive regression test | Assert the **second** request on a reused connection is inspected. Its absence is why EN-1 shipped. | `done` (`runs-here`, EN-1) |
 
 ## UI — [docs/audit/UI-AUDIT.md](docs/audit/UI-AUDIT.md), 32 issues: 3 blocker, 9 major, 14 minor, 8 polish
 
 | ID | Ticket | Severity | State |
 | --- | --- | --- | --- |
 | UI-1 | Fixture-mode watermark — a `--tour-fixtures` window is indistinguishable from live and its footer asserts "Engine running" while never dialling the engine | blocker | `open` |
-| UI-2 | Port renders as `18,099` — thousands separator on a port | blocker | `open` |
+| UI-2 | Port renders as `18,099` — thousands separator on a port | blocker | `in-flight` (`codex/ui-ui2-port-display`) |
 | UI-3 | Add Show/Hide Sidebar to the View menu | major | `open` |
 | UI-4 | Unmatched search must use `ContentUnavailableView.search` | major | `open` |
 | UI-5 | Selecting a container must expose inspector content | major | `open` |
