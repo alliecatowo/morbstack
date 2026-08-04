@@ -322,9 +322,10 @@ final class TrackBLogExportTests: XCTestCase {
         ]
     }
 
-    func testMarksStderrAndTerminatesEveryLine() {
+    func testPreservesEveryDockerStreamAndTerminatesEveryLine() {
         let text = TrackBLogExport.text(
             lines, timestamp: \.ts, stream: \.stream, body: \.text, includeTimestamps: true)
+        XCTAssertTrue(text.contains("[stdout] hello"))
         XCTAssertTrue(text.contains("[stderr] bad"))
         XCTAssertTrue(text.contains("hello"))
         XCTAssertTrue(text.hasSuffix("\n"))
@@ -342,6 +343,33 @@ final class TrackBLogExportTests: XCTestCase {
         XCTAssertTrue(name.hasSuffix(".log"))
         XCTAssertFalse(name.contains("/"))
         XCTAssertFalse(name.contains(":"))
+    }
+
+    func testDocumentDisclosesVisibleFilteredBoundedSnapshotScope() {
+        let document = TrackBLogExport.document(
+            containerName: "web/api",
+            containerID: "0123456789abcdef",
+            lines: lines,
+            bufferedLineCount: 12,
+            droppedEarlierLineCount: 4,
+            initialTail: 1_000,
+            searchQuery: " error ",
+            isStreaming: true,
+            capturedAt: now,
+            timestamp: \.ts,
+            stream: \.stream,
+            body: \.text)
+
+        XCTAssertEqual(document.lineCount, 2)
+        XCTAssertTrue(document.text.contains("# Container: web/api (0123456789abcdef)"))
+        XCTAssertTrue(document.text.contains("# Visible transcript: 2 lines saved from 12 buffered lines"))
+        XCTAssertTrue(document.text.contains("# Search filter: \"error\" (only matching buffered lines)"))
+        XCTAssertTrue(document.text.contains("# Retention: 4 earlier client-side lines were dropped before this snapshot. This is a bounded client snapshot, not complete container log history."))
+        XCTAssertTrue(document.text.contains("# Fetch state: initial request asked Docker for its latest 1000 lines; follow was active when this snapshot was captured."))
+        XCTAssertTrue(document.text.contains("[stdout] hello"))
+        XCTAssertTrue(document.text.contains("[stderr] bad"))
+        XCTAssertEqual(document.data, Data(document.text.utf8))
+        XCTAssertTrue(document.panelMessage.contains("does not fetch or represent complete container history"))
     }
 }
 

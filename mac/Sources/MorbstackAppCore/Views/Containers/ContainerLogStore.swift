@@ -294,4 +294,29 @@ final class TrackBLogStore {
             body: \.plain,
             includeTimestamps: showsTimestamps)
     }
+
+    /// A frozen, provenance-bearing document of the visible client-side transcript.
+    ///
+    /// This deliberately consumes only retained memory. Export never reaches back to
+    /// Docker for a supposed "complete" transcript, and a search remains a search
+    /// subset rather than an unlabelled full-history download.
+    func exportDocument(
+        containerName: String,
+        containerID: String,
+        capturedAt: Date = Date()
+    ) -> TrackBLogExport.Document {
+        TrackBLogExport.document(
+            containerName: containerName,
+            containerID: containerID,
+            lines: visibleLines,
+            bufferedLineCount: lines.elements.count,
+            droppedEarlierLineCount: lines.droppedCount,
+            initialTail: Self.initialTail,
+            searchQuery: isFiltering ? query : nil,
+            isStreaming: isStreaming,
+            capturedAt: capturedAt,
+            timestamp: \.timestamp,
+            stream: \.stream,
+            body: \.plain)
+    }
 }

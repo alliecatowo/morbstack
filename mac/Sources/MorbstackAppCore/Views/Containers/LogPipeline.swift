@@ -182,12 +182,22 @@ enum TrackBLogFilter {
 
 // MARK: - Export
 
-/// Renders log lines as a plain `.log` file body.
+/// Renders the bounded client-side scrollback as a plain `.log` document.
 ///
 /// Escape sequences are already gone by the time a line reaches here, and timestamps
 /// are re-emitted in ISO 8601 rather than the viewer's `HH:mm:ss.SSS` — an exported log
-/// tends to end up in a bug report, where the date matters.
+/// tends to end up in a bug report, where the date matters. The document preamble makes
+/// its capture, time, filter, source, and retention scope explicit so a bounded client
+/// snapshot cannot masquerade as the container's complete Docker log history.
 enum TrackBLogExport {
+
+    struct Document: Sendable {
+        let text: String
+        let lineCount: Int
+        let panelMessage: String
+
+        var data: Data { Data(text.utf8) }
+    }
 
     private static let isoFormatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
@@ -208,11 +218,90 @@ enum TrackBLogExport {
                 out += isoFormatter.string(from: date)
                 out += " "
             }
-            if stream(line) == .stderr { out += "[stderr] " }
+            out += "[\(streamLabel(stream(line)))] "
             out += body(line)
             out += "\n"
         }
         return out
+    }
+
+    /// Freezes exactly the current visible transcript before an `NSSavePanel` opens.
+    ///
+    /// The log stream can keep appending while the panel is on screen. Capturing here
+    /// means the eventual write contains one stable set of already-fetched lines rather
+    /// than a later mixture, and it never starts a second Docker request to fill in
+    /// earlier history. The metadata is a document preamble, not app-authored log
+    /// entries; the body is the same rendered line content the viewer holds.
+    static func document<T>(
+        containerName: String,
+        containerID: String,
+        lines: [T],
+        bufferedLineCount: Int,
+        droppedEarlierLineCount: Int,
+        initialTail: Int,
+        searchQuery: String?,
+        isStreaming: Bool,
+        capturedAt: Date,
+        timestamp: (T) -> Date?,
+        stream: (T) -> StdStream,
+        body: (T) -> String
+    ) -> Document {
+        let normalizedQuery = searchQuery?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let queryDescription: String
+        if let normalizedQuery, !normalizedQuery.isEmpty {
+            queryDescription = "\"\(normalizedQuery)\" (only matching buffered lines)"
+        } else {
+            queryDescription = "None (all buffered lines currently shown)"
+        }
+
+        let timestamps = lines.compactMap(timestamp)
+        let timeDescription: String
+        if let first = timestamps.first, let last = timestamps.last {
+            timeDescription = first == last
+                ? isoFormatter.string(from: first)
+                : "\(isoFormatter.string(from: first)) to \(isoFormatter.string(from: last))"
+        } else {
+            timeDescription = "No Docker timestamp was reported for the saved lines"
+        }
+
+        let retentionDescription: String
+        if droppedEarlierLineCount > 0 {
+            retentionDescription = "\(droppedEarlierLineCount) earlier client-side line\(droppedEarlierLineCount == 1 ? " was" : "s were") dropped before this snapshot"
+        } else {
+            retentionDescription = "No client-side lines were dropped before this snapshot"
+        }
+
+        let safeContainerName = containerName.isEmpty ? "container" : containerName
+        let header = [
+            "# Morbstack container log transcript",
+            "# Container: \(safeContainerName) (\(containerID))",
+            "# Captured: \(isoFormatter.string(from: capturedAt))",
+            "# Visible transcript: \(lines.count) line\(lines.count == 1 ? "" : "s") saved from \(bufferedLineCount) buffered line\(bufferedLineCount == 1 ? "" : "s")",
+            "# Search filter: \(queryDescription)",
+            "# Reported timestamp range: \(timeDescription)",
+            "# Docker sources: stdout and stderr; each saved entry has an explicit stream label and a timestamp when Docker reported one.",
+            "# Fetch state: initial request asked Docker for its latest \(initialTail) lines; follow was \(isStreaming ? "active" : "not active") when this snapshot was captured.",
+            "# Retention: \(retentionDescription). This is a bounded client snapshot, not complete container log history.",
+            "# Format: ANSI escape sequences were removed by the viewer before saving. Lines below are the exact currently visible transcript.",
+            "#",
+        ].joined(separator: "\n") + "\n"
+
+        let transcript = text(
+            lines,
+            timestamp: timestamp,
+            stream: stream,
+            body: body,
+            includeTimestamps: true)
+        let panelMessage = "Save \(lines.count) currently visible log line\(lines.count == 1 ? "" : "s") from \(safeContainerName). The file includes capture, timestamp, search, stream, and bounded-retention metadata; it does not fetch or represent complete container history."
+        return Document(text: header + transcript, lineCount: lines.count, panelMessage: panelMessage)
+    }
+
+    private static func streamLabel(_ stream: StdStream) -> String {
+        switch stream {
+        case .stdout: return "stdout"
+        case .stderr: return "stderr"
+        }
     }
 
     /// `nginx-2026-03-12-094122.log` — a filename that sorts usefully in Downloads.

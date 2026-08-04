@@ -12,6 +12,68 @@ import Charts
 import Foundation
 import SwiftUI
 
+/// The one statistic a person is currently investigating. These are peer
+/// representations of the same Docker stats stream, so a standard picker is clearer
+/// than treating three changing charts as equal-weight dashboard furniture.
+enum ContainerStatsMetric: String, CaseIterable, Identifiable, Sendable {
+    case cpu
+    case memory
+    case network
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .cpu: return "CPU Usage"
+        case .memory: return "Memory Usage"
+        case .network: return "Network Activity"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .cpu: return "cpu"
+        case .memory: return "memorychip"
+        case .network: return "network"
+        }
+    }
+}
+
+/// Pure display decisions for the resource-history surface. Keeping the truth gates out
+/// of the view body makes it impossible for a single reading to silently become a
+/// trend, or for an ended stream to keep masquerading as a loading state.
+enum ContainerStatsPresentation {
+    enum State: Equatable, Sendable {
+        case containerStopped
+        case connecting
+        case waitingForFirstReading
+        case streamFailed(String)
+        case ready
+    }
+
+    static func state(
+        containerIsRunning: Bool,
+        hasProbe: Bool,
+        isLive: Bool,
+        failure: String?
+    ) -> State {
+        guard containerIsRunning else { return .containerStopped }
+        guard hasProbe else { return .connecting }
+        if let failure { return .streamFailed(failure) }
+        return isLive ? .ready : .waitingForFirstReading
+    }
+
+    static func hasScalarTrend(sampleCount: Int) -> Bool {
+        sampleCount >= 2
+    }
+
+    static func hasNetworkTrend(samples: [NetworkRateSample]) -> Bool {
+        let receivedCount = samples.lazy.filter { $0.receivedBytesPerSecond != nil }.count
+        let transmittedCount = samples.lazy.filter { $0.transmittedBytesPerSecond != nil }.count
+        return receivedCount >= 2 || transmittedCount >= 2
+    }
+}
+
 struct ContainerStatsTab: View {
 
     let container: ContainerSummary
@@ -19,24 +81,54 @@ struct ContainerStatsTab: View {
     let client: DockerClient
 
     @State private var probe: TrackBStatsProbe?
+    @State private var selectedMetric: ContainerStatsMetric = .cpu
 
     private var activeProbe: TrackBStatsProbe? {
         probe ?? hub.existingProbe(container.id)
     }
 
+    private var presentationState: ContainerStatsPresentation.State {
+        let activeProbe = activeProbe
+        return ContainerStatsPresentation.state(
+            containerIsRunning: container.isRunning,
+            hasProbe: activeProbe != nil,
+            isLive: activeProbe?.isLive == true,
+            failure: activeProbe?.failure)
+    }
+
     var body: some View {
         Group {
-            if !container.isRunning {
+            switch presentationState {
+            case .containerStopped:
                 ContentUnavailableView {
                     Label("No Live Statistics", systemImage: "waveform.path.ecg")
                 } description: {
                     Text("This container is not running. Its resource history is available only while it runs.")
                 }
-            } else if let probe = activeProbe {
-                content(probe)
-            } else {
+            case .connecting:
                 ProgressView("Connecting to statistics")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .waitingForFirstReading:
+                ProgressView("Waiting for the first statistic")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .streamFailed(let failure):
+                ContentUnavailableView {
+                    Label("Statistics Stream Stopped", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text(failure)
+                } actions: {
+                    Button("Reconnect", action: reconnect)
+                }
+            case .ready:
+                if let probe = activeProbe {
+                    content(probe)
+                } else {
+                    // The state transition is evaluated on the main actor, but retain a
+                    // truthful loading fallback if another observer releases a probe in
+                    // the same update cycle.
+                    ProgressView("Connecting to statistics")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
             }
         }
         .task(id: container.id) { subscribe() }
@@ -49,89 +141,28 @@ struct ContainerStatsTab: View {
                 unsubscribe()
             }
         }
+        .onChange(of: container.id) { _, _ in
+            // A newly selected container begins on the most broadly useful measure;
+            // network availability varies by Engine response and must not surprise a
+            // person with a stale picker choice from another record.
+            selectedMetric = .cpu
+        }
     }
 
     private func content(_ probe: TrackBStatsProbe) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                if let failure = probe.failure {
-                    ContentUnavailableView {
-                        Label("Statistics Stream Stopped", systemImage: "exclamationmark.triangle")
-                    } description: {
-                        Text(failure)
+                Picker("Metric", selection: $selectedMetric) {
+                    ForEach(ContainerStatsMetric.allCases) { metric in
+                        Label(metric.title, systemImage: metric.symbol)
+                            .tag(metric)
                     }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical)
-                } else if !probe.isLive {
-                    ProgressView("Waiting for the first statistic")
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.vertical)
                 }
+                .accessibilityLabel("Resource history metric")
+                .accessibilityHint("Selects the Docker resource statistic shown below")
+                .padding(.bottom, 8)
 
-                let samples = probe.history.enumerated().map { index, sample in
-                    StatsChartSample(index: index, timestamp: sample.ts, value: sample.cpuPercent)
-                }
-                StatsChartSection(
-                    title: "CPU Usage",
-                    symbol: "cpu",
-                    currentValue: probe.latest.map { Formatters.percent($0.cpuPercent) },
-                    samples: samples,
-                    yAxisTitle: "CPU (%)",
-                    yAxisRange: 0...cpuUpperBound(probe),
-                    valueLabel: Formatters.percent,
-                    spokenValueLabel: { "\(Formatters.percent($0)) CPU usage" })
-
-                Divider()
-
-                let memorySamples = probe.history.enumerated().map { index, sample in
-                    StatsChartSample(index: index, timestamp: sample.ts, value: Double(sample.memBytes))
-                }
-                let memoryLimit = probe.latest?.memLimit ?? 0
-                StatsChartSection(
-                    title: "Memory Usage",
-                    symbol: "memorychip",
-                    currentValue: probe.latest.map { memoryValueLabel(Double($0.memBytes)) },
-                    samples: memorySamples,
-                    yAxisTitle: "Memory",
-                    yAxisRange: 0...memoryUpperBound(probe),
-                    valueLabel: memoryValueLabel,
-                    spokenValueLabel: spokenMemoryValueLabel,
-                    reference: memoryLimit > 0
-                        ? StatsChartReference(value: Double(memoryLimit), label: "Memory limit")
-                        : nil)
-
-                if let latest = probe.latest {
-                    Divider()
-
-                    NetworkActivitySection(
-                        latest: latest,
-                        samples: probe.networkRates)
-                }
-
-                if let sample = probe.latest, sample.memLimit > 0 {
-                    Divider()
-
-                    Form {
-                        Section("Memory Limit") {
-                            LabeledContent("In Use") {
-                                Text(memoryValueLabel(Double(sample.memBytes)))
-                                    .monospacedDigit()
-                            }
-                            LabeledContent("Limit") {
-                                Text(memoryValueLabel(Double(sample.memLimit)))
-                                    .monospacedDigit()
-                            }
-                            LabeledContent("Percent") {
-                                Text(Formatters.percent(sample.memFraction * 100))
-                                    .monospacedDigit()
-                            }
-                        }
-                    }
-                    .formStyle(.automatic)
-                    .scrollDisabled(true)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.vertical)
-                }
+                selectedMetricContent(probe)
 
                 Text(sampleCadenceDescription(probe))
                     .font(.caption)
@@ -140,6 +171,77 @@ struct ContainerStatsTab: View {
             }
             .padding()
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    @ViewBuilder
+    private func selectedMetricContent(_ probe: TrackBStatsProbe) -> some View {
+        switch selectedMetric {
+        case .cpu:
+            let samples = probe.history.enumerated().map { index, sample in
+                StatsChartSample(index: index, timestamp: sample.ts, value: sample.cpuPercent)
+            }
+            StatsChartSection(
+                title: ContainerStatsMetric.cpu.title,
+                symbol: ContainerStatsMetric.cpu.symbol,
+                currentValue: probe.latest.map { Formatters.percent($0.cpuPercent) },
+                samples: samples,
+                yAxisTitle: "CPU (%)",
+                yAxisRange: 0...cpuUpperBound(probe),
+                valueLabel: Formatters.percent,
+                spokenValueLabel: { "\(Formatters.percent($0)) CPU usage" })
+
+        case .memory:
+            let samples = probe.history.enumerated().map { index, sample in
+                StatsChartSample(index: index, timestamp: sample.ts, value: Double(sample.memBytes))
+            }
+            let memoryLimit = probe.latest?.memLimit ?? 0
+            StatsChartSection(
+                title: ContainerStatsMetric.memory.title,
+                symbol: ContainerStatsMetric.memory.symbol,
+                currentValue: probe.latest.map { memoryValueLabel(Double($0.memBytes)) },
+                samples: samples,
+                yAxisTitle: "Memory",
+                yAxisRange: 0...memoryUpperBound(probe),
+                valueLabel: memoryValueLabel,
+                spokenValueLabel: spokenMemoryValueLabel,
+                reference: memoryLimit > 0
+                    ? StatsChartReference(value: Double(memoryLimit), label: "Memory limit")
+                    : nil)
+
+            if let sample = probe.latest, sample.memLimit > 0 {
+                Form {
+                    Section("Memory Limit") {
+                        LabeledContent("In Use") {
+                            Text(memoryValueLabel(Double(sample.memBytes)))
+                                .monospacedDigit()
+                        }
+                        LabeledContent("Limit") {
+                            Text(memoryValueLabel(Double(sample.memLimit)))
+                                .monospacedDigit()
+                        }
+                        LabeledContent("Percent") {
+                            Text(Formatters.percent(sample.memFraction * 100))
+                                .monospacedDigit()
+                        }
+                    }
+                }
+                .formStyle(.automatic)
+                .scrollDisabled(true)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top)
+            }
+
+        case .network:
+            if let latest = probe.latest {
+                NetworkActivitySection(
+                    latest: latest,
+                    samples: probe.networkRates)
+            } else {
+                ProgressView("Waiting for the first network statistic")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical)
+            }
         }
     }
 
@@ -193,6 +295,12 @@ struct ContainerStatsTab: View {
         hub.release(container.id)
         probe = nil
     }
+
+    private func reconnect() {
+        hub.reset(container.id)
+        unsubscribe()
+        subscribe()
+    }
 }
 
 /// The Engine API gives the app cumulative counters for every container interface, not
@@ -205,7 +313,7 @@ private struct NetworkActivitySection: View {
 
     private var receivedRates: [Double] { samples.compactMap(\.receivedBytesPerSecond) }
     private var transmittedRates: [Double] { samples.compactMap(\.transmittedBytesPerSecond) }
-    private var hasTrend: Bool { receivedRates.count >= 2 || transmittedRates.count >= 2 }
+    private var hasTrend: Bool { ContainerStatsPresentation.hasNetworkTrend(samples: samples) }
 
     private var latestReceivedRate: Double? {
         guard samples.last?.timestamp == latest.ts else { return nil }
@@ -446,7 +554,7 @@ private struct StatsChartSection: View {
     let spokenValueLabel: (Double) -> String
     var reference: StatsChartReference?
 
-    private var hasTrend: Bool { samples.count >= 2 }
+    private var hasTrend: Bool { ContainerStatsPresentation.hasScalarTrend(sampleCount: samples.count) }
 
     private var windowDescription: String {
         guard let first = samples.first, let last = samples.last else {

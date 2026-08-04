@@ -156,6 +156,35 @@ replacement Theme, Design, Style, or Appearance rendering module.
 | `Design/**`, `Theme.swift` | Materials, color, controls, focus/selection, accessibility | Removal staged — source verification pending | Keep only nonvisual domain semantics temporarily; eliminate routine rendering policy |
 | `Shots/**`, `LiveCapture.swift`, `mise.toml`, `mac/UITests/**` | Windows, accessibility/UI testing, visual validation | Synthetic renderer retired; real-window evidence harness in place | Foundation-only fixture invariants plus a text-only real-window route probe; the standard XCUITest host launches the assembled shipping bundle for WindowServer screenshots and accessibility evidence, followed by Computer Use |
 
+### 2026-08-03 Container log transcript save
+
+The task is to preserve a specific selected container's currently visible debugging
+transcript, not fetch, infer, or label a complete Docker log history. The log viewer's
+secondary native toolbar menu therefore contains **Save Visible Transcript…**. It freezes
+only the already-retained visible lines before opening `NSSavePanel`, so output arriving
+while the standard save panel is open cannot change the document the person chose to save.
+The panel owns destination choice and replacement confirmation; the app atomically writes
+only that frozen document and reports a concrete write failure with a native retry alert.
+
+The saved `.log` preamble records container identity, capture time, first/last reported
+timestamp, visible/buffered line counts, active search query, whether following was active,
+the initial Docker tail request, and client-side dropped-line count. It explicitly says
+that the file is a bounded client snapshot rather than complete container history. Every
+saved body line retains a literal `[stdout]` or `[stderr]` source label and its Docker
+timestamp when reported; the viewer's existing ANSI-to-plain-text transformation remains
+visible in the document rather than being silently re-fetched as a different transcript.
+An empty visible transcript has no save action. This route never starts a second Docker
+request, follows a different container, downloads global logs, or invents missing time or
+stream data.
+
+Consulted: Apple’s [file management](https://developer.apple.com/design/human-interface-guidelines/file-management),
+[toolbars](https://developer.apple.com/design/human-interface-guidelines/toolbars), and
+[`NSSavePanel`](https://developer.apple.com/documentation/appkit/nssavepanel), plus Docker’s
+[`container logs`](https://docs.docker.com/reference/cli/docker/container/logs/) reference.
+The source-only pass adds no real-window evidence: save-panel, error/retry, keyboard,
+VoiceOver, light/dark/narrow, transcript filtering, follow state, and live Docker
+validation remain pending.
+
 ### 2026-08-03 Stacks hierarchy correction
 
 This decision supersedes the earlier `Views/Stacks/**` table-row reference to
@@ -704,6 +733,52 @@ offscreen renderer or to make compositor images the only assertion. It may suppo
 separately approved capture workflow later, but it does not replace XCUITest's semantic
 accessibility assertions or Computer Use's human review. No self-cached image can pass a
 titlebar, toolbar, sidebar, material, inspector, focus, or Liquid Glass acceptance gate.
+
+### Container resource history handoff: selected native chart — 2026-08-03
+
+- **User task:** inspect how one selected running container’s CPU usage, memory use, or
+  network throughput changes over the retained Docker stats window, while retaining
+  the latest exact value and a dependable way to distinguish waiting, unavailable, and
+  failed data. This is a time-series investigation, not a dashboard of decorative
+  mini-graphs.
+- **HIG/API read:** Apple [Charts](https://developer.apple.com/design/human-interface-guidelines/charts),
+  [Swift Charts](https://developer.apple.com/documentation/charts),
+  [accessibilityChartDescriptor(_:)](https://developer.apple.com/documentation/swiftui/view/accessibilitychartdescriptor(_:)),
+  and [AXChartDescriptor](https://developer.apple.com/documentation/accessibility/axchartdescriptor),
+  plus Docker [container stats](https://docs.docker.com/reference/cli/docker/container/stats/).
+  Docker’s stats stream is only live for running containers; the Engine reports memory
+  usage/cache inputs and cumulative network counters, not a presentation-ready history.
+- **Native choice:** retain Swift Charts, but replace the stacked CPU/memory/network
+  dashboard with one standard `Picker` for the selected metric and one task-focused
+  chart beneath it. CPU and memory use system `LineMark`s over real timestamped
+  readings; the memory-limit `RuleMark` appears only when Docker reports a limit.
+  Network retains two system `PointMark` series because receive/send are distinct
+  categories, with a system legend and the existing concise exact counters. No custom
+  graph, background material, card, pill, color token, or fabricated runtime sample is
+  introduced. The compact disclosure `Table`s remain the keyboard/VoiceOver-readable
+  exact-value alternative to the selected chart rather than competing as a primary
+  dashboard layout.
+- **Truth and unavailable behavior:** a stopped container gets `ContentUnavailableView`;
+  no probe, no first reading, and a failed stream map separately to native progress or
+  unavailable states. A failed stream exposes only the stream error and a named
+  **Reconnect** action, never stale marks that look live. One scalar reading does not
+  become a trend; network needs two complete intervals in the same direction. Missing,
+  reset, or nonmonotonic Docker interface counters stay absent rather than becoming
+  zero. Deterministic fixture histories are fixture-only validation data, never a live
+  Engine claim.
+- **Accessibility:** each chart keeps visible time/value axes, a factual
+  `AXChartDescriptor` title/summary/axes/precisely timestamped values for Audio Graphs
+  and VoiceOver, and a visible current `LabeledContent`. The metric picker has a
+  descriptive accessibility label and hint; it does not rely on an icon, color, or
+  scrub interaction to convey the selected metric or a current value.
+- **Evidence:** added focused pure `ContainerStatsPresentationTests` for the state
+  machine, metric vocabulary, and the “two readings/intervals before trend” rule. This
+  parallel source lane ran no build, test, Docker/VM, app launch, XCUITest, or Computer
+  Use validation. An evidence owner must review the real selected-container Stats tab
+  in light/dark and compact/expanded inspector widths, switch each picker metric,
+  inspect the one-reading/network-missing/failed/reconnect states, navigate chart and
+  disclosure contents by keyboard/VoiceOver, and run the focused tests after serialized
+  source work settles.
 
 ### App commands handoff: native reachability and accessibility — 2026-08-03
 

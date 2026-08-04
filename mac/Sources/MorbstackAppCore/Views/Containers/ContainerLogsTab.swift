@@ -19,6 +19,8 @@ struct ContainerLogsTab: View {
     @State private var viewportHeight: CGFloat = 0
     @State private var currentStandardErrorID: Int?
     @State private var scrollTarget: Int?
+    @State private var pendingExport: TrackBLogExport.Document?
+    @State private var exportError: String?
 
     private let streamsLive: Bool
     private let bottomAnchor = "trackb.log.bottom"
@@ -41,6 +43,24 @@ struct ContainerLogsTab: View {
         .onDisappear { if streamsLive { store.stop() } }
         .onChange(of: container.isRunning) { _, isRunning in
             if streamsLive, isRunning, !store.isStreaming { start() }
+        }
+        .alert(
+            "Couldn’t Save Log Transcript",
+            isPresented: Binding(
+                get: { exportError != nil },
+                set: { if !$0 { exportError = nil } })
+        ) {
+            Button("Choose Another Location…") {
+                guard let pendingExport else { return }
+                exportError = nil
+                chooseExportDestination(for: pendingExport)
+            }
+            Button("Cancel", role: .cancel) {
+                exportError = nil
+                pendingExport = nil
+            }
+        } message: {
+            Text(exportError ?? "")
         }
     }
 
@@ -118,11 +138,12 @@ struct ContainerLogsTab: View {
                 .accessibilityLabel("Copy visible lines")
                 .help("Copy visible lines")
 
-                Button("Export Visible Lines…", systemImage: "square.and.arrow.down") {
+                Button("Save Visible Transcript…", systemImage: "square.and.arrow.down") {
                     export()
                 }
-                .accessibilityLabel("Export visible lines")
-                .help("Export visible lines")
+                .accessibilityLabel("Save visible log transcript")
+                .help("Save the currently visible bounded log transcript")
+                .disabled(store.visibleLines.isEmpty)
 
                 Divider()
 
@@ -257,16 +278,34 @@ struct ContainerLogsTab: View {
     }
 
     private func export() {
+        let document = store.exportDocument(
+            containerName: container.displayName,
+            containerID: container.id)
+        guard document.lineCount > 0 else { return }
+        chooseExportDestination(for: document)
+    }
+
+    /// `NSSavePanel` owns location selection and its standard replacement prompt. The
+    /// document is frozen before the panel opens, so a running stream cannot alter what
+    /// the person reviewed as the current visible transcript while choosing a location.
+    @MainActor
+    private func chooseExportDestination(for document: TrackBLogExport.Document) {
         let panel = NSSavePanel()
         panel.nameFieldStringValue = TrackBLogExport.suggestedFilename(container: container.displayName)
         panel.allowedContentTypes = [UTType.log, UTType.plainText]
         panel.canCreateDirectories = true
         panel.isExtensionHidden = false
-        panel.message = "Export the lines currently shown."
+        panel.message = document.panelMessage
+        panel.prompt = "Save"
 
-        let text = store.exportText()
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        try? text.write(to: url, atomically: true, encoding: .utf8)
+        do {
+            try document.data.write(to: url, options: .atomic)
+            pendingExport = nil
+        } catch {
+            pendingExport = document
+            exportError = "Morbstack could not save the selected transcript to \(url.lastPathComponent): \(error.localizedDescription)"
+        }
     }
 }
 
