@@ -9,6 +9,8 @@ final class DockerBindMountPreflightTests: XCTestCase {
 
     private let userShare = MorbDirectoryShare(tag: "morbshare0", path: "/Users")
     private let tmpShare = MorbDirectoryShare(tag: "morbshare1", path: "/private/tmp")
+    private let privateEtcShare = MorbDirectoryShare(tag: "morbshare2", path: "/private/etc")
+    private let privateVarShare = MorbDirectoryShare(tag: "morbshare3", path: "/private/var")
 
     private func mountedStates(for shares: [MorbDirectoryShare]) -> [String: MorbShares.GuestMountState] {
         Dictionary(uniqueKeysWithValues: shares.map { ($0.path, .mounted) })
@@ -24,6 +26,24 @@ final class DockerBindMountPreflightTests: XCTestCase {
     ) -> DockerBindMountPreflight.Verdict {
         let activeShares = shares ?? [userShare]
         return DockerBindMountPreflight.inspectContainerCreate(
+            body: Data(json.utf8),
+            shares: activeShares,
+            guestShareStates: states ?? mountedStates(for: activeShares),
+            guestTmpAliasMounted: tmpAliasMounted,
+            sourceExists: sourceExists,
+            sourcePathResolving: sourcePathResolving)
+    }
+
+    private func prepare(
+        _ json: String,
+        shares: [MorbDirectoryShare]? = nil,
+        states: [String: MorbShares.GuestMountState]? = nil,
+        tmpAliasMounted: Bool? = true,
+        sourceExists: @escaping (String) -> Bool = { _ in true },
+        sourcePathResolving: @escaping (String) -> String = { $0 }
+    ) -> DockerBindMountPreflight.Preparation {
+        let activeShares = shares ?? [userShare]
+        return DockerBindMountPreflight.prepareContainerCreate(
             body: Data(json.utf8),
             shares: activeShares,
             guestShareStates: states ?? mountedStates(for: activeShares),
@@ -67,12 +87,86 @@ final class DockerBindMountPreflightTests: XCTestCase {
             .allowed)
     }
 
-    func testBareVarAliasIsRejectedRatherThanResolvedAgainstGuestSystemState() {
-        let result = inspect(#"{"HostConfig":{"Binds":["/var/project:/workspace"]}}"#)
+    func testBareVarAliasIsRewrittenToAVerifiedPrivateVarSource() throws {
+        let result = prepare(
+            #"{"HostConfig":{"Binds":["/var/log/app:/workspace:ro"]}}"#,
+            shares: [privateVarShare],
+            sourcePathResolving: { _ in "/private/var/log/app" })
+        guard case .allowed(let body, let wasRewritten) = result else {
+            return XCTFail("expected verified macOS /var source to be admitted")
+        }
+        XCTAssertTrue(wasRewritten)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let hostConfig = try XCTUnwrap(object["HostConfig"] as? [String: Any])
+        XCTAssertEqual(hostConfig["Binds"] as? [String], ["/private/var/log/app:/workspace:ro"])
+    }
+
+    func testBareEtcAliasIsRewrittenToTheVerifiedMacHostFile() throws {
+        let result = prepare(
+            #"{"HostConfig":{"Binds":["/etc/hosts:/host-etc-hosts:ro"]}}"#,
+            shares: [privateEtcShare],
+            sourcePathResolving: { _ in "/private/etc/hosts" })
+        guard case .allowed(let body, let wasRewritten) = result else {
+            return XCTFail("expected verified macOS /etc/hosts to be admitted")
+        }
+        XCTAssertTrue(wasRewritten)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let hostConfig = try XCTUnwrap(object["HostConfig"] as? [String: Any])
+        XCTAssertEqual(hostConfig["Binds"] as? [String], ["/private/etc/hosts:/host-etc-hosts:ro"])
+    }
+
+    func testBareSystemAliasUsesItsResolvedHostTargetRatherThanAGuestTraversal() throws {
+        let result = prepare(
+            #"{"HostConfig":{"Binds":["/etc/tool-link:/tool"]}}"#,
+            shares: [userShare],
+            sourcePathResolving: { _ in "/Users/allie/host-tool" })
+        guard case .allowed(let body, let wasRewritten) = result else {
+            return XCTFail("expected a shared resolved host target")
+        }
+        XCTAssertTrue(wasRewritten)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let hostConfig = try XCTUnwrap(object["HostConfig"] as? [String: Any])
+        XCTAssertEqual(hostConfig["Binds"] as? [String], ["/Users/allie/host-tool:/tool"])
+    }
+
+    func testBareSystemAliasRequiresAnExistingHostSourceEvenForLegacyV() {
+        let result = inspect(
+            #"{"HostConfig":{"Binds":["/etc/not-yet-created:/workspace"]}}"#,
+            shares: [privateEtcShare],
+            sourceExists: { _ in false })
         XCTAssertEqual(
             result,
             .rejected(
-                message: "invalid mount config for type \"bind\": bind source path uses the macOS /var alias, but /var is a guest system path; use the explicit /private/var source path after sharing it"))
+                message: "invalid mount config for type \"bind\": macOS /etc alias source must exist before Morbstack can safely bind it: /etc/not-yet-created"))
+    }
+
+    func testBareSystemAliasRejectsAResolvedTargetOutsideMountedShares() {
+        let result = inspect(
+            #"{"HostConfig":{"Binds":["/etc/hosts:/workspace"]}}"#,
+            sourcePathResolving: { _ in "/opt/secret/hosts" })
+        XCTAssertEqual(
+            result,
+            .rejected(
+                message: "invalid mount config for type \"bind\": bind source path resolves outside directories shared with the Morbstack VM: /etc/hosts -> /opt/secret/hosts (add the resolved root to shared_paths, then restart Morbstack)"))
+    }
+
+    func testExplicitBindAliasIsRewrittenInBothEngineAPILocations() throws {
+        let result = prepare(
+            #"{"HostConfig":{"Mounts":[{"Type":"bind","Source":"/etc/hosts","Target":"/host"}]},"Mounts":[{"Type":"bind","Source":"/var/db/config","Target":"/config"}]}"#,
+            shares: [privateEtcShare, privateVarShare],
+            sourcePathResolving: { source in
+                source == "/etc/hosts" ? "/private/etc/hosts" : "/private/var/db/config"
+            })
+        guard case .allowed(let body, let wasRewritten) = result else {
+            return XCTFail("expected both explicit aliases to be admitted")
+        }
+        XCTAssertTrue(wasRewritten)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let hostConfig = try XCTUnwrap(object["HostConfig"] as? [String: Any])
+        let hostMounts = try XCTUnwrap(hostConfig["Mounts"] as? [[String: Any]])
+        let topMounts = try XCTUnwrap(object["Mounts"] as? [[String: Any]])
+        XCTAssertEqual(hostMounts.first?["Source"] as? String, "/private/etc/hosts")
+        XCTAssertEqual(topMounts.first?["Source"] as? String, "/private/var/db/config")
     }
 
     func testGuestDockerSocketBindIsAllowedWithoutAMacShare() {
@@ -93,6 +187,20 @@ final class DockerBindMountPreflightTests: XCTestCase {
                 states: [:],
                 sourceExists: { _ in false }),
             .allowed)
+    }
+
+    func testGuestDockerSocketIsNeverRewrittenAsAMacVarAlias() {
+        let original = #"{"HostConfig":{"Binds":["/var/run/docker.sock:/var/run/docker.sock:ro"]}}"#
+        let result = prepare(
+            original,
+            shares: [],
+            states: [:],
+            sourceExists: { _ in false })
+        guard case .allowed(let body, let wasRewritten) = result else {
+            return XCTFail("the guest Docker socket is an intentional exception")
+        }
+        XCTAssertFalse(wasRewritten)
+        XCTAssertEqual(body, Data(original.utf8))
     }
 
     func testAdvancedBindOptionsRemainTheEnginesResponsibility() {
@@ -117,7 +225,7 @@ final class DockerBindMountPreflightTests: XCTestCase {
         XCTAssertEqual(
             result,
             .rejected(
-                message: "invalid mount config for type \"bind\": bind source path uses the macOS /var alias, but /var is a guest system path; use the explicit /private/var source path after sharing it"))
+                message: "invalid mount config for type \"bind\": bind source path resolves outside directories shared with the Morbstack VM: /var/run/docker.sock/child -> /private/var/run/docker.sock/child (add the resolved root to shared_paths, then restart Morbstack)"))
     }
 
     func testUnsharedLegacyBindIsRejectedBeforeGuestDirectoryCanBeCreated() {

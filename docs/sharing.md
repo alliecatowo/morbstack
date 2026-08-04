@@ -12,8 +12,11 @@ tier 3 (`morbfs`) are M1+ — see [`roadmap.md`](roadmap.md).
 path it has on your Mac.**
 
 `/Users/you/project` on the Mac is `/Users/you/project` in the guest. That
-is the whole mapping. There is no translation table, no `/mnt/...` prefix,
-and no rewriting of `-v` arguments anywhere in Morbstack.
+is the normal mapping. There is no translation table or `/mnt/...` prefix.
+The one deliberate exception is a verified macOS `/etc` or `/var` alias: those
+literal paths are guest system paths, so the Docker proxy rewrites only the bind
+source to its resolved, already-shared `/private/...` host path rather than letting
+Docker read a plausible but wrong guest file.
 
 ```sh
 docker run --rm -v /Users/you/project:/app alpine ls /app
@@ -169,9 +172,14 @@ An unshared source, a share the guest reports as failed, or a guest too old to
 report share state fails the create request with Docker's familiar
 `invalid mount config for type "bind": ...` error instead of letting dockerd
 create an empty guest-local directory. `/tmp` is compared as `/private/tmp`, but
-the request sent to Docker is not rewritten. The check also follows existing
-symlinks (and the nearest existing parent of a missing legacy source) before
-accepting it, so a path under `/Users` that resolves to unshared `/opt` is rejected.
+the request sent to Docker is not rewritten. Bare macOS `/etc` and `/var` sources
+are different: the guest must keep its own system directories, so Morbstack admits
+one only when the source exists, resolves to a path under a live VirtioFS share,
+and rewrites that source to the verified resolved path. They are not part of the
+default share set; add the necessary `/private/...` root and restart the engine
+before requesting one. The check also follows existing symlinks (and the nearest
+existing parent of a missing legacy source) before accepting it, so a path under
+`/Users` that resolves to unshared `/opt` is rejected.
 
 Docker's two bind syntaxes keep their normal behavior once the share is known
 live: legacy `-v host:container` can create a missing host directory under a

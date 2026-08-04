@@ -335,10 +335,10 @@ extension DockerProxy: DockerRequestAdmissionPolicy {
         return .forward
     }
 
-    /// Preserves the original preflight order exactly: publication shape, then the
-    /// dynamic allocation plan, then the fixed-port reservation, and finally bind
-    /// sources — which is why a bind rejection has to hand back a lease it may
-    /// already have taken.
+    /// Validates publication shape and bind sources before taking a host-port lease.
+    /// A verified macOS `/etc` or `/var` bind is made explicit before Docker's port
+    /// plans inspect the document, so every later request rewrite retains the exact
+    /// host source rather than accidentally restoring a guest-system alias.
     private func admitContainerCreate(
         request: DockerRequestFramer.Request,
         body: Data
@@ -353,8 +353,26 @@ extension DockerProxy: DockerRequestAdmissionPolicy {
             break
         }
 
+        let bindPrepared: DockerBindMountPreflight.Preparation
+        let shareSnapshot = vm.shareMountSnapshot
+        bindPrepared = DockerBindMountPreflight.prepareContainerCreate(
+            body: body,
+            shares: shareSnapshot.shares,
+            guestShareStates: shareSnapshot.guestShareStates,
+            guestTmpAliasMounted: shareSnapshot.guestTmpAliasMounted)
+
+        let admittedBody: Data
+        let bindSourcesWereRewritten: Bool
+        switch bindPrepared {
+        case .rejected(let message):
+            return .reject(statusCode: 400, reason: "Bad Request", message: message)
+        case .allowed(let preparedBody, let wasRewritten):
+            admittedBody = preparedBody
+            bindSourcesWereRewritten = wasRewritten
+        }
+
         switch DockerPortPublicationPreflight.dynamicPortCreatePlan(
-            in: body,
+            in: admittedBody,
             hostNetworkPortPublishing: forwarder.hostNetworkPortPublishing)
         {
         case .rejected(let message):
@@ -367,11 +385,11 @@ extension DockerProxy: DockerRequestAdmissionPolicy {
             break
         }
 
-        // A successful snapshot is still not enough. Hold the real listeners before
-        // the create reaches dockerd; a failed bind here has the same Docker-style
-        // error, but no guest side effect to roll back.
+        // A successful publication snapshot is still not enough. Hold the real
+        // listeners before the create reaches dockerd, so a failed host bind has no
+        // guest side effect to roll back.
         let plan = DockerPortPublicationPreflight.fixedPortLeasePlan(
-            in: body,
+            in: admittedBody,
             hostNetworkPortPublishing: forwarder.hostNetworkPortPublishing)
         let lease: PortForwarder.PortLease?
         do {
@@ -383,15 +401,27 @@ extension DockerProxy: DockerRequestAdmissionPolicy {
                 message: error.localizedDescription)
         }
 
-        if case .rejected(let message) = inspectBindSources(in: body) {
-            if let lease {
-                forwarder.abandon(lease, reason: "bind source validation rejected the create")
+        guard let lease else {
+            guard bindSourcesWereRewritten else { return .forward }
+            guard let rewrittenRequest = rewrittenCreateRequest(request: request, body: admittedBody) else {
+                return .reject(
+                    statusCode: 500,
+                    reason: "Internal Server Error",
+                    message: "morbstack could not prepare the verified macOS bind source")
             }
-            return .reject(statusCode: 400, reason: "Bad Request", message: message)
+            return .forwardRewritten(request: rewrittenRequest)
         }
 
-        guard let lease else { return .forward }
-        return .forwardObserving(createObserver(for: lease))
+        let observer = createObserver(for: lease)
+        guard bindSourcesWereRewritten else { return .forwardObserving(observer) }
+        guard let rewrittenRequest = rewrittenCreateRequest(request: request, body: admittedBody) else {
+            forwarder.abandon(lease, reason: "the verified macOS bind source could not be rewritten")
+            return .reject(
+                statusCode: 500,
+                reason: "Internal Server Error",
+                message: "morbstack could not prepare the verified macOS bind source")
+        }
+        return .forwardRewrittenObserving(request: rewrittenRequest, observer: observer)
     }
 
     private func admitDynamicPortCreate(
@@ -432,15 +462,8 @@ extension DockerProxy: DockerRequestAdmissionPolicy {
                 message: "morbstack could not prepare the dynamic published-port allocation")
         }
 
-        if case .rejected(let message) = inspectBindSources(in: rewrittenBody) {
-            forwarder.abandon(
-                reservation.lease,
-                reason: "bind source validation rejected the dynamic published-port create")
-            return .reject(statusCode: 400, reason: "Bad Request", message: message)
-        }
-
         let lease = reservation.lease
-        return .forwardRewritten(
+        return .forwardRewrittenHoldingCreate(
             request: rewrittenHead + rewrittenBody,
             hold: DockerHeldCreate(
                 associate: { [forwarder] containerID in
@@ -533,13 +556,15 @@ extension DockerProxy: DockerRequestAdmissionPolicy {
         }
     }
 
-    private func inspectBindSources(in body: Data) -> DockerBindMountPreflight.Verdict {
-        let shareSnapshot = vm.shareMountSnapshot
-        return DockerBindMountPreflight.inspectContainerCreate(
-            body: body,
-            shares: shareSnapshot.shares,
-            guestShareStates: shareSnapshot.guestShareStates,
-            guestTmpAliasMounted: shareSnapshot.guestTmpAliasMounted)
+    private func rewrittenCreateRequest(
+        request: DockerRequestFramer.Request,
+        body: Data
+    ) -> Data? {
+        guard let rewrittenHead = HTTPRequestHeadRewriting.replacingContentLength(
+            in: request.rawHead,
+            bodyLength: body.count)
+        else { return nil }
+        return rewrittenHead + body
     }
 
     private func createObserver(for lease: PortForwarder.PortLease) -> DockerPortLeaseResponseObserver {

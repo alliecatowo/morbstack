@@ -611,6 +611,86 @@ final class DockerFramedRelayTests: XCTestCase {
         wait(for: [wired.done], timeout: 10)
     }
 
+    func testPlainRewrittenCreateReachesTheGuestAndKeepsTheConnectionFramed() throws {
+        let originalBody = #"{"Image":"alpine","HostConfig":{"Binds":["/etc/hosts:/host"]}}"#
+        let rewrittenBody = #"{"Image":"alpine","HostConfig":{"Binds":["/private/etc/hosts:/host"]}}"#
+        policy.inspectBodyOf = { $0.target.hasSuffix("/containers/create") }
+        policy.verdict = { request, _ in
+            guard request.head.target.hasSuffix("/containers/create") else { return .forward }
+            return .forwardRewritten(
+                request: Data(
+                    "POST /v1.47/containers/create HTTP/1.1\r\nContent-Length: \(rewrittenBody.utf8.count)\r\n\r\n\(rewrittenBody)".utf8))
+        }
+
+        let wired = try makeRelay()
+        write(Self.createRequest(originalBody), to: wired.client)
+        let relayed = readAvailable(wired.guest, atLeast: rewrittenBody.utf8.count)
+        XCTAssertTrue(String(decoding: relayed, as: UTF8.self).hasSuffix(rewrittenBody))
+
+        let created = #"{"Id":"abc123","Warnings":[]}"#
+        write("HTTP/1.1 201 Created\r\nContent-Length: \(created.utf8.count)\r\n\r\n\(created)", to: wired.guest)
+        XCTAssertTrue(String(decoding: readAvailable(wired.client, atLeast: 40), as: UTF8.self).contains("abc123"))
+
+        write(Self.ping, to: wired.client)
+        _ = readAvailable(wired.guest, atLeast: Self.ping.utf8.count)
+        XCTAssertEqual(policy.seen.count, 2)
+
+        wired.relay.cancel()
+        wait(for: [wired.done], timeout: 10)
+    }
+
+    func testRewrittenInspectedCreateDoesNotRestoreAnAlreadyAnsweredExpectHeader() throws {
+        let body = #"{"Image":"alpine"}"#
+        policy.inspectBodyOf = { $0.target.hasSuffix("/containers/create") }
+        policy.verdict = { request, inspectedBody in
+            guard let inspectedBody else { return .forward }
+            return .forwardRewritten(request: request.rawHead + inspectedBody)
+        }
+
+        let wired = try makeRelay()
+        let head = "POST /v1.47/containers/create HTTP/1.1\r\nHost: m\r\nExpect: 100-continue\r\n"
+            + "Content-Length: \(body.utf8.count)\r\n\r\n"
+        write(head, to: wired.client)
+        XCTAssertEqual(
+            String(decoding: readAvailable(wired.client, atLeast: 25), as: UTF8.self),
+            "HTTP/1.1 100 Continue\r\n\r\n")
+        write(body, to: wired.client)
+
+        let relayed = String(decoding: readAvailable(wired.guest, atLeast: body.utf8.count), as: UTF8.self)
+        XCTAssertFalse(relayed.lowercased().contains("expect:"), relayed)
+        XCTAssertTrue(relayed.hasSuffix(body), relayed)
+
+        wired.relay.cancel()
+        wait(for: [wired.done], timeout: 10)
+    }
+
+    func testObservedRewrittenCreateRetainsTheFixedPortResponseObserver() throws {
+        let observed = expectation(description: "rewritten create observed")
+        let body = #"{"Image":"alpine"}"#
+        policy.inspectBodyOf = { $0.target.hasSuffix("/containers/create") }
+        policy.verdict = { request, _ in
+            guard request.head.target.hasSuffix("/containers/create") else { return .forward }
+            return .forwardRewrittenObserving(
+                request: Data(
+                    "POST /v1.47/containers/create HTTP/1.1\r\nContent-Length: \(body.utf8.count)\r\n\r\n\(body)".utf8),
+                observer: DockerPortLeaseResponseObserver(kind: .create) { outcome in
+                    if outcome == .created(containerID: "abc123") { observed.fulfill() }
+                })
+        }
+
+        let wired = try makeRelay()
+        write(Self.createRequest(body), to: wired.client)
+        _ = readAvailable(wired.guest, atLeast: body.utf8.count)
+
+        let created = #"{"Id":"abc123","Warnings":[]}"#
+        write("HTTP/1.1 201 Created\r\nContent-Length: \(created.utf8.count)\r\n\r\n\(created)", to: wired.guest)
+        XCTAssertTrue(String(decoding: readAvailable(wired.client, atLeast: 40), as: UTF8.self).contains("abc123"))
+        wait(for: [observed], timeout: 5)
+
+        wired.relay.cancel()
+        wait(for: [wired.done], timeout: 10)
+    }
+
     /// A rewritten create must have its response held back until the association
     /// callback has run — the client must not learn the container id first.
     func testHeldCreateAssociatesBeforeReleasingTheResponse() throws {
@@ -621,7 +701,7 @@ final class DockerFramedRelayTests: XCTestCase {
             guard request.head.target.hasSuffix("/containers/create") else { return .forward }
             let rewritten = Data(
                 "POST /v1.47/containers/create HTTP/1.1\r\nContent-Length: \(body.utf8.count)\r\n\r\n\(body)".utf8)
-            return .forwardRewritten(
+            return .forwardRewrittenHoldingCreate(
                 request: rewritten,
                 hold: DockerHeldCreate(
                     associate: { containerID in

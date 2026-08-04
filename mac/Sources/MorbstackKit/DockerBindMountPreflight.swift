@@ -16,6 +16,18 @@ public enum DockerBindMountPreflight {
         case rejected(message: String)
     }
 
+    /// The result of validating a container-create document before it reaches the
+    /// guest Engine.
+    ///
+    /// The body is returned unchanged unless a verified macOS system alias must be
+    /// made explicit for the Linux guest. In that case, the rewritten JSON preserves
+    /// every semantic field except the affected bind source; the destination and
+    /// every Docker-owned mount option remain untouched.
+    public enum Preparation {
+        case allowed(body: Data, wasRewritten: Bool)
+        case rejected(message: String)
+    }
+
     /// Inspects bind mounts expressed by `HostConfig.Binds`, `HostConfig.Mounts`,
     /// and the legacy top-level `Mounts` shape.
     ///
@@ -33,8 +45,9 @@ public enum DockerBindMountPreflight {
     ///   - guestTmpAliasMounted: Whether the guest confirmed its literal `/tmp`
     ///     alias to the live `/private/tmp` share. `nil` is an older guest that
     ///     cannot prove the alias; it is not treated as a successful alias.
-    ///   - sourceExists: Injected for deterministic tests. It is only used for
-    ///     explicit `Mounts` bind sources, which Docker itself requires to exist.
+    ///   - sourceExists: Injected for deterministic tests. It is used for explicit
+    ///     `Mounts` bind sources, which Docker itself requires to exist, and for
+    ///     `/etc` or `/var` aliases before Morbstack can safely rewrite them.
     ///   - sourcePathResolving: Resolves symlinks through the nearest existing
     ///     ancestor. It is injected so the preflight's escape behavior is testable
     ///     without depending on this process's filesystem.
@@ -46,8 +59,41 @@ public enum DockerBindMountPreflight {
         sourceExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
         sourcePathResolving: ((String) -> String)? = nil
     ) -> Verdict {
-        guard let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else {
+        switch prepareContainerCreate(
+            body: body,
+            shares: shares,
+            guestShareStates: guestShareStates,
+            guestTmpAliasMounted: guestTmpAliasMounted,
+            sourceExists: sourceExists,
+            sourcePathResolving: sourcePathResolving)
+        {
+        case .allowed:
             return .allowed
+        case .rejected(let message):
+            return .rejected(message: message)
+        }
+    }
+
+    /// Validates the document and makes bare macOS `/etc` and `/var` aliases safe
+    /// for the Linux guest.
+    ///
+    /// The VM cannot mount host `/etc` or `/var` over its own system directories:
+    /// doing so would hide guest configuration or Docker's runtime. Instead, an
+    /// existing alias source is resolved on macOS, proved to sit below a mounted
+    /// VirtioFS share, and rewritten to that verified guest-visible host path. This
+    /// is intentionally narrower than Docker's legacy `-v` directory-creation
+    /// behavior: an absent system alias has no host inode whose identity can be
+    /// preserved, so it is rejected rather than allowed to become a guest path.
+    public static func prepareContainerCreate(
+        body: Data,
+        shares: [MorbDirectoryShare],
+        guestShareStates: [String: MorbShares.GuestMountState],
+        guestTmpAliasMounted: Bool? = nil,
+        sourceExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
+        sourcePathResolving: ((String) -> String)? = nil
+    ) -> Preparation {
+        guard let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else {
+            return .allowed(body: body, wasRewritten: false)
         }
         let sourcePathResolving = sourcePathResolving ?? resolveSourcePathThroughExistingAncestor
 
@@ -71,6 +117,8 @@ public enum DockerBindMountPreflight {
         // current Engine API places these under HostConfig, and missing that field
         // would let an unshared source reach dockerd and become guest-local.
         bindSources.append(contentsOf: explicitBindSources(in: object["Mounts"]))
+
+        var aliasRewrites: [String: String] = [:]
 
         for bindSource in bindSources {
             // Docker's API does not expand `~`; a command shell does that before it
@@ -104,14 +152,35 @@ public enum DockerBindMountPreflight {
             }
 
             // macOS also aliases `/var` and `/etc` through `/private`, but those
-            // literal guest paths are part of the Docker VM's own system. Unlike
-            // `/tmp`, they cannot safely be aliased without hiding the guest's
-            // runtime or configuration. Require the caller to choose the real
-            // `/private/...` spelling instead of approving a request that dockerd
-            // would resolve against guest-local system data.
+            // literal guest paths are part of the Docker VM's own system. They
+            // cannot be made guest aliases without hiding the guest runtime or
+            // configuration. Rewrite them only after proving the exact existing
+            // Mac source resolves beneath a live share. That lets `-v /etc/hosts`
+            // preserve the Mac file's identity without ever letting dockerd see
+            // the guest's own `/etc/hosts`.
             if let alias = unsupportedBareSystemAlias(bindSource.path) {
-                return .rejected(
-                    message: "invalid mount config for type \"bind\": bind source path uses the macOS /\(alias) alias, but /\(alias) is a guest system path; use the explicit /private/\(alias) source path after sharing it")
+                guard sourceExists(bindSource.path) else {
+                    return .rejected(
+                        message: "invalid mount config for type \"bind\": macOS /\(alias) alias source must exist before Morbstack can safely bind it: \(bindSource.path)")
+                }
+
+                let resolvedSource = MorbShares.canonicalHostPath(
+                    sourcePathResolving(bindSource.path))
+                guard let share = coveringShare(for: resolvedSource, in: shares) else {
+                    return .rejected(
+                        message: "invalid mount config for type \"bind\": bind source path resolves outside directories shared with the Morbstack VM: \(bindSource.path) -> \(resolvedSource) (add the resolved root to shared_paths, then restart Morbstack)")
+                }
+                guard let mountState = guestShareStates[share.path] else {
+                    return .rejected(
+                        message: "invalid mount config for type \"bind\": Morbstack cannot verify that \(share.path) is mounted in the running VM; restart Morbstack to use a guest that reports VirtioFS share state")
+                }
+                guard mountState == .mounted else {
+                    return .rejected(
+                        message: "invalid mount config for type \"bind\": share \(share.path) is not mounted in the running VM; repair the share and restart Morbstack")
+                }
+
+                aliasRewrites[bindSource.path] = resolvedSource
+                continue
             }
             let source = MorbShares.canonicalBindSource(bindSource.path)
 
@@ -148,7 +217,60 @@ public enum DockerBindMountPreflight {
                     message: "invalid mount config for type \"bind\": bind source path does not exist: \(bindSource.path)")
             }
         }
-        return .allowed
+        guard !aliasRewrites.isEmpty else {
+            return .allowed(body: body, wasRewritten: false)
+        }
+
+        var rewrittenObject = object
+        rewriteAliasSources(in: &rewrittenObject, aliases: aliasRewrites)
+        guard let rewrittenBody = try? JSONSerialization.data(withJSONObject: rewrittenObject) else {
+            return .rejected(
+                message: "invalid mount config for type \"bind\": Morbstack could not safely prepare the verified macOS bind source")
+        }
+        return .allowed(body: rewrittenBody, wasRewritten: true)
+    }
+
+    /// Replaces exact source fields only in the three create-document locations
+    /// already inspected above. A volume or an opaque field whose string happens to
+    /// look like a path is deliberately left alone.
+    private static func rewriteAliasSources(
+        in object: inout [String: Any],
+        aliases: [String: String]
+    ) {
+        if var hostConfig = object["HostConfig"] as? [String: Any] {
+            if var rawBinds = hostConfig["Binds"] as? [Any] {
+                rawBinds = rawBinds.map { rawBind in
+                    guard let rawBind = rawBind as? String,
+                          let source = legacyBindSource(in: rawBind),
+                          let replacement = aliases[source],
+                          let separator = rawBind.firstIndex(of: ":")
+                    else { return rawBind }
+                    return replacement + String(rawBind[separator...])
+                }
+                hostConfig["Binds"] = rawBinds
+            }
+            rewriteExplicitAliasSources(in: &hostConfig, key: "Mounts", aliases: aliases)
+            object["HostConfig"] = hostConfig
+        }
+        rewriteExplicitAliasSources(in: &object, key: "Mounts", aliases: aliases)
+    }
+
+    private static func rewriteExplicitAliasSources(
+        in object: inout [String: Any],
+        key: String,
+        aliases: [String: String]
+    ) {
+        guard var mounts = object[key] as? [Any] else { return }
+        mounts = mounts.map { rawMount in
+            guard var mount = rawMount as? [String: Any],
+                  (mount["Type"] as? String)?.lowercased() == "bind",
+                  let source = mount["Source"] as? String,
+                  let replacement = aliases[source]
+            else { return rawMount }
+            mount["Source"] = replacement
+            return mount
+        }
+        object[key] = mounts
     }
 
     /// Extracts explicit `--mount type=bind` style sources from one Engine API
@@ -221,8 +343,11 @@ public enum DockerBindMountPreflight {
     /// Resolves existing symlinks without falsely treating a missing legacy `-v`
     /// source as absent from its host share. `URL.resolvingSymlinksInPath()` resolves
     /// only paths that exist; walk up to the nearest existing ancestor, resolve that,
-    /// then append the still-missing components. The result is used exclusively for
-    /// share coverage validation and is never substituted into the Docker request.
+    /// then append the still-missing components. For ordinary sources the result is
+    /// used exclusively for share coverage validation. An existing bare macOS `/etc`
+    /// or `/var` alias is the deliberately narrow exception: its verified resolved
+    /// path becomes the source relayed to the guest so it cannot be substituted with
+    /// guest system content.
     private static func resolveSourcePathThroughExistingAncestor(_ source: String) -> String {
         var candidate = source
         var missingComponents: [String] = []

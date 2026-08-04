@@ -13,9 +13,13 @@ enum DockerRequestAdmission {
     case forward
     /// Relay unchanged and watch the matching response with this bounded observer.
     case forwardObserving(DockerPortLeaseResponseObserver)
+    /// Relay `request` in place of what the client sent.
+    case forwardRewritten(request: Data)
+    /// Relay `request` in place of what the client sent and watch its response.
+    case forwardRewrittenObserving(request: Data, observer: DockerPortLeaseResponseObserver)
     /// Relay `request` in place of what the client sent, and keep every byte of the
     /// response private until `hold.associate` has accepted the created container.
-    case forwardRewritten(request: Data, hold: DockerHeldCreate)
+    case forwardRewrittenHoldingCreate(request: Data, hold: DockerHeldCreate)
     /// Refuse: answer the client directly and end the connection.
     case reject(statusCode: Int, reason: String, message: String)
 }
@@ -248,6 +252,7 @@ final class DockerFramedRelay {
         guard let policy else { return .stop }
 
         var headBytes = request.rawHead
+        var admittedRequest = request
         var body: Data?
         var rawBody: Data?
 
@@ -269,6 +274,10 @@ final class DockerFramedRelay {
                         message: "morbstack could not rewrite an Expect: 100-continue request head")
                 }
                 headBytes = stripped
+                // A policy that needs to replace the inspected body must start from
+                // the same outgoing head. Otherwise it would put `Expect` back
+                // after Morbstack had already answered it itself.
+                admittedRequest.rawHead = stripped
             }
 
             switch framer.bufferBody(request.framing, limit: Self.maximumInspectableBodyBytes) {
@@ -294,13 +303,13 @@ final class DockerFramedRelay {
             }
         }
 
-        let admission = policy.admit(request, body: body)
+        let admission = policy.admit(admittedRequest, body: body)
 
         switch admission {
         case .reject(let statusCode, let reason, let message):
             return refuse(statusCode: statusCode, reason: reason, message: message)
 
-        case .forwardRewritten(let rewritten, let hold):
+        case .forwardRewrittenHoldingCreate(let rewritten, let hold):
             // Arm the response side *before* the request can produce a response.
             setMode(.holdingCreate(hold))
             guard writeToGuest(rewritten) else {
@@ -312,6 +321,18 @@ final class DockerFramedRelay {
             case .resumeFraming: return .continueFraming
             case .hijacked, .aborted: return .stop
             }
+
+        case .forwardRewritten(let rewritten), .forwardRewrittenObserving(let rewritten, _):
+            if case .forwardRewrittenObserving(_, let observer) = admission {
+                setMode(.observing(observer))
+            } else {
+                setMode(.passthrough)
+            }
+            guard writeToGuest(rewritten) else {
+                requestAbort()
+                return .stop
+            }
+            return .continueFraming
 
         case .forward, .forwardObserving:
             let isHijackCandidate = DockerHijackDetection.isHijackCandidate(request.head)
