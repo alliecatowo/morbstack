@@ -490,16 +490,18 @@ struct ComposeFileEditorSheet: View {
                 if editor.sourceKind == .composeYAML {
                     ToolbarItem(placement: .secondaryAction) {
                         Button {
-                            validation.requestValidation(using: editor)
+                            validation.requestValidation(
+                                using: editor,
+                                isProjectOperationPresented: projectOperations.isPresented)
                         } label: {
                             Image(systemName: "checkmark.seal")
                         }
                         .disabled(!validation.canRequestValidation || editor.isDirty || projectOperations.isPresented)
-                        .accessibilityLabel("Validate Compose source")
+                        .accessibilityLabel("Validate saved Compose document")
                         .help(
                             editor.isDirty
-                                ? "Save or discard edits before validating Compose source"
-                                : "Validate saved Compose source")
+                                ? "Save or discard edits before validating this Compose document"
+                                : "Validate the saved Compose document opened in this editor")
                     }
                     ToolbarItem(placement: .secondaryAction) {
                         Menu {
@@ -590,7 +592,7 @@ struct ComposeFileEditorSheet: View {
             Text(editor.saveError ?? "")
         }
         .alert(
-            "Couldn’t Validate Compose Source",
+            "Couldn’t Validate Compose Document",
             isPresented: Binding(
                 get: { validation.requestError != nil },
                 set: { if !$0 { validation.requestError = nil } })

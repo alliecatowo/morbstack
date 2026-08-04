@@ -38,6 +38,7 @@ struct ComposeSourceValidationRequest: Sendable {
     let expectedData: Data
 
     var displayName: String { sourceURL.lastPathComponent }
+    var snapshotDescription: String { "Saved on-disk snapshot opened in this editor" }
 
     func verifyCurrentSource() throws {
         try ComposeFileEditor.validateSourceFile(sourceURL, as: .composeYAML)
@@ -141,15 +142,29 @@ final class ComposeSourceValidationModel {
         return false
     }
 
-    func commandActions(using editor: ComposeFileEditor) -> ComposeSourceValidationCommandActions? {
+    func commandActions(
+        using editor: ComposeFileEditor,
+        isProjectOperationPresented: Bool
+    ) -> ComposeSourceValidationCommandActions? {
         guard editor.isPresented, editor.sourceKind == .composeYAML else { return nil }
         return ComposeSourceValidationCommandActions(
-            validate: { self.requestValidation(using: editor) },
-            canValidate: canRequestValidation && !editor.isDirty)
+            validate: {
+                self.requestValidation(
+                    using: editor,
+                    isProjectOperationPresented: isProjectOperationPresented)
+            },
+            canValidate: canRequestValidation && !editor.isDirty && !isProjectOperationPresented)
     }
 
-    func requestValidation(using editor: ComposeFileEditor) {
+    func requestValidation(
+        using editor: ComposeFileEditor,
+        isProjectOperationPresented: Bool = false
+    ) {
         guard canRequestValidation else { return }
+        guard !isProjectOperationPresented else {
+            requestError = "Finish the current reviewed Compose project command before validating this document."
+            return
+        }
         do {
             phase = .review(try editor.validationRequest())
             requestError = nil
@@ -231,6 +246,21 @@ enum ComposeSourceValidationRunner {
     private static let deadline: TimeInterval = 15
     private static let maximumDiagnosticBytes = 256 * 1024
 
+    /// One deliberately fixed validation invocation. Keeping this separate from launch
+    /// lets focused tests guard against lifecycle, image-resolution, output, or source-
+    /// selection flags being added to the saved-document validation command.
+    static func arguments(for sourceURL: URL) -> [String] {
+        [
+            "--project-directory", sourceURL.deletingLastPathComponent().path,
+            "-f", sourceURL.path,
+            "config",
+            "--quiet",
+            "--no-interpolate",
+            "--no-env-resolution",
+            "--no-path-resolution",
+        ]
+    }
+
     static func run(
         _ request: ComposeSourceValidationRequest,
         onOutput: @escaping @Sendable (String) -> Void
@@ -272,15 +302,7 @@ enum ComposeSourceValidationRunner {
             // the actual Compose client rather than a Docker CLI parent that may have
             // launched a plugin child before cancellation reaches it.
             process.executableURL = compose
-            process.arguments = [
-                "--project-directory", request.sourceURL.deletingLastPathComponent().path,
-                "-f", request.sourceURL.path,
-                "config",
-                "--quiet",
-                "--no-interpolate",
-                "--no-env-resolution",
-                "--no-path-resolution",
-            ]
+            process.arguments = arguments(for: request.sourceURL)
             process.currentDirectoryURL = request.sourceURL.deletingLastPathComponent()
             process.standardInput = FileHandle.nullDevice
             process.standardOutput = stdout
@@ -362,7 +384,7 @@ enum ComposeSourceValidationRunner {
 /// inherits a user's Docker context/config/credential helpers, environment files, SSH
 /// agent, Git configuration, or proxy credentials. The temporary directory is created
 /// only after the person confirms validation and is removed once that client exits.
-private struct ComposeSourceValidationEnvironment {
+struct ComposeSourceValidationEnvironment {
     let environment: [String: String]
     private let directory: URL
 
@@ -379,14 +401,22 @@ private struct ComposeSourceValidationEnvironment {
             throw ComposeSourceValidationError.environmentFailed(error.localizedDescription)
         }
 
-        // This whitelist intentionally starts empty rather than inheriting the GUI's
-        // environment. Compose receives no ambient Docker endpoint,
-        // context, credentials, env file, proxy, Git config, or SSH authentication.
-        let environment: [String: String] = [
+        return ComposeSourceValidationEnvironment(
+            environment: values(socketPath: socketPath, homeDirectoryPath: directory.path),
+            directory: directory)
+    }
+
+    /// This whitelist intentionally starts empty rather than inheriting the GUI's
+    /// environment. Compose receives no ambient Docker endpoint, context, credentials,
+    /// default environment file, proxy, Git config, or SSH authentication. Explicit
+    /// Compose-file references remain Compose's separate trust boundary; this map does
+    /// not represent a filesystem sandbox for those sources.
+    static func values(socketPath: String, homeDirectoryPath: String) -> [String: String] {
+        [
             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-            "HOME": directory.path,
+            "HOME": homeDirectoryPath,
             "DOCKER_HOST": "unix://\(socketPath)",
-            "DOCKER_CONFIG": directory.path,
+            "DOCKER_CONFIG": homeDirectoryPath,
             "COMPOSE_DISABLE_ENV_FILE": "1",
             "COMPOSE_ANSI": "never",
             "COMPOSE_PROGRESS": "plain",
@@ -398,7 +428,6 @@ private struct ComposeSourceValidationEnvironment {
             "SSH_ASKPASS": "/usr/bin/false",
             "GIT_SSH_COMMAND": "/usr/bin/ssh -F /dev/null -oBatchMode=yes -oIdentitiesOnly=yes -oIdentityAgent=none",
         ]
-        return ComposeSourceValidationEnvironment(environment: environment, directory: directory)
     }
 
     func cleanUp() {
@@ -549,10 +578,10 @@ struct ComposeSourceValidationSheet: View {
 
     private var navigationTitle: String {
         switch validation.phase {
-        case .review: "Validate Compose Source"
-        case .running: "Validating Compose Source"
-        case .result(_, let result): "Compose Source: \(result.title)"
-        case .idle: "Compose Source Validation"
+        case .review: "Validate Compose Document"
+        case .running: "Validating Compose Document"
+        case .result(_, let result): "Compose Document: \(result.title)"
+        case .idle: "Compose Document Validation"
         }
     }
 
@@ -566,6 +595,8 @@ struct ComposeSourceValidationSheet: View {
                         .lineLimit(2)
                         .truncationMode(.middle)
                 }
+                LabeledContent("Snapshot", value: request.snapshotDescription)
+                LabeledContent("Before Launch", value: "File type and exact bytes rechecked")
                 LabeledContent("Operation", value: "Bundled Compose config --quiet")
                 LabeledContent("Context", value: "Morbstack local socket")
             }
@@ -575,6 +606,7 @@ struct ComposeSourceValidationSheet: View {
             Section("Trust Review") {
                 Text("Docker Compose treats Compose files as trusted input. During configuration loading, include, extends, config, and secret file references can load other local or remote sources. Review this project and every referenced source before continuing.")
                 Text("Morbstack disables default .env loading, interpolation, service env-file resolution, and path resolution for this command. It uses an isolated temporary Docker configuration and does not use your Docker context, credential helpers, Keychain, Git configuration, SSH agent, or proxy environment.")
+                Text("This is not a source-file sandbox: Docker documents that Compose configuration loading can read declared include, extends, config, and secret file references. This view does not request rendered configuration output or a secret viewer; validate untrusted source only after a dedicated security review.")
                 Text("Cancel and timeout terminate Morbstack’s direct Compose client only. They do not claim to terminate external helpers Compose might start while resolving a referenced source.")
             }
         }
@@ -589,6 +621,7 @@ struct ComposeSourceValidationSheet: View {
             Form {
                 Section("Validation") {
                     LabeledContent("Source", value: request.displayName)
+                    LabeledContent("Snapshot", value: "Saved selected-file snapshot")
                     LabeledContent("Result", value: result.title)
                     if result.output.isTruncated {
                         LabeledContent("Diagnostics", value: "Truncated at 256 KiB")
@@ -615,6 +648,7 @@ struct ComposeSourceValidationSheet: View {
                         }
                     }
                     LabeledContent("Action", value: "config --quiet")
+                    LabeledContent("Snapshot", value: request.snapshotDescription)
                 }
             }
             .formStyle(.automatic)

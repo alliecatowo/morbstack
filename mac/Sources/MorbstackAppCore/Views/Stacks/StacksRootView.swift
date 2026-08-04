@@ -296,7 +296,9 @@ struct StacksRootView: View {
                 composeFileEditor.commandActions)
             .focusedSceneValue(
                 \.composeSourceValidationCommandActions,
-                composeSourceValidation.commandActions(using: composeFileEditor))
+                composeSourceValidation.commandActions(
+                    using: composeFileEditor,
+                    isProjectOperationPresented: composeProjectOperations.isPresented))
     }
 
     // MARK: Toolbar

@@ -267,7 +267,7 @@ struct MorbCommands: Commands {
 
             Divider()
 
-            Button("Validate Compose Source…") {
+            Button("Validate Compose Document…") {
                 composeSourceValidationCommandActions?.validate()
             }
             .disabled(composeSourceValidationCommandActions?.canValidate != true)

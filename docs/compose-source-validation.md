@@ -12,12 +12,15 @@ flow, or environment preview.
 
 The Stacks editor supplies the normal macOS document workflow: an explicit Open-panel
 selection, a source-fidelity `TextEditor`, explicit Save/Revert/Close, and a dirty
-discard confirmation. The symbol-only toolbar command and standard **Compose** menu
-item are available only for the saved, person-selected `.yaml`/`.yml` document. A
+discard confirmation. The symbol-only toolbar command and standard **Validate Compose
+Document…** menu item are available only for the saved, person-selected `.yaml`/`.yml`
+document. A
 document-modal sheet presents the separate review in an automatic system `Form` and
 starts nothing until the person selects **Validate**. While work is active, an
 indeterminate system `ProgressView` represents the actual unquantified process and a
 native, noneditable AppKit `NSTextView` streams selectable monospaced diagnostic text.
+Validation is unavailable while a reviewed Compose project command is presented, so a
+saved-document check cannot be started alongside a source-driven lifecycle/build command.
 It is not custom terminal chrome, a dashboard card, or a fake validation result.
 
 Sources consulted: Apple's [Sheets](https://developer.apple.com/design/human-interface-guidelines/sheets),
@@ -74,6 +77,15 @@ specifically warns that `include`, `extends`, `env_file`, `label_file`, and
 including remote or symlink-mediated sources. The review names this boundary and asks
 the person to trust every referenced source. The app neither presents resolved model
 output nor claims it has inspected the full dependency chain.
+
+`--no-path-resolution` is not a general filesystem sandbox. Docker's current trust
+model warns that `config` can read declared `include`, `extends`, `env_file`,
+`label_file`, and `secrets`/`configs` `file:` references during configuration loading.
+The validation review states this limitation directly: Morbstack does not copy, resolve
+for display, or request a secret viewer; it instead retains bounded raw Compose
+diagnostics. It cannot claim the bundled Compose parser never reads a referenced source.
+A strict no-source-file-read check is outside this feature until it has a dedicated
+security design.
 
 Standard output and standard error are drained continuously to avoid a malformed
 document blocking on a full pipe. Only the first 256 KiB is retained and displayed;
