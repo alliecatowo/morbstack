@@ -258,6 +258,10 @@ struct ContainerSummary: Identifiable, Sendable, Hashable {
     var composeService: String?
     var ports: [PortMapping]
     var createdAt: Date
+    /// Exact Docker `State.StartedAt`, obtained from the inspect response when the
+    /// container is running. `nil` means the app has not received that fact and must
+    /// retain Docker's original status prose instead of estimating a start time.
+    var startedAt: Date? = nil
 
     var isRunning: Bool { state == "running" }
 
@@ -269,6 +273,28 @@ struct ContainerSummary: Identifiable, Sendable, Hashable {
     /// Health lives in the status prose rather than in a field on the list endpoint,
     /// so this is a substring test — but it is the same substring the CLI prints.
     var isUnhealthy: Bool { status.localizedCaseInsensitiveContains("(unhealthy)") }
+
+    /// The list's locally ticking status, when Docker has supplied an actual start
+    /// instant. This never parses or extrapolates the human-oriented `/containers/json`
+    /// `Status` string: when `StartedAt` is absent, the engine's text remains the only
+    /// truthful answer.
+    func statusDisplay(at now: Date = .now) -> String {
+        let fallback = status.isEmpty ? state.capitalized : status
+        guard isRunning,
+              let startedAt,
+              startedAt.timeIntervalSince1970 > 0
+        else { return fallback }
+
+        return "Up \(Formatters.uptime(since: startedAt, now: now))\(statusQualifier)"
+    }
+
+    /// Docker's list endpoint exposes health as a suffix inside `Status`, while the
+    /// exact start instant comes from inspect. Preserve that engine-authored qualifier
+    /// when replacing only the elapsed-time portion.
+    private var statusQualifier: String {
+        guard let range = status.range(of: " (", options: .backwards) else { return "" }
+        return String(status[range.lowerBound...])
+    }
 
     /// Which actions make sense right now.
     var availableActions: [ContainerAction] {

@@ -35,6 +35,15 @@ enum Formatters {
         return formatter
     }()
 
+    private static let uptimeFormatter: DateComponentsFormatter = {
+        let formatter = DateComponentsFormatter()
+        formatter.allowedUnits = [.day, .hour, .minute, .second]
+        formatter.unitsStyle = .full
+        formatter.maximumUnitCount = 1
+        formatter.zeroFormattingBehavior = .dropLeading
+        return formatter
+    }()
+
     /// `4 minutes ago`.
     ///
     /// A zero `Date` means the engine did not report a creation time; showing
@@ -44,6 +53,18 @@ enum Formatters {
         let interval = -date.timeIntervalSinceNow
         if interval < 5 { return "just now" }
         return relativeFormatter.localizedString(for: date, relativeTo: Date())
+    }
+
+    /// `23 seconds`, `4 minutes`, or `2 days` for a known start instant.
+    ///
+    /// The value is intentionally relative to an explicit `now` so the list can update
+    /// locally without re-querying Docker, and so its model transform is deterministic
+    /// in tests. A future timestamp is shown as zero elapsed time rather than a negative
+    /// duration.
+    static func uptime(since start: Date, now: Date = .now) -> String {
+        guard start.timeIntervalSince1970 > 0 else { return "unknown" }
+        let seconds = max(0, now.timeIntervalSince(start))
+        return uptimeFormatter.string(from: seconds) ?? "0 seconds"
     }
 
     private static let absoluteFormatter: DateFormatter = {

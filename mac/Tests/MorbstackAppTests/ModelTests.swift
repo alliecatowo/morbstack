@@ -344,6 +344,26 @@ final class ContainerSummaryTests: XCTestCase {
         XCTAssertFalse(ContainerSummary(wire(status: "Up 5 minutes")).isUnhealthy)
     }
 
+    func testRunningStatusTicksFromAnExactDockerStartTime() {
+        let startedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        var summary = ContainerSummary(wire(status: "Up 5 minutes (healthy)"))
+        summary.startedAt = startedAt
+
+        let first = summary.statusDisplay(at: startedAt.addingTimeInterval(10))
+        let later = summary.statusDisplay(at: startedAt.addingTimeInterval(70))
+
+        XCTAssertTrue(first.hasPrefix("Up "))
+        XCTAssertTrue(later.hasPrefix("Up "))
+        XCTAssertTrue(first.hasSuffix(" (healthy)"))
+        XCTAssertTrue(later.hasSuffix(" (healthy)"))
+        XCTAssertNotEqual(first, later, "local ticking must not need another Docker refresh")
+    }
+
+    func testStatusFallsBackToDockerProseWithoutAnExactStartTime() {
+        let summary = ContainerSummary(wire(status: "Up About a minute"))
+        XCTAssertEqual(summary.statusDisplay(at: .distantFuture), "Up About a minute")
+    }
+
     func testAvailableActionsDependOnState() {
         XCTAssertEqual(ContainerSummary(wire(state: "running")).availableActions, [.stop, .restart, .pause])
         XCTAssertEqual(ContainerSummary(wire(state: "paused")).availableActions, [.unpause, .stop])

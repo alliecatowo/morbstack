@@ -275,13 +275,15 @@ struct ContainersRootView: View {
 
                     Spacer(minLength: 12)
 
-                    Text(container.status.isEmpty ? container.state.capitalized : container.status)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        Text(container.statusDisplay(at: context.date))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
                 }
                 .tag(container.id)
-                .help(container.status.isEmpty ? container.state : container.status)
+                .help(container.statusDisplay())
                 .contextMenu {
                     contextMenu(for: container)
                 }

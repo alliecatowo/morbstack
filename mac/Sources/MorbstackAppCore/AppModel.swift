@@ -239,6 +239,10 @@ final class AppModel {
     /// Image ids whose platform lookup is in flight, so arrowing down a list does not
     /// queue a second request for a row that is already being resolved.
     @ObservationIgnored private var architectureLookups: Set<String> = []
+    /// Running-container ids whose exact `State.StartedAt` is being read. A list
+    /// response gives only human-oriented status prose, so this one bounded inspect per
+    /// running container supplies the fact required for local uptime ticking.
+    @ObservationIgnored private var startedAtLookups: Set<String> = []
 
     init(
         client: DockerClient = DockerClient(),
@@ -367,6 +371,7 @@ final class AppModel {
         buildHistoryState = .idle
         selectedContainerID = nil
         busyContainerIDs.removeAll()
+        startedAtLookups.removeAll()
     }
 
     // MARK: - Refresh
@@ -391,7 +396,10 @@ final class AppModel {
         let (newContainers, newImages, newVolumes, newNetworks) =
             await (containersResult, imagesResult, volumesResult, networksResult)
 
-        if let newContainers { containers = sortForDisplay(newContainers) }
+        if let newContainers {
+            containers = sortForDisplay(preservingStartedAt(in: newContainers))
+            resolveStartedAt(for: containers)
+        }
         if let newImages { images = newImages }
         if let newVolumes { volumes = newVolumes }
         if let newNetworks { networks = newNetworks }
@@ -501,6 +509,54 @@ final class AppModel {
         }
     }
 
+    /// `/containers/json` does not include `State.StartedAt`. Retain exact inspect
+    /// values across ordinary list refreshes, but only while the same record remains
+    /// running; a stop/restart must obtain a new start instant rather than reusing an
+    /// old one.
+    private func preservingStartedAt(in fresh: [ContainerSummary]) -> [ContainerSummary] {
+        let known = Dictionary(
+            uniqueKeysWithValues: containers.compactMap { container in
+                guard container.isRunning, let startedAt = container.startedAt else { return nil }
+                return (container.id, startedAt)
+            })
+
+        return fresh.map { container in
+            var container = container
+            if container.isRunning { container.startedAt = known[container.id] }
+            return container
+        }
+    }
+
+    /// Hydrates only missing start instants. This is not a polling loop: after a
+    /// successful inspect, `TimelineView` advances the displayed elapsed time locally;
+    /// another inspect happens only for a newly running/restarted record or after a
+    /// previous inspect failed.
+    private func resolveStartedAt(for summaries: [ContainerSummary]) {
+        let unresolved = summaries.filter {
+            $0.isRunning && $0.startedAt == nil && !startedAtLookups.contains($0.id)
+        }
+
+        for summary in unresolved {
+            let id = summary.id
+            let client = client
+            startedAtLookups.insert(id)
+
+            Task { [weak self, client] in
+                let inspect = try? await client.inspectContainer(id: id)
+                let startedAt = inspect.flatMap { TrackBInspectDetails(json: $0)?.startedAt }
+
+                guard let self else { return }
+                self.startedAtLookups.remove(id)
+                guard let startedAt,
+                      startedAt.timeIntervalSince1970 > 0,
+                      let index = self.containers.firstIndex(where: { $0.id == id }),
+                      self.containers[index].isRunning
+                else { return }
+                self.containers[index].startedAt = startedAt
+            }
+        }
+    }
+
     // MARK: - Container actions
 
     /// Performs a lifecycle action and keeps the row honest while it happens.
@@ -541,19 +597,27 @@ final class AppModel {
         case .remove:
             containers.remove(at: index)
             if selectedContainerID == id { selectedContainerID = nil }
-        case .start, .unpause:
+        case .start:
+            containers[index].state = "running"
+            containers[index].status = "Up less than a second"
+            // `start` is optimistic. Do not turn the host clock into claimed Docker
+            // state; the next inspect or engine event provides the actual start time.
+            containers[index].startedAt = nil
+        case .unpause:
             containers[index].state = "running"
             containers[index].status = "Up less than a second"
         case .stop:
             containers[index].state = "exited"
             containers[index].status = "Exited (0) just now"
             containers[index].ports = []
+            containers[index].startedAt = nil
         case .pause:
             containers[index].state = "paused"
             containers[index].status = "Up (Paused)"
         case .restart:
             containers[index].state = "restarting"
             containers[index].status = "Restarting"
+            containers[index].startedAt = nil
         }
     }
 
@@ -731,7 +795,10 @@ final class AppModel {
 
         let action = event.action
         switch action {
-        case "start", "unpause", "restart":
+        case "start", "restart":
+            containers[index].state = "running"
+            containers[index].startedAt = event.time
+        case "unpause":
             containers[index].state = "running"
         case "die", "stop", "kill":
             containers[index].state = "exited"
@@ -739,6 +806,7 @@ final class AppModel {
                 containers[index].status = "Exited (\(code)) just now"
             }
             containers[index].ports = []
+            containers[index].startedAt = nil
         case "pause":
             containers[index].state = "paused"
         case "destroy":
