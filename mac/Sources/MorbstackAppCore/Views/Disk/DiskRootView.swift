@@ -358,6 +358,12 @@ struct DiskRootView: View {
                 })
         } else {
             diskTable
+                // The table's four semantic columns need a readable leading-content
+                // width when the system presents its trailing inspector. Keeping that
+                // constraint on the system Table lets the inspector collapse through
+                // its own native adaptation instead of allowing either surface to
+                // encroach on the other at narrow window widths.
+                .frame(minWidth: 520)
                 .inspector(isPresented: $showsInspector) {
                     inspector
                         .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
