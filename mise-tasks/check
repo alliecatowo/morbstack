@@ -53,8 +53,19 @@ echo "==> cargo fmt --check"
 # CI is invisible locally -- which is exactly how a `useless_conversion` in
 # sha256.rs reached the first CI run this project ever had. Whatever CI treats as
 # fatal, this must treat as fatal too, or the local gate is not a gate.
-echo "==> cargo clippy -D warnings"
+echo "==> cargo clippy -D warnings (host)"
 (cd guest/morbinit && cargo clippy --all-targets -- -D warnings) || status=1
+
+# And again for the target that actually runs. Host-only clippy misses the
+# Linux-gated code entirely -- the same hole that let 13 compile errors ship
+# while `cargo test` reported 217 passing. It is not hypothetical here: this
+# invocation found two real lints (a dead protocol variant and a
+# write_with_newline) that the host run above is structurally incapable of
+# seeing. Whatever we lint, lint it where it runs.
+if (cd guest/morbinit && rustc --print target-libdir --target "$GUEST_TARGET") >/dev/null 2>&1; then
+	echo "==> cargo clippy -D warnings (${GUEST_TARGET})"
+	(cd guest/morbinit && cargo clippy --all-targets --target "$GUEST_TARGET" -- -D warnings) || status=1
+fi
 
 # Same rule as clippy: CI shellchecks these, so this gate must too. shellcheck is
 # pinned in mise.toml, so `mise run check` supplies it rather than expecting a

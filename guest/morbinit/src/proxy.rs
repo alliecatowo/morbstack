@@ -154,7 +154,8 @@ mod imp {
     use super::{busy_response, copy_stream, DOCKER_SOCK, MAX_CONNECTIONS, VSOCK_DOCKER_PORT};
     use crate::log;
     use crate::sys;
-    use std::io::{self, Write};
+    use crate::wire::{self, ConnGuard};
+    use std::io;
     use std::net::Shutdown;
     use std::os::fd::{AsRawFd, RawFd};
     use std::os::unix::net::UnixStream;
@@ -176,38 +177,31 @@ mod imp {
     /// this bound is only ever spent on a peer that is already gone.
     const BUSY_REPLY_TIMEOUT_MS: i32 = 250;
 
-    /// Decrements the live-connection counter however the handler thread
-    /// exits (return, error, or panic).
-    struct ConnGuard(Arc<AtomicUsize>);
-
-    impl Drop for ConnGuard {
-        fn drop(&mut self) {
-            self.0.fetch_sub(1, Ordering::SeqCst);
-        }
-    }
-
     /// Best-effort busy rejection on a connection about to be refused.
     ///
     /// Same discipline as `dial::send_busy`: `poll(2)` bounds the wait so a
     /// wedged peer cannot stall the accept loop, and any failure — including
     /// the timeout — just falls through to closing the connection, which is
     /// what happened before this existed.
+    ///
+    /// Note: unlike `dial::send_busy`, this never explicitly `flush()`s
+    /// after the write. That is not an observable difference — `File`'s
+    /// `flush` is an unbuffered no-op — so `wire::send_best_effort`'s
+    /// unconditional flush (needed for callers whose `Write` impl *does*
+    /// buffer) changes nothing here.
     fn send_busy(mut conn: std::fs::File) {
         let reply = busy_response();
-        match sys::poll_writable(conn.as_raw_fd(), BUSY_REPLY_TIMEOUT_MS) {
-            Ok(true) => {
-                if let Err(e) = conn.write_all(&reply) {
-                    log::log(&format!(
-                        "could not send the docker proxy busy rejection: {}",
-                        e
-                    ));
-                }
-            }
-            Ok(false) => log::log(
+        match wire::send_best_effort(&mut conn, &reply, BUSY_REPLY_TIMEOUT_MS) {
+            wire::SendOutcome::Sent => {}
+            wire::SendOutcome::WriteFailed(e) => log::log(&format!(
+                "could not send the docker proxy busy rejection: {}",
+                e
+            )),
+            wire::SendOutcome::NotWritableInTime => log::log(
                 "docker proxy busy rejection could not be sent within its timeout — \
                  closing the connection instead",
             ),
-            Err(e) => log::log(&format!(
+            wire::SendOutcome::PollFailed(e) => log::log(&format!(
                 "could not poll a rejected docker proxy connection for writability: {} \
                  — closing it instead",
                 e
@@ -263,7 +257,7 @@ mod imp {
             let spawned = thread::Builder::new()
                 .name("docker-proxy-conn".to_string())
                 .spawn(move || {
-                    let _guard = ConnGuard(live_for_thread);
+                    let _guard = ConnGuard::new(live_for_thread);
                     if let Err(e) = handle_connection(conn) {
                         log::log(&format!("docker proxy connection ended: {}", e));
                     }

@@ -960,9 +960,9 @@ fn store_grow_receipt(receipt: &GrowReceipt) -> Result<(), String> {
         .mode(0o600)
         .open(&temporary)
         .map_err(|e| format!("could not create disk-grow receipt: {}", e))?;
-    write!(
+    writeln!(
         file,
-        "MRBDISKGROW2 {} {} {} {} {} {}\n",
+        "MRBDISKGROW2 {} {} {} {} {} {}",
         receipt.phase.token(),
         receipt.target_bytes,
         receipt.filesystem,

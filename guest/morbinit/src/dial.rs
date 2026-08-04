@@ -86,21 +86,6 @@ pub const BUSY_REASON: &str = "busy";
 /// Bridge publications reach dockerd's `docker-proxy` listener here.
 pub const DIAL_ADDR: &str = "127.0.0.1";
 
-/// Build an `ERR <reason>\n` reply.
-///
-/// The reason is flattened to a single line: it is a framing delimiter, and
-/// an error string containing a newline (an OS error message, say) would
-/// otherwise let the failure reply masquerade as two.
-pub fn err_line(reason: &str) -> Vec<u8> {
-    let mut out = String::with_capacity(reason.len() + 5);
-    out.push_str("ERR ");
-    for c in reason.chars() {
-        out.push(if c == '\n' || c == '\r' { ' ' } else { c });
-    }
-    out.push('\n');
-    out.into_bytes()
-}
-
 /// The `ERR` reason for a failed dial to `127.0.0.1:<port>`.
 ///
 /// ECONNREFUSED gets its own wording because the host needs to distinguish a
@@ -116,41 +101,6 @@ pub fn dial_error_reason(port: u16, e: &io::Error) -> String {
     } else {
         format!("dial {}:{}: {}", DIAL_ADDR, port, e)
     }
-}
-
-/// Read one newline-terminated line, at most `max` bytes including the
-/// newline, one byte per `read` call.
-///
-/// Byte-at-a-time is deliberate and not an oversight: see the module docs.
-pub fn read_preamble_line<R: Read>(r: &mut R, max: usize) -> io::Result<String> {
-    let mut buf = Vec::with_capacity(16);
-    let mut byte = [0u8; 1];
-    loop {
-        if buf.len() >= max {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("no newline within the first {} bytes", max),
-            ));
-        }
-        match r.read(&mut byte) {
-            Ok(0) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "connection closed before the preamble was complete",
-                ))
-            }
-            Ok(_) => {
-                buf.push(byte[0]);
-                if byte[0] == b'\n' {
-                    break;
-                }
-            }
-            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e),
-        }
-    }
-    String::from_utf8(buf)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "preamble is not valid UTF-8"))
 }
 
 /// Parse `"TCP <port>\n"`, returning the port to dial.
@@ -189,11 +139,11 @@ pub fn parse_preamble(line: &str) -> Result<u16, String> {
 /// rejection has already been sent, and `Err` when the connection failed
 /// before a reply could mean anything.
 pub fn negotiate<S: Read + Write>(conn: &mut S) -> io::Result<Option<u16>> {
-    let line = read_preamble_line(conn, MAX_PREAMBLE_LEN)?;
+    let line = crate::wire::read_preamble_line(conn, MAX_PREAMBLE_LEN)?;
     match parse_preamble(&line) {
         Ok(port) => Ok(Some(port)),
         Err(reason) => {
-            conn.write_all(&err_line(&reason))?;
+            conn.write_all(&crate::wire::err_line(&reason))?;
             conn.flush()?;
             Ok(None)
         }
@@ -207,68 +157,20 @@ pub fn negotiate<S: Read + Write>(conn: &mut S) -> io::Result<Option<u16>> {
 #[cfg(target_os = "linux")]
 mod imp {
     use super::{
-        dial_error_reason, err_line, negotiate, BUSY_REASON, BUSY_REPLY_TIMEOUT_MS, DIAL_ADDR,
+        dial_error_reason, negotiate, BUSY_REASON, BUSY_REPLY_TIMEOUT_MS, DIAL_ADDR,
         MAX_CONNECTIONS, OK_LINE, PREAMBLE_TIMEOUT, VSOCK_STREAM_DIAL_PORT,
     };
     use crate::log;
     use crate::proxy::copy_stream;
     use crate::sys;
-    use std::io::{self, Read, Write};
+    use crate::wire::{self, ConnGuard, DeadlineStream};
+    use std::io::{self, Write};
     use std::net::{Shutdown, TcpStream};
     use std::os::fd::AsRawFd;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::thread;
     use std::time::{Duration, Instant};
-
-    struct ConnGuard(Arc<AtomicUsize>);
-
-    impl Drop for ConnGuard {
-        fn drop(&mut self) {
-            self.0.fetch_sub(1, Ordering::SeqCst);
-        }
-    }
-
-    /// A `Read`/`Write` view of the accepted vsock fd whose reads give up at
-    /// a deadline.
-    ///
-    /// The vsock fd is a plain `std::fs::File` (see `sys::VsockListener`), so
-    /// it has no socket timeout knobs; `poll(2)` before each read supplies
-    /// them. Only used for the preamble — once we start splicing, blocking
-    /// forever is exactly the desired behaviour.
-    struct DeadlineStream<'a> {
-        file: &'a mut std::fs::File,
-        deadline: Instant,
-    }
-
-    impl Read for DeadlineStream<'_> {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            let remaining = self.deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "timed out waiting for the preamble",
-                ));
-            }
-            let ms = std::cmp::min(remaining.as_millis(), i32::MAX as u128) as i32;
-            if !sys::poll_readable(self.file.as_raw_fd(), ms)? {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "timed out waiting for the preamble",
-                ));
-            }
-            self.file.read(buf)
-        }
-    }
-
-    impl Write for DeadlineStream<'_> {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.file.write(buf)
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            self.file.flush()
-        }
-    }
 
     /// Bind vsock 2376 and serve it from a dedicated thread.
     ///
@@ -317,7 +219,7 @@ mod imp {
             let spawned = thread::Builder::new()
                 .name("stream-dial-conn".to_string())
                 .spawn(move || {
-                    let _guard = ConnGuard(live_for_thread);
+                    let _guard = ConnGuard::new(live_for_thread);
                     if let Err(e) = handle_connection(conn) {
                         log::log(&format!("stream dial connection ended: {}", e));
                     }
@@ -338,18 +240,17 @@ mod imp {
     /// a second is gone anyway, and the connection cap exists precisely so
     /// PID 1 does not spawn a thread per caller — including for this.
     fn send_busy(mut conn: std::fs::File) {
-        let reply = err_line(BUSY_REASON);
-        match sys::poll_writable(conn.as_raw_fd(), BUSY_REPLY_TIMEOUT_MS) {
-            Ok(true) => {
-                if let Err(e) = conn.write_all(&reply).and_then(|()| conn.flush()) {
-                    log::log(&format!("could not send the busy rejection: {}", e));
-                }
+        let reply = wire::err_line(BUSY_REASON);
+        match wire::send_best_effort(&mut conn, &reply, BUSY_REPLY_TIMEOUT_MS) {
+            wire::SendOutcome::Sent => {}
+            wire::SendOutcome::WriteFailed(e) => {
+                log::log(&format!("could not send the busy rejection: {}", e))
             }
-            Ok(false) => log::log(
+            wire::SendOutcome::NotWritableInTime => log::log(
                 "busy rejection could not be sent within its timeout — closing the \
                  connection instead",
             ),
-            Err(e) => log::log(&format!(
+            wire::SendOutcome::PollFailed(e) => log::log(&format!(
                 "could not poll a rejected connection for writability: {} — closing \
                  it instead",
                 e
@@ -359,10 +260,11 @@ mod imp {
 
     fn handle_connection(mut vsock: std::fs::File) -> io::Result<()> {
         let port = {
-            let mut framed = DeadlineStream {
-                file: &mut vsock,
-                deadline: Instant::now() + PREAMBLE_TIMEOUT,
-            };
+            let mut framed = DeadlineStream::new(
+                &mut vsock,
+                Instant::now() + PREAMBLE_TIMEOUT,
+                "timed out waiting for the preamble",
+            );
             match negotiate(&mut framed)? {
                 Some(port) => port,
                 // negotiate already sent the ERR line.
@@ -375,7 +277,7 @@ mod imp {
             Err(e) => {
                 let reason = dial_error_reason(port, &e);
                 log::log(&format!("stream dial refused: {}", reason));
-                vsock.write_all(&err_line(&reason))?;
+                vsock.write_all(&wire::err_line(&reason))?;
                 vsock.flush()?;
                 return Ok(());
             }
@@ -445,12 +347,6 @@ mod tests {
         }
         fn written(&self) -> &str {
             std::str::from_utf8(&self.outbound).unwrap()
-        }
-        /// How many input bytes are left unread — the preamble reader must
-        /// leave the payload untouched for the splice.
-        fn unread(&self) -> Vec<u8> {
-            let pos = self.inbound.position() as usize;
-            self.inbound.get_ref()[pos..].to_vec()
         }
     }
 
@@ -542,40 +438,10 @@ mod tests {
         assert!(parse_preamble("TCP 8080").is_err());
     }
 
-    #[test]
-    fn reads_exactly_the_preamble_and_no_further() {
-        // The bytes after the newline belong to the spliced stream. If the
-        // reader buffers ahead they are lost, and every forwarded request
-        // arrives with its first bytes missing.
-        let mut conn = DuplexBuf::new(b"TCP 8080\nGET / HTTP/1.1\r\n\r\n");
-        let line = read_preamble_line(&mut conn, MAX_PREAMBLE_LEN).unwrap();
-        assert_eq!(line, "TCP 8080\n");
-        assert_eq!(conn.unread(), b"GET / HTTP/1.1\r\n\r\n".to_vec());
-    }
-
-    #[test]
-    fn a_line_longer_than_the_cap_is_rejected_rather_than_read_forever() {
-        let flood = vec![b'A'; 4096];
-        let mut conn = DuplexBuf::new(&flood);
-        let err = read_preamble_line(&mut conn, MAX_PREAMBLE_LEN).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-        // And it stopped at the cap instead of consuming the whole flood.
-        assert!(conn.inbound.position() as usize <= MAX_PREAMBLE_LEN);
-    }
-
-    #[test]
-    fn eof_before_a_newline_is_an_unexpected_eof() {
-        let mut conn = DuplexBuf::new(b"TCP 80");
-        let err = read_preamble_line(&mut conn, MAX_PREAMBLE_LEN).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
-    }
-
-    #[test]
-    fn non_utf8_input_is_rejected_without_panicking() {
-        let mut conn = DuplexBuf::new(&[0xff, 0xfe, b'\n']);
-        let err = read_preamble_line(&mut conn, MAX_PREAMBLE_LEN).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-    }
+    // The raw byte-at-a-time preamble reader's own tests (cap enforcement,
+    // EOF, UTF-8 validation, "stops exactly at the newline") now live with
+    // its implementation in `wire.rs`'s test module — `negotiate`'s tests
+    // below exercise it through this module's own protocol on top of that.
 
     #[test]
     fn negotiate_accepts_a_valid_preamble_and_writes_nothing_yet() {
@@ -601,7 +467,7 @@ mod tests {
     fn err_reasons_are_flattened_to_one_line() {
         // An OS error string with an embedded newline must not be able to
         // forge a second protocol frame.
-        let line = err_line("connection refused\nEXTRA\r\n");
+        let line = crate::wire::err_line("connection refused\nEXTRA\r\n");
         let text = String::from_utf8(line).unwrap();
         assert_eq!(text.matches('\n').count(), 1);
         assert!(text.starts_with("ERR "));
@@ -619,7 +485,7 @@ mod tests {
         // Backpressure at MAX_CONNECTIONS used to close the connection
         // without a word, which the host reports as a protocol violation. It
         // has to arrive as an ordinary, parseable ERR line instead.
-        let line = err_line(BUSY_REASON);
+        let line = crate::wire::err_line(BUSY_REASON);
         assert_eq!(line, b"ERR busy\n".to_vec());
         let text = String::from_utf8(line).unwrap();
         assert!(text.starts_with("ERR "));
@@ -642,7 +508,7 @@ mod tests {
             "connection refused on 127.0.0.1:8080 (no guest loopback listener)"
         );
         // Still one line once it is on the wire.
-        let line = String::from_utf8(err_line(&reason)).unwrap();
+        let line = String::from_utf8(crate::wire::err_line(&reason)).unwrap();
         assert_eq!(line.matches('\n').count(), 1);
         assert!(line.starts_with("ERR connection refused on 127.0.0.1:8080"));
     }

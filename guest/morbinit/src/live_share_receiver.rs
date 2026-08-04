@@ -96,9 +96,10 @@ mod imp {
     use crate::sha256::Sha256;
     use crate::shares::{MountState, ShareSpec};
     use crate::sys;
+    use crate::wire::{self, ConnGuard};
     use std::fmt;
     use std::fs::{self, File};
-    use std::io::{self, Read, Write};
+    use std::io::{self, Write};
     use std::os::fd::AsRawFd;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -122,23 +123,17 @@ mod imp {
     /// what happened before this existed.
     fn send_busy(mut connection: File) {
         let reply = busy_line();
-        match sys::poll_writable(connection.as_raw_fd(), BUSY_REPLY_TIMEOUT_MS) {
-            Ok(true) => {
-                if let Err(error) = connection
-                    .write_all(&reply)
-                    .and_then(|()| connection.flush())
-                {
-                    log::log(&format!(
-                        "could not send the live-share busy rejection: {}",
-                        error
-                    ));
-                }
-            }
-            Ok(false) => log::log(
+        match wire::send_best_effort(&mut connection, &reply, BUSY_REPLY_TIMEOUT_MS) {
+            wire::SendOutcome::Sent => {}
+            wire::SendOutcome::WriteFailed(error) => log::log(&format!(
+                "could not send the live-share busy rejection: {}",
+                error
+            )),
+            wire::SendOutcome::NotWritableInTime => log::log(
                 "live-share busy rejection could not be sent within its timeout — closing \
                  the connection instead",
             ),
-            Err(error) => log::log(&format!(
+            wire::SendOutcome::PollFailed(error) => log::log(&format!(
                 "could not poll a rejected live-share connection for writability: {} — \
                  closing it instead",
                 error
@@ -150,14 +145,6 @@ mod imp {
     struct ReceiverContext {
         mounted_shares: Vec<MountedShare>,
         boot_id: [u8; live_share::GUEST_BOOT_ID_BYTES],
-    }
-
-    struct ConnectionGuard(Arc<AtomicUsize>);
-
-    impl Drop for ConnectionGuard {
-        fn drop(&mut self) {
-            self.0.fetch_sub(1, Ordering::SeqCst);
-        }
     }
 
     /// Starts the one bounded data-plane listener.  Mount results are passed from
@@ -227,7 +214,7 @@ mod imp {
             let spawn = thread::Builder::new()
                 .name("live-share-conn".to_string())
                 .spawn(move || {
-                    let _guard = ConnectionGuard(live_for_thread);
+                    let _guard = ConnGuard::new(live_for_thread);
                     if let Err(error) = serve_connection(connection, &context_for_thread) {
                         log::log(&format!("live-share connection ended: {}", error));
                     }
@@ -553,38 +540,16 @@ mod imp {
     }
 
     fn read_line(connection: &mut File, cap: usize) -> io::Result<String> {
-        crate::dial::read_preamble_line(connection, cap)
+        crate::wire::read_preamble_line(connection, cap)
     }
 
     fn read_line_until(connection: &mut File, cap: usize, deadline: Instant) -> io::Result<String> {
-        struct DeadlineReader<'a> {
-            file: &'a mut File,
-            deadline: Instant,
-        }
-        impl Read for DeadlineReader<'_> {
-            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-                let remaining = self.deadline.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "live-share hello timed out",
-                    ));
-                }
-                let ms = remaining.as_millis().min(i32::MAX as u128) as i32;
-                if !sys::poll_readable(self.file.as_raw_fd(), ms)? {
-                    return Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "live-share hello timed out",
-                    ));
-                }
-                self.file.read(buffer)
-            }
-        }
-        crate::dial::read_preamble_line(
-            &mut DeadlineReader {
-                file: connection,
+        crate::wire::read_preamble_line(
+            &mut crate::wire::DeadlineStream::new(
+                connection,
                 deadline,
-            },
+                "live-share hello timed out",
+            ),
             cap,
         )
     }

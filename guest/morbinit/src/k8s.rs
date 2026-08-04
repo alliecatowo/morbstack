@@ -842,41 +842,6 @@ pub fn installed_digest_matches(name: &str, want: &str) -> bool {
     }
 }
 
-/// Read one `\n`-terminated line, one byte at a time.
-///
-/// Byte-at-a-time for the same reason as `dial.rs`: everything after the
-/// newline is payload, and a buffered read would swallow the first bytes of
-/// the file being installed.
-fn read_preamble<R: Read>(reader: &mut R) -> io::Result<String> {
-    let mut bytes = Vec::with_capacity(96);
-    let mut byte = [0u8; 1];
-    while bytes.len() < MAX_PREAMBLE_LEN {
-        match reader.read(&mut byte)? {
-            0 => {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "the host closed the install channel before sending a request",
-                ))
-            }
-            _ => {
-                if byte[0] == b'\n' {
-                    return Ok(String::from_utf8_lossy(&bytes).into_owned());
-                }
-                if byte[0] != b'\r' {
-                    bytes.push(byte[0]);
-                }
-            }
-        }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!(
-            "install request exceeded {} bytes with no newline",
-            MAX_PREAMBLE_LEN
-        ),
-    ))
-}
-
 fn write_line<W: Write>(writer: &mut W, line: &str) -> io::Result<()> {
     writer.write_all(line.as_bytes())?;
     writer.write_all(b"\n")?;
@@ -890,7 +855,7 @@ fn write_line<W: Write>(writer: &mut W, line: &str) -> io::Result<()> {
 /// on the disk — is exercised by unit tests on the macOS dev host with an
 /// in-memory stream.
 pub fn handle_install_connection<S: Read + Write>(conn: &mut S, state: &K8sState) {
-    let line = match read_preamble(conn) {
+    let line = match crate::wire::read_install_preamble_line(conn, MAX_PREAMBLE_LEN) {
         Ok(l) => l,
         Err(e) => {
             log::log(&format!("k8s install: {}", e));
@@ -1181,7 +1146,7 @@ default       broken                          0/1   CrashLoopBackOff   6   4m
     #[test]
     fn a_preamble_with_no_newline_is_bounded() {
         let mut input = std::io::Cursor::new(vec![b'A'; MAX_PREAMBLE_LEN * 4]);
-        assert!(read_preamble(&mut input).is_err());
+        assert!(crate::wire::read_install_preamble_line(&mut input, MAX_PREAMBLE_LEN).is_err());
     }
 
     // ---- enable-state persistence -----------------------------------------

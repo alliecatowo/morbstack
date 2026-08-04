@@ -63,6 +63,7 @@ mod sha256;
 mod shares;
 mod supervisor;
 mod sys;
+mod wire;
 
 #[cfg(target_os = "linux")]
 use std::sync::atomic::AtomicBool;

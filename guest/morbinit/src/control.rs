@@ -742,20 +742,17 @@ const BUSY_REPLY_TIMEOUT_MS: i32 = 250;
 /// happened before this existed.
 #[cfg(target_os = "linux")]
 fn send_busy(mut conn: std::fs::File) {
-    use std::os::fd::AsRawFd;
-
     let reply = busy_frame();
-    match crate::sys::poll_writable(conn.as_raw_fd(), BUSY_REPLY_TIMEOUT_MS) {
-        Ok(true) => {
-            if let Err(e) = conn.write_all(&reply).and_then(|()| conn.flush()) {
-                log::log(&format!("could not send the control busy rejection: {}", e));
-            }
+    match crate::wire::send_best_effort(&mut conn, &reply, BUSY_REPLY_TIMEOUT_MS) {
+        crate::wire::SendOutcome::Sent => {}
+        crate::wire::SendOutcome::WriteFailed(e) => {
+            log::log(&format!("could not send the control busy rejection: {}", e))
         }
-        Ok(false) => log::log(
+        crate::wire::SendOutcome::NotWritableInTime => log::log(
             "control busy rejection could not be sent within its timeout — closing the \
              connection instead",
         ),
-        Err(e) => log::log(&format!(
+        crate::wire::SendOutcome::PollFailed(e) => log::log(&format!(
             "could not poll a rejected control connection for writability: {} — closing \
              it instead",
             e
@@ -765,14 +762,8 @@ fn send_busy(mut conn: std::fs::File) {
 
 #[cfg(target_os = "linux")]
 fn accept_loop(listener: crate::sys::VsockListener, ctx: Arc<ControlContext>) {
+    use crate::wire::ConnGuard;
     use std::sync::atomic::AtomicUsize;
-
-    struct ConnGuard(Arc<AtomicUsize>);
-    impl Drop for ConnGuard {
-        fn drop(&mut self) {
-            self.0.fetch_sub(1, Ordering::SeqCst);
-        }
-    }
 
     let live = Arc::new(AtomicUsize::new(0));
     loop {
@@ -804,7 +795,7 @@ fn accept_loop(listener: crate::sys::VsockListener, ctx: Arc<ControlContext>) {
         let spawned = std::thread::Builder::new()
             .name("control-conn".to_string())
             .spawn(move || {
-                let _guard = ConnGuard(live_for_thread);
+                let _guard = ConnGuard::new(live_for_thread);
                 // Never powers off from this thread: `handle_connection`
                 // hands the request to the supervisor loop, which stops
                 // services in a defined order and then cuts the power.

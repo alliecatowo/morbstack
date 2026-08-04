@@ -96,6 +96,17 @@ pub struct Hello {
 /// accepts `HostToGuest`; outbound guest changes require their own separate
 /// authenticated sender and never re-enter this receive path.
 #[derive(Clone, Copy, PartialEq, Eq)]
+// `GuestToHost` is deliberately never constructed here. It is part of the WIRE
+// vocabulary, not of this receiver: a record's direction is a protocol field
+// both ends must agree on, and the receiver's whole security posture is that it
+// accepts HostToGuest and nothing else. Deleting the variant to satisfy
+// dead-code analysis would make the enum a lie about the protocol and would
+// silently turn "we reject the other direction" into "the other direction is
+// unrepresentable", which is a different and weaker guarantee.
+#[allow(
+    dead_code,
+    reason = "wire vocabulary; the receiver only ever accepts HostToGuest"
+)]
 pub enum Direction {
     HostToGuest,
     GuestToHost,

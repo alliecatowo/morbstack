@@ -34,49 +34,6 @@ const PREAMBLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10)
 #[cfg(target_os = "linux")]
 const BUSY_REPLY_TIMEOUT_MS: i32 = 250;
 
-pub fn err_line(reason: &str) -> Vec<u8> {
-    let mut out = String::with_capacity(reason.len() + 5);
-    out.push_str("ERR ");
-    for c in reason.chars() {
-        out.push(if c == '\n' || c == '\r' { ' ' } else { c });
-    }
-    out.push('\n');
-    out.into_bytes()
-}
-
-/// Reads a line one byte at a time. There is no buffered reader here: anything
-/// after the newline is the first four-byte frame header and must remain unread.
-pub fn read_preamble_line<R: Read>(reader: &mut R, max: usize) -> io::Result<String> {
-    let mut bytes = Vec::with_capacity(16);
-    let mut byte = [0u8; 1];
-    loop {
-        if bytes.len() >= max {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("no newline within the first {} bytes", max),
-            ));
-        }
-        match reader.read(&mut byte) {
-            Ok(0) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "connection closed before the preamble was complete",
-                ))
-            }
-            Ok(_) => {
-                bytes.push(byte[0]);
-                if byte[0] == b'\n' {
-                    break;
-                }
-            }
-            Err(ref error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error),
-        }
-    }
-    String::from_utf8(bytes)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "preamble is not valid UTF-8"))
-}
-
 pub fn parse_preamble(line: &str) -> Result<u16, String> {
     let body = line
         .strip_suffix('\n')
@@ -98,11 +55,11 @@ pub fn parse_preamble(line: &str) -> Result<u16, String> {
 }
 
 pub fn negotiate<S: Read + Write>(conn: &mut S) -> io::Result<Option<u16>> {
-    let line = read_preamble_line(conn, MAX_PREAMBLE_LEN)?;
+    let line = crate::wire::read_preamble_line(conn, MAX_PREAMBLE_LEN)?;
     match parse_preamble(&line) {
         Ok(port) => Ok(Some(port)),
         Err(reason) => {
-            conn.write_all(&err_line(&reason))?;
+            conn.write_all(&crate::wire::err_line(&reason))?;
             conn.flush()?;
             Ok(None)
         }
@@ -175,58 +132,19 @@ pub fn read_frame<R: Read>(reader: &mut R) -> io::Result<Option<Vec<u8>>> {
 #[cfg(target_os = "linux")]
 mod imp {
     use super::{
-        err_line, negotiate, read_frame, write_frame, BUSY_REASON, BUSY_REPLY_TIMEOUT_MS,
-        DIAL_ADDR, MAX_CONNECTIONS, MAX_DATAGRAM_BYTES, OK_LINE, PREAMBLE_TIMEOUT,
-        VSOCK_DATAGRAM_DIAL_PORT,
+        negotiate, read_frame, write_frame, BUSY_REASON, BUSY_REPLY_TIMEOUT_MS, DIAL_ADDR,
+        MAX_CONNECTIONS, MAX_DATAGRAM_BYTES, OK_LINE, PREAMBLE_TIMEOUT, VSOCK_DATAGRAM_DIAL_PORT,
     };
     use crate::log;
     use crate::sys;
-    use std::io::{self, Read, Write};
+    use crate::wire::{self, ConnGuard, DeadlineStream};
+    use std::io::{self, Write};
     use std::net::UdpSocket;
     use std::os::fd::AsRawFd;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::thread;
     use std::time::{Duration, Instant};
-
-    struct ConnGuard(Arc<AtomicUsize>);
-    impl Drop for ConnGuard {
-        fn drop(&mut self) {
-            self.0.fetch_sub(1, Ordering::SeqCst);
-        }
-    }
-
-    struct DeadlineStream<'a> {
-        file: &'a mut std::fs::File,
-        deadline: Instant,
-    }
-    impl Read for DeadlineStream<'_> {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            let remaining = self.deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "timed out waiting for the preamble",
-                ));
-            }
-            let milliseconds = std::cmp::min(remaining.as_millis(), i32::MAX as u128) as i32;
-            if !sys::poll_readable(self.file.as_raw_fd(), milliseconds)? {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "timed out waiting for the preamble",
-                ));
-            }
-            self.file.read(buf)
-        }
-    }
-    impl Write for DeadlineStream<'_> {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.file.write(buf)
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            self.file.flush()
-        }
-    }
 
     pub fn spawn_datagram_dialer() -> io::Result<()> {
         let listener = sys::VsockListener::bind(VSOCK_DATAGRAM_DIAL_PORT)?;
@@ -260,7 +178,7 @@ mod imp {
             let spawned = thread::Builder::new()
                 .name("datagram-dial-conn".to_string())
                 .spawn(move || {
-                    let _guard = ConnGuard(live_for_thread);
+                    let _guard = ConnGuard::new(live_for_thread);
                     if let Err(error) = handle_connection(conn) {
                         log::log(&format!("datagram dial connection ended: {}", error));
                     }
@@ -275,22 +193,28 @@ mod imp {
         }
     }
 
+    /// Best-effort `ERR busy\n` on a connection about to be refused.
+    ///
+    /// Unlike every sibling `send_busy` (`dial`, `proxy`, `live_share_receiver`,
+    /// `control`), this one does not log on a timeout or a poll/write
+    /// failure — it only ever tries once, silently, and moves on either way.
+    /// That is the behavior this had before this extraction; preserved
+    /// as-is rather than made consistent with the others, since silencing it
+    /// or adding logging here would be an observable behavior change this
+    /// refactor is not supposed to make. See the refactor report for the
+    /// divergence.
     fn send_busy(mut conn: std::fs::File) {
-        let reply = err_line(BUSY_REASON);
-        if matches!(
-            sys::poll_writable(conn.as_raw_fd(), BUSY_REPLY_TIMEOUT_MS),
-            Ok(true)
-        ) {
-            let _ = conn.write_all(&reply).and_then(|()| conn.flush());
-        }
+        let reply = wire::err_line(BUSY_REASON);
+        let _ = wire::send_best_effort(&mut conn, &reply, BUSY_REPLY_TIMEOUT_MS);
     }
 
     fn handle_connection(mut vsock: std::fs::File) -> io::Result<()> {
         let port = {
-            let mut framed = DeadlineStream {
-                file: &mut vsock,
-                deadline: Instant::now() + PREAMBLE_TIMEOUT,
-            };
+            let mut framed = DeadlineStream::new(
+                &mut vsock,
+                Instant::now() + PREAMBLE_TIMEOUT,
+                "timed out waiting for the preamble",
+            );
             match negotiate(&mut framed)? {
                 Some(port) => port,
                 None => return Ok(()),
@@ -303,7 +227,7 @@ mod imp {
         if let Err(error) = udp.connect((DIAL_ADDR, port)) {
             let reason = format!("dial UDP {}:{}: {}", DIAL_ADDR, port, error);
             log::log(&format!("datagram dial refused: {}", reason));
-            vsock.write_all(&err_line(&reason))?;
+            vsock.write_all(&wire::err_line(&reason))?;
             vsock.flush()?;
             return Ok(());
         }
