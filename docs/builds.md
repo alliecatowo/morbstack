@@ -32,6 +32,22 @@ Morbstack's Builds route has two deliberately separate pieces of Docker state:
   invoke the person's `~/.docker` credential helpers; consequently, a Dockerfile that
   needs to pull a private base image can fail until a separate explicit credentials
   design is implemented.
+- **The active builder** is a separate, explicitly requested Buildx inspection. Its
+  system sheet never calls `docker buildx ls`: Docker documents that command as listing
+  every builder and node, and the bundled Buildx implementation loads each configured
+  node to obtain its status. A modified app-owned configuration could therefore make a
+  seemingly read-only inventory contact a remote endpoint. The sheet instead reports
+  only `docker buildx inspect --timeout=10s`, without `--bootstrap`, from a History
+  refresh or when the person chooses **Check Active Builder**. It offers one confirmed
+  recovery command, `docker buildx use default`, in Morbstack's private Buildx configuration and local
+  socket. Docker documents `use` as selecting the builder for later builds; Morbstack
+  passes neither `--default` nor `--global`, and never lists/selects remote builders,
+  creates/removes builders, starts a builder, inherits a shell Docker context, or uses
+  Build Cloud. If someone has manually changed Morbstack's private configuration to
+  select a remote builder, the explicit inspection can contact that one selected builder
+  while obtaining its reported state; the app still never fans out to every stored
+  builder. A successful reset refreshes the Buildx history and active-builder facts that
+  the route displays.
 
 ## Progress, cancellation, and recovery
 
@@ -69,9 +85,20 @@ replicas, or progress dashboard. Build setup is a system sheet with a `Form` and
 picker; active work is an ordinary `ProgressView`; cache pruning and build execution have
 explicit confirmation/recovery states.
 
+Active-builder management follows the same task-shaped vocabulary: a secondary native
+toolbar command opens a document-modal `Form` for scalar builder and node facts, while
+an unqueried or failed check uses `ContentUnavailableView` with the next safe action.
+The one state-changing local-default recovery has a native confirmation dialog and a
+standard error/retry alert; simply opening the sheet has no Buildx side effect.
+
 This follows Apple’s [Lists and tables](https://developer.apple.com/design/human-interface-guidelines/lists-and-tables),
 [Toolbars](https://developer.apple.com/design/human-interface-guidelines/toolbars),
+[Sheets](https://developer.apple.com/design/human-interface-guidelines/sheets),
+[Form](https://developer.apple.com/documentation/swiftui/form),
 [ProgressView](https://developer.apple.com/documentation/swiftui/progressview), and
 [ContentUnavailableView](https://developer.apple.com/documentation/swiftui/contentunavailableview)
-guidance. Real-window visual validation remains a serialized integration task; this
-source change was intentionally not used to start the engine or execute a build.
+guidance, plus Docker’s [builder inventory](https://docs.docker.com/reference/cli/docker/buildx/ls/),
+[builder selection](https://docs.docker.com/reference/cli/docker/buildx/use/), and
+[builder-management](https://docs.docker.com/build/builders/manage/) documentation.
+Real-window visual validation remains a serialized integration task; this source change
+was intentionally not used to start the engine, change a builder, or execute a build.

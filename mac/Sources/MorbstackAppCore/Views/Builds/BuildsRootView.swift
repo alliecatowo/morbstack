@@ -190,6 +190,13 @@ struct BuildsRootView: View {
     @State private var buildPhase: BuildSheetPhase = .configuration
     @State private var buildEvents: [BuildProgressEvent] = []
     @State private var buildTask: Task<Void, Never>?
+    @State private var showsBuilderSheet = false
+    @State private var builderSheetState: BuildxCurrentBuilderLoadState = .idle
+    @State private var builderSheetBuilder: BuildxCurrentBuilder?
+    @State private var builderSheetTask: Task<Void, Never>?
+    @State private var isSelectingMorbstackDefaultBuilder = false
+    @State private var showsDefaultBuilderConfirmation = false
+    @State private var defaultBuilderError: String?
 
     private var records: [BuildCacheRecord] { model.buildCache }
 
@@ -303,6 +310,9 @@ struct BuildsRootView: View {
             .sheet(isPresented: $showsBuildSheet, onDismiss: resetBuildSheetIfIdle) {
                 buildSheet
             }
+            .sheet(isPresented: $showsBuilderSheet, onDismiss: cancelActiveBuilderInspection) {
+                builderSheet
+            }
             .fileImporter(
                 isPresented: $showsContextPicker,
                 allowedContentTypes: [.folder],
@@ -400,6 +410,7 @@ struct BuildsRootView: View {
                 buildTask?.cancel()
                 historyDetailTask?.cancel()
                 historyLogTask?.cancel()
+                cancelActiveBuilderInspection()
             }
     }
 
@@ -444,6 +455,16 @@ struct BuildsRootView: View {
             .accessibilityLabel(scope == .cache ? "Refresh build cache" : "Refresh Buildx history")
             .help(scope == .cache ? "Refresh the BuildKit cache records" : "Refresh completed builds reported by Buildx")
             .disabled(isRefreshingCurrentScope || isPruning)
+        }
+        ToolbarItem(id: "builds.builder", placement: .secondaryAction) {
+            Button {
+                openBuilderSheet()
+            } label: {
+                Image(systemName: "hammer")
+            }
+            .accessibilityLabel("View active Buildx builder")
+            .help("View the active Buildx builder")
+            .disabled(isBuilding || isSelectingMorbstackDefaultBuilder)
         }
         if scope == .cache {
             ToolbarItem(id: "builds.prune", placement: .secondaryAction) {
@@ -1153,6 +1174,219 @@ struct BuildsRootView: View {
 
     private var searchPrompt: String {
         scope == .cache ? "Description, type, ID" : "Name, status, ID"
+    }
+
+    // MARK: Active builder
+
+    /// Builder listing is intentionally not an app feature. Docker documents
+    /// `buildx ls` as loading every configured builder node; the bundled v0.36
+    /// implementation does that concurrently, so an app-owned configuration changed
+    /// outside Morbstack could make a seemingly read-only inventory contact a remote
+    /// endpoint. This sheet reports only one explicitly requested active-builder
+    /// inspection and offers the fixed local-default recovery below.
+    private var builderSheet: some View {
+        NavigationStack {
+            Group {
+                switch builderSheetState {
+                case .idle:
+                    ContentUnavailableView {
+                        Label("Active Builder Not Checked", systemImage: "hammer")
+                    } description: {
+                        Text("Check the builder used by Morbstack’s next local build. Morbstack does not enumerate or select remote builders; if its private configuration was manually changed, Buildx may contact only that configured active builder.")
+                    } actions: {
+                        Button("Check Active Builder") { inspectActiveBuilder() }
+                            .disabled(isHistoryRefreshing || isBuilding)
+                        Button("Use Morbstack Default Builder…") {
+                            showsDefaultBuilderConfirmation = true
+                        }
+                        .disabled(isSelectingMorbstackDefaultBuilder || isHistoryRefreshing || isBuilding)
+                    }
+                case .loading:
+                    ContentUnavailableView {
+                        Label("Checking Active Builder", systemImage: "hammer")
+                    } description: {
+                        Text("Morbstack is reading Buildx without the bootstrap flag, so opening this view does not start a builder.")
+                    } actions: {
+                        ProgressView()
+                            .controlSize(.small)
+                            .accessibilityLabel("Checking active Buildx builder")
+                    }
+                case .loaded:
+                    if let builder = builderSheetBuilder {
+                        builderDetailsForm(builder)
+                    } else {
+                        ContentUnavailableView(
+                            "Active Builder Unavailable",
+                            systemImage: "exclamationmark.triangle",
+                            description: Text("Buildx did not provide a builder record Morbstack can show."))
+                    }
+                case .unavailable(let detail):
+                    ContentUnavailableView {
+                        Label("Active Builder Unavailable", systemImage: "exclamationmark.triangle")
+                    } description: {
+                        Text(detail)
+                    } actions: {
+                        Button("Try Again") { inspectActiveBuilder() }
+                            .disabled(isHistoryRefreshing || isBuilding)
+                        Button("Use Morbstack Default Builder…") {
+                            showsDefaultBuilderConfirmation = true
+                        }
+                        .disabled(isSelectingMorbstackDefaultBuilder || isHistoryRefreshing || isBuilding)
+                    }
+                }
+            }
+            .navigationTitle("Active Builder")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { showsBuilderSheet = false }
+                        .disabled(isSelectingMorbstackDefaultBuilder)
+                }
+            }
+            .confirmationDialog(
+                "Use Morbstack’s Default Builder?",
+                isPresented: $showsDefaultBuilderConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button("Use Local Builder") {
+                    Task { await useMorbstackDefaultBuilder() }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text(
+                    "Morbstack will run its bundled docker buildx use default command with the app’s "
+                        + "private Buildx configuration and local Unix socket. This changes only the builder "
+                        + "used by later Morbstack builds. It does not start or restart the engine or a builder, "
+                        + "create or remove builders, use a shell Docker context, or connect Build Cloud.")
+            }
+            .alert(
+                "Couldn’t Use Morbstack’s Default Builder",
+                isPresented: Binding(
+                    get: { defaultBuilderError != nil },
+                    set: { if !$0 { defaultBuilderError = nil } })
+            ) {
+                Button("Try Again") {
+                    defaultBuilderError = nil
+                    showsDefaultBuilderConfirmation = true
+                }
+                Button("Cancel", role: .cancel) { defaultBuilderError = nil }
+            } message: {
+                Text(defaultBuilderError ?? "")
+            }
+        }
+        .frame(minWidth: 520, minHeight: 360)
+        .interactiveDismissDisabled(isSelectingMorbstackDefaultBuilder)
+    }
+
+    private func builderDetailsForm(_ builder: BuildxCurrentBuilder) -> some View {
+        Form {
+            Section("Active Builder") {
+                LabeledContent("Name", value: builder.name)
+                if let driver = builder.driver { LabeledContent("Driver", value: driver) }
+                if let lastActivity = builder.lastActivity {
+                    LabeledContent("Last Activity", value: lastActivity)
+                }
+            }
+            if !builder.nodes.isEmpty {
+                Section("Builder Nodes") {
+                    ForEach(builder.nodes) { node in
+                        LabeledContent(node.name) {
+                            Text(node.reportedFacts ?? "No state reported")
+                                .textSelection(.enabled)
+                                .lineLimit(3)
+                        }
+                    }
+                }
+            }
+            Section {
+                Button("Check Active Builder") { inspectActiveBuilder() }
+                    .disabled(isSelectingMorbstackDefaultBuilder || isHistoryRefreshing || isBuilding)
+            }
+            Section("Morbstack Scope") {
+                LabeledContent("Docker endpoint", value: "Morbstack local socket")
+                LabeledContent("Buildx configuration", value: "Morbstack-managed")
+                Text("This check uses Morbstack’s bundled Docker and Buildx tools. It does not inherit a shell Docker context, credential helper, or builder selection. If this private configuration was manually changed to select a remote builder, Buildx may contact that one active builder while reporting its state.")
+                    .foregroundStyle(.secondary)
+            }
+            Section("Builder Selection") {
+                Text("Morbstack offers only its local default builder. It does not list or select remote builders, create or remove builders, start a builder, or connect Build Cloud.")
+                    .foregroundStyle(.secondary)
+                Button("Use Morbstack Default Builder…") {
+                    showsDefaultBuilderConfirmation = true
+                }
+                .disabled(isSelectingMorbstackDefaultBuilder || isBuilding || isHistoryRefreshing)
+            }
+        }
+        .formStyle(.automatic)
+    }
+
+    @MainActor
+    private func openBuilderSheet() {
+        if case .loaded = model.buildxCurrentBuilderState,
+           let builder = model.buildxCurrentBuilder
+        {
+            builderSheetBuilder = builder
+            builderSheetState = .loaded
+        } else {
+            builderSheetBuilder = nil
+            builderSheetState = .idle
+        }
+        showsBuilderSheet = true
+    }
+
+    @MainActor
+    private func inspectActiveBuilder() {
+        guard !isSelectingMorbstackDefaultBuilder else { return }
+        builderSheetTask?.cancel()
+        builderSheetState = .loading
+        builderSheetBuilder = nil
+        let socketPath = MorbPaths.dockerSocket.path
+        builderSheetTask = Task { @MainActor [socketPath] in
+            do {
+                let builder = try await BuildxHistoryClient.currentBuilder(socketPath: socketPath)
+                guard !Task.isCancelled else { return }
+                builderSheetBuilder = builder
+                builderSheetState = .loaded
+            } catch is CancellationError {
+                guard !Task.isCancelled else { return }
+                builderSheetState = .idle
+            } catch {
+                guard !Task.isCancelled else { return }
+                builderSheetState = .unavailable(MorbErrorMessage.text(for: error))
+            }
+            if !Task.isCancelled {
+                builderSheetTask = nil
+            }
+        }
+    }
+
+    @MainActor
+    private func cancelActiveBuilderInspection() {
+        builderSheetTask?.cancel()
+        builderSheetTask = nil
+        if case .loading = builderSheetState {
+            builderSheetState = .idle
+        }
+    }
+
+    @MainActor
+    private func useMorbstackDefaultBuilder() async {
+        guard !isSelectingMorbstackDefaultBuilder, !isBuilding, !isHistoryRefreshing else { return }
+        cancelActiveBuilderInspection()
+        isSelectingMorbstackDefaultBuilder = true
+        defaultBuilderError = nil
+        defer { isSelectingMorbstackDefaultBuilder = false }
+
+        do {
+            try await BuildxHistoryClient.useMorbstackDefaultBuilder(
+                socketPath: MorbPaths.dockerSocket.path)
+            await model.refreshBuildHistory()
+            builderSheetBuilder = model.buildxCurrentBuilder
+            builderSheetState = model.buildxCurrentBuilderState
+        } catch is CancellationError {
+            builderSheetState = .idle
+        } catch {
+            defaultBuilderError = MorbErrorMessage.text(for: error)
+        }
     }
 
     // MARK: Local build workflow

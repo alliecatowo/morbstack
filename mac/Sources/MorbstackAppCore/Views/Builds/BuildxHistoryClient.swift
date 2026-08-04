@@ -1,7 +1,8 @@
 // Copyright 2026 The Morbstack Authors.
 // Licensed under the Apache License, Version 2.0 (the "License").
 //
-// A narrow, read-only wrapper around Buildx's active-builder history.
+// A narrow wrapper around Buildx's active-builder history and one explicitly
+// confirmed local-builder recovery command.
 //
 // This is intentionally separate from Docker Engine's `/system/df` cache endpoint.
 // The latter cannot identify individual completed builds. Buildx documents
@@ -46,6 +47,16 @@ enum BuildxHistoryClientError: LocalizedError {
 /// display command from silently querying a person's remote Docker context.
 enum BuildxHistoryClient {
 
+    /// The only builder-selection command Morbstack exposes.
+    ///
+    /// It deliberately names Buildx's implicit `default` builder and omits both
+    /// `--default` and `--global`. With ``BuildxClientEnvironment`` this updates only
+    /// Morbstack's private Buildx configuration for its local Unix socket; it neither
+    /// reads a shell's builder selection nor creates, starts, removes, or connects a
+    /// remote builder. Keep the argument list directly testable so later UI work
+    /// cannot quietly broaden this recovery action.
+    static let morbstackDefaultBuilderArguments = ["buildx", "use", "default"]
+
     /// Reads the identity and current node state of the active Buildx builder.
     ///
     /// `buildx inspect` is deliberately invoked without `--bootstrap`: Docker
@@ -70,6 +81,28 @@ enum BuildxHistoryClient {
                 "Buildx builder inspection returned more data than Morbstack can safely display.")
         }
         return try decodeCurrentBuilder(output.stdout)
+    }
+
+    /// Restores Buildx's implicit local builder for later Morbstack builds.
+    ///
+    /// This command is never run while opening a view. Its caller must collect an
+    /// explicit confirmation and re-read Buildx afterwards. Docker documents
+    /// `buildx use` as selecting the builder used by subsequent builds; unlike
+    /// `buildx inspect --bootstrap`, it has no builder-start flag.
+    static func useMorbstackDefaultBuilder(socketPath: String) async throws {
+        guard let docker = MorbCliPlugins.sourceDockerCLI() else {
+            throw BuildxHistoryClientError.dockerCLIMissing
+        }
+        guard let buildx = MorbCliPlugins.sourceBinary(for: MorbCliPlugins.buildx) else {
+            throw BuildxHistoryClientError.buildxPluginMissing
+        }
+
+        _ = try await BuildxHistoryCommand(
+            docker: docker,
+            buildx: buildx,
+            socketPath: socketPath,
+            arguments: morbstackDefaultBuilderArguments)
+            .run()
     }
 
     static func list(socketPath: String) async throws -> [BuildxHistoryRecord] {
