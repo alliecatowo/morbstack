@@ -226,6 +226,41 @@ final class StatsStreamDecoderTests: XCTestCase {
 
 final class PortMappingTests: XCTestCase {
 
+    func testBrowserAddressUsesOnlyTheReportedIPv4LoopbackTCPBinding() {
+        let port = PortMapping(hostIP: "127.0.0.1", hostPort: 8080, containerPort: 80, proto: "TCP")
+        XCTAssertEqual(port.browserAddress?.absoluteString, "http://127.0.0.1:8080")
+        XCTAssertNil(port.browserAddressUnavailableReason)
+    }
+
+    func testBrowserAddressUsesURLComponentsForIPv6Loopback() {
+        let port = PortMapping(hostIP: "::1", hostPort: 8080, containerPort: 80, proto: "tcp")
+        XCTAssertEqual(port.browserAddress?.absoluteString, "http://[::1]:8080")
+        XCTAssertNil(port.browserAddressUnavailableReason)
+    }
+
+    func testBrowserAddressRejectsMappingsWithoutATrustworthyLoopbackDestination() {
+        let wildcard = PortMapping(hostIP: "0.0.0.0", hostPort: 8080, containerPort: 80, proto: "tcp")
+        XCTAssertNil(wildcard.browserAddress)
+        XCTAssertEqual(
+            wildcard.browserAddressUnavailableReason,
+            "Browser actions require a literal loopback binding; Docker reported 0.0.0.0.")
+
+        let lan = PortMapping(hostIP: "192.168.1.40", hostPort: 8080, containerPort: 80, proto: "tcp")
+        XCTAssertNil(lan.browserAddress)
+
+        let udp = PortMapping(hostIP: "127.0.0.1", hostPort: 53, containerPort: 53, proto: "udp")
+        XCTAssertNil(udp.browserAddress)
+        XCTAssertEqual(udp.browserAddressUnavailableReason, "Browser actions require a TCP mapping.")
+
+        let unpublished = PortMapping(hostIP: nil, hostPort: nil, containerPort: 80, proto: "tcp")
+        XCTAssertNil(unpublished.browserAddress)
+        XCTAssertEqual(unpublished.browserAddressUnavailableReason, "No host port was reported.")
+
+        let invalid = PortMapping(hostIP: "127.0.0.1", hostPort: 0, containerPort: 80, proto: "tcp")
+        XCTAssertNil(invalid.browserAddress)
+        XCTAssertEqual(invalid.browserAddressUnavailableReason, "Docker reported an invalid host port.")
+    }
+
     func testPublishedTCPPortGetsALoopbackURL() {
         let port = PortMapping(hostIP: "0.0.0.0", hostPort: 8080, containerPort: 80, proto: "tcp")
         XCTAssertEqual(port.url?.absoluteString, "http://127.0.0.1:8080")

@@ -8,7 +8,7 @@
 // record command set lives in the native contextual menu rather than becoming controls
 // embedded in every row or a hand-made toolbar overflow.
 
-import AppKit
+import Foundation
 import MorbstackKit
 import SwiftUI
 
@@ -17,6 +17,8 @@ import SwiftUI
 struct ContainersRootView: View {
 
     let model: AppModel
+
+    @Environment(\.openURL) private var openURL
 
     init(
         model: AppModel,
@@ -316,11 +318,37 @@ struct ContainersRootView: View {
         Button("Copy Name") { MorbPasteboard.copy(container.displayName) }
         Button("Copy Container ID") { MorbPasteboard.copy(container.id) }
         Button("Copy Image") { MorbPasteboard.copy(container.image) }
-        if let url = container.ports.compactMap(\.url).first {
-            Button("Open in Browser…") { NSWorkspace.shared.open(url) }
+        let addresses = browserAddresses(for: container)
+        if addresses.count == 1, let address = addresses.first {
+            Divider()
+            browserAddressActionItems(for: address)
+        } else if !addresses.isEmpty {
+            Divider()
+            Menu("Published Addresses") {
+                ForEach(addresses, id: \.absoluteString) { address in
+                    Menu(address.absoluteString) {
+                        browserAddressActionItems(for: address)
+                    }
+                }
+            }
         }
         Divider()
         Button("Remove…", role: .destructive) { removalTarget = container }
+    }
+
+    /// Preserve Docker's individual bindings while keeping the contextual menu's
+    /// multi-address order deterministic. Only `PortMapping.browserAddress` is
+    /// eligible, so no wildcard, LAN, UDP, host-network, or incomplete mapping gets
+    /// a deceptively concrete browser command.
+    private func browserAddresses(for container: ContainerSummary) -> [URL] {
+        Array(Set(container.ports.compactMap(\.browserAddress)))
+            .sorted { $0.absoluteString.localizedStandardCompare($1.absoluteString) == .orderedAscending }
+    }
+
+    @ViewBuilder
+    private func browserAddressActionItems(for address: URL) -> some View {
+        Button("Copy Address") { MorbPasteboard.copy(address.absoluteString) }
+        Button("Open in Browser") { openURL(address) }
     }
 
     private var engineEmptyState: some View {

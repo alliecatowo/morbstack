@@ -6,6 +6,7 @@
 // Containers route owns the operational table. There are no dashboard cards, chips,
 // nested scroll views, or miniature tables here.
 
+import Foundation
 import MorbstackKit
 import SwiftUI
 
@@ -17,6 +18,8 @@ struct ContainerOverviewTab: View {
     let errorText: String?
     var fileSharing: MorbShareSurface.Report = .empty
     var onRetry: (() -> Void)?
+
+    @Environment(\.openURL) private var openURL
 
     @State private var envQuery = ""
     @State private var revealed: Set<Int> = []
@@ -239,27 +242,47 @@ struct ContainerOverviewTab: View {
 
     @ViewBuilder
     private var portsSection: some View {
-        Section("Ports") {
+        Section {
             if container.ports.isEmpty {
                 Text("No published ports reported for this container.")
                     .foregroundStyle(.secondary)
             } else {
                 ForEach(container.ports) { port in
                     LabeledContent(port.containerDisplay) {
-                        HStack(spacing: 8) {
+                        VStack(alignment: .leading, spacing: 4) {
                             Text(port.hostDisplay ?? "Not Published")
                                 .font(.system(.body, design: .monospaced))
                                 .foregroundStyle(port.hostPort == nil ? .secondary : .primary)
-                            if let url = port.url {
-                                Link("Open", destination: url)
-                                    .accessibilityLabel("Open \(url.absoluteString)")
-                                    .help("Open \(url.absoluteString)")
+                            if let address = port.browserAddress {
+                                HStack(spacing: 8) {
+                                    Text(address.absoluteString)
+                                        .font(.system(.body, design: .monospaced))
+                                        .textSelection(.enabled)
+                                    browserAddressActions(for: address)
+                                }
+                            } else if let reason = port.browserAddressUnavailableReason {
+                                Text(reason)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
                             }
                         }
                     }
                 }
             }
+        } header: {
+            Text("Ports")
+        } footer: {
+            Text("Browser actions use only Docker-reported TCP bindings on literal loopback addresses and open an HTTP address. Morbstack does not probe the service.")
         }
+    }
+
+    private func browserAddressActions(for address: URL) -> some View {
+        Menu("Address Actions") {
+            Button("Copy Address") { MorbPasteboard.copy(address.absoluteString) }
+            Button("Open in Browser") { openURL(address) }
+        }
+        .accessibilityLabel("Address actions for \(address.absoluteString)")
+        .help("Copy or open \(address.absoluteString)")
     }
 
     @ViewBuilder

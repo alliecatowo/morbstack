@@ -412,6 +412,51 @@ struct PortMapping: Hashable, Sendable, Identifiable {
         return URL(string: "http://127.0.0.1:\(hostPort)")
     }
 
+    /// A browser address only when Docker reported one literal loopback TCP binding.
+    ///
+    /// `url` predates the selected-container address actions and reflects
+    /// Morbstack's forwarding assumption. Those actions are intentionally stricter:
+    /// they must not turn a wildcard/LAN, host-network, UDP, incomplete, or malformed
+    /// Docker mapping into a plausible browser destination. The URL is derived from
+    /// the exact reported loopback host and port, using HTTP as the explicit browser
+    /// scheme; it is an address to try, not a health or protocol probe.
+    var browserAddress: URL? {
+        guard let hostIP = browserAddressHost,
+              let hostPort,
+              (1...65_535).contains(hostPort),
+              proto.caseInsensitiveCompare("tcp") == .orderedSame
+        else { return nil }
+
+        var components = URLComponents()
+        components.scheme = "http"
+        components.host = hostIP
+        components.port = hostPort
+        return components.url
+    }
+
+    /// The factual reason selected-container browser actions are unavailable.
+    /// This is deliberately not a service diagnosis: it describes only the mapping
+    /// Docker reported, and never attempts a connection.
+    var browserAddressUnavailableReason: String? {
+        guard browserAddress == nil else { return nil }
+        guard hostPort != nil else { return "No host port was reported." }
+        guard (1...65_535).contains(hostPort ?? 0) else {
+            return "Docker reported an invalid host port."
+        }
+        guard proto.caseInsensitiveCompare("tcp") == .orderedSame else {
+            return "Browser actions require a TCP mapping."
+        }
+        guard let hostIP else { return "Docker did not report a concrete host address." }
+        return "Browser actions require a literal loopback binding; Docker reported \(hostIP)."
+    }
+
+    private var browserAddressHost: String? {
+        switch hostIP {
+        case "127.0.0.1", "::1": hostIP
+        default: nil
+        }
+    }
+
     /// `8080 → 80/tcp`, or `80/tcp` when unpublished.
     var label: String {
         if let hostPort {
