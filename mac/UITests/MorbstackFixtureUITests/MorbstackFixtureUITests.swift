@@ -131,6 +131,34 @@ final class MorbstackFixtureUITests: XCTestCase {
         secondCommand.click() // Restore the caller's original sidebar state.
     }
 
+    /// A selected record's trailing inspector must remain recoverable from View when a
+    /// narrow window moves its toolbar toggle into system overflow. This exercises the
+    /// command registered by `InspectorCommands`, not the route's visible glyph.
+    func testSelectedRecordUsesTheSystemViewMenuInspectorCommand() throws {
+        let app = try launchFixture(appearance: .light)
+        try selectSidebarRoute("Containers", in: app)
+        try assertFixtureMarker("shopfront-api-1", in: app)
+
+        let row = app.staticTexts["shopfront-api-1"]
+        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        row.click()
+
+        let firstCommand = try inspectorMenuCommand(in: app)
+        let originalTitle = firstCommand.label
+        XCTAssertTrue(
+            ["Hide Inspector", "Show Inspector"].contains(originalTitle),
+            "The View menu must expose the standard inspector command for a selected record.")
+        firstCommand.click()
+
+        let expectedNextTitle = originalTitle == "Hide Inspector" ? "Show Inspector" : "Hide Inspector"
+        let secondCommand = try inspectorMenuCommand(in: app)
+        XCTAssertEqual(secondCommand.label, expectedNextTitle)
+        attachWindowEvidence(
+            named: "light-containers-system-inspector-\(expectedNextTitle.replacingOccurrences(of: " ", with: "-"))",
+            from: app)
+        secondCommand.click() // Restore the caller's original inspector state.
+    }
+
     /// The app has a main operations window and a separate Settings scene, not a
     /// tabbed-document model. Its View menu must not advertise tab commands that have
     /// no meaningful destination.
@@ -244,6 +272,22 @@ final class MorbstackFixtureUITests: XCTestCase {
             }
         }
         throw HarnessError(message: "View menu lacks the standard Show/Hide Sidebar command.")
+    }
+
+    private func inspectorMenuCommand(in app: XCUIApplication) throws -> XCUIElement {
+        let viewMenu = app.menuBars.menuBarItems["View"]
+        guard viewMenu.waitForExistence(timeout: 10) else {
+            throw HarnessError(message: "The standard View menu is unavailable.")
+        }
+        viewMenu.click()
+
+        for title in ["Hide Inspector", "Show Inspector"] {
+            let command = app.menuItems[title]
+            if command.waitForExistence(timeout: 3) {
+                return command
+            }
+        }
+        throw HarnessError(message: "View menu lacks the standard Show/Hide Inspector command.")
     }
 
     // MARK: - Result evidence

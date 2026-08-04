@@ -264,6 +264,8 @@ struct MorbMenuBarContent: View {
             }
             .menuStyle(.borderlessButton)
             .disabled(busy.contains(container.id))
+            .help("Actions for \(container.displayName)")
+            .accessibilityLabel("Actions for \(container.displayName)")
         }
     }
 
@@ -359,23 +361,30 @@ struct MorbMenuBarContent: View {
             }
             .buttonStyle(.plain)
             .keyboardShortcut("o", modifiers: .command)
+            .help("Open the Morbstack main window")
+            .accessibilityHint("Opens the main Morbstack window")
 
             Button("Review Disk Cleanup…", systemImage: "trash") {
                 TrackDAppBridge.reveal(.disk, in: model)
             }
             .buttonStyle(.plain)
             .help("Review reclaimable disk in the main window")
+            .accessibilityHint("Opens Disk in the Morbstack main window")
 
             Button("Settings…", systemImage: "gearshape") {
                 NSApp.activate()
                 openSettings()
             }
             .buttonStyle(.plain)
+            .help("Open Morbstack settings")
+            .accessibilityHint("Opens Morbstack settings")
 
             Button("Quit Morbstack", systemImage: "power") {
                 NSApp.terminate(nil)
             }
             .buttonStyle(.plain)
+            .help("Quit Morbstack")
+            .accessibilityHint("Quits Morbstack")
         }
     }
 

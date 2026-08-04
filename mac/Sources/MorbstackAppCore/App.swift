@@ -169,6 +169,25 @@ struct MorbCommands: Commands {
     @FocusedValue(\.composeFileEditorCommandActions) private var composeFileEditorCommandActions
     @FocusedValue(\.composeSourceValidationCommandActions) private var composeSourceValidationCommandActions
 
+    /// Keep the Engine menu's enablement aligned with the status extra and the daemon
+    /// lifecycle. A reachable control socket does not by itself make every transition
+    /// meaningful: a second Start while the VM is already starting, or a Stop after it
+    /// has stopped, must not be presented as an available command.
+    private var canStartEngine: Bool {
+        !model.isEngineBusy && !model.engine.isRunning && !model.engine.isTransitional
+    }
+
+    private var canSuspendEngine: Bool {
+        !model.isEngineBusy && model.engine.isRunning
+    }
+
+    private var canStopEngine: Bool {
+        !model.isEngineBusy
+            && model.engine.reachable
+            && !model.engine.isTransitional
+            && (model.engine.state == "running" || model.engine.state == "suspended")
+    }
+
     var body: some Commands {
         // A deferred setup remains available from the standard application menu. This
         // is a command, not an onboarding overlay, and it presents the same scoped
@@ -179,9 +198,17 @@ struct MorbCommands: Commands {
             }
         }
 
-        // Keep the system's View > Show Sidebar command and add document navigation
-        // immediately after it.  That gives every toolbar/sidebar command a standard
-        // menu and keyboard equivalent without replacing a system command group.
+        // Register the platform-owned View commands before extending their group.
+        // `NavigationSplitView` and `.inspector` then supply the stateful Show/Hide
+        // Sidebar and Show/Hide Inspector actions themselves — including their normal
+        // keyboard equivalents and menu enablement — rather than making our toolbar
+        // glyphs the only way to recover space at a narrow width.
+        SidebarCommands()
+        InspectorCommands()
+
+        // Add document navigation after the system sidebar command. This preserves the
+        // normal View menu while keeping every top-level destination discoverable even
+        // when Tahoe places less-important toolbar controls in its overflow menu.
         CommandGroup(after: .sidebar) {
             Divider()
             ForEach(Nav.allCases) { nav in
@@ -205,11 +232,11 @@ struct MorbCommands: Commands {
             Divider()
 
             Button("Start Engine") { Task { await model.engineAction(.start) } }
-                .disabled(model.engine.isRunning || model.isEngineBusy)
+                .disabled(!canStartEngine)
             Button("Free Engine Memory") { Task { await model.engineAction(.suspend) } }
-                .disabled(!model.engine.isRunning || model.isEngineBusy)
+                .disabled(!canSuspendEngine)
             Button("Stop Engine") { Task { await model.engineAction(.stop) } }
-                .disabled(!model.engine.reachable || model.isEngineBusy)
+                .disabled(!canStopEngine)
         }
 
         CommandMenu("Image") {
