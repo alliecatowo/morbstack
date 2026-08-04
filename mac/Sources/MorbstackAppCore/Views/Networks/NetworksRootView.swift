@@ -263,12 +263,22 @@ struct NetworksRootView: View {
         busy || isCreatingNetwork || isChangingNetworkMembership
     }
 
+    // As one literal expression this modifier chain exceeded what the type checker
+    // could solve in reasonable time. The chain is split into staged helpers applied
+    // in the original order — no modifier was added, removed, or reordered.
     var body: some View {
-        content
-            .navigationTitle("Networks")
-            .navigationSubtitle(subtitle)
-            .searchable(text: $query, placement: .toolbar, prompt: "Name, driver, ID")
-            .toolbar { toolbarContent }
+        withSelectionAndLifecycle(
+            withOperationAlerts(
+                withSheetsAndDialogs(
+                    content
+                        .navigationTitle("Networks")
+                        .navigationSubtitle(subtitle)
+                        .searchable(text: $query, placement: .toolbar, prompt: "Name, driver, ID")
+                        .toolbar { toolbarContent })))
+    }
+
+    private func withSheetsAndDialogs(_ view: some View) -> some View {
+        view
             .sheet(item: $unusedRemovalPlan) { plan in
                 UnusedNetworkRemovalReview(plan: plan) { targets in
                     Task { await removeUnused(targets) }
@@ -308,6 +318,10 @@ struct NetworksRootView: View {
                     "Docker will detach \(target.containerName) from \(target.networkName). "
                         + "It does not stop or remove the container, and it does not change its other network attachments.")
             }
+    }
+
+    private func withOperationAlerts(_ view: some View) -> some View {
+        view
             .alert(
                 removal.map { "Remove \($0.name)?" } ?? "",
                 isPresented: Binding(get: { removal != nil }, set: { if !$0 { removal = nil } }),
@@ -338,6 +352,10 @@ struct NetworksRootView: View {
             } message: { alert in
                 Text(alert.message)
             }
+    }
+
+    private func withSelectionAndLifecycle(_ view: some View) -> some View {
+        view
             .onDeleteCommand {
                 guard !isPerformingNetworkOperation,
                       let selection,

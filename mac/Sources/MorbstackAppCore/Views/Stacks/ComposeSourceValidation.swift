@@ -568,6 +568,7 @@ struct ComposeSourceValidationSheet: View {
             review(request)
         case .running(let request):
             diagnostics(
+                request: request,
                 title: "Validating \(request.displayName)",
                 detail: "The bundled Compose client is checking the saved source. No deploy, build, pull, or provider operation is running.",
                 output: validation.liveDiagnostics)
@@ -636,7 +637,16 @@ struct ComposeSourceValidationSheet: View {
         }
     }
 
-    private func diagnostics(title: String, detail: String, output: String) -> some View {
+    // `request` was referenced in the body but never passed in; the only caller (the
+    // `.running(let request)` case above) has it in scope, and the sibling
+    // `resultView(request:result:)` follows the same shape, so threading it through
+    // as a parameter is the evident intent.
+    private func diagnostics(
+        request: ComposeSourceValidationRequest,
+        title: String,
+        detail: String,
+        output: String
+    ) -> some View {
         VStack(spacing: 0) {
             Form {
                 Section("Validation") {

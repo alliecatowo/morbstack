@@ -513,6 +513,13 @@ extension DockerProxy: DockerRequestAdmissionPolicy {
     private func admitPublishAllStart(containerID: String) -> DockerRequestAdmission {
         do {
             let session = try forwarder.beginPublishAllLifecycleSession(containerID: containerID)
+            // Capture the forwarder, not `self`. The observer outlives this call —
+            // it fires when Moby answers the start — so capturing `self` would keep
+            // the whole proxy alive for the duration of every publish-all start, and
+            // `[weak self]` would silently drop the completion if the proxy went
+            // away mid-flight, leaving the session open forever. The forwarder is
+            // the only thing the closure actually needs.
+            let forwarder = self.forwarder
             return .forwardObserving(
                 DockerPortLeaseResponseObserver(kind: .start) { outcome in
                     forwarder.completePublishAllLifecycleSession(

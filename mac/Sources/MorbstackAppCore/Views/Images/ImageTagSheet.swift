@@ -51,7 +51,7 @@ struct ImageTagSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Source Image") {
+                Section {
                     LabeledContent("Image ID") {
                         Text(image.id)
                             .font(.system(.body, design: .monospaced))
@@ -60,11 +60,13 @@ struct ImageTagSheet: View {
                             .truncationMode(.middle)
                     }
                     LabeledContent("Current Tags", value: currentTagsDescription)
-                } footer: {
+                } header: {
+            Text("Source Image")
+        } footer: {
                     Text("This immutable ID is the source. Tagging adds a local name; it does not duplicate image layers.")
                 }
 
-                Section("New Reference") {
+                Section {
                     TextField("Repository", text: $repository, prompt: Text("registry.example/team/app"))
                         .font(.system(.body, design: .monospaced))
                         .disabled(isTagging)
@@ -84,7 +86,9 @@ struct ImageTagSheet: View {
                                 .truncationMode(.middle)
                         }
                     }
-                } footer: {
+                } header: {
+            Text("New Reference")
+        } footer: {
                     Text("Docker validates the repository and tag. Morbstack does not pull, push, authenticate, or contact a registry.")
                 }
 

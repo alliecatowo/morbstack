@@ -77,159 +77,210 @@ struct LocalImageRunSheet: View {
         return true
     }
 
+    // The Form's sections are extracted into computed properties below. As one
+    // literal expression the body exceeded what the type checker could solve in
+    // reasonable time ("unable to type-check this expression"); the split is purely
+    // structural — every section keeps its exact content and order.
     var body: some View {
-        NavigationStack {
-            Form {
-                Section("Image") {
-                    LabeledContent("Selected image") {
-                        Text(imageLabel)
-                            .font(.system(.body, design: .monospaced))
-                            .lineLimit(2)
-                            .truncationMode(.middle)
-                            .textSelection(.enabled)
-                    }
-                    LabeledContent("Image ID") {
-                        Text(image.id)
-                            .font(.system(.callout, design: .monospaced))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .textSelection(.enabled)
-                    }
-                }
-
-                Section {
-                    TextField("Name (Optional)", text: $requestedName)
-                        .font(.system(.body, design: .monospaced))
-                        .focused($nameIsFocused)
-                        .disabled(!isEditingEnabled)
-                } header: {
-                    Text("Container")
-                } footer: {
-                    Text("Leave the name empty to let Docker assign one. Docker validates any name you enter.")
-                }
-
-                Section("Environment") {
-                    DisclosureGroup("Environment Variables (\(environment.count))") {
-                        ForEach(environment.indices, id: \.self) { index in
-                            Text("Environment Variable \(index + 1)")
-                                .font(.headline)
-                            TextField("Name", text: $environment[index].name, prompt: Text("LOG_LEVEL"))
-                                .font(.system(.body, design: .monospaced))
-                                .disabled(!isEditingEnabled)
-                                .accessibilityLabel("Environment variable \(index + 1) name")
-                            TextField("Value", text: $environment[index].value, prompt: Text("debug"))
-                                .font(.system(.body, design: .monospaced))
-                                .disabled(!isEditingEnabled)
-                                .accessibilityLabel("Environment variable \(index + 1) value")
-                            Button("Remove Environment Variable \(index + 1)", role: .destructive) {
-                                environment.remove(at: index)
-                            }
-                            .disabled(!isEditingEnabled)
-                        }
-                        Button("Add Environment Variable", systemImage: "plus") {
-                            environment.append(LocalImageEnvironmentEntry())
-                        }
-                        .disabled(!isEditingEnabled)
-                    }
-                } footer: {
-                    Text("Values are sent literally as entered. Morbstack does not read your Mac environment, .env files, keychain, or a secret store.")
-                }
-
-                Section("Published Ports") {
-                    DisclosureGroup("Published Ports (\(publishedPorts.count))") {
-                        ForEach(publishedPorts.indices, id: \.self) { index in
-                            Text("Published Port \(index + 1)")
-                                .font(.headline)
-                            TextField("Host Port", text: $publishedPorts[index].hostPort, prompt: Text("8080"))
-                                .font(.system(.body, design: .monospaced))
-                                .disabled(!isEditingEnabled)
-                                .accessibilityLabel("Published port \(index + 1) host port")
-                            TextField("Container Port", text: $publishedPorts[index].containerPort, prompt: Text("80"))
-                                .font(.system(.body, design: .monospaced))
-                                .disabled(!isEditingEnabled)
-                                .accessibilityLabel("Published port \(index + 1) container port")
-                            Picker("Protocol", selection: $publishedPorts[index].transport) {
-                                ForEach(LocalImagePortTransport.allCases, id: \.self) { transport in
-                                    Text(transport.displayName).tag(transport)
-                                }
-                            }
-                            .pickerStyle(.menu)
-                            .disabled(!isEditingEnabled)
-                            Picker("Exposure", selection: $publishedPorts[index].exposure) {
-                                ForEach(LocalImagePortExposure.allCases, id: \.self) { exposure in
-                                    Text(exposure.displayName).tag(exposure)
-                                }
-                            }
-                            .pickerStyle(.menu)
-                            .disabled(!isEditingEnabled)
-                            Button("Remove Published Port \(index + 1)", role: .destructive) {
-                                publishedPorts.remove(at: index)
-                            }
-                            .disabled(!isEditingEnabled)
-                        }
-                        Button("Add Published Port", systemImage: "plus") {
-                            publishedPorts.append(LocalImagePortMappingEntry())
-                        }
-                        .disabled(!isEditingEnabled)
-                    }
-                } footer: {
-                    Text("Each mapping is one fixed TCP or UDP host port. Docker and Morbstack's normal port preflight report current binding conflicts; this form does not create dynamic ports, ranges, or publish-all mappings.")
-                }
-
-                Section("Authority") {
-                    Text(
-                        "Creates and starts one new container from this local image ID. Docker uses the image’s configured entrypoint, command, user, and working directory; literal declarations here may override the image environment.")
-                    Text(
-                        "Morbstack does not pull an image or configure bind mounts, custom networking, privilege, capabilities, credentials, secrets, host networking, or arbitrary Docker JSON.")
-                }
-
-                if let validationMessage, isEditingEnabled {
-                    Section("Check the Request") {
-                        Text(validationMessage)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                stateSection
+        withRunConfirmationAndEditObservers(
+            NavigationStack {
+                runForm
+                    .navigationTitle("Run Local Image")
+                    .toolbar { sheetToolbar }
             }
-            .navigationTitle("Run Local Image")
-            .toolbar {
-                if !state.isWorking {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button(closeTitle) { dismiss() }
-                    }
+            .frame(minWidth: 500, idealWidth: 560, minHeight: 460)
+            .interactiveDismissDisabled(state.isWorking))
+    }
+
+    private var runForm: some View {
+        Form {
+            imageSection
+            containerSection
+            environmentSection
+            publishedPortsSection
+            authoritySection
+            if let validationMessage, isEditingEnabled {
+                Section("Check the Request") {
+                    Text(validationMessage)
+                        .foregroundStyle(.secondary)
                 }
-                if isEditingEnabled {
-                    ToolbarItem(placement: .confirmationAction) {
-                        Button(runButtonTitle) { requestForConfirmation = requestedRun }
-                            .disabled(requestedRun == nil)
-                    }
-                }
+            }
+
+            stateSection
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var sheetToolbar: some ToolbarContent {
+        if !state.isWorking {
+            ToolbarItem(placement: .cancellationAction) {
+                Button(closeTitle) { dismiss() }
             }
         }
-        .frame(minWidth: 500, idealWidth: 560, minHeight: 460)
-        .interactiveDismissDisabled(state.isWorking)
-        .confirmationDialog(
-            "Run \(imageLabel)?",
-            isPresented: Binding(
-                get: { requestForConfirmation != nil },
-                set: { if !$0 { requestForConfirmation = nil } }
-            ),
-            presenting: requestForConfirmation,
-            titleVisibility: .visible
-        ) { request in
-            Button("Run") {
-                requestForConfirmation = nil
-                Task { await run(request) }
+        if isEditingEnabled {
+            ToolbarItem(placement: .confirmationAction) {
+                Button(runButtonTitle) { requestForConfirmation = requestedRun }
+                    .disabled(requestedRun == nil)
             }
-            Button("Cancel", role: .cancel) {}
-        } message: { request in
-            Text(confirmationMessage(for: request))
         }
-        .onAppear { nameIsFocused = true }
-        .onChange(of: requestedName) { _, _ in clearFailureAfterEdit() }
-        .onChange(of: environment) { _, _ in clearFailureAfterEdit() }
-        .onChange(of: publishedPorts) { _, _ in clearFailureAfterEdit() }
+    }
+
+    private func withRunConfirmationAndEditObservers(_ view: some View) -> some View {
+        view
+            .confirmationDialog(
+                "Run \(imageLabel)?",
+                isPresented: Binding(
+                    get: { requestForConfirmation != nil },
+                    set: { if !$0 { requestForConfirmation = nil } }
+                ),
+                // The real overload is confirmationDialog(_:isPresented:titleVisibility:
+                // presenting:actions:message:); with the two arguments swapped the call
+                // matched no overload, which is what drove the original
+                // "unable to type-check in reasonable time" on this body.
+                titleVisibility: .visible,
+                presenting: requestForConfirmation
+            ) { request in
+                Button("Run") {
+                    requestForConfirmation = nil
+                    Task { await run(request) }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: { request in
+                Text(confirmationMessage(for: request))
+            }
+            .onAppear { nameIsFocused = true }
+            .onChange(of: requestedName) { _, _ in clearFailureAfterEdit() }
+            .onChange(of: environment) { _, _ in clearFailureAfterEdit() }
+            .onChange(of: publishedPorts) { _, _ in clearFailureAfterEdit() }
+    }
+
+    // MARK: Form sections (extracted verbatim from `body`; see note there)
+
+    private var imageSection: some View {
+        Section("Image") {
+            LabeledContent("Selected image") {
+                Text(imageLabel)
+                    .font(.system(.body, design: .monospaced))
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+            }
+            LabeledContent("Image ID") {
+                Text(image.id)
+                    .font(.system(.callout, design: .monospaced))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+            }
+        }
+    }
+
+    private var containerSection: some View {
+        Section {
+            TextField("Name (Optional)", text: $requestedName)
+                .font(.system(.body, design: .monospaced))
+                .focused($nameIsFocused)
+                .disabled(!isEditingEnabled)
+        } header: {
+            Text("Container")
+        } footer: {
+            Text("Leave the name empty to let Docker assign one. Docker validates any name you enter.")
+        }
+    }
+
+    private var environmentSection: some View {
+        Section {
+            DisclosureGroup("Environment Variables (\(environment.count))") {
+                ForEach(environment.indices, id: \.self) { index in
+                    environmentRow(at: index)
+                }
+                Button("Add Environment Variable", systemImage: "plus") {
+                    environment.append(LocalImageEnvironmentEntry())
+                }
+                .disabled(!isEditingEnabled)
+            }
+        } header: {
+            Text("Environment")
+        } footer: {
+            Text("Values are sent literally as entered. Morbstack does not read your Mac environment, .env files, keychain, or a secret store.")
+        }
+    }
+
+    @ViewBuilder
+    private func environmentRow(at index: Int) -> some View {
+        Text("Environment Variable \(index + 1)")
+            .font(.headline)
+        TextField("Name", text: $environment[index].name, prompt: Text("LOG_LEVEL"))
+            .font(.system(.body, design: .monospaced))
+            .disabled(!isEditingEnabled)
+            .accessibilityLabel("Environment variable \(index + 1) name")
+        TextField("Value", text: $environment[index].value, prompt: Text("debug"))
+            .font(.system(.body, design: .monospaced))
+            .disabled(!isEditingEnabled)
+            .accessibilityLabel("Environment variable \(index + 1) value")
+        Button("Remove Environment Variable \(index + 1)", role: .destructive) {
+            environment.remove(at: index)
+        }
+        .disabled(!isEditingEnabled)
+    }
+
+    private var publishedPortsSection: some View {
+        Section {
+            DisclosureGroup("Published Ports (\(publishedPorts.count))") {
+                ForEach(publishedPorts.indices, id: \.self) { index in
+                    publishedPortRow(at: index)
+                }
+                Button("Add Published Port", systemImage: "plus") {
+                    publishedPorts.append(LocalImagePortMappingEntry())
+                }
+                .disabled(!isEditingEnabled)
+            }
+        } header: {
+            Text("Published Ports")
+        } footer: {
+            Text("Each mapping is one fixed TCP or UDP host port. Docker and Morbstack's normal port preflight report current binding conflicts; this form does not create dynamic ports, ranges, or publish-all mappings.")
+        }
+    }
+
+    @ViewBuilder
+    private func publishedPortRow(at index: Int) -> some View {
+        Text("Published Port \(index + 1)")
+            .font(.headline)
+        TextField("Host Port", text: $publishedPorts[index].hostPort, prompt: Text("8080"))
+            .font(.system(.body, design: .monospaced))
+            .disabled(!isEditingEnabled)
+            .accessibilityLabel("Published port \(index + 1) host port")
+        TextField("Container Port", text: $publishedPorts[index].containerPort, prompt: Text("80"))
+            .font(.system(.body, design: .monospaced))
+            .disabled(!isEditingEnabled)
+            .accessibilityLabel("Published port \(index + 1) container port")
+        Picker("Protocol", selection: $publishedPorts[index].transport) {
+            ForEach(LocalImagePortTransport.allCases, id: \.self) { transport in
+                Text(transport.displayName).tag(transport)
+            }
+        }
+        .pickerStyle(.menu)
+        .disabled(!isEditingEnabled)
+        Picker("Exposure", selection: $publishedPorts[index].exposure) {
+            ForEach(LocalImagePortExposure.allCases, id: \.self) { exposure in
+                Text(exposure.displayName).tag(exposure)
+            }
+        }
+        .pickerStyle(.menu)
+        .disabled(!isEditingEnabled)
+        Button("Remove Published Port \(index + 1)", role: .destructive) {
+            publishedPorts.remove(at: index)
+        }
+        .disabled(!isEditingEnabled)
+    }
+
+    private var authoritySection: some View {
+        Section("Authority") {
+            Text(
+                "Creates and starts one new container from this local image ID. Docker uses the image’s configured entrypoint, command, user, and working directory; literal declarations here may override the image environment.")
+            Text(
+                "Morbstack does not pull an image or configure bind mounts, custom networking, privilege, capabilities, credentials, secrets, host networking, or arbitrary Docker JSON.")
+        }
     }
 
     private var closeTitle: String {

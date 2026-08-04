@@ -144,6 +144,11 @@ public struct VolumeMigrationItemReport: Sendable, Equatable, Codable, Identifia
     public let name: String
     public let driver: String
     public var archiveBytes: Int64
+    /// Regular-file entries counted in the exported archive by walking its ustar
+    /// headers on disk. `nil` when the transfer failed before a complete export (or
+    /// for reports written before this field existed); `0` can also mean the archive
+    /// did not parse as ustar — this is a progress-report fact, not a verification.
+    public var archiveFileCount: Int?
     public var sourceHelperCreated: Bool
     public var destinationHelperCreated: Bool
     public var outcome: VolumeMigrationItemOutcome
@@ -156,6 +161,7 @@ public struct VolumeMigrationItemReport: Sendable, Equatable, Codable, Identifia
         name: String,
         driver: String,
         archiveBytes: Int64,
+        archiveFileCount: Int? = nil,
         sourceHelperCreated: Bool,
         destinationHelperCreated: Bool,
         outcome: VolumeMigrationItemOutcome,
@@ -165,6 +171,7 @@ public struct VolumeMigrationItemReport: Sendable, Equatable, Codable, Identifia
         self.name = name
         self.driver = driver
         self.archiveBytes = archiveBytes
+        self.archiveFileCount = archiveFileCount
         self.sourceHelperCreated = sourceHelperCreated
         self.destinationHelperCreated = destinationHelperCreated
         self.outcome = outcome
@@ -525,6 +532,7 @@ public enum VolumeMigrationTransaction {
         }
 
         var archiveBytes: Int64 = 0
+        var archiveFileCount: Int?
         var sourceHelperCreated = false
         var destinationHelperCreated = false
         var destinationCreated = false
@@ -536,7 +544,7 @@ public enum VolumeMigrationTransaction {
         }
 
         guard isSafeVolumeName(item.name) else {
-            return report(for: item, bytes: archiveBytes, sourceHelperCreated: sourceHelperCreated,
+            return report(for: item, bytes: archiveBytes, fileCount: archiveFileCount, sourceHelperCreated: sourceHelperCreated,
                           destinationHelperCreated: destinationHelperCreated, outcome: .failed,
                           destinationState: .notCreated,
                           detail: "the prepared volume name is not safe for the Docker Engine path contract")
@@ -546,19 +554,19 @@ public enum VolumeMigrationTransaction {
             event(.checkingPreconditions)
             let sourceInfo = try source.client.jsonObject("GET", "/volumes/\(item.name)", timeout: 30)
             guard JSONRead.string(sourceInfo, "Driver") == "local" else {
-                return report(for: item, bytes: archiveBytes, sourceHelperCreated: sourceHelperCreated,
+                return report(for: item, bytes: archiveBytes, fileCount: archiveFileCount, sourceHelperCreated: sourceHelperCreated,
                               destinationHelperCreated: destinationHelperCreated, outcome: .failed,
                               destinationState: .notCreated,
                               detail: "source volume is no longer a Docker local-driver volume")
             }
             guard isOptionFreeLocalVolume(sourceInfo) else {
-                return report(for: item, bytes: archiveBytes, sourceHelperCreated: sourceHelperCreated,
+                return report(for: item, bytes: archiveBytes, fileCount: archiveFileCount, sourceHelperCreated: sourceHelperCreated,
                               destinationHelperCreated: destinationHelperCreated, outcome: .failed,
                               destinationState: .notCreated,
                               detail: "source volume has custom or unverifiable local-driver options; refusing to create a default destination volume that would change its storage contract")
             }
             guard try !volumeExists(item.name, on: destination) else {
-                return report(for: item, bytes: archiveBytes, sourceHelperCreated: sourceHelperCreated,
+                return report(for: item, bytes: archiveBytes, fileCount: archiveFileCount, sourceHelperCreated: sourceHelperCreated,
                               destinationHelperCreated: destinationHelperCreated, outcome: .failed,
                               destinationState: .notCreated,
                               detail: "Morbstack now has a volume with this name; refusing to merge or overwrite it")
@@ -585,11 +593,12 @@ public enum VolumeMigrationTransaction {
                     return true
                 })
             archiveBytes = exported.bytes
+            archiveFileCount = TarLite.countRegularFiles(at: archive)
 
             // Check again after the potentially long source read. A race may create
             // the name at Morbstack, but the safe answer is still to leave it alone.
             guard try !volumeExists(item.name, on: destination) else {
-                return report(for: item, bytes: archiveBytes, sourceHelperCreated: sourceHelperCreated,
+                return report(for: item, bytes: archiveBytes, fileCount: archiveFileCount, sourceHelperCreated: sourceHelperCreated,
                               destinationHelperCreated: destinationHelperCreated, outcome: .failed,
                               destinationState: .notCreated,
                               detail: "Morbstack acquired this volume name while the source archive was read; refusing to merge or overwrite it")
@@ -617,14 +626,14 @@ public enum VolumeMigrationTransaction {
                 throw EngineError.engine(status: uploaded.status, message: uploaded.engineMessage)
             }
 
-            return report(for: item, bytes: archiveBytes, sourceHelperCreated: sourceHelperCreated,
+            return report(for: item, bytes: archiveBytes, fileCount: archiveFileCount, sourceHelperCreated: sourceHelperCreated,
                           destinationHelperCreated: destinationHelperCreated, outcome: .copied,
                           destinationState: .archiveUploaded,
                           detail: "Docker accepted the complete archive upload; volume contents were not independently verified")
         } catch {
             let outcome: VolumeMigrationItemOutcome = destinationCreated ? .requiresReview : .failed
             let state: VolumeMigrationDestinationState = destinationCreated ? .requiresReview : .notCreated
-            return report(for: item, bytes: archiveBytes, sourceHelperCreated: sourceHelperCreated,
+            return report(for: item, bytes: archiveBytes, fileCount: archiveFileCount, sourceHelperCreated: sourceHelperCreated,
                           destinationHelperCreated: destinationHelperCreated, outcome: outcome,
                           destinationState: state, detail: "transfer returned an error: \(error)")
         }
@@ -654,6 +663,7 @@ public enum VolumeMigrationTransaction {
     private static func report(
         for item: MigrationVolumePlanItem,
         bytes: Int64,
+        fileCount: Int?,
         sourceHelperCreated: Bool,
         destinationHelperCreated: Bool,
         outcome: VolumeMigrationItemOutcome,
@@ -661,7 +671,7 @@ public enum VolumeMigrationTransaction {
         detail: String?
     ) -> VolumeMigrationItemReport {
         VolumeMigrationItemReport(
-            name: item.name, driver: item.driver, archiveBytes: bytes,
+            name: item.name, driver: item.driver, archiveBytes: bytes, archiveFileCount: fileCount,
             sourceHelperCreated: sourceHelperCreated, destinationHelperCreated: destinationHelperCreated,
             outcome: outcome, destinationState: destinationState, detail: detail)
     }

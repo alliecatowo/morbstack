@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+#MISE description="Clean slate: show exactly what would be removed, then remove only the tier you ask for"
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:-$PWD}"
+
+# ---------------------------------------------------------------------------
+# "Turn it off and on again", made safe to type.
+#
+# There are three separate things people mean by "reset", they have wildly
+# different costs, and conflating them is how somebody loses a 72 GB disk image
+# full of their images and volumes while trying to clear a stale initrd. So this
+# task refuses to guess: it prints the tiers, and does nothing without a flag.
+#
+#   --build     build outputs only (same as `mise run clean`, plus the bundle)
+#   --runtime   the staged guest runtime: data/runtime, data/kernel
+#               This is the one you almost always want. It is the tier that goes
+#               stale invisibly, and rebuilding it costs one `mise run dev`.
+#   --state     VM state: vmstate.bin, disk-grow-journal.json,
+#               save-restore-unsupported. Containers do not survive it; images
+#               and volumes do, because they live in disk.img.
+#   --disk      DESTRUCTIVE. Deletes disk.img: every image, container, volume and
+#               build cache in the VM. Requires typing the confirmation.
+#   --all       --build --runtime --state (deliberately NOT --disk)
+#
+# It never touches config.toml, kubeconfig, or anything under ~/.docker. Look at
+# CLAUDE.md §1.2 if you are tempted to make it touch ~/.docker.
+# ---------------------------------------------------------------------------
+
+MORBSTACK_HOME="${MORBSTACK_HOME:-$HOME/.morbstack}"
+
+do_build=0
+do_runtime=0
+do_state=0
+do_disk=0
+any=0
+
+usage() {
+	sed -n '7,26p' "$0" | sed 's/^# \{0,1\}//'
+	echo
+	echo "usage: mise run reset -- [--build] [--runtime] [--state] [--disk] [--all]"
+}
+
+for arg in "$@"; do
+	case "$arg" in
+	--build) do_build=1; any=1 ;;
+	--runtime) do_runtime=1; any=1 ;;
+	--state) do_state=1; any=1 ;;
+	--disk) do_disk=1; any=1 ;;
+	--all) do_build=1; do_runtime=1; do_state=1; any=1 ;;
+	-h | --help)
+		usage
+		exit 0
+		;;
+	*)
+		echo "error: unknown option $arg" >&2
+		usage >&2
+		exit 2
+		;;
+	esac
+done
+
+if [ "$any" -eq 0 ]; then
+	usage
+	exit 2
+fi
+
+# A running daemon holds disk.img open and re-creates run-directory state as fast
+# as you delete it, so a reset under a live daemon produces a half-reset nobody
+# can reason about. Refuse rather than race. Named by argv, not by process name:
+# `pkill -f morbstackd` would also match another agent's daemon, or the user's.
+if pgrep -f "Morbstack.app/Contents/MacOS/morbstackd" >/dev/null 2>&1 \
+	|| pgrep -f "mac/.build/debug/morbstackd" >/dev/null 2>&1; then
+	echo "error: a morbstackd is running; stop it first (morb stop, or quit the app)" >&2
+	echo "       resetting under a live daemon leaves a half-reset state" >&2
+	exit 1
+fi
+
+targets=()
+[ "$do_build" -eq 1 ] && targets+=("mac/.build" "guest/morbinit/target" "dist/Morbstack.app")
+[ "$do_runtime" -eq 1 ] && targets+=("${MORBSTACK_HOME}/data/runtime" "${MORBSTACK_HOME}/data/kernel")
+[ "$do_state" -eq 1 ] && targets+=(
+	"${MORBSTACK_HOME}/data/vmstate.bin"
+	"${MORBSTACK_HOME}/data/disk-grow-journal.json"
+	"${MORBSTACK_HOME}/data/save-restore-unsupported"
+)
+[ "$do_disk" -eq 1 ] && targets+=("${MORBSTACK_HOME}/data/disk.img")
+
+echo "would remove:"
+present=0
+for t in "${targets[@]}"; do
+	if [ -e "$t" ]; then
+		printf '  %-60s %s\n' "$t" "$(du -sh "$t" 2>/dev/null | awk '{print $1}')"
+		present=1
+	else
+		printf '  %-60s (absent)\n' "$t"
+	fi
+done
+if [ "$present" -eq 0 ]; then
+	echo
+	echo "nothing to do."
+	exit 0
+fi
+
+# Deleting disk.img is not undoable and is not covered by any backup this project
+# writes. An interactive confirmation is the correct amount of friction: nobody
+# gets there by autocompleting a flag.
+if [ "$do_disk" -eq 1 ]; then
+	echo
+	echo "--disk destroys every image, container, volume and build cache in the VM."
+	printf 'type "delete my disk" to continue: '
+	read -r confirmation
+	if [ "$confirmation" != "delete my disk" ]; then
+		echo "aborted."
+		exit 1
+	fi
+fi
+
+for t in "${targets[@]}"; do
+	rm -rf "$t"
+done
+echo
+echo "done. rebuild with: mise run dev"

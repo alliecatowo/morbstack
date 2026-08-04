@@ -58,7 +58,9 @@ SOCKET="$MORBSTACK_HOME/run/docker.sock"
 [ "${#SOCKET}" -lt 104 ] || fail "socket path is too long for Darwin sockaddr_un: $SOCKET"
 [ -S "$SOCKET" ] || fail "no ready Morbstack Docker socket at $SOCKET; start the dedicated engine first"
 
-REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+# CDPATH='' (not the bare `CDPATH= cd` idiom, which trips shellcheck SC1007)
+# keeps a user's exported CDPATH from redirecting the cd.
+REPO_ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 DOCKER_BIN=${MORBSTACK_DOCKER_BIN:-"$REPO_ROOT/dist/Morbstack.app/Contents/Resources/host-bin/docker"}
 [ -x "$DOCKER_BIN" ] || fail "candidate Docker CLI is not executable: $DOCKER_BIN"
 

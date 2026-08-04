@@ -124,7 +124,7 @@ struct ContainerExecSheet: View {
     }
 
     private var commandSection: some View {
-        Section("Command") {
+        Section {
             TextField("Program", text: $program)
                 .font(.system(.body, design: .monospaced))
                 .focused($programIsFocused)
@@ -137,6 +137,8 @@ struct ContainerExecSheet: View {
                 .disabled(state.isExecuting || !isContainerRunning)
                 .accessibilityLabel("Command arguments")
                 .accessibilityHint("Enter one literal argument per line. Spaces within a line are passed unchanged.")
+        } header: {
+            Text("Command")
         } footer: {
             Text("Enter one literal argument per line. Morbstack does not split shell quotes or evaluate command chains. To use a shell, enter it as the program and supply its arguments explicitly.")
         }

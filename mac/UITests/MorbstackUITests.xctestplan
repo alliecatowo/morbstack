@@ -1,25 +1,26 @@
 {
-  "configurations" : [
+  "configurations": [
     {
-      "id" : "23DEB91B-65EA-42D2-8100-3D97A57DF002",
-      "name" : "Test Action",
-      "options" : {
-        "language" : "en",
-        "region" : "en_US"
+      "id": "23DEB91B-65EA-42D2-8100-3D97A57DF002",
+      "name": "Test Action",
+      "options": {
+        "language": "en",
+        "region": "en_US"
       }
     }
   ],
-  "defaultOptions" : {
-
+  "defaultOptions": {
+    "systemAttachmentLifetime": "keepNever",
+    "preferredScreenCaptureFormat": "screenshots"
   },
-  "testTargets" : [
+  "testTargets": [
     {
-      "target" : {
-        "containerPath" : "container:MorbstackUITests.xcodeproj",
-        "identifier" : "E8A201132D0A000100000001",
-        "name" : "MorbstackFixtureUITests"
+      "target": {
+        "containerPath": "container:MorbstackUITests.xcodeproj",
+        "identifier": "E8A201132D0A000100000001",
+        "name": "MorbstackFixtureUITests"
       }
     }
   ],
-  "version" : 1
+  "version": 1
 }

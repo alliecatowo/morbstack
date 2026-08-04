@@ -240,12 +240,22 @@ private enum ImageArchiveImportFileInspectionError: Error {
 }
 
 private func imageArchiveImportFileFacts(at url: URL) throws -> ImageArchiveImportFileFacts {
-    var sourceStat = stat()
-    let status = url.withUnsafeFileSystemRepresentation { path -> Int32 in
+    // Deliberately open+fstat rather than stat(2): `stat` names both the C
+    // function and the struct, and Swift resolves the bare name to the struct in
+    // every position — as a call it picks the argument-less initializer, and as a
+    // value it yields `stat.Type`. open(2) and fstat(2) have no such collision.
+    // Semantics are unchanged: both follow symlinks.
+    let descriptor = url.withUnsafeFileSystemRepresentation { path -> Int32 in
         guard let path else { return -1 }
-        return Darwin.stat(path, &sourceStat)
+        return open(path, O_RDONLY | O_CLOEXEC)
     }
-    guard status == 0 else { throw ImageArchiveImportFileInspectionError.unavailable }
+    guard descriptor >= 0 else { throw ImageArchiveImportFileInspectionError.unavailable }
+    defer { close(descriptor) }
+
+    var sourceStat = stat()
+    guard fstat(descriptor, &sourceStat) == 0 else {
+        throw ImageArchiveImportFileInspectionError.unavailable
+    }
     return try imageArchiveImportFileFacts(from: sourceStat)
 }
 

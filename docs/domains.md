@@ -1,10 +1,15 @@
 # Local developer domains and HTTPS
 
-Status: **S5 delivery contract and inactive source foundation.** Morbstack does
-not currently resolve a local name, listen for local HTTP(S), modify macOS DNS,
-install a Network Extension, issue a certificate, or trust a local CA.
-`MorbLocalDomain` and `LocalDomainClaimReconciler` only validate prospective
-in-memory claims. They have no network or Docker side effect.
+Status: **S5 delivery contract; mechanism decided in
+[`docs/design/DNS-DECISION.md`](design/DNS-DECISION.md), which supersedes this
+document wherever they disagree.** Morbstack does not currently resolve a local
+name, listen for local HTTP(S), modify macOS DNS, install a Network Extension,
+issue a certificate, or trust a local CA. The only domains code in the tree is
+`MorbLocalDomain.Name`, a pure hostname validator with no network or Docker side
+effect. The earlier host-loopback claim model (`MorbLocalDomain.Claim`/`Registry`
+and `LocalDomainClaimReconciler`) encoded a host HTTP-router design the SP-2/SP-3
+decision rejected, and was deleted on 2026-08-03 under SP-5 (see
+[`docs/design/INERT-SUBSYSTEMS-DECISION.md`](design/INERT-SUBSYSTEMS-DECISION.md)).
 
 This document is the implementation contract for the feature, not evidence that
 any stage has shipped. A local-service URL is a security boundary: a browser
@@ -55,10 +60,8 @@ no documentation, UI, CLI, or marketing may say that `morb.local` resolves.
 
 | Boundary | Current source evidence | What it proves | What it does **not** prove |
 | --- | --- | --- | --- |
-| Claim shape | `MorbLocalDomain.Name` and `.Claim` accept an exact ASCII subdomain, full owner ID, and TCP port. | A malformed name, owner, or port is rejected rather than normalized loosely. | A hostname is configured, resolvable, or public. |
-| Collision check | `MorbLocalDomain.Registry` rejects duplicate exact names. | A future registry cannot choose a winner by event order. | A collision is repaired or shown to a person. |
-| Current-target proof | `LocalDomainClaimReconciler` requires explicit opt-in, a fresh running-owner candidate, and an atomic `PortForwarder` TCP snapshot. | A prospective claim fails for a stopped owner, missing/failed/conflicting forward, or owner mismatch. | DNS, HTTP, TLS, listener, lifecycle ownership, or a safe connect handoff. |
-| Host transport | `PortForwarder` owns actual TCP listeners on `127.0.0.1`, and exposes an atomic list for the reconciler. | Published Docker ports can be established as daemon-owned loopback forwards. | A router can safely reconnect to a bare numeric port after the snapshot. |
+| Name shape | `MorbLocalDomain.Name` accepts an exact ASCII hostname below `morb.local` (unit-tested in `MorbLocalDomainNameTests`). | A malformed or non-`Host`-header-safe name is rejected rather than normalized loosely. | A hostname is configured, resolvable, or public. |
+| Registrar, routing, withdrawal | Nothing — the DIF-4 mDNS registrar, guest reverse proxy, and lifecycle are unwritten. The former loopback claim/reconciler model was deleted with the host-router design it served. | — | Anything. |
 | Existing TLS use | `K8sResourceReader` pins a narrow local Kubernetes identity. | Security.framework is already a project dependency. | A local CA, key lifecycle, trust setting, leaf issuance, or HTTPS proxy. |
 
 The last distinction matters. A numeric loopback `connect` after a snapshot can

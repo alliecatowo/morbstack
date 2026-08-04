@@ -183,7 +183,7 @@ struct NetworkConnectSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var selectedCandidateID: String?
     @State private var aliasesInput = ""
-    @State private var state: State = .editing
+    @State private var state: Phase = .editing
     @FocusState private var focusedField: FocusTarget?
 
     private enum FocusTarget: Hashable {
@@ -191,7 +191,12 @@ struct NetworkConnectSheet: View {
         case aliases
     }
 
-    private enum State {
+    /// Named `Phase`, not `State`: a nested type called `State` shadows SwiftUI's
+    /// `@State` inside this type's scope, so every `@State` attribute below it
+    /// resolves to the enum and fails with "enum 'State' cannot be used as an
+    /// attribute" — which then cascades into unrelated-looking errors in other
+    /// files in the module.
+    private enum Phase {
         case editing
         case connecting
         case succeeded(NetworkConnectRequest, NetworkMembershipRefreshResult)

@@ -23,6 +23,21 @@ dist/*/*
 
 .mise.local.toml
 
+# Signed/packaged output. dist/* above already covers the normal locations, but
+# an .app or .dmg assembled anywhere else is still hundreds of megabytes of
+# re-buildable binary, and the pre-commit hook's dist/ guard would not see it.
+*.app/
+*.dmg
+
+# artifacts/ is scratch space for audits and dogfooding runs. The visual evidence
+# under artifacts/visual/ is deliberately tracked — docs/audit/UI-AUDIT.md cites
+# it, and a screenshot nobody can find is not evidence. Everything else is the
+# residue of a one-off run: artifacts/audit/ once carried a committed symlink
+# whose target was one developer's absolute home path, which resolves nowhere on
+# any other clone.
+artifacts/*
+!artifacts/visual/
+
 # OS
 .DS_Store
 

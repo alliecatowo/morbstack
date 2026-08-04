@@ -491,6 +491,14 @@ mod imp {
     }
 }
 
+#[cfg(target_os = "linux")]
+pub use imp::spawn_publish_all_allocator;
+
+#[cfg(not(target_os = "linux"))]
+pub fn spawn_publish_all_allocator() -> io::Result<()> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{parse_host_registration, HostRegistration};
@@ -533,12 +541,4 @@ mod tests {
             assert_eq!(parse_host_registration(&line), None, "{line}");
         }
     }
-}
-
-#[cfg(target_os = "linux")]
-pub use imp::spawn_publish_all_allocator;
-
-#[cfg(not(target_os = "linux"))]
-pub fn spawn_publish_all_allocator() -> io::Result<()> {
-    Ok(())
 }

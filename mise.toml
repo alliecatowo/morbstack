@@ -48,9 +48,31 @@
 #  3. The list of binaries copied into the app bundle is a curated product
 #     decision, not something to derive from Package.swift's target graph.
 
+# Only tools that a task or script will actually invoke belong here, and each one
+# is here because its absence produced a confusing failure rather than a clear
+# "not installed" message.
+#
+#   rust        the guest PID 1 toolchain; also supplies rustup, which
+#               dist/CROSS_COMPILE.md's recorded setup relies on.
+#   shellcheck  CI lints scripts/ and mise-tasks/ and treats it as fatal, so
+#               `mise run check` must lint the same set. It was missing locally
+#               for the whole life of the project, which meant the only way to
+#               find a shell bug was to push.
+#   jq          scripts/fetch-image-oci.sh parses registry manifests with it.
+#               Without it that script fails deep inside a pipeline with an
+#               empty variable rather than at a missing dependency.
+#
+# NOT pinnable here, and therefore documented in CONTRIBUTING.md instead:
+#   - Swift/Xcode (comes from xcode-select; mise does not manage Xcode)
+#   - docker + buildx (Docker Desktop or equivalent; needed only to rebuild the
+#     patched engine from source — `mise run guest-image` fetches the pinned,
+#     hash-verified release asset instead, so the normal loop does not need it)
+#   - the aarch64-unknown-linux-musl cross toolchain (Homebrew; dist/CROSS_COMPILE.md)
+#   - cpio, zstd (macOS ships cpio; zstd has no mise registry entry)
 [tools]
 rust = "stable"
 shellcheck = "latest"
+jq = "latest"
 
 # Task files are discovered in ./mise-tasks by default; stated explicitly so the
 # location is greppable from the config rather than implied.

@@ -43,6 +43,12 @@ struct ComposeSourceDeclarationReview: Identifiable {
         inspection = ComposeProjectSourceInspection.inspect(text: text, sourceKind: sourceKind)
     }
 
+    // ComposeFileEditor is @MainActor-isolated, so reading its properties requires
+    // main-actor isolation here. Both call sites live in SwiftUI view bodies, which
+    // are already on the main actor, so this constrains nothing new — it just states
+    // where the snapshot is legally taken. (The memberwise init above stays
+    // nonisolated: it touches no actor-isolated state.)
+    @MainActor
     init?(editor: ComposeFileEditor) {
         guard editor.isPresented,
               let sourceURL = editor.fileURL,

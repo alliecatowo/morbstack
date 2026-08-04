@@ -379,12 +379,23 @@ struct BuildsRootView: View {
         "Buildx commands and local build selection are unavailable in developer fixture data. This window is not connected to a Docker Engine."
     }
 
+    // As one literal expression this modifier chain exceeded what the type checker
+    // could solve in reasonable time. The chain is split into staged helpers applied
+    // in the original order — no modifier was added, removed, or reordered.
     var body: some View {
-        content
-            .navigationTitle("Builds")
-            .navigationSubtitle(subtitle)
-            .searchable(text: $query, placement: .toolbar, prompt: searchPrompt)
-            .toolbar { toolbarContent }
+        withLifecycleHandlers(
+            withOperationAlerts(
+                withBuildDialogs(
+                    withSheetsAndImporter(
+                        content
+                            .navigationTitle("Builds")
+                            .navigationSubtitle(subtitle)
+                            .searchable(text: $query, placement: .toolbar, prompt: searchPrompt)
+                            .toolbar { toolbarContent }))))
+    }
+
+    private func withSheetsAndImporter(_ view: some View) -> some View {
+        view
             .sheet(isPresented: $showsBuildSheet, onDismiss: resetBuildSheetIfIdle) {
                 buildSheet
             }
@@ -404,6 +415,10 @@ struct BuildsRootView: View {
                     buildPreparationError = MorbErrorMessage.text(for: error)
                 }
             }
+    }
+
+    private func withBuildDialogs(_ view: some View) -> some View {
+        view
             .confirmationDialog(
                 pendingBuildRequest.map { "Build \($0.displayName)?" } ?? "Build image?",
                 isPresented: Binding(
@@ -440,6 +455,10 @@ struct BuildsRootView: View {
                         + "record. It keeps cache that is in use. Docker decides the final eligible "
                         + "records when the cleanup runs.")
             }
+    }
+
+    private func withOperationAlerts(_ view: some View) -> some View {
+        view
             .alert(
                 "Couldn’t Prune Build Cache",
                 isPresented: Binding(
@@ -472,6 +491,10 @@ struct BuildsRootView: View {
             } message: {
                 Text(historyLogExportError ?? "")
             }
+    }
+
+    private func withLifecycleHandlers(_ view: some View) -> some View {
+        view
             .task {
                 if selection == nil { selection = visible.first?.id }
             }

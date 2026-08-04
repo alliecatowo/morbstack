@@ -68,6 +68,60 @@ else
 	echo "warning: shellcheck not found; run 'mise install' (CI will still lint)" >&2
 fi
 
+# Third thing CI's lint job treats as fatal, and the last one this gate was
+# missing. A task that is not executable, has no description, or does not parse
+# is not a syntax error anywhere -- it just quietly vanishes from `mise tasks`,
+# and the next person concludes the task was never written. Keep this equivalent
+# to ci.yml's "Validate mise task files" step.
+echo "==> mise task files"
+mise tasks >/dev/null || status=1
+for task in mise-tasks/*; do
+	[ -x "$task" ] || { echo "not executable: $task" >&2; status=1; }
+	grep -q '^#MISE description=' "$task" \
+		|| { echo "missing '#MISE description=': $task" >&2; status=1; }
+	bash -n "$task" || status=1
+done
+
+# Drift, last, and ADVISORY — the exit code is reported, not inherited.
+#
+# Read the reasoning before "fixing" this to be fatal. `check` is a source gate:
+# it compiles the tree and runs unit tests, and none of its conclusions depend on
+# the initramfs, the app bundle, or which daemon is running. Blocking a docs
+# commit because somebody's staged runtime is a day old is a category error, and
+# a gate that fails for reasons unrelated to the diff gets switched off within a
+# week — taking the real drift detection with it.
+#
+# Drift IS fatal where it changes the answer: `mise run dev` ends with doctor and
+# inherits its status, because that task's entire claim is "the thing you built is
+# now the thing that runs."
+#
+# `|| doctor_status=$?` and not a bare call: this task runs under `set -e`, so a
+# bare `mise run doctor` would abort the script before the report below.
+echo "==> doctor (advisory)"
+doctor_status=0
+mise run doctor || doctor_status=$?
+case "$doctor_status" in
+0) ;;
+1) echo "note: environment incomplete (TODO lines above) — not a gate failure" >&2 ;;
+*)
+	echo >&2
+	echo "  *** DRIFT: what you are running is not what you built. ***" >&2
+	echo "  Your commit is not blocked, but no runtime claim from this tree is" >&2
+	echo "  trustworthy until you run: mise run dev" >&2
+	echo >&2
+	;;
+esac
+
+# `swift build --build-tests` above just stripped com.apple.security.virtualization
+# off mac/.build/debug/morbstackd (CLAUDE.md §1.1). Running the gate therefore
+# breaks the dev daemon every single time, silently, and the symptom appears much
+# later as a VM that will not open. Say so here, where the cause is.
+if [ -x mac/.build/debug/morbstackd ]; then
+	echo
+	echo "note: this run re-signed mac/.build/debug/morbstackd without entitlements."
+	echo "      re-sign before starting it:  mise run sign"
+fi
+
 if [ "$status" -ne 0 ]; then
 	echo "error: mise run check failed (see output above)" >&2
 fi

@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+#MISE description="Run docker against the local engine with a scratch config (never hangs on credsStore)"
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:-$PWD}"
+
+# ---------------------------------------------------------------------------
+# The safe way to type `docker` in this repository.
+#
+# Two failure modes, both of which have eaten real sessions:
+#
+#  1. `~/.docker/config.json` can carry a `credsStore` whose helper is gone or
+#     unresponsive (`docker-credential-desktop` after Docker Desktop is removed
+#     is the classic). The Docker CLI then HANGS — no timeout, no error, and it
+#     wedges whatever shell or agent turn invoked it. See CLAUDE.md §1.2 and
+#     docs/parity.md. The cure is a scratch DOCKER_CONFIG, every single time,
+#     including for `docker ps`.
+#  2. The `docker` on PATH may be talking to some other engine entirely. Naming a
+#     socket explicitly is the difference between testing Morbstack and testing
+#     Docker Desktop while believing you tested Morbstack.
+#
+# This task fixes both and then gets out of the way:
+#
+#   mise run docker -- ps
+#   mise run docker -- run --rm hello-world
+#
+# It never reads, writes, moves or "cleans" ~/.docker. Nothing in this repository
+# may. That directory holds real registry credentials.
+# ---------------------------------------------------------------------------
+
+# Prefer the CLI this project ships and pins (sha256-verified in mise-tasks/app),
+# so the client version is a known quantity rather than whatever Homebrew has.
+for candidate in \
+	dist/Morbstack.app/Contents/Resources/host-bin/docker \
+	dist/host-bin/docker; do
+	if [ -x "$candidate" ]; then
+		DOCKER_BIN="$candidate"
+		break
+	fi
+done
+DOCKER_BIN="${DOCKER_BIN:-$(command -v docker || true)}"
+if [ -z "$DOCKER_BIN" ]; then
+	echo "error: no docker CLI found" >&2
+	echo "       fetch the pinned one: ./scripts/fetch-guest-assets.sh --host-cli" >&2
+	exit 1
+fi
+
+MORBSTACK_HOME="${MORBSTACK_HOME:-$HOME/.morbstack}"
+SOCKET="${MORBSTACK_HOME}/run/docker.sock"
+if [ ! -S "$SOCKET" ]; then
+	echo "error: no Morbstack engine socket at ${SOCKET}" >&2
+	echo "       start the engine first: open dist/Morbstack.app  (or mise run run-daemon)" >&2
+	exit 1
+fi
+
+# Scratch config directory, created fresh per invocation and removed on exit. It
+# is empty, so there is no credsStore to hang on and no auth to leak into a log.
+# The trade is that `docker login` state does not persist here -- which is the
+# correct trade for a dev-loop shortcut, and the reason this is not a substitute
+# for the real `morb install-cli` setup a user gets.
+#
+# Short by construction: $TMPDIR on macOS is already ~50 characters, and Docker
+# does not care where the config lives, but keeping the habit of short scratch
+# paths is what stops the 104-byte sun_path limit biting elsewhere (CLAUDE.md §1.3).
+SCRATCH_CONFIG=$(mktemp -d "/tmp/morb-dockercfg.XXXXXX")
+trap 'rm -rf "$SCRATCH_CONFIG"' EXIT
+
+# The CLI plugins (compose, buildx) are resolved out of DOCKER_CONFIG/cli-plugins,
+# so an empty scratch config would otherwise lose `docker compose` entirely.
+# Symlink them in rather than copy: they are large, pinned, and already verified.
+PLUGIN_SOURCE="$(dirname "$DOCKER_BIN")/cli-plugins"
+if [ -d "$PLUGIN_SOURCE" ]; then
+	ln -s "$(cd "$PLUGIN_SOURCE" && pwd)" "${SCRATCH_CONFIG}/cli-plugins"
+fi
+
+# DOCKER_HOST beats any current context, so this cannot be silently redirected by
+# whatever context the machine happens to have selected.
+DOCKER_CONFIG="$SCRATCH_CONFIG" DOCKER_HOST="unix://${SOCKET}" "$DOCKER_BIN" "$@"

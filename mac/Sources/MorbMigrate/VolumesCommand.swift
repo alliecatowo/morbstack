@@ -148,13 +148,14 @@ enum VolumesCommand {
 
     private static func renderReport(_ report: VolumeMigrationTransactionReport) {
         out("\nNamed-volume migration report:")
-        var table = TextTable(headers: ["VOLUME", "RESULT", "DESTINATION", "ARCHIVE", "DETAIL"], rightAligned: [3])
+        var table = TextTable(headers: ["VOLUME", "RESULT", "DESTINATION", "ARCHIVE", "FILES", "DETAIL"], rightAligned: [3, 4])
         for item in report.items {
             table.add([
                 item.name,
                 item.outcome.rawValue,
                 item.destinationState.rawValue,
                 Format.bytes(item.archiveBytes),
+                item.archiveFileCount.map(String.init) ?? "—",
                 item.detail ?? "—",
             ])
         }

@@ -699,7 +699,7 @@ struct DiskRootView: View {
     /// than presenting another dashboard gauge or a preference editor.
     @ViewBuilder
     private var diskGrowthFacts: some View {
-        Section("VM Disk Capacity") {
+        Section {
             if model.fixtureProvenance != nil {
                 Text("VM disk capacity is unavailable in developer fixture data.")
                     .foregroundStyle(.secondary)
@@ -771,6 +771,8 @@ struct DiskRootView: View {
             }
 
             diskGrowthActionControl
+        } header: {
+            Text("VM Disk Capacity")
         } footer: {
             Text("Current raw capacity is the VM block device size. Docker storage totals above are a separate daemon-reported attribution and do not describe all guest filesystem use.")
         }
@@ -811,7 +813,9 @@ struct DiskRootView: View {
 
     private var diskGrowthAction: TrackCDiskGrowthAction {
         guard model.fixtureProvenance == nil else { return .none }
-        TrackCDiskGrowthPresentation.action(
+        // Implicit return only applies to single-expression getters; the guard above
+        // makes this body multi-statement, so the return must be explicit.
+        return TrackCDiskGrowthPresentation.action(
             capacity: diskCapacity,
             diagnostic: diskResizeDiagnostic,
             hasRecoveryJournal: diskGrowthJournal != nil,

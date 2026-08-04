@@ -1518,6 +1518,13 @@ final class DockerFramedRelayTests: XCTestCase {
         let associated = RelayByteBox()
         policy.inspectBodyOf = { $0.target.hasPrefix("/v1.47/containers/create") }
         policy.verdict = { request, inspectedBody in
+            // This connection is reused for the trailing `/_ping` keep-alive request
+            // below, which `inspectBodyOf` does not select for body inspection. Without
+            // this guard the same rewrite verdict was applied to that request too: its
+            // body-less head has neither Content-Length nor Transfer-Encoding, so
+            // `replacingBodyFraming` correctly returns nil for it and the ping was
+            // rejected instead of relayed, which is what made this test fail.
+            guard request.head.target.hasPrefix("/v1.47/containers/create") else { return .forward }
             XCTAssertEqual(inspectedBody, Data(originalBody.utf8))
             guard let rewrittenHead = HTTPRequestHeadRewriting.replacingBodyFraming(
                 in: request.rawHead, bodyLength: rewrittenBody.utf8.count)

@@ -26,6 +26,45 @@ have to **build** them, not undercut a price. Every row below is a build, not a 
 
 ---
 
+## Apple is now a competitor, and that is mostly good news
+
+Researched 2026-08-03 against primary sources (GitHub releases/API, Apple's own docs).
+
+Apple ships **`container`** (v1.2.0, 29 Jul 2026; 1.0 froze the API in June) on the
+**Containerization** framework — 48.6k stars, monthly releases, active commits. It is real,
+stable and mainstream. But its architecture is **VM-per-container**, not one shared VM, and
+its compatibility posture is the opposite of ours:
+
+- **Apple explicitly declined Docker Engine API compatibility.** The request to expose a
+  `/var/run/docker.sock` equivalent was closed **"not planned"** ([apple/container#66]).
+- **No native Compose. No Docker CLI compatibility.**
+- macOS 15 containers cannot talk to each other at all; container-to-container networking
+  needs macOS 26.
+- virtiofs bind mounts are slow enough that a maintainer recommends named volumes (~3× faster,
+  still 2–3× slower than bare metal).
+- **VM memory is never returned to the host** — freed guest pages are not relinquished, so the
+  per-VM model accumulates cost at scale.
+- No prebuilt kernel is published; it is a build-it-yourself recipe derived from Kata's config.
+
+**What the ecosystem did about it is the tell.** No major tool — not Docker Desktop, OrbStack,
+Podman, or Colima — has adopted Containerization as a backend. Instead, third parties bolt
+Docker compatibility *onto* Apple's tool (`socktainer` for a Docker-ish REST API,
+`container-compose` for compose files, `kina`/`kiac` for Kubernetes). The gap Apple left open
+is precisely the one Morbstack fills.
+
+So Apple entering this space **validates the bet** — VM-based containerization on Apple silicon
+is now first-class and mainstream — rather than threatening it. Morbstack's thesis (real Moby,
+real Engine API, real Compose, real CLI) is the thing Apple has decided not to do.
+
+**The one thing to watch:** `container machine`, shipped in 1.0 — a persistent VM with the
+user's home directory mounted, framed as "the closest thing to WSL on macOS". That is adjacent
+to DIF-13 (Linux machines), and Apple's roadmap reportedly includes Kubernetes and a
+WSL competitor. Compete there deliberately or not at all; do not drift into it.
+
+[apple/container#66]: https://github.com/apple/container/issues/66
+
+---
+
 ## Table stakes — if any of these is wrong, nothing else matters
 
 | Capability | Them | Us | State |

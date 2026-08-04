@@ -44,7 +44,7 @@ The foundation. Everything here is about making it impossible to *not know* some
 | 0.8 | Guest image rebuild is part of the loop | **done** — and the loop is `guest-image` → `app` → restart, because the daemon boots `runtime/current` staged from the bundle, not `data/kernel/`. A self-referential manifest check also froze the staged image permanently; fixed in `9f81cf4`. |
 | 0.9 | **Remove the Docker-to-build-Docker bootstrap.** `build-patched-dockerd` needs `docker buildx`. Publish the built engine as a pinned, SHA-verified release artifact so a contributor with no Docker can build Morbstack. | **open** |
 | 0.10 | A `mise run doctor` that reports staleness: is the initrd older than `guest/`? is the running daemon's inode the one on disk? is the patched dockerd in the image? | **open** |
-| 0.11 | Complete the security review of the untrusted-input surfaces: vsock 1024/2375/2376/2377/2378/2379/2380/2381 and the MCP server | **open — treat as unreviewed** |
+| 0.11 | Complete the security review of the untrusted-input surfaces: vsock 1024/2375/2376/2377/2378/2379/2381 and the MCP server (2380 was removed in `51dc543`) | **open — treat as unreviewed** |
 
 **0.10 is not optional polish.** Every serious error in the last two days came from trusting a name
 over its contents: a daemon at the right path with an old inode mapped, an initrd predating its own
@@ -133,7 +133,7 @@ Cheap, and it protects everything else.
 | 2.2 | Collapse the six overlapping status documents into one generated from a machine-checkable source. |
 | 2.3 | Ship `scripts/fetch-scan-tools.sh` or stop referencing it five times — `morb scan` cites a file that does not exist. |
 | 2.4 | Resolve `.local` vs `.test`: `domains.md:37` chose `.test`, `MorbLocalDomain.swift:17` hardcodes `morb.local`. |
-| 2.5 | Delete or wire the ~1,750 LOC of inert subsystems (`MorbShareSyncProtocol.swift` 1,002 LOC zero callers; `MachineImageAdmission.swift` 581 LOC, `assess()` has no success path). Dead code that ships is worse than a stub screen. |
+| 2.5 | ~~Delete or wire the inert subsystems~~ **Done 2026-08-03 (SP-5):** deleted `MorbShareSyncProtocol.swift` (1,002), `MachineRegistry.swift` (1,020), `MachineImageAdmission.swift` (581) and `LocalDomainClaimReconciler`; wired `TarLite` into the volume-migration report. See `docs/design/INERT-SUBSYSTEMS-DECISION.md`. |
 | 2.6 | Fixture-mode watermark — a `--tour-fixtures` window is indistinguishable from live and its footer claims "Engine running". |
 
 ---

@@ -353,7 +353,7 @@ and `docs/domains.md` needs the correction, not the code.
 | --- | --- | --- |
 | 0 | Prove host→guest reachability at `192.168.64.x` with a real booted VM, on Wi-Fi, on Ethernet, and under a VPN. **Gate: if this fails, drop to the `127.0.0.1` + high-port fallback and re-estimate.** | 2 days |
 | 1 | mDNS registrar in `morbstackd`: `DNSServiceRegisterRecord`, `LocalOnly`, `A` only, no advertised Bonjour service type, conflict handling, lifecycle bound to Docker events | 4 days |
-| 2 | Name derivation + registry, wired to the existing `MorbLocalDomain` / `LocalDomainClaimReconciler` (which already validate claims and reject duplicates) | 3 days |
+| 2 | Name derivation + registry, wired to the existing `MorbLocalDomain.Name` validator (the loopback `LocalDomainClaimReconciler` was deleted under SP-5 — it validated claims against `PortForwarder` host-loopback snapshots, the rejected host-router model; the mDNS registrar keeps its own name-to-container index and duplicate rejection) | 3 days |
 | 3 | Guest-side Host-header reverse proxy on `:80`/`:443`, pinned like every other guest binary, plus listening-port auto-detection per container | 6–8 days |
 | 4 | Withdrawal paths: container stop/remove, VM suspend, wake, VPN transition, hostile-`.local` detection | 3 days |
 | 5 | `morb domain` CLI + inspector affordance + the honest limits in `--help` | 4 days |

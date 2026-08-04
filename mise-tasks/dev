@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+#MISE description="The whole loop, correctly: guest image -> app bundle -> restart -> prove it"
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:-$PWD}"
+
+# ---------------------------------------------------------------------------
+# THE dev loop. If you only ever learn one task in this repo, learn this one.
+#
+# Why it exists: `mise run guest-image` alone has NO RUNTIME EFFECT. That is not
+# a quirk, it is how the runtime is versioned, and it has cost this project hours
+# more than once. The chain:
+#
+#   mise run guest-image      writes $MORBSTACK_HOME/data/kernel/initrd.img
+#   mise run app              copies THAT into Morbstack.app/Contents/Resources/
+#                             runtime/<version>/kernel/initrd.img and signs it
+#   restart the daemon        the bundled daemon re-installs the bundle payload
+#                             into $MORBSTACK_HOME/data/runtime/current
+#   the VM boots              Paths.initrd PREFERS runtime/current and only falls
+#                             back to data/kernel when current is absent
+#
+# So once data/runtime/current exists on a machine — and it exists on every
+# machine that has ever launched the app — data/kernel/initrd.img is dead bytes.
+# You can rebuild it all afternoon and boot the same stale guest every time, with
+# no error, no warning, and a build log full of success.
+#
+# See mac/Sources/MorbstackKit/Paths.swift (`initrd`) for the preference order and
+# mac/Sources/MorbstackKit/RuntimeArtifacts.swift (`install`) for the re-staging.
+# ---------------------------------------------------------------------------
+
+# Sequential on purpose: `#MISE depends=[...]` may run its entries in parallel,
+# and `app` packages whatever initrd exists at the moment it runs. A parallel
+# guest-image would be a race between the build and the thing that copies it.
+echo "==> [1/4] guest image"
+mise run guest-image
+
+echo
+echo "==> [2/4] app bundle (builds release binaries, signs inside-out)"
+mise run app
+
+echo
+echo "==> [3/4] restart so the daemon re-stages runtime/current from the bundle"
+# Only the daemon can re-stage: the install is a verified, atomic swap that
+# checks the bundle's signed manifest against the bytes (RuntimeArtifacts.swift).
+# Copying the initrd into place by hand here would skip that verification and
+# reintroduce exactly the "staged runtime that authenticates itself" bug.
+#
+# Use the morb INSIDE the bundle we just built, never a `morb` from PATH: a stale
+# CLI on PATH talking to a new daemon is its own class of confusion.
+BUNDLED_MORB="dist/Morbstack.app/Contents/MacOS/morb"
+if [ ! -x "$BUNDLED_MORB" ]; then
+	echo "error: no morb in the bundle we just built — app assembly changed?" >&2
+	exit 1
+fi
+if "$BUNDLED_MORB" status >/dev/null 2>&1; then
+	# Stop and start rather than a single restart verb: the daemon re-reads and
+	# re-installs the bundle payload on start, and the VM is socket-activated, so
+	# it comes back on the next client connection with the new guest.
+	"$BUNDLED_MORB" stop || true
+	"$BUNDLED_MORB" start
+else
+	echo "    no daemon reachable — nothing to restart."
+	echo "    start one when you want it:  open dist/Morbstack.app"
+	echo "    (a daemon started later stages the bundle you just built)"
+fi
+
+echo
+echo "==> [4/4] doctor: is what is running what you just built?"
+# The point of the whole task. Without this line the loop still ends in a
+# success message whether or not any of it took effect, which is the failure
+# mode this task exists to remove. `doctor` exits 2 on real drift.
+mise run doctor

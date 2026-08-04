@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+#MISE description="Run the locally built morb CLI (mise run morb -- status)"
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:-$PWD}"
+
+# `morb` from PATH is whatever `morb install-cli` linked into ~/.morbstack/bin,
+# which is a release build from whenever the app was last assembled. When you are
+# changing the CLI, that is not your code, and the gap between the two is
+# invisible: same name, same flags, different behaviour. This runs the binary you
+# just built, every time.
+#
+#   mise run morb -- status
+#   mise run morb -- ports list
+#
+# Deliberately does NOT depend on build-mac. Two reasons, both learned the hard
+# way: a `swift build` triggered by an innocent-looking CLI invocation strips the
+# virtualization entitlement off mac/.build/debug/morbstackd (CLAUDE.md §1.1), and
+# a rebuild is a build-lane operation that would collide with whoever holds it.
+# Build deliberately, then run.
+MORB="${MORB:-mac/.build/debug/morb}"
+if [ ! -x "$MORB" ]; then
+	echo "error: no local morb at ${MORB}" >&2
+	echo "       build it first: mise run build-mac" >&2
+	echo "       or point at another one: MORB=dist/Morbstack.app/Contents/MacOS/morb mise run morb -- status" >&2
+	exit 1
+fi
+
+exec "$MORB" "$@"

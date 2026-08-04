@@ -47,9 +47,28 @@ final class PublishAllPortAllocator {
             self.traceID = Self.makeTraceID()
         }
 
-        deinit {
-            trace("event=deinit-close fd=\(fd)")
+        /// Guards the descriptor against being closed twice. `beginPublishAllLifecycleSession`
+        /// closes `fd` explicitly when `start()` throws, and this object is deallocated on
+        /// the same path — so without this flag the handshake-failure case closed the same
+        /// descriptor twice. That is not merely untidy: between the two closes the number can
+        /// already have been handed to an unrelated `accept()` or vsock connect on another
+        /// queue, so the second close severs a live connection somewhere else entirely.
+        private let closeOnce = NSLock()
+        private var isClosed = false
+
+        /// Closes the owned descriptor exactly once, from whichever path gets there first.
+        func closeOwnedDescriptor() {
+            closeOnce.lock()
+            let alreadyClosed = isClosed
+            isClosed = true
+            closeOnce.unlock()
+            guard !alreadyClosed else { return }
+            trace("event=close fd=\(fd)")
             Darwin.close(fd)
+        }
+
+        deinit {
+            closeOwnedDescriptor()
         }
 
         /// Performs the registration handshake before the Docker lifecycle relay

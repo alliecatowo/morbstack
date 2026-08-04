@@ -1,14 +1,21 @@
 # Linux Machines
 
-Status: **M0 registry and a no-I/O M0.1 acquisition-admission boundary are
-implemented; no machine runtime or UI exists yet.** The M1 blueprint below is
-planned architecture, not implementation evidence or a user-visible capability.
+Status: **planned architecture only; no machines code exists in the tree.** The
+former M0 registry and M0.1 admission scaffolding (`MachineRegistry.swift`,
+`MachineImageAdmission.swift` — 1,601 LOC of pure validation with zero callers
+and, by design, no success path) was deleted on 2026-08-03 under SP-5; see
+[`docs/design/INERT-SUBSYSTEMS-DECISION.md`](design/INERT-SUBSYSTEMS-DECISION.md).
+It is recoverable from git history (`3157c39` and its parents) if DIF-13 is ever
+staffed for real. Per [`docs/COMPETITIVE-GAPS.md`](COMPETITIVE-GAPS.md), Apple's
+`container machine` makes this a space to enter deliberately or not at all. This
+document remains the design spec for that decision; nothing below is
+implementation evidence or a user-visible capability.
 
-M0 is deliberately an inventory contract, not a partial VM feature. The pure
-[MachineRegistry.swift](../mac/Sources/MorbstackKit/MachineRegistry.swift) model
-accepts a strict `MachineImageManifest` and secret-free desired/observed machine
-records, but cannot write images, download anything, start a VM, prepare a seed,
-or expose a user command. Its only runtime answer is **unavailable** until M1 has
+M0 was deliberately an inventory contract, not a partial VM feature. The pure
+`MachineRegistry` model (now deleted)
+accepted a strict `MachineImageManifest` and secret-free desired/observed machine
+records, but could not write images, download anything, start a VM, prepare a seed,
+or expose a user command. Its only runtime answer was **unavailable** until M1 has
 verified boot artifacts, NoCloud provisioning, and the separately-versioned
 machine agent.
 
@@ -31,11 +38,11 @@ machine agent.
 
 ### M0.1 image-acquisition admission boundary
 
-[MachineImageAdmission.swift](../mac/Sources/MorbstackKit/MachineImageAdmission.swift)
-adds a separate, pure `MachineImageAcquisitionManifest` for the first M1
-precondition. It is not an image downloader or a partially implemented Create
-path. Its strict decoder rejects unknown fields throughout the outer declaration
-and M0 image manifest, then requires:
+`MachineImageAdmission` (now deleted) added a separate, pure
+`MachineImageAcquisitionManifest` for the first M1 precondition. It was not an
+image downloader or a partially implemented Create path. Its strict decoder
+rejected unknown fields throughout the outer declaration and M0 image manifest,
+then required:
 
 - one direct credential-free HTTPS source, expected byte count, and SHA-256 for
   each required artifact role, with no archive fan-out or duplicate source;

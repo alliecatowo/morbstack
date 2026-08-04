@@ -429,7 +429,10 @@ struct PortMapping: Hashable, Sendable, Identifiable {
 
         var components = URLComponents()
         components.scheme = "http"
-        components.host = hostIP
+        // URLComponents refuses to render a URL for an unbracketed IPv6 literal —
+        // `host = "::1"` makes `.url` nil — so the one accepted IPv6 loopback is
+        // bracketed here explicitly ("http://[::1]:8080").
+        components.host = hostIP == "::1" ? "[::1]" : hostIP
         components.port = hostPort
         return components.url
     }
@@ -776,7 +779,12 @@ extension NetworkInspection.IPAMConfiguration {
 extension NetworkInspection.Member {
     init(id: String, _ wire: Wire.Network.Container) {
         self.id = id
-        name = wire.Name?.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        // The parentheses are load-bearing. Without them the `.flatMap` binds to the
+        // String that `trimmingCharacters` returns *inside* the optional chain, which
+        // resolves to Sequence.flatMap over Characters and yields [Character] — not
+        // Optional.flatMap. The sibling lines below are correct as written because
+        // they have no optional chaining before `.flatMap`.
+        name = (wire.Name?.trimmingCharacters(in: CharacterSet(charactersIn: "/")))
             .flatMap { $0.isEmpty ? nil : $0 } ?? String(id.prefix(12))
         endpointID = wire.EndpointID.flatMap { $0.isEmpty ? nil : $0 }
         macAddress = wire.MacAddress.flatMap { $0.isEmpty ? nil : $0 }

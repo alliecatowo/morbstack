@@ -22,19 +22,34 @@ cd "${MISE_PROJECT_ROOT:-$PWD}" || exit 1
 # looked. This task looks. It is read-only: it never builds, signs, starts or
 # stops anything.
 #
-# Exit 0 = no drift. Exit 1 = at least one thing you are running is not the
-# thing you built.
+# EXIT CODES — three, not two, and the split is load-bearing:
+#
+#   0  everything checked agrees
+#   1  the environment is INCOMPLETE (something has not been built or installed
+#      yet). Normal on a fresh clone. `mise run check` reports this and moves on.
+#   2  DRIFT: a thing exists under the right name but is not the thing you built.
+#      `mise run check` treats this as fatal, because every conclusion you draw
+#      from a tree in this state is a lie.
+#
+# Keeping "not built yet" out of the fatal bucket is what lets `check` call this
+# at all. If a fresh clone with no guest image failed the commit gate, the gate
+# would be turned off within a day and the drift detection would go with it.
 
 MORBSTACK_HOME="${MORBSTACK_HOME:-$HOME/.morbstack}"
 BUNDLE="dist/Morbstack.app"
-problems=0
+drift=0
+incomplete=0
 notes=0
 
 red()   { printf '\033[31m%s\033[0m\n' "$*"; }
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
 warn()  { printf '\033[33m%s\033[0m\n' "$*"; }
 
-fail() { red   "  FAIL  $1"; problems=$((problems + 1)); }
+# FAIL  = drift (exit 2). Use only when a name and its contents disagree.
+# TODO  = not built/installed yet (exit 1). Use when the answer is "run X".
+# NOTE  = informational (exit 0).
+fail() { red   "  FAIL  $1"; drift=$((drift + 1)); }
+todo() { warn  "  TODO  $1"; incomplete=$((incomplete + 1)); }
 note() { warn  "  NOTE  $1"; notes=$((notes + 1)); }
 ok()   { green "  ok    $1"; }
 
@@ -64,7 +79,7 @@ done
 # guest-image -> app -> restart. Running guest-image alone changes nothing at
 # runtime, which is exactly the trap that cost hours.
 if [ ! -e "$INITRD_BUILT" ]; then
-	fail "no guest image built at ${INITRD_BUILT} — run: mise run guest-image"
+	todo "no guest image built at ${INITRD_BUILT} — run: mise run guest-image"
 else
 	guest_src_mtime=0
 	while IFS= read -r f; do
@@ -109,7 +124,7 @@ echo "== patched Docker Engine =="
 # `docker run -P` cannot work no matter what the host side does.
 PATCHED="dist/guest-bin/morbstack-dockerd"
 if [ ! -e "$PATCHED" ]; then
-	fail "no patched engine at ${PATCHED} — run: mise run build-patched-dockerd"
+	todo "no patched engine at ${PATCHED} — run: mise run build-patched-dockerd"
 elif [ "$(strings "$PATCHED" 2>/dev/null | grep -c morbstack)" -eq 0 ]; then
 	fail "${PATCHED} contains no morbstack symbols — it is STOCK upstream, not patched"
 else
@@ -156,13 +171,30 @@ echo "== code signing =="
 SIGNED_D="${BUNDLE}/Contents/MacOS/morbstackd"
 if [ -e "$SIGNED_D" ]; then
 	if codesign -d --entitlements - "$SIGNED_D" 2>/dev/null | grep -q "com.apple.security.virtualization"; then
-		ok "morbstackd carries the virtualization entitlement"
+		ok "bundled morbstackd carries the virtualization entitlement"
 	else
-		fail "morbstackd has NO virtualization entitlement — it cannot boot a VM"
+		fail "bundled morbstackd has NO virtualization entitlement — it cannot boot a VM"
 		echo "          fix: mise run app   (signs inside-out; never use codesign --deep)"
 	fi
 else
-	note "no assembled bundle — run: mise run app"
+	todo "no assembled bundle — run: mise run app"
+fi
+
+# The debug daemon is signed by `mise run sign`, and EVERY `swift build` after
+# that strips the entitlement again. The bundle check above says nothing about
+# it, so a developer running `mise run run-daemon` after an unrelated rebuild
+# gets a daemon that fails to open a VM with a confusing error. Two binaries,
+# two independent signatures, two checks.
+DEBUG_D="mac/.build/debug/morbstackd"
+if [ -e "$DEBUG_D" ]; then
+	if codesign -d --entitlements - "$DEBUG_D" 2>/dev/null | grep -q "com.apple.security.virtualization"; then
+		ok "debug morbstackd carries the virtualization entitlement"
+	else
+		fail "debug morbstackd lost its entitlement to a later swift build"
+		echo "          fix: mise run sign   (must be the LAST step before starting it)"
+	fi
+else
+	note "no debug daemon built (fine unless you use mise run run-daemon)"
 fi
 
 echo
@@ -171,30 +203,51 @@ echo "== toolchain =="
 if rustc --print target-libdir --target aarch64-unknown-linux-musl >/dev/null 2>&1; then
 	ok "guest Rust target installed (aarch64-unknown-linux-musl)"
 else
-	fail "guest Rust target missing — the guest's Linux-only code is NOT type-checked"
+	todo "guest Rust target missing — the guest's Linux-only code is NOT type-checked"
 	echo "          this is how 13 guest compile errors shipped while 217 host tests passed"
 	echo "          fix: rustup target add aarch64-unknown-linux-musl"
+fi
+
+# Pinned in mise.toml so `mise run check` can lint the same set CI lints. If the
+# shim is missing, check silently downgrades to a warning and the local gate
+# stops matching CI -- which is the whole reason the pin exists.
+if command -v shellcheck >/dev/null 2>&1; then
+	ok "shellcheck available ($(shellcheck --version 2>/dev/null | awk '/^version:/ {print $2}'))"
+else
+	todo "shellcheck missing — mise run check cannot lint what CI lints. fix: mise install"
 fi
 
 echo
 echo "== repository =="
 
 if [ -z "$(git remote 2>/dev/null)" ]; then
-	fail "no git remote — CI cannot run, and has never run"
+	todo "no git remote — CI cannot run"
 else
 	ok "remote: $(git remote get-url origin 2>/dev/null)"
 fi
 
-if [ -e .git/hooks/pre-commit ]; then
-	ok "pre-commit hook installed"
+# `mise run install-hooks` sets core.hooksPath; it does NOT write
+# .git/hooks/pre-commit. Checking the latter meant this line reported "not
+# installed" forever, no matter how many times someone installed the hooks --
+# a check that can only ever produce one answer is not a check.
+HOOKS_PATH=$(git config --get core.hooksPath 2>/dev/null || true)
+if [ -n "$HOOKS_PATH" ] && [ -x "${HOOKS_PATH}/pre-commit" ]; then
+	ok "pre-commit hook installed (core.hooksPath -> ${HOOKS_PATH})"
+elif [ -x .git/hooks/pre-commit ]; then
+	note "a pre-commit hook is copied into .git/hooks — the tracked one in"
+	echo "          scripts/git-hooks will not update it. fix: mise run install-hooks"
 else
-	note "pre-commit hook not installed — run: mise run install-hooks"
+	todo "pre-commit hook not installed — run: mise run install-hooks"
 fi
 
 echo
-if [ "$problems" -eq 0 ]; then
-	green "no drift detected${notes:+ (${notes} note(s) above)}"
-	exit 0
+if [ "$drift" -ne 0 ]; then
+	red "${drift} drift problem(s): what you are running is not what you built"
+	exit 2
 fi
-red "${problems} problem(s): what you are running is not what you built"
-exit 1
+if [ "$incomplete" -ne 0 ]; then
+	warn "${incomplete} thing(s) not built or installed yet (no drift detected)"
+	exit 1
+fi
+green "no drift detected${notes:+ (${notes} note(s) above)}"
+exit 0

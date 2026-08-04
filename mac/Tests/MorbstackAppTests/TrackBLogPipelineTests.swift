@@ -335,7 +335,11 @@ final class TrackBLogExportTests: XCTestCase {
     func testTimestampsCanBeOmitted() {
         let text = TrackBLogExport.text(
             lines, timestamp: \.ts, stream: \.stream, body: \.text, includeTimestamps: false)
-        XCTAssertEqual(text, "hello\n[stderr] bad\n")
+        // The export deliberately labels every stream since "Enhance native container
+        // observability" (68a1763) — the sibling test above asserts "[stdout] hello" —
+        // so this test now checks only what its name promises: that the timestamp
+        // prefix is gone. It previously encoded the older stderr-only labeling.
+        XCTAssertEqual(text, "[stdout] hello\n[stderr] bad\n")
     }
 
     func testSuggestedFilenameIsSafeForTheFilesystem() {

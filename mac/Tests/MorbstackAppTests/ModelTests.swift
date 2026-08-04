@@ -885,6 +885,9 @@ final class LaunchOptionsTests: XCTestCase {
         XCTAssertNil(options.fixtureProvenance)
     }
 
+    // AppModel and its factory are @MainActor-isolated; the test hops onto the main
+    // actor to construct them, matching the pattern used in TrackDSettingsTests.
+    @MainActor
     func testFixtureLaunchCarriesNonLiveProvenance() {
         let options = LaunchOptions(arguments: ["/path/to/app", "--tour-fixtures"])
         let provenance = options.fixtureProvenance

@@ -413,48 +413,6 @@ public final class PortForwarder {
         return tcp + udp
     }
 
-    /// An atomic, structured view of Morbstack-owned loopback TCP forwards for the
-    /// pure local-domain claim reconciler.
-    ///
-    /// This does not expose listeners, cause a refresh, or reserve a port. The caller
-    /// must pair it with a fresh Engine `running`-container snapshot before trusting
-    /// a prospective domain claim. Failed and conflicting ports are captured under
-    /// the same lock as live listeners so a stale active entry can never win over a
-    /// known denial.
-    public var localDomainForwardSnapshot: MorbLocalDomain.LoopbackTCPForwardSnapshot {
-        lock.lock()
-        defer { lock.unlock() }
-
-        let active = forwards.values.compactMap { forward -> MorbLocalDomain.LoopbackTCPForward? in
-            let binding = forward.binding
-            guard binding.networkProtocol == "tcp",
-                  (1...65_535).contains(binding.hostPort),
-                  PortForwardPlan.endpoint(for: binding)?.address.isLoopback == true,
-                  !binding.containerID.isEmpty
-            else {
-                return nil
-            }
-            return MorbLocalDomain.LoopbackTCPForward(
-                ownerID: binding.containerID,
-                hostPort: UInt16(binding.hostPort))
-        }.sorted { lhs, rhs in
-            lhs.hostPort == rhs.hostPort ? lhs.ownerID < rhs.ownerID : lhs.hostPort < rhs.hostPort
-        }
-
-        let failed = Set(failedBinds.keys.compactMap { Self.validTCPHostPort($0.port) })
-        let conflicts = Set(conflictingTCPForwards.keys.compactMap { Self.validTCPHostPort($0.port) })
-        return MorbLocalDomain.LoopbackTCPForwardSnapshot(
-            forwarderIsRunning: running,
-            activeForwards: active,
-            failedHostPorts: failed,
-            conflictingHostPorts: conflicts)
-    }
-
-    private static func validTCPHostPort(_ port: Int) -> UInt16? {
-        guard (1...65_535).contains(port) else { return nil }
-        return UInt16(port)
-    }
-
     private static func endpointOrder(_ lhs: DockerHostEndpoint, _ rhs: DockerHostEndpoint) -> Bool {
         if lhs.port != rhs.port { return lhs.port < rhs.port }
         if lhs.address.family != rhs.address.family { return lhs.address.family < rhs.address.family }
@@ -1051,13 +1009,18 @@ public final class PortForwarder {
 
         let fd = try vm.connectVsockBlocking(
             port: MorbVsockPorts.publishAllAllocator, timeout: 5).get()
+        // Constructed OUTSIDE the do/catch on purpose. The session takes ownership of `fd`
+        // the moment it exists, so the failure path must close it through the session's own
+        // guarded close rather than closing `fd` directly — otherwise the explicit close here
+        // and the session's deinit both fire on the same descriptor, and between them that
+        // number can already belong to an unrelated accept() or vsock connect on another queue.
+        let session = PublishAllPortAllocator.Session(
+            fd: fd,
+            containerID: containerID,
+            forwarder: self,
+            log: log,
+            remainsAvailableForRestartPolicy: durable)
         do {
-            let session = PublishAllPortAllocator.Session(
-                fd: fd,
-                containerID: containerID,
-                forwarder: self,
-                log: log,
-                remainsAvailableForRestartPolicy: durable)
             try session.start()
             if durable {
                 publishAllRestartSessions[containerID] = session
@@ -1066,7 +1029,7 @@ public final class PortForwarder {
             }
             return session
         } catch {
-            Darwin.close(fd)
+            session.closeOwnedDescriptor()
             throw error
         }
     }
