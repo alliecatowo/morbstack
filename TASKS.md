@@ -21,18 +21,31 @@ body exceeds what it will buffer for inspection. Options: refuse with a Docker-s
 through, which is a fail-open security decision nobody made deliberately.
 **Rewrites:** EN-1, and every preflight guard's threat model.
 
-### SP-2 · `NEDNSSettings` entitlement feasibility · `in-flight`
-**Deliverable:** can a non-App-Store, Developer-ID-signed Mac app install a scoped DNS resolver for a
-private suffix, without a system extension the user must approve? Answer with a working spike or a
-documented refusal from Apple's entitlement model.
-**Rewrites:** DIF-4 and DIF-5 entirely. This decides whether container domains + HTTPS is ~6 weeks or
-architecturally impossible in the form we want. **Do this before writing any domain code.**
+### SP-2 · `NEDNSSettings` entitlement feasibility · `decided`
+**Decision:** [`docs/design/DNS-DECISION.md`](docs/design/DNS-DECISION.md). Do not use
+`NEDNSSettings` — its `dnsSettings` property accepts only DoH/DoT settings objects, so it would
+require a trusted local TLS certificate *before* DNS works, and the user must activate the resulting
+network service by hand behind the admin padlock. `NEDNSProxyProvider` is worse still: Developer ID
+needs `dns-proxy-systemextension`, a user-approved system extension that then sees every DNS query on
+the Mac.
+**Instead:** register per-container mDNS proxy `A` records under `.local` from the ordinary
+unprivileged daemon (`DNSServiceRegisterRecord`, `LocalOnly` interface). Verified on macOS 26.4:
+no entitlement, no password, no dialog, no `/etc/resolver` write, nothing to uninstall, multi-label
+names work, OS-arbitrated name conflicts, ~1 ms resolution. Also verified: a non-root process cannot
+bind 80/443/53 on macOS 26, so the bare-URL listener moves **into the guest VM** (the `A` record
+points at the guest's `192.168.64.x` address), keeping the host privilege cost at zero.
+**Rewrote:** SP-3, DIF-4, DIF-5, DOC-4, and the resolver/router sections of `docs/domains.md`.
 
-### SP-3 · Local domain suffix: `.local` vs `.test` vs `.orb`-style · `blocked` (SP-2)
-**Deliverable:** one chosen suffix, with the mDNS-collision analysis written down.
-`docs/domains.md:37` chose `.test`; `MorbLocalDomain.swift:17` hardcodes `morb.local`. `.local`
-collides with mDNS/Bonjour, which is a real correctness problem, not a taste one.
-**Rewrites:** DIF-4, DOC-4.
+### SP-3 · Local domain suffix: `.local` vs `.test` vs `.orb`-style · `decided`
+**Decision: `.local`.** Keep `MorbLocalDomain.suffix = "morb.local"`; withdraw the `*.morb.test`
+recommendation in `docs/domains.md:37`. SP-2 proved `.test` is unreachable without root
+(`DNSServiceRegisterRecord` returns `kDNSServiceErr_BadParam` for any non-`.local` name), so `.test`
+costs an admin password and a permanent `/etc/resolver` file. The mDNS-collision analysis inverts the
+old objection: `.local` collides with Bonjour only when resolved by *unicast* DNS. Registering unique
+records with mDNSResponder **is** Bonjour, and `LocalOnly` registration keeps the names off the LAN.
+**Accept knowingly:** no wildcard subdomains, and networks whose DNS hijacks `*.local` will break
+resolution (detect and report — see [orbstack#2274](https://github.com/orbstack/orbstack/issues/2274)).
+**Rewrote:** DIF-4, DOC-4.
 
 ### SP-4 · Remove the Docker-to-build-Docker bootstrap · `decided`
 **Decision:** [docs/design/ENGINE-BUILD-DECISION.md](docs/design/ENGINE-BUILD-DECISION.md). Publish
@@ -150,7 +163,7 @@ the author.
 | DOC-1 | "Unmodified upstream dockerd" retraction | Done: 26 corrections across 11 files; 17 hits deliberately left because `containerd`, the `docker` CLI, Compose and Buildx really are unmodified. See `docs/TRUTHFULNESS-PASS.md`. | `done` |
 | DOC-2 | Collapse six status docs into one generated file | | `blocked` (SP-7) |
 | DOC-3 | `morb scan` docs | Site copy corrected to describe the real behaviour | `done` |
-| DOC-4 | `.local` vs `.test` contradiction | Marked UNRESOLVED in `docs/domains.md`; the decision itself is SP-3 | `blocked` (SP-3) |
+| DOC-4 | `.local` vs `.test` contradiction | Settled by SP-3 in favour of the **source** constant (`morb.local`). `docs/domains.md` now needs four corrections, listed at the end of `docs/design/DNS-DECISION.md`: withdraw the `*.morb.test` recommendation; delete "there is no `/etc/resolver` fallback" (there is, priced in the decision); retire the "prove the per-user process can own loopback :80" gate (proved impossible); scope the host-side router + transport-lease contract to the fallback path only. | `open` |
 | DOC-5 | **`morb scan` tells users to run a script that does not exist** | Code scope, so the doc pass could not fix it: `ToolLocator.swift:90` is a user-facing *error message* directing you to `scripts/fetch-scan-tools.sh`, and `ScanCLI.swift:403` repeats it in `--help`. Either ship the script or rewrite both strings. An error message that prescribes a nonexistent remedy is worse than no message. | `open` |
 
 ## Release and distribution — nobody has ever installed this
@@ -172,8 +185,8 @@ Ranked by impact per effort. Full rationale in [docs/COMPETITIVE-GAPS.md](docs/C
 | DIF-1 | Hot reload on by default + published watcher conformance matrix | `blocked` (EN-7) |
 | DIF-2 | Container `exec` + a real PTY in the app — no `exec` in `DockerClient.swift`, no PTY view; table stakes for both competitors | `open` |
 | DIF-3 | Publish the benchmark harness; add `git-status-bindmount` and `npm-install-bindmount-vs-volume` | `open` |
-| DIF-4 | Container domains, router-only first | `blocked` (SP-2, SP-3) |
-| DIF-5 | HTTPS via a name-constrained local CA | `blocked` (SP-2) |
+| DIF-4 | **Container domains via unprivileged mDNS** — mechanism decided in [`docs/design/DNS-DECISION.md`](docs/design/DNS-DECISION.md). Six steps, **~3–4 weeks, zero admin prompts**: (0) prove host→guest reachability at `192.168.64.x` on Wi-Fi/Ethernet/VPN — **hard gate**, fall back to `127.0.0.1` + high-port URLs if it fails; (1) mDNS registrar in `morbstackd` (`A` records only, `LocalOnly`, no advertised service type, conflict handling, Docker-event lifecycle); (2) name derivation wired to the existing `MorbLocalDomain`/`LocalDomainClaimReconciler`; (3) guest-side Host-header reverse proxy owning `:80`/`:443` inside the VM, pinned like every other guest binary, with listening-port auto-detection; (4) withdrawal paths (stop/remove, suspend, wake, VPN transition, hostile-`.local` detection); (5) `morb domain` CLI + inspector affordance. No wildcards — do not advertise them. | `open` |
+| DIF-5 | **HTTPS via a name-constrained local CA** — **~2–3 weeks after DIF-4**. CA key in the Keychain, ACL-restricted; per-name short-lived leaves; name constraints as defence in depth with honest browser-by-browser verification (Firefox has its own trust store). **Two things need a written ruling before code:** the trust installation is the one and only user password prompt in the whole domains feature, and if the proxy lives in the guest then leaf private keys live in the guest — recommended shape is issue-on-host, push over vsock, hold in guest tmpfs, CA key never leaves the host. | `blocked` (DIF-4) |
 | DIF-6 | Routable container IPs | `blocked` (SP-5) |
 | DIF-7 | Native file access to volumes (Finder) | `open` |
 | DIF-8 | Distroless debug toolbox — **the one thing OrbStack actually paywalls** | `blocked` (DIF-2) |

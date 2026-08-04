@@ -50,39 +50,49 @@ is the mechanical answer.
 Table stakes. If any of this is wrong, no differentiator matters, because the user's existing
 workflow breaks on day one.
 
-### 1.0 — THE BLOCKER: the Docker API preflight is fail-open for real CLI traffic
+### 1.0 — WAS THE BLOCKER: the Docker API preflight was fail-open for real CLI traffic — **`runs-here`, closed**
 
-`DockerProxy.preflightThenRelay` inspects **only the first HTTP request per connection**, then
-splices the socket raw. The `docker` CLI opens a connection, pings, and *reuses* it — so
-`POST /containers/create` is essentially never inspected. Proven with one identical body:
-**HTTP 400 on a fresh connection, HTTP 201 as the second request on a keep-alive connection.**
+Full writeup and evidence: **`docs/audit/PROXY-FRAMING.md`**.
 
-`DockerProxy.swift:24` already documents the preflight as "best-effort" for large or chunked
-requests. What nobody caught is that keep-alive makes the bypass near-universal.
+**The defect.** `DockerProxy.preflightThenRelay` inspected **only the first HTTP request per
+connection**, then spliced the socket raw. The `docker` CLI opens a connection, pings, and
+*reuses* it — so `POST /containers/create` was essentially never inspected. Proven with one
+identical body: **HTTP 400 on a fresh connection, HTTP 201 as the second request on a
+keep-alive connection.** Every preflight guard in the codebase was correct, unit-tested, and
+not actually running: `-v /etc/hosts:/x` served the **guest's** file, `/var/log` and `/Library`
+silently became guest directories, and container writes to them silently vanished. The same
+bypass disabled the create-time port-publication preflight.
 
-Consequences, none of which are theoretical:
+**The fix.** A real HTTP/1.1 framing layer — `DockerRequestFraming.swift` and
+`DockerFramedRelay.swift` — frames every request on the client-to-guest direction
+(`Content-Length`, chunked, pipelining, bodyless) until the Engine actually hijacks the
+connection, and only then splices. The response direction stays a raw backpressured splice, so
+`logs -f`, `events` and `cp` are untouched. Hijack is **nominated on the request** (`attach`,
+`exec` start, `session`, `grpc`, any `Upgrade`) and **confirmed on the response** (`101`, or a
+`2xx` carrying Docker's raw/multiplexed stream type), which makes over-nomination free and a
+missed hijack unlikely. A body too large to inspect is **refused** with a Docker-shaped `400`,
+never waved through; so are the ambiguous framings (`Content-Length` with `Transfer-Encoding`,
+repeated `Content-Length`) that would otherwise let a request smuggle past admission.
+`DockerDynamicCreateTransaction` was retired — its bounded hold-back now runs inside the relay,
+so it applies to a dynamic-port create anywhere on a connection.
 
-- Every preflight guard in this codebase is **correct, unit-tested, and not actually running**. That
-  includes the bind-mount alias guard (`435d09f`) and the port-publication preflight. They pass their
-  tests and never see production traffic.
-- `-v /etc/hosts:/x` still serves the **guest's** file (`e3998dbe…` vs the Mac's `c7dd0e2e…`).
-  `/var/log` and `/Library` silently become guest directories, and **container writes to them
-  silently vanish** — a later container still saw a file the host never received.
+**Verified live** against the rebuilt daemon (inode-checked, not name-checked): the original
+experiment now yields **identical 400s both ways**; the full bind-mount matrix refuses `/etc`,
+`/var`, `/Library` and symlink traversal with corrective messages while shared roots serve real
+Mac content and container writes land on the Mac; the port matrix including
+`-p 8080:80 -p 8080:81` passes; and `logs -f`, `exec -it`, `attach`, `cp` both directions,
+`events`, BuildKit and classic builds, and the 3-service compose fixture all show no regression
+(zero framing failures logged). `mise run check` green at 764 Swift / 217 Rust.
 
-This single defect invalidates the "fixed in source, gated on a rebuild" framing for an entire class
-of findings: the fixes are in the image now, and they still do not run.
-
-Fixing it is not a one-liner. Forcing one-request-per-connection interacts with `logs -f`, `exec`,
-`attach` and the events stream, all of which legitimately hijack the connection. The likely shape is
-a real HTTP/1.1 framing layer that parses each request on the connection until a hijack is
-negotiated, then splices. **Nothing else in Phase 1 should be trusted until this lands**, because
-every guard sits behind it.
+Residual risk is recorded in `PROXY-FRAMING.md` §2.7 — principally that hijack confirmation and
+the held create assume a non-pipelining client, which no Docker client is, and which the
+previous code assumed at connection granularity anyway.
 
 | # | Item | State |
 | --- | --- | --- |
 | 1.1 | `docker run -P` end to end | first run **PASS**; stop/start/restart **FAIL** — the durable session EOFs 6 ms after its successful first allocation |
 | 1.2 | Explicit `-p` in every form incl. UDP, ranges, `127.0.0.1:`, and the ambiguity case | **PASS**, incl. first-ever UDP run |
-| 1.3 | Bind mounts: `/tmp`, `/var`, `/etc`, `$HOME`, symlink-traversing paths | shared roots **PASS**; `/etc` and `/var` **FAIL (critical)** — blocked on 1.0, not on the guard |
+| 1.3 | Bind mounts: `/tmp`, `/var`, `/etc`, `$HOME`, symlink-traversing paths | **PASS** — `runs-here`, re-run through the real CLI after 1.0 landed. `/etc`, `/var`, `/Library` and symlink traversal all refused with corrective messages; `/tmp`, `/private/tmp` and `$HOME` serve real Mac content; container writes land on the Mac. See `docs/audit/PROXY-FRAMING.md` §3.2 |
 | 1.4 | `host.docker.internal` | **PARTIAL** — needs an explicit `--add-host` |
 | 1.5 | Disk grow, fail-closed across crash/retry | **FAIL** — host/guest contract mismatch (`keyNotFound: 'device'`); image grew to 72 GiB while the guest filesystem stayed 62.4 G, and a *refused* grow still mutated configured capacity |
 | 1.6 | Live-share / hot reload | `source-only`; first compile was today, listener now binds |

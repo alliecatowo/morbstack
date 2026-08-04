@@ -439,7 +439,15 @@ final class SharesTests: XCTestCase {
         config.sharedPaths = []
         let report = Doctor.run(config: config, includeLiveShares: false)
         XCTAssertEqual(report.checks.first { $0.name == "shares" }?.status, .warn)
-        XCTAssertTrue(report.healthy, "an empty shared_paths must not fail the report")
+        // Assert on the share checks, NOT on report.healthy. `healthy` is false if
+        // ANY check fails, including ones about the guest image, disk and kernel —
+        // none of which exist on a fresh CI runner. Asserting whole-report health
+        // here silently coupled a test about `shared_paths` to the entire ambient
+        // machine state, and it failed on CI's first ever run for that reason.
+        XCTAssertFalse(
+            report.checks.contains { $0.name.hasPrefix("share") && $0.status == .fail },
+            "an empty shared_paths must not fail any share check"
+        )
     }
 
     func testDoctorShowsTheShareArgumentsOnTheBootCmdline() {
