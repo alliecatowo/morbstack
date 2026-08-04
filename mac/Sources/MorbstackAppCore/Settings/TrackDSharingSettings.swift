@@ -69,7 +69,7 @@ struct TrackDSharingSettings: View {
                 )
             }
 
-            Section("Live Reload") {
+            Section {
                 if store.draft.liveSharePaths.isEmpty {
                     LabeledContent("Project Folders") {
                         Text("Off")
@@ -108,6 +108,8 @@ struct TrackDSharingSettings: View {
                         restartEngine()
                     }
                 }
+            } header: {
+                Text("Live Reload")
             } footer: {
                 Text(
                     "Choose only project folders beneath a shared folder. Changes apply after an engine restart. Morbstack emits metadata invalidations (IN_ATTRIB), not synthetic writes, renames, or deletes; run morb shares to confirm delivery after restarting."

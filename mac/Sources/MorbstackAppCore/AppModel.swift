@@ -514,7 +514,7 @@ final class AppModel {
     /// running; a stop/restart must obtain a new start instant rather than reusing an
     /// old one.
     private func preservingStartedAt(in fresh: [ContainerSummary]) -> [ContainerSummary] {
-        let known = Dictionary(
+        let known: [String: Date] = Dictionary(
             uniqueKeysWithValues: containers.compactMap { container in
                 guard container.isRunning, let startedAt = container.startedAt else { return nil }
                 return (container.id, startedAt)
@@ -522,7 +522,7 @@ final class AppModel {
 
         return fresh.map { container in
             var container = container
-            if container.isRunning { container.startedAt = known[container.id] }
+            if container.isRunning { container.startedAt = known[container.id] ?? container.startedAt }
             return container
         }
     }
