@@ -572,6 +572,17 @@ enum DockerHijackDetection {
             return false
         }
 
+        // Image pushes carry their repository in the escaped route path, with the
+        // tag in the query and registry credentials in a request header. Their
+        // progress and terminal errors stay in an ordinary JSON HTTP response;
+        // closing that response is how the Engine observes push cancellation.
+        if head.method.uppercased() == "POST",
+           components.count >= 3,
+           components[components.count - 3] == "images",
+           last == "push" {
+            return false
+        }
+
         // The build context is a regular (often chunked) tar request and its output
         // is a regular JSON response stream. Client disconnect is build cancellation,
         // so this route must keep HTTP framing even if a stale Upgrade header appears.
