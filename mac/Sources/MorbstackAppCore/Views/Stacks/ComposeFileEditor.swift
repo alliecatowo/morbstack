@@ -414,8 +414,19 @@ struct ComposeFileEditorSheet: View {
                         LabeledContent("Format", value: editor.sourceKind?.formatDescription ?? "Unavailable")
                         LabeledContent(
                             "Provenance",
-                            value: editor.isDirty ? "Unsaved editor text" : "Selected file snapshot")
-                        LabeledContent("Deployment", value: "Not applied automatically")
+                            value: editor.isDirty
+                                ? "Editor draft over selected-file snapshot"
+                                : "Selected-file snapshot")
+                        LabeledContent(
+                            "Disk Changes",
+                            value: editor.sourceKind == .composeYAML
+                                ? "Checked before save, validation, or command"
+                                : "Checked before save")
+                        LabeledContent(
+                            "Runtime",
+                            value: editor.sourceKind == .composeYAML
+                                ? "Unchanged; does not restart services"
+                                : "Unchanged; not applied automatically")
                         if editor.isEnvironmentFile {
                             LabeledContent("Scope", value: "Selected .env file only")
                             LabeledContent(

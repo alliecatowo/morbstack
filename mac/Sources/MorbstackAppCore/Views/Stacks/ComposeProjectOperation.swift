@@ -61,7 +61,7 @@ enum ComposeProjectOperation: String, Sendable {
         case .build:
             "Builds the services declared by this saved source. Dockerfile instructions and declared build contexts are executable input; they can read the reviewed project context and make the network requests those instructions explicitly request."
         case .up:
-            "Creates or starts the resources declared by this saved source. This command does not build images and does not pull images implicitly."
+            "Creates or starts the resources declared by this saved source. Compose can recreate an existing service when its configuration or image changed. This command does not build images and does not pull images implicitly."
         case .down:
             "Stops and removes this source's Compose containers and networks. It does not pass --volumes, --rmi, or --remove-orphans, so named volumes, images, and containers outside the declared project are not requested for removal."
         }

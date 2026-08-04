@@ -83,4 +83,21 @@ final class ComposeProjectSourceInspectionTests: XCTestCase {
         XCTAssertEqual(inspection.secretGrants.map(\.syntax), [.short, .long])
         XCTAssertEqual(inspection.secretGrants.map(\.target), [nil, "/run/project-api"])
     }
+
+    func testTopLevelSecretDeclarationDoesNotGrantServiceAccess() {
+        let inspection = ComposeProjectSourceInspection.inspect(
+            text: """
+            services:
+              app:
+                image: example/app:latest
+            secrets:
+              database_password:
+                file: ./database-password.txt
+            """,
+            sourceKind: .composeYAML)
+
+        XCTAssertEqual(inspection.secretDeclarations.map(\.name), ["database_password"])
+        XCTAssertEqual(inspection.secretDeclarations.map(\.source), [.file(path: "./database-password.txt")])
+        XCTAssertTrue(inspection.secretGrants.isEmpty)
+    }
 }
