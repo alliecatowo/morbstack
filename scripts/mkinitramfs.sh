@@ -80,7 +80,8 @@ fi
 
 if [ ! -x "${PATCHED_DOCKERD_BIN}" ]; then
 	echo "error: ${PATCHED_DOCKERD_BIN} is missing or not executable" >&2
-	echo "       run scripts/build-morbstack-dockerd.sh (or mise run guest-image)" >&2
+	echo "       fetch the pinned release with scripts/fetch-guest-assets.sh --morbstack-dockerd-only" >&2
+	echo "       or build it locally with scripts/build-morbstack-dockerd.sh" >&2
 	exit 1
 fi
 

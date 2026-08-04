@@ -47,3 +47,34 @@ Download command used:
   curl -L -o docker-29.7.1.tgz \
     https://download.docker.com/linux/static/stable/aarch64/docker-29.7.1.tgz
   tar xzf docker-29.7.1.tgz   # produces docker/{docker,dockerd,containerd,...}
+
+Morbstack-patched dockerd
+==========================
+
+File: morbstack-dockerd
+Release tag: engine-moby-v29.7.1-c5b8ce9
+Source: https://github.com/alliecatowo/morbstack/releases/download/engine-moby-v29.7.1-c5b8ce9/morbstack-dockerd
+sha256: 96d417aed3deda5971f4b479fb32c2a28d7c59d9e128255c83987794deed95cc
+Target: Linux/arm64, installed by mkinitramfs.sh as /usr/local/bin/dockerd
+
+This is not a redistributed upstream Docker binary. It is Moby
+docker-v29.7.1 at commit c5b8ce9274b5c00cb1f8287c8e258edc1f01176d with
+guest/moby-patches/0001-morbstack-publish-all-host-allocator.patch applied.
+The patch is required for `docker run -P`: it reports Moby's effective
+published-port set to Morbstack's host allocator after exposed ports have
+been expanded.
+
+Verification and reproduction
+-----------------------------
+
+scripts/fetch-guest-assets.sh --morbstack-dockerd-only verifies the pinned
+SHA-256 before installing this file. The companion build-engine GitHub Actions
+workflow attaches an in-toto build provenance attestation to the published
+asset; inspect it with `gh attestation verify` and reproduce it locally with
+scripts/build-morbstack-dockerd.sh, then compare its SHA-256 to the pin above.
+
+The pinned tag is deliberately fail-closed. Until that GitHub Release asset
+exists, a fresh fetch fails with the two honest remediation paths: build from
+the pinned source locally, or restore access to the release. mkinitramfs.sh
+never substitutes the stock dockerd, because doing so would silently disable
+host-reachable `docker run -P` publishing.

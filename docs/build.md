@@ -36,7 +36,7 @@ pin.
 | `build-mac` | — | `swift build` in `mac/` — builds `morbstackd` and `morb` |
 | `build-guest` | — | `cargo build` in `guest/morbinit/` — host-arch `morbinit`, enough for `cargo test`/`cargo check` |
 | `cross-build-guest` | — | Cross-compiles `morbinit` for `aarch64-unknown-linux-musl` (the real guest target) via the messense Homebrew cross toolchain |
-| `guest-image` | `cross-build-guest` | Runs `scripts/mkinitramfs.sh` — assembles the bootable initramfs (morbinit + Alpine rootfs + Docker engine binaries + fsutils) into `$MORBSTACK_HOME/data/kernel/initrd.img` (default `~/.morbstack`) |
+| `guest-image` | `cross-build-guest` | Fetches the pinned Morbstack-patched `dockerd` release only when no local patch build exists, then runs `scripts/mkinitramfs.sh` to assemble the bootable initramfs (morbinit + Alpine rootfs + Docker engine binaries + fsutils) into `$MORBSTACK_HOME/data/kernel/initrd.img` (default `~/.morbstack`) |
 | `sign` | `build-mac` | Ad-hoc codesigns `morbstackd` with the `com.apple.security.virtualization` entitlement. Must be the last step before starting the daemon — `swift build` strips the entitlement on every rebuild |
 | `run-daemon`\* | `sign` | Runs `morbstackd --foreground` for local development |
 | `test` | — | Runs the Swift suite (if `mac/Tests` exists) and the Rust suite |
@@ -63,6 +63,26 @@ if `clean`/`clean-app` are what you're testing.
 
 Run `mise tasks ls` at any time for the live list with one-line
 descriptions, or `mise tasks deps <task>` to see a task's dependency tree.
+
+## Patched Docker Engine input
+
+The guest always embeds Morbstack's patched Linux/arm64 `dockerd`, because the
+patch is what makes `docker run -P` report effective published ports to the
+host allocator. A normal `mise run guest-image` uses the pinned,
+SHA-256-verified `morbstack-dockerd` GitHub Release asset; it does not require
+Docker or Buildx on the Mac. If
+`dist/guest-bin/morbstack-dockerd` already exists and is executable, the task
+keeps that local file so someone actively working on the Moby patch can test
+their source build.
+
+`mise run build-patched-dockerd` remains the reproducibility route. It needs a
+working Docker Buildx setup, builds the commit- and patch-pinned Moby source,
+and writes the candidate to `dist/guest-bin/morbstack-dockerd`. Compare its
+SHA-256 with the release pin in
+`scripts/fetch-guest-assets.sh` and the provenance record in
+`dist/guest-bin/PROVENANCE.txt`. If neither a local build nor the pinned
+release is available, initramfs assembly fails explicitly; it never falls back
+to stock `dockerd`, which would silently break `-P`.
 
 ## Things worth knowing about how these tasks run
 

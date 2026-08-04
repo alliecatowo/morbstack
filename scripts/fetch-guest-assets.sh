@@ -7,20 +7,25 @@
 #                -> $MORBSTACK_HOME/data/kernel/vmlinux
 #   2. docker:   Docker 29.7.1 static aarch64 binaries, archive-hash-pinned,
 #                -> dist/guest-bin/
-#   3. alpine:   Alpine 3.24.1 aarch64 minirootfs, verified against Alpine's
+#   3. morbstack-dockerd: Morbstack's downstream-patched Linux/arm64 Docker
+#                Engine, fetched from the pinned Morbstack GitHub Release and
+#                SHA-256-verified -> dist/guest-bin/morbstack-dockerd.
+#                This is required for `docker run -P`; stock dockerd is never
+#                silently substituted. See dist/guest-bin/PROVENANCE.txt.
+#   4. alpine:   Alpine 3.24.1 aarch64 minirootfs, verified against Alpine's
 #                own CDN sha256 sidecar (Alpine doesn't publish permanent
 #                versioned URLs the way GitHub Releases / download.docker.com
 #                do, so this one is sidecar-verified rather than hash-pinned
 #                in this script)
 #                -> dist/rootfs/
-#   4. fsutils:  Alpine 3.24 aarch64 apks for btrfs-progs + e2fsprogs
+#   5. fsutils:  Alpine 3.24 aarch64 apks for btrfs-progs + e2fsprogs
 #                (guest disk formatting, see the persistence design) and
 #                iptables-legacy (guest bridge NAT), plus their full
 #                transitive .so dependency closure. Archive-hash-pinned,
 #                cached -> dist/apks/ (see dist/apks/PROVENANCE.txt for the
 #                full package list and the iptables-legacy vs iptables
 #                rationale).
-#   5. cli:      the `docker` client binary itself, HOST darwin-arm64,
+#   6. cli:      the `docker` client binary itself, HOST darwin-arm64,
 #                version 29.7.1 (matching the guest's dockerd exactly — zero
 #                client/server skew). Docker Inc. does not publish a
 #                standalone macOS CLI binary through its own release
@@ -38,10 +43,10 @@
 #                Morbstack" into a complete Docker CLI + engine on a Mac
 #                that has never had Docker Desktop or Homebrew's docker
 #                installed — see docs/parity.md's zero-config-discovery item.
-#   6. compose:  docker/compose v5.3.1 CLI plugin binary for the HOST Mac
+#   7. compose:  docker/compose v5.3.1 CLI plugin binary for the HOST Mac
 #                (darwin-aarch64), verified against its GitHub Release
 #                sha256 sidecar -> dist/host-bin/cli-plugins/docker-compose.
-#   7. buildx:   docker/buildx v0.36.0 CLI plugin binary for the HOST Mac
+#   8. buildx:   docker/buildx v0.36.0 CLI plugin binary for the HOST Mac
 #                (darwin-arm64). Unlike compose, buildx's GitHub Release does
 #                NOT publish darwin binaries in its plain checksums.txt (only
 #                the linux/freebsd/netbsd/openbsd builds are listed there) —
@@ -53,7 +58,7 @@
 #                functional; shipping this client-side plugin is what turns
 #                that into a working `docker build`/`docker buildx build`
 #                out of the box.
-#   8. kubectl:  Kubernetes v1.36.2 client for the HOST darwin-arm64. This
+#   9. kubectl:  Kubernetes v1.36.2 client for the HOST darwin-arm64. This
 #                is a deliberately private, optional helper at
 #                dist/host-bin/kubernetes/kubectl. It is not installed into
 #                PATH, is not part of the ordinary Docker toolchain, and is
@@ -67,7 +72,7 @@
 #   Resources/host-bin/), no path special-casing between them. See
 #   MorbstackKit/CliPlugins.swift.
 #
-#   9. k8s:      k3s v1.36.2+k3s1 arm64 server binary and cri-dockerd v0.4.4
+#   10. k8s:     k3s v1.36.2+k3s1 arm64 server binary and cri-dockerd v0.4.4
 #                arm64, both hash-pinned -> dist/guest-k8s/ (the repository's
 #                provenance-bearing cache) and $MORBSTACK_HOME/data/k8s/ (the
 #                copy morbstackd actually reads). This is the OPTIONAL
@@ -86,6 +91,7 @@
 #   scripts/fetch-guest-assets.sh                 # fetch everything
 #   scripts/fetch-guest-assets.sh --kernel-only    # kernel step only
 #   scripts/fetch-guest-assets.sh --docker-only    # docker binaries only
+#   scripts/fetch-guest-assets.sh --morbstack-dockerd-only # patched dockerd only
 #   scripts/fetch-guest-assets.sh --alpine-only    # alpine rootfs only
 #   scripts/fetch-guest-assets.sh --fsutils-only   # btrfs/e2fs/iptables apks only
 #   scripts/fetch-guest-assets.sh --host-cli       # all three host Docker CLI files
@@ -121,6 +127,20 @@ KERNEL_FINAL_SHA256="2fe4a58d2885d623bcb4d705900ac8c1d4f02371152da8126b3b00c8c47
 DOCKER_RELEASE_URL="https://download.docker.com/linux/static/stable/aarch64/docker-29.7.1.tgz"
 DOCKER_ARCHIVE_SHA256="4eb4d1b21131897ed3990aac31039161bf4bdd07fcfb733e996010319ff4e069"
 DOCKER_BIN_NAMES="containerd containerd-shim-runc-v2 ctr docker docker-init docker-proxy dockerd runc"
+
+# --- morbstack-dockerd: downstream-patched Moby 29.7.1, Linux/arm64 ---
+#
+# This is intentionally a repository-owned release asset rather than an
+# upstream sidecar: Morbstack's publish-all patch changes dockerd, so Docker
+# cannot publish a checksum for it. The SHA is the trust anchor; GitHub's
+# build provenance attestation is additive evidence that the pinned release
+# was built from this repository revision. See
+# docs/design/ENGINE-BUILD-DECISION.md and dist/guest-bin/PROVENANCE.txt.
+MORBSTACK_DOCKERD_RELEASE_TAG="engine-moby-v29.7.1-c5b8ce9"
+MORBSTACK_DOCKERD_RELEASE_URL="https://github.com/alliecatowo/morbstack/releases/download/${MORBSTACK_DOCKERD_RELEASE_TAG}/morbstack-dockerd"
+MORBSTACK_DOCKERD_SHA256="96d417aed3deda5971f4b479fb32c2a28d7c59d9e128255c83987794deed95cc"
+MORBSTACK_DOCKERD_MOBY_COMMIT="c5b8ce9274b5c00cb1f8287c8e258edc1f01176d"
+MORBSTACK_DOCKERD_PATCH="guest/moby-patches/0001-morbstack-publish-all-host-allocator.patch"
 
 # --- alpine: 3.24.1 aarch64 minirootfs ---
 ALPINE_RELEASE_URL="https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/aarch64/alpine-minirootfs-3.24.1-aarch64.tar.gz"
@@ -261,11 +281,12 @@ KUBECTL_SHA256="4408c85c83fd3a31adaa555bdf3c7a6c81f74b19449a9060ba31ab91926f023d
 
 usage() {
 	cat <<EOF
-Usage: $(basename "$0") [--kernel-only|--docker-only|--alpine-only|--fsutils-only|--host-cli|--cli-only|--compose-only|--buildx-only|--host-kubectl-only|--k8s-only] [-h]
+Usage: $(basename "$0") [--kernel-only|--docker-only|--morbstack-dockerd-only|--alpine-only|--fsutils-only|--host-cli|--cli-only|--compose-only|--buildx-only|--host-kubectl-only|--k8s-only] [-h]
 
 Fetch and verify all pinned third-party guest assets:
   kernel   -> ${MORBSTACK_HOME}/data/kernel/vmlinux
   docker   -> ${REPO_ROOT}/dist/guest-bin/
+  morbstack-dockerd -> ${REPO_ROOT}/dist/guest-bin/morbstack-dockerd
   alpine   -> ${REPO_ROOT}/dist/rootfs/
   fsutils  -> ${REPO_ROOT}/dist/apks/
   cli      -> ${REPO_ROOT}/dist/host-bin/docker
@@ -277,6 +298,8 @@ Fetch and verify all pinned third-party guest assets:
 Options:
   --kernel-only    Only fetch/verify the kernel
   --docker-only    Only fetch/verify the Docker engine binaries
+  --morbstack-dockerd-only
+                    Only fetch/verify Morbstack's patched dockerd release asset
   --alpine-only    Only fetch/verify the Alpine minirootfs
   --fsutils-only   Only fetch/verify the btrfs-progs/e2fsprogs/iptables-legacy apks
   --host-cli       Fetch/verify docker, docker-compose and docker-buildx for the host Mac
@@ -463,6 +486,51 @@ fetch_docker() {
 	trap - RETURN
 	rm -f "${tmp_archive}"
 	rm -rf "${tmp_extract}"
+}
+
+# ---------------------------------------------------------------------------
+# Step: Morbstack-patched dockerd release asset
+# ---------------------------------------------------------------------------
+
+fetch_morbstack_dockerd() {
+	echo "== morbstack-dockerd (patched Moby 29.7.1, Linux/arm64) =="
+	info "pinned inputs: Moby ${MORBSTACK_DOCKERD_MOBY_COMMIT}, ${MORBSTACK_DOCKERD_PATCH}"
+
+	local dest_dir="${REPO_ROOT}/dist/guest-bin"
+	local dest_file="${dest_dir}/morbstack-dockerd"
+
+	if [ -x "${dest_file}" ]; then
+		local have_sha
+		have_sha="$(sha256_of "${dest_file}")"
+		if [ "${have_sha}" = "${MORBSTACK_DOCKERD_SHA256}" ]; then
+			check "morbstack-dockerd already present and verified: ${dest_file}"
+			return 0
+		fi
+		echo "  existing ${dest_file} has sha256 ${have_sha}, expected ${MORBSTACK_DOCKERD_SHA256}; re-fetching" >&2
+	fi
+
+	require_cmd curl
+	mkdir -p "${dest_dir}"
+
+	local tmp
+	tmp="$(mktemp "${TMPDIR:-/tmp}/morbstack-dockerd.XXXXXX")"
+	trap 'rm -f "${tmp}"' RETURN
+
+	info "downloading ${MORBSTACK_DOCKERD_RELEASE_URL}"
+	curl --fail --location --show-error --progress-bar --output "${tmp}" "${MORBSTACK_DOCKERD_RELEASE_URL}" ||
+		fail "failed to download the pinned morbstack-dockerd release asset; build it locally with scripts/build-morbstack-dockerd.sh or restore access to ${MORBSTACK_DOCKERD_RELEASE_URL}"
+
+	local got_sha
+	got_sha="$(sha256_of "${tmp}")"
+	[ "${got_sha}" = "${MORBSTACK_DOCKERD_SHA256}" ] ||
+		fail "morbstack-dockerd sha256 mismatch: got ${got_sha}, expected ${MORBSTACK_DOCKERD_SHA256} (possible corruption, wrong release tag, or supply-chain tamper)"
+	check "sha256 verified against Morbstack release pin"
+
+	install -m 0755 "${tmp}" "${dest_file}"
+	check "installed patched dockerd: ${dest_file}"
+
+	trap - RETURN
+	rm -f "${tmp}"
 }
 
 # ---------------------------------------------------------------------------
@@ -1052,6 +1120,7 @@ EOF
 
 DO_KERNEL=1
 DO_DOCKER=1
+DO_MORBSTACK_DOCKERD=1
 DO_ALPINE=1
 DO_FSUTILS=1
 DO_CLI=1
@@ -1060,109 +1129,66 @@ DO_BUILDX=1
 DO_KUBECTL=0
 DO_K8S=1
 
+disable_all_fetches() {
+	DO_KERNEL=0
+	DO_DOCKER=0
+	DO_MORBSTACK_DOCKERD=0
+	DO_ALPINE=0
+	DO_FSUTILS=0
+	DO_CLI=0
+	DO_COMPOSE=0
+	DO_BUILDX=0
+	DO_KUBECTL=0
+	DO_K8S=0
+}
+
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--kernel-only)
-		DO_DOCKER=0
-		DO_ALPINE=0
-		DO_FSUTILS=0
-		DO_CLI=0
-		DO_COMPOSE=0
-		DO_BUILDX=0
-		DO_KUBECTL=0
-		DO_K8S=0
+		disable_all_fetches
+		DO_KERNEL=1
 		;;
 	--docker-only)
-		DO_KERNEL=0
-		DO_ALPINE=0
-		DO_FSUTILS=0
-		DO_CLI=0
-		DO_COMPOSE=0
-		DO_BUILDX=0
-		DO_KUBECTL=0
-		DO_K8S=0
+		disable_all_fetches
+		DO_DOCKER=1
+		;;
+	--morbstack-dockerd-only)
+		disable_all_fetches
+		DO_MORBSTACK_DOCKERD=1
 		;;
 	--alpine-only)
-		DO_KERNEL=0
-		DO_DOCKER=0
-		DO_FSUTILS=0
-		DO_CLI=0
-		DO_COMPOSE=0
-		DO_BUILDX=0
-		DO_KUBECTL=0
-		DO_K8S=0
+		disable_all_fetches
+		DO_ALPINE=1
 		;;
 	--fsutils-only)
-		DO_KERNEL=0
-		DO_DOCKER=0
-		DO_ALPINE=0
-		DO_CLI=0
-		DO_COMPOSE=0
-		DO_BUILDX=0
-		DO_KUBECTL=0
-		DO_K8S=0
+		disable_all_fetches
+		DO_FSUTILS=1
 		;;
 	--host-cli)
-		DO_KERNEL=0
-		DO_DOCKER=0
-		DO_ALPINE=0
-		DO_FSUTILS=0
+		disable_all_fetches
 		DO_CLI=1
 		DO_COMPOSE=1
 		DO_BUILDX=1
-		DO_KUBECTL=0
-		DO_K8S=0
 		;;
 	--cli-only)
-		DO_KERNEL=0
-		DO_DOCKER=0
-		DO_ALPINE=0
-		DO_FSUTILS=0
-		DO_COMPOSE=0
-		DO_BUILDX=0
-		DO_KUBECTL=0
-		DO_K8S=0
+		disable_all_fetches
+		DO_CLI=1
 		;;
 	--compose-only)
-		DO_KERNEL=0
-		DO_DOCKER=0
-		DO_ALPINE=0
-		DO_FSUTILS=0
-		DO_CLI=0
-		DO_BUILDX=0
-		DO_KUBECTL=0
-		DO_K8S=0
+		disable_all_fetches
+		DO_COMPOSE=1
 		;;
 	--buildx-only)
-		DO_KERNEL=0
-		DO_DOCKER=0
-		DO_ALPINE=0
-		DO_FSUTILS=0
-		DO_CLI=0
-		DO_COMPOSE=0
-		DO_KUBECTL=0
-		DO_K8S=0
+		disable_all_fetches
+		DO_BUILDX=1
 		;;
 	--host-kubectl-only)
-		DO_KERNEL=0
-		DO_DOCKER=0
-		DO_ALPINE=0
-		DO_FSUTILS=0
-		DO_CLI=0
-		DO_COMPOSE=0
-		DO_BUILDX=0
+		disable_all_fetches
 		DO_KUBECTL=1
-		DO_K8S=0
 		;;
 	--k8s-only)
-		DO_KERNEL=0
-		DO_DOCKER=0
-		DO_ALPINE=0
-		DO_FSUTILS=0
-		DO_CLI=0
-		DO_COMPOSE=0
-		DO_BUILDX=0
-		DO_KUBECTL=0
+		disable_all_fetches
+		DO_K8S=1
 		;;
 	-h | --help)
 		usage
@@ -1179,6 +1205,7 @@ done
 
 [ "${DO_KERNEL}" -eq 1 ] && fetch_kernel
 [ "${DO_DOCKER}" -eq 1 ] && fetch_docker
+[ "${DO_MORBSTACK_DOCKERD}" -eq 1 ] && fetch_morbstack_dockerd
 [ "${DO_ALPINE}" -eq 1 ] && fetch_alpine
 [ "${DO_FSUTILS}" -eq 1 ] && fetch_fsutils
 [ "${DO_CLI}" -eq 1 ] && fetch_docker_cli

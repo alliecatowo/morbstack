@@ -37,8 +37,13 @@ jobs:
           filters: |
             guest_image:
               - 'guest/morbinit/**'
+              - 'guest/moby-patches/**'
               - 'scripts/mkinitramfs.sh'
               - 'scripts/fetch-guest-assets.sh'
+              - 'scripts/build-morbstack-dockerd.sh'
+              - 'scripts/fetch-moby-source.sh'
+              - 'mise-tasks/guest-image'
+              - 'dist/guest-bin/PROVENANCE.txt'
               - 'dist/CROSS_COMPILE.md'
               - 'mise.toml'
 
@@ -217,21 +222,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: jdx/mise-action@v2
 
-      # `mise run guest-image` depends on build-patched-dockerd, which builds the
-      # pinned Moby engine through `docker buildx bake` — and GitHub's hosted
-      # macOS runners ship no Docker at all (that is a Linux-runner convenience).
-      # Fail here, with the reason, rather than 40 minutes later inside a build
-      # script whose error message assumes a developer's laptop.
-      - name: Require Docker Buildx for the Moby build
-        run: |
-          docker buildx version >/dev/null 2>&1 || {
-            echo "::error::this job needs a working 'docker buildx' to build the pinned Moby engine." >&2
-            echo "GitHub's hosted macOS runners do not provide one. Either provision a" >&2
-            echo "Docker-capable runner, or split build-patched-dockerd out to a Linux job" >&2
-            echo "that publishes the engine binaries as an artifact for this job to consume." >&2
-            exit 1
-          }
-
       - name: Install aarch64-unknown-linux-musl cross toolchain
         run: |
           brew tap messense/macos-cross-toolchains
@@ -261,10 +251,14 @@ jobs:
       # Kernel/k8s payload fetches are skipped here on purpose: they're
       # not inputs to mise run guest-image (see scripts/mkinitramfs.sh),
       # and skipping them keeps this job's network footprint to what the
-      # initramfs itself actually needs.
+      # initramfs itself actually needs. morbstack-dockerd is different: it
+      # is a pinned downstream release built/attested on Linux by
+      # build-engine.yml, so this macOS job only verifies and embeds it; it
+      # never needs Docker or Buildx itself.
       - name: Fetch guest assets
         run: |
           ./scripts/fetch-guest-assets.sh --docker-only
+          ./scripts/fetch-guest-assets.sh --morbstack-dockerd-only
           ./scripts/fetch-guest-assets.sh --alpine-only
           ./scripts/fetch-guest-assets.sh --fsutils-only
 
