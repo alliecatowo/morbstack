@@ -1,0 +1,5 @@
+{
+  "name": "Morbstack ecosystem acceptance",
+  "image": "mcr.microsoft.com/devcontainers/base:alpine",
+  "postCreateCommand": "printf ready > /tmp/morbstack-devcontainer-sentinel"
+}
