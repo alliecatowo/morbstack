@@ -441,8 +441,13 @@ contexts, and providers) remain Compose's trusted-input boundary and are named i
 review; this isolation is not represented as a credential or source-security guarantee.
 
 The selected commands are deliberately narrow: **Build Project Images** is `build`;
-**Bring Up Project** is `up --detach --no-build --pull never`; and **Stop and Remove
-Project** is default `down`, without `--volumes`, `--rmi`, or `--remove-orphans`.
+**Bring Up Project** is `up --detach --no-build --pull never`; **Start Existing Services**
+is `start`; **Stop Running Services** is `stop`; **Restart Project Services** is
+`restart`; and **Stop and Remove Project** is default `down`, without `--volumes`,
+`--rmi`, or `--remove-orphans`. The review distinguishes their exact lifecycle
+semantics: start uses existing containers only; stop retains containers; restart does
+not apply configuration changes made after container creation; and only `up`, `stop`,
+and `down` warn that Docker Compose may run a configured provider on the host.
 Output and launch errors are retained only in memory, bounded to 256 KiB, then subjected
 to best-effort common key/value and URL-credential redaction before they are shown in the
 sheet. This is a presentation guard, not a full data-loss-prevention claim. Cancellation
@@ -459,6 +464,10 @@ plus SwiftUI [`Form`](https://developer.apple.com/documentation/swiftui/form),
 [`Menu`](https://developer.apple.com/documentation/swiftui/menu),
 [`ProgressView`](https://developer.apple.com/documentation/swiftui/progressview), and
 [`View.sheet`](https://developer.apple.com/documentation/swiftui/view/sheet(isPresented:ondismiss:content:)).
+Docker Compose semantics were checked against [`start`](https://docs.docker.com/reference/cli/docker/compose/start/),
+[`stop`](https://docs.docker.com/reference/cli/docker/compose/stop/),
+[`restart`](https://docs.docker.com/reference/cli/docker/compose/restart/), and the
+[Compose trust model](https://docs.docker.com/compose/trust-model/).
 
 No Compose command, Docker/VM action, build, test, or app launch was performed for this
 source-only implementation. Full-window visual acceptance, light/dark, narrow-toolbar,
@@ -551,35 +560,27 @@ For each route, record a compact review card before calling it complete:
 | Exception | AppKit/custom code only: the missing system behavior, owner, accessibility behavior, and removal condition |
 | Evidence | Build/typecheck, real-window dimensions/appearance, keyboard/accessibility checks, and safe interaction result |
 
-### Settings route handoff: host-network port forwarding — 2026-08-03
+### Settings route correction: host-network port publishing — 2026-08-03
 
-- **User task:** make a deliberate security and connectivity choice for guest
-  host-network containers; this is a durable preference, not a run-time dashboard
-  control.
+- **User task:** accurately understand Docker host networking. This is Docker
+  behavior, not a Morbstack preference.
 - **HIG/API read:** [Settings](https://developer.apple.com/design/human-interface-guidelines/settings),
-  [Toggles](https://developer.apple.com/design/human-interface-guidelines/toggles), and
-  [Form](https://developer.apple.com/documentation/swiftui/form).
-- **Native choice:** a labelled `Toggle` in the existing Resources `Form`'s
-  `Host Networking` section, followed by a concise secondary explanatory text. The
-  standard Settings scene, form spacing, control size, focus behavior, VoiceOver
-  name, and Tahoe treatment remain system-owned.
-- **Rejected alternative:** no custom switch, lifecycle pill, material card, or
-  inline port dashboard. The setting has one Boolean, restart-gated effect and needs
-  no bespoke visual language.
-- **Data/action behavior:** the value persists as
-  `allow_host_network_port_publishing`; after the required engine restart it permits
-  explicit `--network host -p HOST:CONTAINER` TCP and UDP mappings to bridge from
-  the requested Mac listener to the guest-local `CONTAINER` port. It also discovers
-  a running host-network container's Docker-effective `Config.ExposedPorts` only
-  after a guest read-only probe proves its TCP or UDP listener is reachable on
-  loopback or every guest interface; that no-`-p` path uses the same port on the Mac.
-  It is default-off because guest host networking is otherwise not Mac-reachable
-  through VZNAT.
-- **Evidence:** source-only implementation and focused model tests were added in
-  this change. Per the serialized validation constraint, no build, XCUITest, app
-  launch, or Computer Use inspection was run; light/dark, narrow width,
-  keyboard/VoiceOver, reduced-transparency/contrast, and real Engine verification
-  remain required before visual or runtime acceptance.
+  [Form](https://developer.apple.com/documentation/swiftui/form), and
+  [LabeledContent](https://developer.apple.com/documentation/swiftui/labeledcontent).
+- **Native choice:** remove the `Host Networking` toggle and explanatory copy from
+  the Resources `Form`. It did not control a supported Docker behavior, so a disabled
+  switch, read-only setting, warning panel, or new networking control would only add
+  misleading interface.
+- **Data/action behavior:** [Docker host networking](https://docs.docker.com/engine/network/drivers/host/)
+  shares the Docker host network namespace. Docker ignores `-p`, `--publish`, `-P`,
+  and `--publish-all` in host network mode, and reports that published ports are
+  discarded. Morbstack therefore has no host-network port-tunnel setting or restart
+  action. The remaining Published Ports setting applies only to ordinary Docker port
+  publishing.
+- **Evidence:** Settings restart bookkeeping and its focused test no longer refer to
+  host-network forwarding. Per the serialized validation constraint, source parsing
+  and `git diff --check` are required here; build, XCUITest, app launch, and Computer
+  Use evidence remain for the evidence owner.
 
 ### Volumes route handoff: selected-record identity and relationship evidence — 2026-08-03
 

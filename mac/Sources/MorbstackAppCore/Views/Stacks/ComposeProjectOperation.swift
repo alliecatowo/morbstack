@@ -19,12 +19,18 @@ import SwiftUI
 enum ComposeProjectOperation: String, Sendable {
     case build
     case up
+    case start
+    case stop
+    case restart
     case down
 
     var reviewTitle: String {
         switch self {
         case .build: "Build Project Images"
         case .up: "Bring Up Project"
+        case .start: "Start Existing Services"
+        case .stop: "Stop Running Services"
+        case .restart: "Restart Project Services"
         case .down: "Stop and Remove Project"
         }
     }
@@ -33,6 +39,9 @@ enum ComposeProjectOperation: String, Sendable {
         switch self {
         case .build: "Build Images"
         case .up: "Bring Up"
+        case .start: "Start Services"
+        case .stop: "Stop Services"
+        case .restart: "Restart Services"
         case .down: "Stop and Remove"
         }
     }
@@ -41,6 +50,9 @@ enum ComposeProjectOperation: String, Sendable {
         switch self {
         case .build: "docker compose build"
         case .up: "docker compose up --detach --no-build --pull never"
+        case .start: "docker compose start"
+        case .stop: "docker compose stop"
+        case .restart: "docker compose restart"
         case .down: "docker compose down"
         }
     }
@@ -51,6 +63,12 @@ enum ComposeProjectOperation: String, Sendable {
             ["build"]
         case .up:
             ["up", "--detach", "--no-build", "--pull", "never"]
+        case .start:
+            ["start"]
+        case .stop:
+            ["stop"]
+        case .restart:
+            ["restart"]
         case .down:
             ["down"]
         }
@@ -61,9 +79,25 @@ enum ComposeProjectOperation: String, Sendable {
         case .build:
             "Builds the services declared by this saved source. Dockerfile instructions and declared build contexts are executable input; they can read the reviewed project context and make the network requests those instructions explicitly request."
         case .up:
-            "Creates or starts the resources declared by this saved source. Compose can recreate an existing service when its configuration or image changed. This command does not build images and does not pull images implicitly."
+            "Creates or starts the resources declared by this saved source. Compose can recreate an existing service when its configuration or image changed. This command does not build images and does not pull images implicitly. A configured Compose provider can run on the host while this command processes the project."
+        case .start:
+            "Starts existing containers for the services in this saved source. It does not create new service containers."
+        case .stop:
+            "Stops this source's running service containers without removing them, so they can be started again. A configured Compose provider can run on the host while this command processes the project."
+        case .restart:
+            "Restarts this source's stopped and running service containers. Compose configuration changes made after those containers were created are not applied by restart."
         case .down:
-            "Stops and removes this source's Compose containers and networks. It does not pass --volumes, --rmi, or --remove-orphans, so named volumes, images, and containers outside the declared project are not requested for removal."
+            "Stops and removes this source's Compose containers and networks. It does not pass --volumes, --rmi, or --remove-orphans, so named volumes, images, and containers outside the declared project are not requested for removal. A configured Compose provider can run on the host while this command processes the project."
+        }
+    }
+
+    /// Docker Compose documents host-provider execution for `up`, `stop`, and `down`.
+    /// The review calls it out only for those commands rather than implying every
+    /// operation can run a provider binary.
+    var mayRunProvider: Bool {
+        switch self {
+        case .up, .stop, .down: true
+        case .build, .start, .restart: false
         }
     }
 
@@ -671,6 +705,9 @@ struct ComposeProjectOperationSheet: View {
             }
             Section("Trust and Cancellation") {
                 Text("Compose files and their explicit include, extends, config, secret, build-context, and provider references are trusted input. Review this project and every referenced source before continuing.")
+                if request.operation.mayRunProvider {
+                    Text("This command can run a provider executable named by the reviewed source on the host. Cancel cannot promise to stop that external helper.")
+                }
                 Text("Morbstack verifies the same saved source bytes and the exact non-symbolic-link project root immediately before launch. It disables ambient Docker contexts, credential helpers, default .env loading, Git configuration, SSH agent, and proxy environment.")
                 Text("Cancel terminates Morbstack’s direct Compose client, then force-stops that client if needed. It cannot roll back Docker work already accepted by the daemon or promise to stop external helpers a trusted source may start.")
             }

@@ -421,17 +421,19 @@ struct ComposeFileEditorSheet: View {
                                 value: environmentValuesAreRevealed ? "Source shown for editing" : "Redacted")
                             LabeledContent("Compose Result", value: "Not evaluated")
                         }
-                        if let review = ComposeSourceDeclarationReview(editor: editor) {
-                            Button("Review Environment Declarations…") {
+                        if editor.isEnvironmentFile {
+                            if let review = ComposeSourceDeclarationReview(editor: editor) {
+                                Button("Review Environment Declarations…") {
+                                    declarationReview = review
+                                }
+                                .help("Review source declaration names without reading environment values")
+                            }
+                        } else if let review = ComposeSourceDeclarationReview(editor: editor) {
+                            Button("Review Environment and Secrets…") {
                                 declarationReview = review
                             }
-                            .help("Review source declaration names without reading environment values")
+                            .help("Review source declarations without reading environment or secret values")
                         }
-                    } else if let review = ComposeSourceDeclarationReview(editor: editor) {
-                        Button("Review Environment and Secrets…") {
-                            declarationReview = review
-                        }
-                        .help("Review source declarations without reading environment or secret values")
                     }
                 }
                 .formStyle(.automatic)
@@ -506,6 +508,16 @@ struct ComposeFileEditorSheet: View {
                             }
                             Button("Bring Up Project…") {
                                 projectOperations.request(.up, using: editor)
+                            }
+                            Divider()
+                            Button("Start Existing Services…") {
+                                projectOperations.request(.start, using: editor)
+                            }
+                            Button("Stop Running Services…") {
+                                projectOperations.request(.stop, using: editor)
+                            }
+                            Button("Restart Project Services…") {
+                                projectOperations.request(.restart, using: editor)
                             }
                             Divider()
                             Button("Stop and Remove Project…", role: .destructive) {

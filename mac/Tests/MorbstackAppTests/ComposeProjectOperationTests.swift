@@ -18,4 +18,43 @@ final class ComposeProjectOperationTests: XCTestCase {
             ComposeProjectOperation.up.effectDescription.contains(
                 "recreate an existing service"))
     }
+
+    func testStartUsesOnlyTheBoundedComposeStartCommand() {
+        XCTAssertEqual(ComposeProjectOperation.start.arguments, ["start"])
+        XCTAssertEqual(
+            ComposeProjectOperation.start.commandDescription,
+            "docker compose start")
+        XCTAssertFalse(ComposeProjectOperation.start.isDestructive)
+    }
+
+    func testStopUsesOnlyTheBoundedComposeStopCommand() {
+        XCTAssertEqual(ComposeProjectOperation.stop.arguments, ["stop"])
+        XCTAssertEqual(
+            ComposeProjectOperation.stop.commandDescription,
+            "docker compose stop")
+        XCTAssertTrue(
+            ComposeProjectOperation.stop.effectDescription.contains(
+                "without removing them"))
+        XCTAssertFalse(ComposeProjectOperation.stop.isDestructive)
+    }
+
+    func testRestartDisclosesItsConfigurationBoundary() {
+        XCTAssertEqual(ComposeProjectOperation.restart.arguments, ["restart"])
+        XCTAssertEqual(
+            ComposeProjectOperation.restart.commandDescription,
+            "docker compose restart")
+        XCTAssertTrue(
+            ComposeProjectOperation.restart.effectDescription.contains(
+                "not applied by restart"))
+        XCTAssertFalse(ComposeProjectOperation.restart.isDestructive)
+    }
+
+    func testOnlyDocumentedProviderCommandsShowTheProviderRisk() {
+        XCTAssertTrue(ComposeProjectOperation.up.mayRunProvider)
+        XCTAssertTrue(ComposeProjectOperation.stop.mayRunProvider)
+        XCTAssertTrue(ComposeProjectOperation.down.mayRunProvider)
+        XCTAssertFalse(ComposeProjectOperation.build.mayRunProvider)
+        XCTAssertFalse(ComposeProjectOperation.start.mayRunProvider)
+        XCTAssertFalse(ComposeProjectOperation.restart.mayRunProvider)
+    }
 }
