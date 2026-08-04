@@ -47,8 +47,10 @@ struct ContainerOverviewTab: View {
                 } actions: {
                     if let onRetry {
                         Button("Try Again", action: onRetry)
+                            .accessibilityIdentifier("containers.overview.empty.unavailable.retry")
                     }
                 }
+                .accessibilityIdentifier("containers.overview.empty.unavailable")
             } else {
                 ContentUnavailableView {
                     Label("No Container Information", systemImage: "shippingbox")
@@ -57,8 +59,10 @@ struct ContainerOverviewTab: View {
                 } actions: {
                     if let onRetry {
                         Button("Reload", action: onRetry)
+                            .accessibilityIdentifier("containers.overview.empty.noInformation.reload")
                     }
                 }
+                .accessibilityIdentifier("containers.overview.empty.noInformation")
             }
         }
     }

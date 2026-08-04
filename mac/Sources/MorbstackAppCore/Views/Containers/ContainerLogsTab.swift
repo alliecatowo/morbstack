@@ -70,6 +70,7 @@ struct ContainerLogsTab: View {
                 .font(.caption)
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
+                .accessibilityIdentifier("containers.logs.lineCount")
 
             streamStatus
 
@@ -127,6 +128,7 @@ struct ContainerLogsTab: View {
                 Button("Jump to Next Standard Error Line", systemImage: "arrow.down.to.line") {
                     jumpToNextStandardErrorLine()
                 }
+                .accessibilityIdentifier("containers.logs.options.jumpToNextStandardError")
                 .accessibilityLabel("Jump to next standard error line")
                 .help("Jump to the next line written to standard error")
                 .disabled(!hasStandardErrorLines)
@@ -136,12 +138,14 @@ struct ContainerLogsTab: View {
                 Button(copied ? "Copied" : "Copy Visible Lines", systemImage: copied ? "checkmark" : "doc.on.doc") {
                     copyVisibleLines()
                 }
+                .accessibilityIdentifier("containers.logs.options.copyVisibleLines")
                 .accessibilityLabel("Copy visible lines")
                 .help("Copy visible lines")
 
                 Button("Save Visible Transcript…", systemImage: "square.and.arrow.down") {
                     export()
                 }
+                .accessibilityIdentifier("containers.logs.options.saveTranscript")
                 .accessibilityLabel("Save visible log transcript")
                 .help("Save the currently visible bounded log transcript")
                 .disabled(store.visibleLines.isEmpty)
@@ -151,6 +155,7 @@ struct ContainerLogsTab: View {
                 Button("Clear Scrollback") {
                     store.clear()
                 }
+                .accessibilityIdentifier("containers.logs.options.clearScrollback")
                 .accessibilityLabel("Clear scrollback")
                 .help("Clear scrollback")
         } label: {
@@ -159,6 +164,7 @@ struct ContainerLogsTab: View {
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
+        .accessibilityIdentifier("containers.logs.options")
         .accessibilityLabel("Log options")
         .help("Follow, display, and export options for this log")
     }

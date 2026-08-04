@@ -74,6 +74,9 @@ struct ContainerDetailView: View {
             {
                 tabBody(for: .overview)
             }
+            // Identifies the tab picker's own button, per rule 4 of
+            // docs/design/ACCESSIBILITY-IDENTIFIERS.md, not the pane it displays.
+            .accessibilityIdentifier("containers.detail.tab.overview")
 
             Tab(
                 TrackBDetailTab.logs.title,
@@ -82,6 +85,7 @@ struct ContainerDetailView: View {
             {
                 tabBody(for: .logs)
             }
+            .accessibilityIdentifier("containers.detail.tab.logs")
 
             Tab(
                 TrackBDetailTab.stats.title,
@@ -90,6 +94,7 @@ struct ContainerDetailView: View {
             {
                 tabBody(for: .stats)
             }
+            .accessibilityIdentifier("containers.detail.tab.stats")
 
             Tab(
                 TrackBDetailTab.inspect.title,
@@ -98,6 +103,7 @@ struct ContainerDetailView: View {
             {
                 tabBody(for: .inspect)
             }
+            .accessibilityIdentifier("containers.detail.tab.inspect")
         }
         // Container state changes require a fresh inspect document.  Giving the task a
         // state-aware identity lets SwiftUI cancel the superseded read rather than

@@ -115,6 +115,7 @@ struct ContainerStatsTab: View {
                 } description: {
                     Text("This container is not running. Its resource history is available only while it runs.")
                 }
+                .accessibilityIdentifier("containers.stats.empty.stopped")
             case .connecting:
                 ProgressView("Connecting to statistics")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -128,7 +129,9 @@ struct ContainerStatsTab: View {
                     Text(failure)
                 } actions: {
                     Button("Reconnect", action: reconnect)
+                        .accessibilityIdentifier("containers.stats.empty.streamFailed.reconnect")
                 }
+                .accessibilityIdentifier("containers.stats.empty.streamFailed")
             case .ready:
                 if let probe = activeProbe {
                     content(probe)
@@ -472,6 +475,7 @@ private struct NetworkActivitySection: View {
                 } description: {
                     Text("The Docker Engine did not report complete interface counters for this container.")
                 }
+                .accessibilityIdentifier("containers.stats.empty.networkUnavailable")
                 .frame(maxWidth: .infinity)
             }
         }

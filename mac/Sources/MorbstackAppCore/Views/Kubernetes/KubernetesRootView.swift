@@ -1000,6 +1000,9 @@ struct KubernetesRootView: View {
                 showsInspector = true
             }
         }
+        // Pods and nodes are two mutually exclusive presentations of the same
+        // resource table slot, so they share one identifier.
+        .accessibilityIdentifier("kubernetes.table")
         .onChange(of: selectedPodID) { _, selectedID in
             guard let selectedID, let pod = pods.first(where: { $0.id == selectedID }) else {
                 clearPodObservation()
@@ -1017,6 +1020,9 @@ struct KubernetesRootView: View {
                 Text(node.name)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                    // Row identity is the node name, the reference `kubectl` accepts
+                    // to address this node, per docs/design/ACCESSIBILITY-IDENTIFIERS.md.
+                    .accessibilityIdentifier("kubernetes.row.\(node.name)")
             }
             .width(min: 180, ideal: 260, max: 480)
             TableColumn("Status", sortUsing: KubernetesNodeComparator(key: .ready)) { node in
@@ -1061,6 +1067,9 @@ struct KubernetesRootView: View {
                 showsInspector = true
             }
         }
+        // Pods and nodes are two mutually exclusive presentations of the same
+        // resource table slot, so they share one identifier.
+        .accessibilityIdentifier("kubernetes.table")
         .onChange(of: selectedNodeID) { _, selectedID in
             guard let selectedID, let node = nodes.first(where: { $0.id == selectedID }) else {
                 clearPodObservation()

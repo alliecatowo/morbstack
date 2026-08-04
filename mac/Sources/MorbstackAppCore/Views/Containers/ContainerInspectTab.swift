@@ -59,6 +59,7 @@ struct ContainerInspectTab: View {
                         .font(.caption)
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("containers.inspect.matchCount")
                 }
 
                 if !matches.isEmpty {

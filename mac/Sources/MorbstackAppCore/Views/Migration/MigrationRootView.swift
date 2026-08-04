@@ -207,6 +207,7 @@ struct MigrationRootView: View {
                     Image(systemName: "arrow.clockwise")
                 }
             }
+            .accessibilityIdentifier("migration.refresh")
             .accessibilityLabel(isInspecting ? "Inspecting migration sources" : "Refresh migration inspection")
             .help("Refresh local runtime readiness and the selected image comparison")
             .disabled(isInspecting || model.launchOptions.tourFixtures)
@@ -220,6 +221,7 @@ struct MigrationRootView: View {
                 } label: {
                     Image(systemName: "sidebar.right")
                 }
+                .accessibilityIdentifier("migration.inspector")
                 .accessibilityLabel(showsInspector ? "Hide inspector" : "Show inspector")
                 .help(showsInspector ? "Hide the inspector" : "Show the inspector")
             }
@@ -234,6 +236,7 @@ struct MigrationRootView: View {
             } description: {
                 Text("Migration inspection reads local runtime sockets and Docker configuration, so fixture launches never run it against your Mac.")
             }
+            .accessibilityIdentifier("migration.empty.fixturesUnavailable")
         } else if inspection == nil {
             ProgressView("Inspecting local container runtimes…")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -241,6 +244,9 @@ struct MigrationRootView: View {
             Table(runtimes, selection: $selection) {
                 TableColumn("Runtime") { runtime in
                     Text(runtime.name)
+                        // Row identity is the runtime's name, per
+                        // docs/design/ACCESSIBILITY-IDENTIFIERS.md.
+                        .accessibilityIdentifier("migration.row.\(runtime.name)")
                 }
                 .width(min: 140, ideal: 180, max: 260)
                 TableColumn("Status") { runtime in
@@ -263,6 +269,7 @@ struct MigrationRootView: View {
                 .width(min: 92, ideal: 112, max: 144)
             }
             .tableStyle(.automatic)
+            .accessibilityIdentifier("migration.table")
             .accessibilityLabel("Local container runtimes")
             .accessibilityHint("Select a runtime to review migration readiness")
             .inspector(isPresented: $showsInspector) {
@@ -356,6 +363,7 @@ struct MigrationRootView: View {
                         Button("Select Images to Import…") {
                             presentImageMigration(for: runtime, candidates: images.wouldCopy)
                         }
+                        .accessibilityIdentifier("migration.selectImages")
                         Text(
                             "Choose one or more images for review. Morbstack never selects every image automatically."
                         )
@@ -417,6 +425,7 @@ struct MigrationRootView: View {
                         Button("Select Volumes to Transfer…") {
                             presentVolumeMigration(for: runtime, candidates: volumes.eligible)
                         }
+                        .accessibilityIdentifier("migration.selectVolumes")
                         Text(
                             "Choose the exact eligible volumes to review. Existing Morbstack volumes and unsupported drivers cannot be selected.")
                             .foregroundStyle(.secondary)
@@ -643,6 +652,7 @@ struct MigrationRootView: View {
                     Button("Retry Unfinished Images…") {
                         imageMigration.retryLastReport()
                     }
+                    .accessibilityIdentifier("migration.retryImages")
                     Text(
                         "Retry opens a new selection and review. It does not resume or import anything automatically."
                     )
@@ -749,6 +759,10 @@ private struct MigrationImageSelectionSheet: View {
                             .font(.body.monospaced())
                             .lineLimit(1)
                             .truncationMode(.middle)
+                            // Row identity is the image reference, the value Docker
+                            // accepts to address it, per
+                            // docs/design/ACCESSIBILITY-IDENTIFIERS.md.
+                            .accessibilityIdentifier("migration.imageSelection.row.\(image.reference)")
                     }
                     .width(min: 220, ideal: 320)
 
@@ -768,6 +782,7 @@ private struct MigrationImageSelectionSheet: View {
                     .width(min: 130, ideal: 180)
                 }
                 .tableStyle(.automatic)
+                .accessibilityIdentifier("migration.imageSelection.table")
                 .disabled(isPreparing)
                 .accessibilityLabel("Images available to import")
             }
@@ -775,6 +790,7 @@ private struct MigrationImageSelectionSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel", action: onCancel)
+                        .accessibilityIdentifier("migration.imageSelection.cancel")
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(action: onReview) {
@@ -785,6 +801,7 @@ private struct MigrationImageSelectionSheet: View {
                             Text("Review Selected Images")
                         }
                     }
+                    .accessibilityIdentifier("migration.imageSelection.review")
                     .disabled(selectedItems.isEmpty || isPreparing)
                     .accessibilityLabel(
                         isPreparing ? "Rechecking selected images" : "Review selected images before import")
@@ -849,6 +866,7 @@ private struct MigrationImageReviewSheet: View {
                             .font(.body.monospaced())
                             .lineLimit(1)
                             .truncationMode(.middle)
+                            .accessibilityIdentifier("migration.imageReview.row.\(image.reference)")
                     }
                     .width(min: 220, ideal: 320)
 
@@ -868,17 +886,20 @@ private struct MigrationImageReviewSheet: View {
                     .width(min: 150, ideal: 190)
                 }
                 .tableStyle(.automatic)
+                .accessibilityIdentifier("migration.imageReview.table")
                 .accessibilityLabel("Images confirmed for import")
             }
             .navigationTitle("Review Image Import")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Back", action: onBack)
+                        .accessibilityIdentifier("migration.imageReview.back")
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(
                         "Import \(prepared.items.count) Image\(prepared.items.count == 1 ? "" : "s")",
                         action: onConfirm)
+                        .accessibilityIdentifier("migration.imageReview.confirm")
                 }
             }
         }
@@ -981,6 +1002,7 @@ private struct MigrationImageProgressSheet: View {
                     Button(
                         cancellationRequested ? "Stopping Remaining Images" : "Stop Remaining Images",
                         action: onCancelRemaining)
+                    .accessibilityIdentifier("migration.imageProgress.stop")
                     .disabled(cancellationRequested)
                 }
             }
@@ -1039,6 +1061,7 @@ private struct MigrationImageReportSheet: View {
                             .font(.body.monospaced())
                             .lineLimit(1)
                             .truncationMode(.middle)
+                            .accessibilityIdentifier("migration.imageReport.row.\(item.reference)")
                     }
                     .width(min: 180, ideal: 260)
 
@@ -1068,16 +1091,19 @@ private struct MigrationImageReportSheet: View {
                     .width(min: 170, ideal: 250)
                 }
                 .tableStyle(.automatic)
+                .accessibilityIdentifier("migration.imageReport.table")
                 .accessibilityLabel("Image import report")
             }
             .navigationTitle("Image Import Report")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Done", action: onDone)
+                        .accessibilityIdentifier("migration.imageReport.done")
                 }
                 if retryCount > 0 {
                     ToolbarItem(placement: .confirmationAction) {
                         Button("Retry Unfinished Images", action: onRetry)
+                            .accessibilityIdentifier("migration.imageReport.retry")
                     }
                 }
             }
@@ -1125,6 +1151,10 @@ private struct MigrationVolumeSelectionSheet: View {
                             .font(.body.monospaced())
                             .lineLimit(1)
                             .truncationMode(.middle)
+                            // Row identity is the volume name, the value Docker accepts
+                            // to address it, per
+                            // docs/design/ACCESSIBILITY-IDENTIFIERS.md.
+                            .accessibilityIdentifier("migration.volumeSelection.row.\(volume.name)")
                     }
                     .width(min: 220, ideal: 320)
 
@@ -1140,6 +1170,7 @@ private struct MigrationVolumeSelectionSheet: View {
                     .width(min: 90, ideal: 110, max: 140)
                 }
                 .tableStyle(.automatic)
+                .accessibilityIdentifier("migration.volumeSelection.table")
                 .disabled(isPreparing)
                 .accessibilityLabel("Eligible named volumes available to transfer")
             }
@@ -1147,6 +1178,7 @@ private struct MigrationVolumeSelectionSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel", action: onCancel)
+                        .accessibilityIdentifier("migration.volumeSelection.cancel")
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(action: onReview) {
@@ -1157,6 +1189,7 @@ private struct MigrationVolumeSelectionSheet: View {
                             Text("Review Selected Volumes")
                         }
                     }
+                    .accessibilityIdentifier("migration.volumeSelection.review")
                     .disabled(selectedItems.isEmpty || isPreparing)
                     .accessibilityLabel(
                         isPreparing
@@ -1241,6 +1274,7 @@ private struct MigrationVolumeReviewSheet: View {
                             .font(.body.monospaced())
                             .lineLimit(1)
                             .truncationMode(.middle)
+                            .accessibilityIdentifier("migration.volumeReview.row.\(volume.name)")
                     }
                     .width(min: 220, ideal: 320)
 
@@ -1256,17 +1290,20 @@ private struct MigrationVolumeReviewSheet: View {
                     .width(min: 130, ideal: 160, max: 190)
                 }
                 .tableStyle(.automatic)
+                .accessibilityIdentifier("migration.volumeReview.table")
                 .accessibilityLabel("Named volumes confirmed for transfer")
             }
             .navigationTitle("Review Volume Transfer")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Back", action: onBack)
+                        .accessibilityIdentifier("migration.volumeReview.back")
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(
                         "Transfer \(prepared.items.count) Volume\(prepared.items.count == 1 ? "" : "s")",
                         action: onConfirm)
+                    .accessibilityIdentifier("migration.volumeReview.confirm")
                     .disabled(prepared.helperImageNetworkConsentRequired && !networkConsentGranted)
                 }
             }
@@ -1410,6 +1447,7 @@ private struct MigrationVolumeReportSheet: View {
                             .font(.body.monospaced())
                             .lineLimit(1)
                             .truncationMode(.middle)
+                            .accessibilityIdentifier("migration.volumeReport.row.\(item.name)")
                     }
                     .width(min: 180, ideal: 250)
 
@@ -1439,12 +1477,14 @@ private struct MigrationVolumeReportSheet: View {
                     .width(min: 170, ideal: 250)
                 }
                 .tableStyle(.automatic)
+                .accessibilityIdentifier("migration.volumeReport.table")
                 .accessibilityLabel("Volume transfer report")
             }
             .navigationTitle("Volume Transfer Report")
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done", action: onDone)
+                        .accessibilityIdentifier("migration.volumeReport.done")
                 }
             }
         }
