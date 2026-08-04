@@ -98,6 +98,22 @@ class DaemonClient: @unchecked Sendable {
             reachable: true)
     }
 
+    /// Reads the daemon's current disk-growth diagnostic without starting the daemon,
+    /// VM, or a resize transaction. This intentionally uses the existing `status`
+    /// reply: the daemon derives it from the persisted disk-growth journal, RAW-image
+    /// capacity, VM lifecycle state, and guest capability as one read-only snapshot.
+    /// `nil` means no daemon answered or an older daemon has not added this status
+    /// field; callers must not present that absence as a safe resize capability.
+    func diskResizeDiagnostic() async -> MorbDiskResize.Diagnostic? {
+        guard FileManager.default.fileExists(atPath: socketPath) else { return nil }
+        guard let response = try? await roundTrip(DaemonRequest(cmd: "status"), timeout: Self.statusTimeout),
+              response.ok,
+              let encoded = response.data?["disk_resize"],
+              let data = try? JSONEncoder().encode(encoded)
+        else { return nil }
+        return try? JSONDecoder().decode(MorbDiskResize.Diagnostic.self, from: data)
+    }
+
     /// The guest's view of the shared host paths, or `nil` when nothing answered.
     ///
     /// `nil` and `[]` are different answers and both are used: `nil` means "no daemon,

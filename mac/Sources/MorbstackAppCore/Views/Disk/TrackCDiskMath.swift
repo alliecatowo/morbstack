@@ -21,11 +21,7 @@ import MorbstackKit
 
 // MARK: - Categories
 
-/// The four buckets the stacked bar is divided into, in bar order.
-///
-/// Order is load-bearing: it is the left-to-right order of the bar, the top-to-bottom
-/// order of the legend, and the order of the prune rows, and those three agreeing is
-/// most of what makes the screen legible.
+/// The four daemon-reported storage categories, in their stable table order.
 enum TrackCDiskCategory: String, CaseIterable, Identifiable, Sendable {
     case images
     case containers
@@ -79,10 +75,9 @@ enum TrackCDiskCategory: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
-// MARK: - Segments
+// MARK: - Storage attribution
 
-/// One slice of the stacked bar: how much a category holds, and how much of that is
-/// garbage.
+/// One daemon storage category and its reclaimable attribution.
 struct TrackCDiskSegment: Identifiable, Hashable, Sendable {
 
     var category: TrackCDiskCategory
@@ -96,11 +91,6 @@ struct TrackCDiskSegment: Identifiable, Hashable, Sendable {
 
     var id: String { category.rawValue }
 
-    /// The share of `total` this segment occupies, in `0...1`.
-    func fraction(of total: Int64) -> Double {
-        guard total > 0, bytes > 0 else { return 0 }
-        return min(1, Double(bytes) / Double(total))
-    }
 }
 
 // MARK: - Named size
@@ -148,6 +138,70 @@ struct TrackCDiskImageFootprint: Hashable, Sendable {
     /// `true` when the file is meaningfully sparse — under the threshold we say so, to
     /// avoid captioning a 99.7%-full image as a clever space-saving trick.
     var isSparse: Bool { occupancy < 0.98 && savedBytes > 0 }
+}
+
+// MARK: - VM disk growth presentation
+
+/// The one safe next action for a disk-growth fact set. This is intentionally a
+/// presentation decision, not a second resize preflight: `morbstackd` remains the
+/// authority that serializes VM state, journal recovery, RAW-image identity, and guest
+/// filesystem proof immediately before it mutates anything.
+enum TrackCDiskGrowthAction: Equatable {
+    case none
+    case refreshReadiness
+    case stopEngine
+    case reviewGrowth
+    case reviewRecovery
+}
+
+enum TrackCDiskGrowthPresentation {
+
+    static func action(
+        capacity: MorbDiskCapacity.Status?,
+        diagnostic: MorbDiskResize.Diagnostic?,
+        hasRecoveryJournal: Bool,
+        engineIsRunning: Bool
+    ) -> TrackCDiskGrowthAction {
+        guard let capacity else { return .refreshReadiness }
+
+        if hasRecoveryJournal || diagnostic?.state == .recoveryRequired {
+            return engineIsRunning ? .stopEngine : .reviewRecovery
+        }
+
+        guard capacity.state == .increaseRequiresGuestResize else { return .none }
+        if engineIsRunning { return .stopEngine }
+
+        switch diagnostic?.state {
+        case .some(.guestResizeUnavailable),
+             .some(.capacityUnavailable),
+             .some(.decreaseUnsupported),
+             .some(.notNeeded):
+            return .none
+        case .some(.recoveryRequired):
+            return .reviewRecovery
+        case .some(.vmMustStop):
+            return .stopEngine
+        case .some(.readyForExplicitTransaction),
+             .some(.guestCapabilityUnknown),
+             .none:
+            // A stopped guest cannot always report this additive capability. The real
+            // transaction boots it and requires a fresh `ready` proof before it extends
+            // the filesystem, so an absent or older readiness report is not treated as
+            // success but can still reach the explicitly reviewed Engine operation.
+            return .reviewGrowth
+        }
+    }
+
+    static func journalPhaseDescription(_ phase: MorbDiskGrowth.Phase) -> String {
+        switch phase {
+        case .prepared:
+            return "Morbstack saved the original and target capacity before changing the RAW image. Retrying uses this exact target."
+        case .hostGrown:
+            return "The RAW image reached the saved target, but the guest filesystem still needs verified proof. Retrying uses this exact target."
+        case .guestProved:
+            return "The guest proof was saved before final cleanup. Retrying re-verifies the saved target; Morbstack will not shrink the disk."
+        }
+    }
 }
 
 // MARK: - Prune previews
@@ -208,8 +262,8 @@ enum TrackCDiskMath {
 
     // MARK: Segments
 
-    /// Splits a `docker system df` snapshot into the four bar segments, attributing the
-    /// aggregate reclaimable figure across them using the live lists.
+    /// Splits a `docker system df` snapshot into four storage-category records,
+    /// attributing the aggregate reclaimable figure across them using the live lists.
     ///
     /// Exactness, per category:
     ///
@@ -286,48 +340,6 @@ enum TrackCDiskMath {
         return (Int64(share.rounded()), true)
     }
 
-    // MARK: Bar layout
-
-    /// Turns byte counts into pixel widths that add up to exactly `totalWidth`.
-    ///
-    /// A proportional split alone makes a 40 MB segment next to 12 GB of images
-    /// literally invisible — sub-pixel, so it does not anti-alias into anything either.
-    /// Non-empty segments are therefore floored at `minimumSegmentWidth` and the
-    /// difference is borrowed proportionally from the segments that can afford it. When
-    /// the floor cannot be honoured (a very narrow bar, or many segments) the split
-    /// falls back to pure proportion rather than overflowing the bar.
-    ///
-    /// Returns one width per input, aligned by index, with zeros for empty segments.
-    static func barWidths(
-        byteValues: [Int64],
-        totalWidth: Double,
-        minimumSegmentWidth: Double = 5
-    ) -> [Double] {
-        let values = byteValues.map { max(0, $0) }
-        let total = values.reduce(Int64(0), +)
-        guard total > 0, totalWidth > 0 else { return Array(repeating: 0, count: values.count) }
-
-        var widths = values.map { totalWidth * Double($0) / Double(total) }
-        let nonEmpty = values.indices.filter { values[$0] > 0 }
-        guard minimumSegmentWidth > 0,
-              Double(nonEmpty.count) * minimumSegmentWidth <= totalWidth
-        else { return widths }
-
-        let starved = nonEmpty.filter { widths[$0] < minimumSegmentWidth }
-        guard !starved.isEmpty else { return widths }
-
-        let borrowed = starved.reduce(0.0) { $0 + (minimumSegmentWidth - widths[$1]) }
-        let donors = nonEmpty.filter { widths[$0] >= minimumSegmentWidth }
-        let donorWidth = donors.reduce(0.0) { $0 + widths[$1] }
-
-        for index in starved { widths[index] = minimumSegmentWidth }
-        if donorWidth > 0 {
-            let scale = max(0, (donorWidth - borrowed) / donorWidth)
-            for index in donors { widths[index] *= scale }
-        }
-        return widths
-    }
-
     // MARK: Prune previews
 
     /// Volume names Docker generated itself, which is what `docker volume prune`
@@ -354,7 +366,7 @@ enum TrackCDiskMath {
     /// The `limit` largest tagged images, biggest first.
     ///
     /// Dangling layers are left out on purpose. They are already called out by their own
-    /// row in the Images screen and by the reclaimable hatch in the bar, and a list whose
+    /// row in the Images screen and by the reclaimable storage attribution, and a list whose
     /// top two entries are both `<none>` tells the reader nothing they can act on.
     static func largestImages(_ images: [ImageSummary], limit: Int) -> [TrackCNamedSize] {
         images

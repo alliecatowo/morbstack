@@ -7,6 +7,7 @@
 // the useful questions directly: how much is used, what is reclaimable, and which
 // resources are worth investigating or pruning.
 
+import MorbstackKit
 import SwiftUI
 
 // MARK: - Prune targets
@@ -236,6 +237,21 @@ private struct DiskPruneConfirmation: View {
     }
 }
 
+private struct DiskGrowthNotice: Identifiable {
+    let id = UUID()
+    let title: String
+    let message: String
+}
+
+/// The read-only host facts used to render the VM disk section. This is intentionally
+/// separate from Docker's `/system/df` storage attribution: Docker reports its own
+/// objects, while these facts describe the VM's RAW capacity and recovery journal.
+private struct DiskGrowthLocalFacts: Sendable {
+    let capacity: MorbDiskCapacity.Status?
+    let journal: MorbDiskGrowth.Journal?
+    let errorMessage: String?
+}
+
 // MARK: - Root
 
 struct DiskRootView: View {
@@ -251,6 +267,14 @@ struct DiskRootView: View {
     ]
     @State private var showsInspector = true
     @State private var operationError: String?
+    @State private var diskCapacity: MorbDiskCapacity.Status?
+    @State private var diskResizeDiagnostic: MorbDiskResize.Diagnostic?
+    @State private var diskGrowthJournal: MorbDiskGrowth.Journal?
+    @State private var diskCapacityError: String?
+    @State private var isGrowingDisk = false
+    @State private var diskGrowthError: String?
+    @State private var showsDiskGrowthConfirmation = false
+    @State private var diskGrowthNotice: DiskGrowthNotice?
 
     /// Whether the footprint was handed in, in which case this view does not go and
     /// `stat` the real disk image over the top of it.
@@ -286,6 +310,8 @@ struct DiskRootView: View {
         return "\(Formatters.bytesString(usage.total)) in use · \(Formatters.bytesString(usage.reclaimable)) reclaimable"
     }
 
+    private var isPerformingDiskOperation: Bool { busy || isGrowingDisk }
+
     var body: some View {
         content
         .navigationTitle("Disk")
@@ -295,6 +321,15 @@ struct DiskRootView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(operationError ?? "An unknown error occurred.")
+        }
+        .alert(
+            diskGrowthNotice?.title ?? "",
+            isPresented: diskGrowthNoticeBinding,
+            presenting: diskGrowthNotice
+        ) { _ in
+            Button("OK", role: .cancel) {}
+        } message: { notice in
+            Text(notice.message)
         }
         .sheet(item: $pruning) { target in
             let preview = TrackCDiskMath.prunePreview(
@@ -308,10 +343,25 @@ struct DiskRootView: View {
             }
         }
         .task {
-            if !footprintIsInjected {
-                await loadFootprint()
+            if model.fixtureProvenance == nil {
+                if !footprintIsInjected {
+                    await loadFootprint()
+                }
+                await loadDiskGrowthFacts()
             }
             selectFirstRowIfNeeded()
+        }
+        .confirmationDialog(
+            diskGrowthConfirmationTitle,
+            isPresented: $showsDiskGrowthConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button(diskGrowthConfirmationActionTitle, role: .destructive) {
+                beginDiskGrowth()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(diskGrowthConfirmationMessage)
         }
     }
 
@@ -338,6 +388,7 @@ struct DiskRootView: View {
                             Task { await refreshDiskUsage() }
                         }
                     }
+                    diskGrowthActionControl
                 })
         } else if model.disk == nil {
             ContentUnavailableView(
@@ -345,7 +396,7 @@ struct DiskRootView: View {
                     Label("The Engine Is Not Running", systemImage: "internaldrive")
                 },
                 description: {
-                    Text("Start the engine to view Docker images, containers, volumes, and build cache on disk.")
+                    Text(engineStoppedDiskDescription)
                 },
                 actions: {
                     if busy {
@@ -355,6 +406,7 @@ struct DiskRootView: View {
                             Task { await startEngine() }
                         }
                     }
+                    diskGrowthActionControl
                 })
         } else {
             diskTable
@@ -388,7 +440,7 @@ struct DiskRootView: View {
                 Image(systemName: "arrow.triangle.2.circlepath")
             }
             .accessibilityLabel("Recalculate disk usage")
-            .disabled(busy)
+            .disabled(isPerformingDiskOperation)
             .help("Recalculate disk usage — the engine walks every layer, so this is not instant")
         }
         if model.disk != nil {
@@ -495,7 +547,7 @@ struct DiskRootView: View {
                 Button("Prune \(category.title)…", role: .destructive) {
                     pruning = target
                 }
-                .disabled(busy || !canPrune(target))
+                .disabled(isPerformingDiskOperation || !canPrune(target))
                 .help(category.pruneSummary)
             } else if case .some(.buildCache) = row.category {
                 Button("Show Build Cache") {
@@ -570,7 +622,7 @@ struct DiskRootView: View {
                         Button("Prune \(category.title)…", role: .destructive) {
                             pruning = target
                         }
-                        .disabled(busy || !canPrune(target))
+                        .disabled(isPerformingDiskOperation || !canPrune(target))
                         .help(category.pruneSummary)
                     } footer: {
                         Text(category.pruneSummary)
@@ -588,6 +640,7 @@ struct DiskRootView: View {
                 }
 
                 diskImageFacts
+                diskGrowthFacts
             }
             // Keep selected storage facts in the system inspector's aligned form
             // columns. The Form remains responsible for all spacing and appearance.
@@ -640,6 +693,195 @@ struct DiskRootView: View {
         }
     }
 
+    /// VM disk capacity and Docker storage attribution answer different questions.
+    /// This section keeps the RAW-image capacity, its durable recovery record, and the
+    /// Engine's exact readiness diagnostic together in a normal inspector Form rather
+    /// than presenting another dashboard gauge or a preference editor.
+    @ViewBuilder
+    private var diskGrowthFacts: some View {
+        Section("VM Disk Capacity") {
+            if model.fixtureProvenance != nil {
+                Text("VM disk capacity is unavailable in developer fixture data.")
+                    .foregroundStyle(.secondary)
+            } else if let diskCapacity {
+                if let currentBytes = diskCapacity.currentBytes {
+                    LabeledContent("Current Raw Capacity") {
+                        Text(Formatters.bytesString(currentBytes))
+                            .monospacedDigit()
+                    }
+                } else {
+                    LabeledContent("Current Raw Capacity", value: "No disk image")
+                }
+                LabeledContent("Configured Capacity") {
+                    Text(Formatters.bytesString(diskCapacity.configuredBytes))
+                        .monospacedDigit()
+                }
+                LabeledContent("Capacity State", value: capacityStateTitle(diskCapacity.state))
+                Text(diskCapacity.summary)
+                    .foregroundStyle(.secondary)
+
+                if let inspectionError = diskCapacity.inspectionError {
+                    Text(inspectionError)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+
+                if let diskResizeDiagnostic {
+                    LabeledContent(
+                        "Transaction Readiness",
+                        value: diskResizeStateTitle(diskResizeDiagnostic.state))
+                    LabeledContent(
+                        "Guest Resize",
+                        value: diskResizeDiagnostic.guestCapability.rawValue.capitalized)
+                    Text(diskResizeDiagnostic.summary)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("The daemon has not reported disk-growth readiness. Morbstack checks the same preconditions again before any reviewed growth transaction.")
+                        .foregroundStyle(.secondary)
+                }
+
+                if let diskGrowthJournal {
+                    LabeledContent("Recovery Phase", value: diskGrowthJournal.phase.rawValue)
+                    LabeledContent("Saved Target") {
+                        Text(Formatters.bytesString(diskGrowthJournal.targetBytes))
+                            .monospacedDigit()
+                    }
+                    Text(TrackCDiskGrowthPresentation.journalPhaseDescription(diskGrowthJournal.phase))
+                        .foregroundStyle(.secondary)
+                }
+            } else if let diskCapacityError {
+                Text(diskCapacityError)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            } else {
+                ProgressView("Checking VM disk capacity")
+            }
+
+            if isGrowingDisk {
+                ProgressView("Growing VM disk and verifying the guest filesystem")
+            }
+
+            if let diskGrowthError {
+                LabeledContent("Last Attempt") {
+                    Text(diskGrowthError)
+                        .textSelection(.enabled)
+                        .lineLimit(3)
+                        .truncationMode(.middle)
+                }
+            }
+
+            diskGrowthActionControl
+        } footer: {
+            Text("Current raw capacity is the VM block device size. Docker storage totals above are a separate daemon-reported attribution and do not describe all guest filesystem use.")
+        }
+    }
+
+    @ViewBuilder
+    private var diskGrowthActionControl: some View {
+        switch diskGrowthAction {
+        case .none:
+            EmptyView()
+        case .refreshReadiness:
+            Button("Refresh VM Disk Readiness", systemImage: "arrow.clockwise") {
+                Task { await loadDiskGrowthFacts() }
+            }
+            .disabled(isPerformingDiskOperation)
+        case .stopEngine:
+            Button("Stop Engine", systemImage: "stop.fill") {
+                Task { await stopEngineForDiskGrowth() }
+            }
+            .disabled(model.isEngineBusy || isGrowingDisk)
+            .help("The VM must stop completely before Morbstack can grow its data disk")
+        case .reviewGrowth:
+            Button("Review Disk Growth…", systemImage: "arrow.up.right") {
+                diskGrowthError = nil
+                showsDiskGrowthConfirmation = true
+            }
+            .disabled(isGrowingDisk || diskGrowthTargetGiB == nil)
+            .help("Review the grow-only VM disk transaction")
+        case .reviewRecovery:
+            Button("Review Disk Recovery…", systemImage: "arrow.clockwise") {
+                diskGrowthError = nil
+                showsDiskGrowthConfirmation = true
+            }
+            .disabled(isGrowingDisk || diskGrowthTargetGiB == nil)
+            .help("Retry the exact saved disk-growth target and verify the guest filesystem")
+        }
+    }
+
+    private var diskGrowthAction: TrackCDiskGrowthAction {
+        guard model.fixtureProvenance == nil else { return .none }
+        TrackCDiskGrowthPresentation.action(
+            capacity: diskCapacity,
+            diagnostic: diskResizeDiagnostic,
+            hasRecoveryJournal: diskGrowthJournal != nil,
+            // Docker's ready state is narrower than the VM lifecycle state. A starting,
+            // stopping, suspended, or otherwise reachable VM must not be offered a
+            // grow transaction merely because dockerd is not ready to list containers.
+            engineIsRunning: model.engine.reachable && model.engine.state != "stopped")
+    }
+
+    private var diskGrowthTargetGiB: Int? {
+        if let diskGrowthJournal {
+            let bytes = diskGrowthJournal.targetBytes
+            guard bytes > 0, bytes % MorbDiskCapacity.bytesPerGiB == 0 else { return nil }
+            return Int(bytes / MorbDiskCapacity.bytesPerGiB)
+        }
+        return diskCapacity?.configuredGiB
+    }
+
+    private var diskGrowthConfirmationTitle: String {
+        diskGrowthAction == .reviewRecovery ? "Recover VM Disk Growth?" : "Grow VM Disk?"
+    }
+
+    private var diskGrowthConfirmationActionTitle: String {
+        guard let targetGiB = diskGrowthTargetGiB else { return "Grow Disk" }
+        return diskGrowthAction == .reviewRecovery
+            ? "Retry \(targetGiB) GiB Target"
+            : "Grow to \(targetGiB) GiB"
+    }
+
+    private var diskGrowthConfirmationMessage: String {
+        guard let targetGiB = diskGrowthTargetGiB else {
+            return "Morbstack could not determine a safe disk-growth target. Refresh VM disk readiness before trying again."
+        }
+        if diskGrowthAction == .reviewRecovery {
+            return "Morbstack will retry the saved \(targetGiB) GiB target. It verifies the recorded disk identity and guest filesystem before completing recovery; it will not shrink the disk or accept a different target."
+        }
+        let current = diskCapacity?.currentBytes.map(Formatters.bytesString) ?? "the current capacity"
+        return "Morbstack will extend the VM disk from \(current) to \(targetGiB) GiB, boot the VM only long enough to resize /var/lib/docker, and require a guest proof before committing the result. Docker is unavailable during the transaction. Disk growth cannot be undone; if verification fails, Morbstack stops the VM and retains recovery information for this exact target."
+    }
+
+    private var engineStoppedDiskDescription: String {
+        guard let diskCapacity else {
+            return "Start the engine to view Docker images, containers, volumes, and build cache on disk. VM disk capacity is checked separately."
+        }
+        return "Start the engine to view Docker images, containers, volumes, and build cache on disk. VM disk: \(capacityStateTitle(diskCapacity.state))."
+    }
+
+    private func capacityStateTitle(_ state: MorbDiskCapacity.State) -> String {
+        switch state {
+        case .willCreate: return "Created on first start"
+        case .matchesConfiguration: return "Matches configuration"
+        case .increaseRequiresGuestResize: return "Growth required"
+        case .decreaseUnsupported: return "Shrink unsupported"
+        case .unavailable: return "Unavailable"
+        }
+    }
+
+    private func diskResizeStateTitle(_ state: MorbDiskResize.State) -> String {
+        switch state {
+        case .notNeeded: return "No transaction needed"
+        case .decreaseUnsupported: return "Shrink unsupported"
+        case .capacityUnavailable: return "Capacity unavailable"
+        case .vmMustStop: return "Stop VM first"
+        case .guestCapabilityUnknown: return "Guest check required"
+        case .guestResizeUnavailable: return "Guest resize unavailable"
+        case .recoveryRequired: return "Recovery required"
+        case .readyForExplicitTransaction: return "Ready for review"
+        }
+    }
+
     private func footprintExplanation(_ footprint: TrackCDiskImageFootprint) -> String {
         if footprint.isSparse {
             return "This sparse file reserves \(Formatters.bytesString(footprint.apparentBytes)) but currently uses \(Formatters.bytesString(footprint.actualBytes)) on APFS."
@@ -655,6 +897,12 @@ struct DiskRootView: View {
             set: { if !$0 { operationError = nil } })
     }
 
+    private var diskGrowthNoticeBinding: Binding<Bool> {
+        Binding(
+            get: { diskGrowthNotice != nil },
+            set: { if !$0 { diskGrowthNotice = nil } })
+    }
+
     private func selectFirstRowIfNeeded() {
         guard selection == nil else { return }
         selection = diskRows.first?.id
@@ -666,6 +914,7 @@ struct DiskRootView: View {
         defer { busy = false }
         await model.refreshAll()
         await loadFootprint()
+        await loadDiskGrowthFacts()
         selectFirstRowIfNeeded()
     }
 
@@ -675,6 +924,7 @@ struct DiskRootView: View {
         defer { busy = false }
         await model.refreshDisk()
         await loadFootprint()
+        await loadDiskGrowthFacts()
         selectFirstRowIfNeeded()
     }
 
@@ -683,6 +933,90 @@ struct DiskRootView: View {
         busy = true
         defer { busy = false }
         await model.engineAction(.start)
+        await loadDiskGrowthFacts()
+    }
+
+    /// Stops the VM only from the explicit Disk action, then reloads the daemon's
+    /// disk-growth diagnosis. The grow transaction itself still rechecks that the VM
+    /// is completely stopped before it mutates the RAW image.
+    @MainActor
+    private func stopEngineForDiskGrowth() async {
+        await model.engineAction(.stop)
+        await loadDiskGrowthFacts()
+        await loadFootprint()
+    }
+
+    /// Reads capacity/configuration and the durable journal without mutating either.
+    /// Fixture mode intentionally supplies neither: presenting the developer machine's
+    /// real Morbstack disk beside fixture Docker data would be a false live-data claim.
+    private func loadDiskGrowthFacts() async {
+        guard model.fixtureProvenance == nil else {
+            await MainActor.run {
+                diskCapacity = nil
+                diskResizeDiagnostic = nil
+                diskGrowthJournal = nil
+                diskCapacityError = nil
+            }
+            return
+        }
+
+        let localFacts = await Task.detached(priority: .utility) { () -> DiskGrowthLocalFacts in
+            do {
+                let config = try MorbConfig.load()
+                let capacity = MorbDiskCapacity.inspect(configuredGiB: config.diskSizeGiB)
+                do {
+                    return DiskGrowthLocalFacts(
+                        capacity: capacity,
+                        journal: try MorbDiskGrowth.loadJournal(),
+                        errorMessage: nil)
+                } catch {
+                    return DiskGrowthLocalFacts(
+                        capacity: capacity,
+                        journal: nil,
+                        errorMessage: MorbErrorMessage.text(for: error))
+                }
+            } catch {
+                return DiskGrowthLocalFacts(
+                    capacity: nil,
+                    journal: nil,
+                    errorMessage: MorbErrorMessage.text(for: error))
+            }
+        }.value
+        let daemonDiagnostic = await model.daemon.diskResizeDiagnostic()
+
+        await MainActor.run {
+            diskCapacity = localFacts.capacity
+            diskGrowthJournal = localFacts.journal
+            diskCapacityError = localFacts.errorMessage
+            diskResizeDiagnostic = daemonDiagnostic
+        }
+    }
+
+    /// Begins only after the native confirmation dialog. The daemon owns all durable
+    /// mutation and proof ordering: this view passes one reviewed target and reflects
+    /// the final verified state or retained recovery record after it returns.
+    private func beginDiskGrowth() {
+        guard let targetGiB = diskGrowthTargetGiB, !isGrowingDisk else { return }
+        Task { @MainActor in
+            isGrowingDisk = true
+            diskGrowthError = nil
+            defer { isGrowingDisk = false }
+            do {
+                try await model.daemon.growDisk(targetGiB: targetGiB)
+                await model.refreshEngine()
+                await loadDiskGrowthFacts()
+                await loadFootprint()
+                diskGrowthNotice = DiskGrowthNotice(
+                    title: "VM Disk Growth Verified",
+                    message: "Morbstack completed the \(targetGiB) GiB disk-growth transaction and accepted the guest filesystem proof.")
+            } catch {
+                let message = MorbErrorMessage.text(for: error)
+                diskGrowthError = message
+                operationError = message
+                await loadDiskGrowthFacts()
+                await loadFootprint()
+            }
+        }
     }
 
     /// Reads `disk.img`'s real footprint off the main actor.
@@ -709,6 +1043,7 @@ struct DiskRootView: View {
             }
             await model.refreshAll()
             await loadFootprint()
+            await loadDiskGrowthFacts()
             selectFirstRowIfNeeded()
         } catch {
             operationError = MorbErrorMessage.text(for: error)

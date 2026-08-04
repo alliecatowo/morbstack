@@ -5,12 +5,13 @@ import Foundation
 import XCTest
 
 @testable import MorbstackAppCore
+import MorbstackKit
 
-/// Coverage for the Disk screen's arithmetic: segment attribution, bar layout, prune
-/// classification, and the sparse-file footprint.
+/// Coverage for the Disk screen's arithmetic: storage attribution, growth-action
+/// selection, prune classification, and the sparse-file footprint.
 ///
-/// These are the numbers a screenshot cannot check. A bar that renders beautifully while
-/// attributing 3 GB of images to the build cache looks exactly like a correct one.
+/// These are the facts a screenshot cannot check. A table can look native while still
+/// attributing 3 GB of images to build cache or offering an unsafe disk action.
 final class TrackCDiskMathTests: XCTestCase {
 
     // MARK: - Fixtures
@@ -47,12 +48,30 @@ final class TrackCDiskMathTests: XCTestCase {
             size: size, refCount: refCount)
     }
 
+    private func capacity(_ state: MorbDiskCapacity.State) -> MorbDiskCapacity.Status {
+        MorbDiskCapacity.Status(
+            imagePath: "/tmp/disk.img",
+            configuredGiB: 128,
+            configuredBytes: 128 * MorbDiskCapacity.bytesPerGiB,
+            currentBytes: 64 * MorbDiskCapacity.bytesPerGiB,
+            state: state)
+    }
+
+    private func resizeDiagnostic(_ state: MorbDiskResize.State) -> MorbDiskResize.Diagnostic {
+        MorbDiskResize.Diagnostic(
+            state: state,
+            guestCapability: state == .guestResizeUnavailable ? .unavailable : .ready,
+            currentBytes: 64 * MorbDiskCapacity.bytesPerGiB,
+            targetBytes: 128 * MorbDiskCapacity.bytesPerGiB,
+            summary: "Fixture diagnostic")
+    }
+
     /// 64 lowercase hex characters — the shape Docker gives an anonymous volume.
     private let anonymousName = String(repeating: "a1b2c3d4", count: 8)
 
     // MARK: - Segment attribution
 
-    func testSegmentsCarryEachCategoryTotalInBarOrder() {
+    func testSegmentsCarryEachCategoryTotalInStableTableOrder() {
         let usage = DiskUsage(
             layersSize: 8_000, imagesTotal: 8_000, volumesTotal: 3_000,
             buildCacheTotal: 2_000, containersTotal: 1_000, reclaimable: 0)
@@ -82,8 +101,8 @@ final class TrackCDiskMathTests: XCTestCase {
 
     func testImagesReclaimableNeverExceedsTheCategoryTotal() throws {
         // Per-image sizes double-count shared base layers, so the sum of dangling images
-        // can legitimately exceed `LayersSize`. Reporting "12 GB reclaimable" inside an
-        // 8 GB bar segment would draw a hatch wider than the segment itself.
+        // can legitimately exceed `LayersSize`. The per-category reclaimable value must
+        // never exceed the daemon-reported category total.
         let usage = DiskUsage(
             layersSize: 8_000, imagesTotal: 8_000, volumesTotal: 0,
             buildCacheTotal: 0, containersTotal: 0, reclaimable: 20_000)
@@ -177,13 +196,13 @@ final class TrackCDiskMathTests: XCTestCase {
         let segments = TrackCDiskMath.segments(usage: usage, containers: [], images: images, volumes: [])
         let cache = try XCTUnwrap(segments.first { $0.category == .buildCache })
 
-        XCTAssertEqual(cache.reclaimableBytes, 0, "a negative residual must not become a negative hatch")
+        XCTAssertEqual(cache.reclaimableBytes, 0, "a negative residual must not become negative storage")
         XCTAssertFalse(cache.isEstimate)
     }
 
     func testReclaimableNeverExceedsItsOwnSegment() {
-        // Property-ish sweep across a spread of shapes: whatever the inputs, the hatch
-        // can never be wider than the segment it sits in.
+        // Property-ish sweep across a spread of shapes: whatever the inputs, no
+        // reclaimable attribution can exceed the category it describes.
         for imagesTotal in [Int64(0), 1_000, 50_000] {
             for reclaimable in [Int64(0), 10_000, 1_000_000] {
                 let usage = DiskUsage(
@@ -205,52 +224,63 @@ final class TrackCDiskMathTests: XCTestCase {
         }
     }
 
-    // MARK: - Bar layout
+    // MARK: - Disk growth action
 
-    func testWidthsAreProportionalAndFillTheBar() {
-        let widths = TrackCDiskMath.barWidths(
-            byteValues: [50, 30, 20], totalWidth: 100, minimumSegmentWidth: 0)
-
-        XCTAssertEqual(widths[0], 50, accuracy: 0.001)
-        XCTAssertEqual(widths[1], 30, accuracy: 0.001)
-        XCTAssertEqual(widths[2], 20, accuracy: 0.001)
+    func testMissingCapacityOnlyOffersAReadOnlyRefresh() {
+        XCTAssertEqual(
+            TrackCDiskGrowthPresentation.action(
+                capacity: nil,
+                diagnostic: nil,
+                hasRecoveryJournal: false,
+                engineIsRunning: false),
+            .refreshReadiness)
     }
 
-    func testEmptySegmentsGetNoWidthAtAll() {
-        let widths = TrackCDiskMath.barWidths(byteValues: [100, 0, 0], totalWidth: 200)
-
-        XCTAssertEqual(widths[0], 200, accuracy: 0.001)
-        XCTAssertEqual(widths[1], 0)
-        XCTAssertEqual(widths[2], 0)
+    func testAConfiguredIncreaseStopsTheEngineBeforeAnyGrowthReview() {
+        XCTAssertEqual(
+            TrackCDiskGrowthPresentation.action(
+                capacity: capacity(.increaseRequiresGuestResize),
+                diagnostic: resizeDiagnostic(.readyForExplicitTransaction),
+                hasRecoveryJournal: false,
+                engineIsRunning: true),
+            .stopEngine)
     }
 
-    func testASliverIsRaisedToTheFloorAndTheBarStillAddsUp() {
-        // 1 byte out of 1,000,001 is 0.0004pt — invisible, and not even anti-aliased.
-        let widths = TrackCDiskMath.barWidths(
-            byteValues: [1_000_000, 1], totalWidth: 400, minimumSegmentWidth: 6)
-
-        XCTAssertEqual(widths[1], 6, accuracy: 0.001)
-        XCTAssertEqual(widths.reduce(0, +), 400, accuracy: 0.001, "borrowing must not change the total")
+    func testAStoppedGuestWithNoPriorReportCanOnlyReachReviewedGrowth() {
+        XCTAssertEqual(
+            TrackCDiskGrowthPresentation.action(
+                capacity: capacity(.increaseRequiresGuestResize),
+                diagnostic: resizeDiagnostic(.guestCapabilityUnknown),
+                hasRecoveryJournal: false,
+                engineIsRunning: false),
+            .reviewGrowth)
     }
 
-    func testTheFloorIsAbandonedRatherThanOverflowingANarrowBar() {
-        let widths = TrackCDiskMath.barWidths(
-            byteValues: [10, 10, 10, 10], totalWidth: 12, minimumSegmentWidth: 6)
-
-        XCTAssertEqual(widths.reduce(0, +), 12, accuracy: 0.001)
-        XCTAssertTrue(widths.allSatisfy { $0 < 6 }, "four 6pt floors do not fit in 12pt, so proportion wins")
+    func testGuestResizeUnavailableOffersNoGrowthAction() {
+        XCTAssertEqual(
+            TrackCDiskGrowthPresentation.action(
+                capacity: capacity(.increaseRequiresGuestResize),
+                diagnostic: resizeDiagnostic(.guestResizeUnavailable),
+                hasRecoveryJournal: false,
+                engineIsRunning: false),
+            .none)
     }
 
-    func testZeroTotalAndZeroWidthAreBothSafe() {
-        XCTAssertEqual(TrackCDiskMath.barWidths(byteValues: [0, 0], totalWidth: 100), [0, 0])
-        XCTAssertEqual(TrackCDiskMath.barWidths(byteValues: [5, 5], totalWidth: 0), [0, 0])
-        XCTAssertEqual(TrackCDiskMath.barWidths(byteValues: [], totalWidth: 100), [])
-    }
-
-    func testNegativeByteCountsAreTreatedAsEmpty() {
-        let widths = TrackCDiskMath.barWidths(byteValues: [-5, 100], totalWidth: 100, minimumSegmentWidth: 0)
-        XCTAssertEqual(widths[0], 0)
-        XCTAssertEqual(widths[1], 100, accuracy: 0.001)
+    func testRecoveryAlwaysUsesTheSavedTargetReviewAfterTheEngineStops() {
+        XCTAssertEqual(
+            TrackCDiskGrowthPresentation.action(
+                capacity: capacity(.matchesConfiguration),
+                diagnostic: resizeDiagnostic(.recoveryRequired),
+                hasRecoveryJournal: true,
+                engineIsRunning: true),
+            .stopEngine)
+        XCTAssertEqual(
+            TrackCDiskGrowthPresentation.action(
+                capacity: capacity(.matchesConfiguration),
+                diagnostic: resizeDiagnostic(.recoveryRequired),
+                hasRecoveryJournal: true,
+                engineIsRunning: false),
+            .reviewRecovery)
     }
 
     // MARK: - Anonymous volume names
