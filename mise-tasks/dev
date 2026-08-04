@@ -52,10 +52,38 @@ if [ ! -x "$BUNDLED_MORB" ]; then
 	exit 1
 fi
 if "$BUNDLED_MORB" status >/dev/null 2>&1; then
-	# Stop and start rather than a single restart verb: the daemon re-reads and
-	# re-installs the bundle payload on start, and the VM is socket-activated, so
-	# it comes back on the next client connection with the new guest.
+	# `morb stop` shuts down the VM, NOT the daemon -- read its own help: "Shut the
+	# VM down". The daemon is long-lived and re-stages runtime/current only when the
+	# DAEMON starts. So stop+start alone leaves the old daemon process alive with the
+	# old inode mapped, it never re-stages, and the VM boots the stale guest while
+	# every command reports success. That is precisely the failure this task exists
+	# to prevent, and this task shipped with it.
+	#
+	# So: stop the VM cleanly first, then terminate the daemon by its EXACT pid, then
+	# let `start` socket-activate a fresh one out of the bundle we just built. Exact
+	# pid and never pkill -- a pattern kill here would also take out an unrelated
+	# daemon from another checkout, which is a mistake this project has made before.
 	"$BUNDLED_MORB" stop || true
+
+	DAEMON_BIN="$PWD/dist/Morbstack.app/Contents/MacOS/morbstackd"
+	daemon_pid=$(pgrep -x -f "$DAEMON_BIN.*" 2>/dev/null | head -1 || true)
+	if [ -n "${daemon_pid:-}" ]; then
+		echo "    terminating daemon pid ${daemon_pid} so the next start re-stages"
+		kill -TERM "$daemon_pid" 2>/dev/null || true
+		# Wait for it to actually go, rather than assuming. A daemon that is still
+		# alive when `start` runs is the whole bug.
+		for _ in 1 2 3 4 5 6 7 8 9 10; do
+			kill -0 "$daemon_pid" 2>/dev/null || break
+			sleep 0.5
+		done
+		if kill -0 "$daemon_pid" 2>/dev/null; then
+			echo "error: daemon pid ${daemon_pid} did not exit; refusing to claim a" >&2
+			echo "       restart that did not happen. Investigate before trusting" >&2
+			echo "       any runtime result from this tree." >&2
+			exit 1
+		fi
+	fi
+
 	"$BUNDLED_MORB" start
 else
 	echo "    no daemon reachable — nothing to restart."

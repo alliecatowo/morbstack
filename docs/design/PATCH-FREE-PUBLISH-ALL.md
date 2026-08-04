@@ -212,3 +212,42 @@ Runtime acceptance on a real engine, recorded 2026-08-04 (see EN-2):
 - The rebase tax on every future Moby release is gone; engine upgrades are
   again "bump the pinned version, verify the hashes" — plus one source check
   that the `StartProxy` argv/fd contract is unchanged.
+
+---
+
+## Live acceptance — 2026-08-04
+
+Run against a **rebuilt guest** (`mise run dev`), on a daemon verified newer than its own
+binary by `mise run doctor`, with stock upstream `dockerd` 29.7.1 on both client and server.
+`strings dist/guest-bin/dockerd | grep -c morbstack` → **0**.
+
+This matters because the patched implementation passed its first run and failed every restart
+afterwards (SP-6: the durable session EOF'd 6 ms after its *successful* first allocation). So
+"`-P` works" was never the interesting claim; surviving lifecycle was.
+
+| Case | Result |
+| --- | --- |
+| `docker run -P nginx:alpine` | `80/tcp -> 0.0.0.0:32768`, `curl` **HTTP 200 in 4.3 ms** |
+| `docker restart` | `-> 32769`, HTTP 200 |
+| `docker stop` + `docker start` | `-> 32770`, HTTP 200 |
+| `--restart=always` across a **full VM restart** (`morb stop`/`start`) | `32771` → `32768`, HTTP 200 |
+| Explicit `-p 18500:80` and `-p 127.0.0.1:18501:80` together | both HTTP 200, correct host-IP scoping |
+| **Host port collision** — Mac process holding `127.0.0.1:18432`, then `docker run -p 127.0.0.1:18432:80` | **fails closed**: `Bind for 127.0.0.1:18432/tcp failed: port is already allocated`, and **no container is created** |
+
+The ephemeral port changes on each lifecycle event (32768 → 32769 → 32770). That is upstream
+Docker's own `-P` behaviour, not a Morbstack artefact: `-P` requests *an* ephemeral mapping, not a
+stable one. Anything depending on a fixed port must use explicit `-p`, exactly as with Docker
+Desktop.
+
+The collision case is the one worth dwelling on. It is the entire reason this mechanism was chosen
+over Lima's and gvisor-tap-vsock's reactive `/proc/net/tcp` discovery: that approach is **fail-open**,
+so a host-side collision degrades into a silently unforwarded port. Here the failure is Docker's own
+error text, delivered before the container exists. Given that this project's most serious defect to
+date was a proxy that failed open on every keep-alive connection, choosing the fail-closed mechanism
+is the right call twice over.
+
+### Still not proven
+
+UDP publishing, port ranges, and Compose/BuildKit under the new proxy were not re-run in this pass.
+They are expected to be unaffected — they never touched the publish-all path — but "expected" is the
+word that got this project into trouble, so they are listed here as owed rather than assumed.
