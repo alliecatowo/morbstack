@@ -68,61 +68,55 @@ struct ContainerLogsTab: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        ToolbarItemGroup(placement: .primaryAction) {
-            Toggle(isOn: Binding(
-                get: { store.tail.followEnabled },
-                set: { store.tail.setFollow($0) })
-            ) {
-                Image(systemName: "arrow.down.to.line")
-            }
-            .toggleStyle(.button)
-            .accessibilityLabel("Follow output")
-            .help("Follow new output")
+        // Follow, timestamps, error navigation, and export are all commands for the
+        // selected log document, not additional primary container lifecycle actions.
+        // A single semantic menu lets the system place/overflow them as one unit at
+        // narrow widths while preserving each native control and its state.
+        ToolbarItem(id: "logs.options", placement: .secondaryAction) {
+            Menu {
+                Toggle("Follow Output", isOn: Binding(
+                    get: { store.tail.followEnabled },
+                    set: { store.tail.setFollow($0) }))
+                    .accessibilityLabel("Follow output")
+                    .help("Follow new output")
 
-            Toggle(isOn: $store.showsTimestamps) {
-                Image(systemName: "clock")
-            }
-            .toggleStyle(.button)
-            .accessibilityLabel("Show timestamps")
-            .help("Show timestamps")
+                Toggle("Show Timestamps", isOn: $store.showsTimestamps)
+                    .accessibilityLabel("Show timestamps")
+                    .help("Show timestamps")
 
-            Button { jumpToNextError() } label: {
-                Image(systemName: "exclamationmark.triangle")
-            }
-            .accessibilityLabel("Jump to next error")
-            .help("Jump to next error")
-            .disabled(!hasErrors)
-        }
-
-        ToolbarItem(id: "logs.clear", placement: .secondaryAction) {
-            Button { store.clear() } label: {
-                Image(systemName: "trash")
-            }
-            .accessibilityLabel("Clear scrollback")
-            .help("Clear scrollback")
-        }
-
-        ToolbarItem(id: "logs.copy", placement: .secondaryAction) {
-            Button {
-                MorbPasteboard.copy(store.exportText())
-                copied = true
-                Task {
-                    try? await Task.sleep(for: .seconds(1.4))
-                    copied = false
+                Button("Jump to Next Error", systemImage: "exclamationmark.triangle") {
+                    jumpToNextError()
                 }
-            } label: {
-                Image(systemName: copied ? "checkmark" : "doc.on.doc")
-            }
-            .accessibilityLabel("Copy visible lines")
-            .help("Copy visible lines")
-        }
+                .accessibilityLabel("Jump to next error")
+                .help("Jump to next error")
+                .disabled(!hasErrors)
 
-        ToolbarItem(id: "logs.export", placement: .secondaryAction) {
-            Button(action: export) {
-                Image(systemName: "square.and.arrow.down")
+                Divider()
+
+                Button(copied ? "Copied" : "Copy Visible Lines", systemImage: copied ? "checkmark" : "doc.on.doc") {
+                    copyVisibleLines()
+                }
+                .accessibilityLabel("Copy visible lines")
+                .help("Copy visible lines")
+
+                Button("Export Visible Lines…", systemImage: "square.and.arrow.down") {
+                    export()
+                }
+                .accessibilityLabel("Export visible lines")
+                .help("Export visible lines")
+
+                Divider()
+
+                Button("Clear Scrollback") {
+                    store.clear()
+                }
+                .accessibilityLabel("Clear scrollback")
+                .help("Clear scrollback")
+            } label: {
+                Label("Log options", systemImage: "text.alignleft")
             }
-            .accessibilityLabel("Export visible lines")
-            .help("Export visible lines")
+            .accessibilityLabel("Log options")
+            .help("Follow, display, and export options for this log")
         }
     }
 
@@ -139,6 +133,15 @@ struct ContainerLogsTab: View {
             currentErrorID = errors[0].id
         }
         scrollTarget = currentErrorID
+    }
+
+    private func copyVisibleLines() {
+        MorbPasteboard.copy(store.exportText())
+        copied = true
+        Task {
+            try? await Task.sleep(for: .seconds(1.4))
+            copied = false
+        }
     }
 
     private var logSurface: some View {
