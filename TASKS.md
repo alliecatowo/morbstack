@@ -347,3 +347,11 @@ Dev Containers CLI 0.88.0 in full — `up`, two-way workspace bind mount, `postC
 and a features/derived-image build through Morbstack BuildKit. Only Testcontainers **Python** and the
 Dev Containers CLI find Morbstack without `DOCKER_HOST`; they are the two that read `docker context`.
 Evidence: [audit/ECOSYSTEM-MATRIX.md](docs/audit/ECOSYSTEM-MATRIX.md).
+
+## Findings without tickets — filed 2026-08-04
+
+| ID | Ticket | Deliverable | State |
+| --- | --- | --- | --- |
+| SEC-1 | **Unbounded read on bare CR in the k8s install preamble** | `read_install_preamble_line` (now `guest/morbinit/src/wire.rs`) strips every `\r` and **those bytes do not count toward the length cap**, so a peer sending an unbounded run of bare `\r` without ever completing a line is read forever by that function alone. Pre-existing; found and deliberately preserved during the PROTO-6 refactor rather than silently "fixed" mid-cleanup. Count CR bytes toward the cap, or bound total bytes read independently of line length. This is exactly the class OPS-8 exists to find, which is a small argument for unblocking that review. | `open` |
+| ARCH-1 | **`VMManager` queue-confinement is enforced only by convention** | `virtualMachine`, `controlReady`, `runWaiters`, `stopWaiters`, `guestStopObservers`, `stopInFlight`, `diskGrowthInFlight`, `suspendCancelRequested` have **no lock at all**. Correctness rests entirely on every call site remembering to hop onto `queue` first. The comments say "Queue-confined"; nothing enforces it. The architecture audit rates this the largest concurrency risk in the codebase, and it is a design choice rather than a bug — so the deliverable is a decision: express the confinement in the type system (an actor, or a `@QueueConfined` wrapper that asserts `dispatchPrecondition`), or accept it and add `dispatchPrecondition(condition: .onQueue(queue))` at every entry point so a violation traps in debug rather than corrupting silently. | `open` |
+| OPS-10 | ~~Clippy ran host-only~~ | **Done 2026-08-04.** `mise run check` now runs clippy for both host and `aarch64-unknown-linux-musl`. Host-only clippy was structurally incapable of seeing the Linux-gated code — the same hole that let 13 guest compile errors ship while `cargo test` reported 217 passing. It immediately found two live lints. CI should mirror this. | `done` (CI mirror `open`) |
