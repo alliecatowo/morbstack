@@ -2,6 +2,14 @@
 
 Date: 2026-08-03. Host: macOS 26.4 (Darwin 25.4.0), Apple Silicon, 8 vCPU / 8192 MiB VM.
 
+## Evidence scope
+
+This is a dated result for the candidate exercised on 2026-08-03, not a blanket
+current-head acceptance. In particular, `33fd00e` changed bind-admission/framed-relay
+behavior after this run, and the pending chunked-create rewrite changes request rewriting
+again. A current result requires the serialized `guest-image` → `app` → restart loop and
+the relevant live matrix rerun; do not carry a row below forward as `runs-here` until then.
+
 This is the first time most of this surface has ever been **executed**. Until today the
 guest side had never been compiled or run. Every row below records the exact command, the
 exact output, and a verdict. The final section separates what is now **proven at runtime**

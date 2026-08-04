@@ -26,17 +26,25 @@ Status: `open` · `in-flight` · `decided` · `done` · `blocked`
 - **Next planning gate:** reconcile the completed engine matrix and audit board,
   then start non-machine tickets in parallel while the machine lane is reserved
   for an explicit, controlled guest/runtime acceptance pass.
+- **Runtime-evidence boundary:** the recorded Engine/Proxy matrix is evidence for
+  its 2026-08-03 candidate, not for the current source tree. `33fd00e`
+  changed bind-admission/framed-relay behavior after that run, and the pending
+  chunked-create rewrite changes the same boundary again. Neither may inherit a
+  `runs-here` verdict until the serialized `guest-image` → `app` → restart and
+  live matrix rerun completes on the current candidate.
 
 ---
 
 ## Spikes — decisions that reshape other tickets
 
-### SP-1 · Docker proxy: policy for bodies too large to buffer · `done` (`runs-here`)
+### SP-1 · Docker proxy: policy for bodies too large to buffer · `done` (decision; dated runtime evidence)
 **Deliverable:** a decision, in `docs/audit/PROXY-FRAMING.md`, on what the proxy does when a request
 body exceeds what it will buffer for inspection. Options: refuse with a Docker-shaped error
-(fail-closed), stream-inspect incrementally, or inspect a bounded prefix. The framed relay now
-rejects too-large and ambiguous request framings with Docker-shaped `400` errors and inspects every
-request until a confirmed hijack; see the recorded post-fix matrix in `PROXY-FRAMING.md`.
+(fail-closed), stream-inspect incrementally, or inspect a bounded prefix. The framed relay's
+2026-08-03 candidate rejected too-large and ambiguous request framings with Docker-shaped `400`
+errors and inspected every request until a confirmed hijack; see the dated matrix in
+`PROXY-FRAMING.md`. Current-source runtime acceptance is pending the post-`33fd00e` and
+pending-chunked-rewrite rerun.
 **Rewrites:** EN-1, and every preflight guard's threat model.
 
 ### SP-2 · `NEDNSSettings` entitlement feasibility · `decided`
@@ -117,9 +125,9 @@ the author.
 
 | ID | Ticket | Deliverable | State |
 | --- | --- | --- | --- |
-| EN-1 | **Docker proxy request framing** | Every request on a connection is framed and inspected until a legitimate hijack, then spliced. Too-large and ambiguous bodies are rejected fail-closed. The fresh and second keep-alive create requests both return `400`, and stream/BuildKit/Compose regressions were rerun. See `docs/audit/PROXY-FRAMING.md`. | `done` (`runs-here`) |
+| EN-1 | **Docker proxy request framing** | The 2026-08-03 candidate framed every request until a legitimate hijack, rejected too-large and ambiguous bodies fail-closed, returned `400` for fresh and second keep-alive creates, and completed stream/BuildKit/Compose regressions. `33fd00e` and the pending chunked-create rewrite changed this boundary after that candidate, so current-source rebuilt-guest acceptance remains required. See `docs/audit/PROXY-FRAMING.md`. | `in-flight` (current-candidate acceptance) |
 | EN-2 | `-P` across stop/start/restart | Mapping survives lifecycle | `blocked` (SP-6) |
-| EN-3 | Bind mounts `/etc`, `/var`, unshared roots | `/etc`, `/var`, `/Library`, and symlink traversal are now refused before Docker sees them; `/tmp`, `/private/tmp`, and `$HOME` expose real host files and write through. See `docs/audit/PROXY-FRAMING.md`. | `done` (`runs-here`) |
+| EN-3 | Bind mounts `/etc`, `/var`, unshared roots | The 2026-08-03 candidate recorded refusals for `/etc`, `/var`, `/Library`, and symlink traversal, plus working `/tmp`, `/private/tmp`, and `$HOME` bind writes. `33fd00e` then changed bind-admission and relay behavior; rebuild the guest and rerun this exact matrix before assigning those results to the current source. See `docs/audit/PROXY-FRAMING.md`. | `in-flight` (post-`33fd00e` rebuilt-guest acceptance) |
 | EN-4 | `morb disk grow` | Fix `keyNotFound: 'device'` host/guest contract mismatch. Image grew to 72 GiB while the guest filesystem stayed 62.4 G, and a **refused** grow still mutated configured capacity. Add the journal tests it never had. | `in-flight` (`codex/parity-en4-disk-grow`) |
 | EN-5 | Reclaim the 72 GiB `disk.img` | Safe reclamation path for the test artifact left on the dev machine | `open` |
 | EN-6 | `host.docker.internal` without `--add-host` | Resolves by default | `open` |
@@ -152,7 +160,7 @@ the author.
 | TST-3 | Live-share transport + both guest modules | ~1,850 LOC, self-described "authority boundary", zero tests | `open` |
 | TST-4 | `PublishAllPortAllocator` + guest `publish_all.rs` | Untested on both sides | `open` |
 | TST-5 | vsock relay under load | Half-close, backpressure, cancellation | `open` |
-| TST-6 | Keep-alive regression test | Assert the **second** request on a reused connection is inspected. Its absence is why EN-1 shipped. | `done` (`runs-here`, EN-1) |
+| TST-6 | Keep-alive regression test | Assert the **second** request on a reused connection is inspected. Its absence is why EN-1 shipped. Focused source coverage exists; the recorded runtime result belongs to the dated matrix and must be rerun with EN-1. | `done` (source coverage; current runtime pending) |
 
 ## UI — [docs/audit/UI-AUDIT.md](docs/audit/UI-AUDIT.md), 32 issues: 3 blocker, 9 major, 14 minor, 8 polish
 

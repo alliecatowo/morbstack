@@ -5,9 +5,16 @@ traffic. This document records the defect, the design that replaced it, and the
 verification that the replacement holds — including the streaming paths it would have
 been easy to break while fixing it.
 
-Status: **PASS (PROVABLE NOW)**. Every request on every connection is inspected; the
-bind-mount and port matrices were re-run live against the rebuilt daemon; no streaming
-path regressed; `mise run check` is green at 764 Swift / 217 Rust.
+## Evidence scope
+
+**Dated runtime evidence — 2026-08-03 candidate only.** The matrix below proved that
+candidate's request framing, bind-mount and port behavior against its rebuilt daemon;
+the historical `mise run check` result was 764 Swift / 217 Rust. It is not a
+current-head PASS: `33fd00e` subsequently changed bind admission and framed-relay
+behavior, and the pending chunked-create rewrite changes the same request-rewrite
+boundary. Preserve the results below as the exact dated record, but rebuild the guest,
+assemble/restart the candidate, and rerun the matrix before promoting either change to
+`runs-here`.
 
 ---
 
