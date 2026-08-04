@@ -18,9 +18,8 @@ import Foundation
 /// both            raw bidirectional splice
 /// ```
 ///
-/// The port in the preamble is *guest-local*: bridge networking reaches dockerd's
-/// proxy on the published host port, while an opted-in guest host-network mapping
-/// reaches the declared container port directly.
+/// The port in the preamble is the guest-local bridge-publication port where
+/// dockerd's proxy listens. Host-network containers do not create Mac forwards.
 public enum StreamDial {
 
     /// How long the guest gets to answer the preamble.

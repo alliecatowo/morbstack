@@ -156,68 +156,6 @@ final class PortForwardingTests: XCTestCase {
         XCTAssertTrue(PortForwardPlan.desiredListeners(bindings, exposure: .localNetwork).isEmpty)
     }
 
-    func testHostNetworkDiscoveryRequiresDockerEffectiveExposedPorts() throws {
-        let containerID = String(repeating: "a", count: 64)
-        let containers = Data(
-            """
-            [
-              {"Id":"\(containerID)","Names":["/hosted"],"State":"running"},
-              {"Id":"stopped","Names":["/stopped"],"State":"exited"}
-            ]
-            """.utf8)
-        XCTAssertEqual(
-            try DockerAPIDecoding.runningContainers(containersJSON: containers),
-            [DockerRunningContainer(id: containerID, name: "hosted")])
-
-        let inspect = Data(
-            """
-            {
-              "Id":"\(containerID)",
-              "State":{"Running":true},
-              "Config":{"ExposedPorts":{"80/tcp":{},"5353/udp":{},"5000/sctp":{},"0/tcp":{}}},
-              "HostConfig":{"NetworkMode":"host","PublishAllPorts":false,"PortBindings":{}}
-            }
-            """.utf8)
-        XCTAssertEqual(
-            DockerAPIDecoding.hostNetworkExposedPorts(
-                inspectJSON: inspect,
-                expectedContainerID: containerID,
-                containerName: "hosted"),
-            [
-                DockerHostNetworkExposedPort(
-                    transport: .tcp, port: 80, containerID: containerID, containerName: "hosted"),
-                DockerHostNetworkExposedPort(
-                    transport: .udp, port: 5353, containerID: containerID, containerName: "hosted")
-            ])
-    }
-
-    func testHostNetworkDiscoveryNeverDuplicatesExplicitPublishing() {
-        let containerID = String(repeating: "b", count: 64)
-        let inspect = Data(
-            """
-            {
-              "Id":"\(containerID)",
-              "State":{"Running":true},
-              "Config":{"ExposedPorts":{"80/tcp":{}}},
-              "HostConfig":{"NetworkMode":"host","PortBindings":{"80/tcp":[{"HostPort":"8080"}]}}
-            }
-            """.utf8)
-        XCTAssertTrue(
-            DockerAPIDecoding.hostNetworkExposedPorts(
-                inspectJSON: inspect,
-                expectedContainerID: containerID,
-                containerName: "hosted").isEmpty)
-    }
-
-    func testGuestListenerProbeHasOneClosedRequestGrammar() {
-        XCTAssertEqual(
-            GuestListenerProbe.preamble(transport: .tcp, guestPort: 8080),
-            Data("LISTEN tcp 8080\n".utf8))
-        XCTAssertEqual(
-            GuestListenerProbe.preamble(transport: .udp, guestPort: 53),
-            Data("LISTEN udp 53\n".utf8))
-    }
-
     // MARK: - Fixed TCP create leases
 
     func testExplicitTCPCreateBindingsCollapseAddressFamiliesForOneMacLease() {
@@ -428,19 +366,40 @@ final class PortForwardingTests: XCTestCase {
             Set([endpoint("0.0.0.0", 8443), endpoint("::", 8443)]))
     }
 
-    func testHostNetworkLeavesPortPublishingToMobyUntilThePolicyIsEnabled() {
+    func testHostNetworkAlwaysLeavesPublishingToMobyWithoutAMacLease() {
         let hostNetwork = Data(
-            #"{"HostConfig":{"NetworkMode":"host","PortBindings":{"80/tcp":[{"HostPort":"8080-8082"}]}}}"#.utf8)
+            #"{"HostConfig":{"NetworkMode":"host","PortBindings":{"80/tcp":[{"HostPort":"8080"}],"53/udp":[{"HostPort":"5353"}]}}}"#.utf8)
+        let publishAllHostNetwork = Data(
+            #"{"HostConfig":{"NetworkMode":"host","PublishAllPorts":true}}"#.utf8)
         let sharedContainerNetwork = Data(
             #"{"HostConfig":{"NetworkMode":"container:anchor","PortBindings":{"80/tcp":[{"HostPort":"8080"}]}}}"#.utf8)
 
-        // The explicit host-network policy defaults off. Until it is enabled, Moby
-        // owns its standard warning and Morbstack must not bind a Mac endpoint.
-        XCTAssertEqual(DockerPortPublicationPreflight.inspectContainerCreate(body: hostNetwork), .allowed)
+        // Docker host networking belongs to the Linux guest. The preflight must not
+        // even inspect a requested Mac endpoint: Moby receives the original request
+        // and emits its standard "published ports are discarded" warning.
+        XCTAssertEqual(
+            DockerPortPublicationPreflight.inspectContainerCreate(
+                body: hostNetwork,
+                availability: { port, transport, address in
+                    XCTFail("host networking must not probe or reserve a Mac port")
+                    return HostPortPreflight.Result(
+                        port: port,
+                        transport: transport,
+                        bindAddress: address.stringValue,
+                        availability: .available,
+                        publication: address.isLoopback ? .loopback : .localNetwork,
+                        detail: "unexpected host-network probe")
+                }),
+            .allowed)
         guard case .notDynamic = DockerPortPublicationPreflight.dynamicPortCreatePlan(in: hostNetwork) else {
             return XCTFail("host networking must remain an unmodified Engine create")
         }
         XCTAssertNil(DockerPortPublicationPreflight.fixedPortLeasePlan(in: hostNetwork))
+        XCTAssertEqual(DockerPortPublicationPreflight.inspectContainerCreate(body: publishAllHostNetwork), .allowed)
+        guard case .notDynamic = DockerPortPublicationPreflight.dynamicPortCreatePlan(in: publishAllHostNetwork) else {
+            return XCTFail("host-network -P must remain an unmodified Engine create")
+        }
+        XCTAssertNil(DockerPortPublicationPreflight.fixedPortLeasePlan(in: publishAllHostNetwork))
 
         // Moby rejects port publishing when a container shares another
         // container's network namespace. It must receive that native error
@@ -452,50 +411,12 @@ final class PortForwardingTests: XCTestCase {
         XCTAssertNil(DockerPortPublicationPreflight.fixedPortLeasePlan(in: sharedContainerNetwork))
     }
 
-    func testOptedInHostNetworkUsesTheContainerPortAsItsGuestDialTarget() {
-        let fixed = Data(
-            #"{"HostConfig":{"NetworkMode":"host","PortBindings":{"80/tcp":[{"HostPort":"8080"}],"53/udp":[{"HostPort":"5353"}]}}}"#.utf8)
-        let dynamic = Data(
-            #"{"HostConfig":{"NetworkMode":"host","PortBindings":{"80/tcp":[{"HostPort":""}]}}}"#.utf8)
-
-        XCTAssertEqual(
-            DockerPortPublicationPreflight.inspectContainerCreate(
-                body: fixed,
-                hostNetworkPortPublishing: true,
-                availability: Self.alwaysAvailable),
-            .allowed)
-        let fixedPlan = DockerPortPublicationPreflight.fixedPortLeasePlan(
-            in: fixed,
-            hostNetworkPortPublishing: true)
-        XCTAssertEqual(fixedPlan?.guestDialPort, .containerPort)
-        XCTAssertEqual(fixedPlan?.tcp.first?.hostPort, 8080)
-        XCTAssertEqual(fixedPlan?.tcp.first?.containerPort, 80)
-        XCTAssertEqual(fixedPlan?.udp.first?.hostPort, 5353)
-        XCTAssertEqual(fixedPlan?.udp.first?.containerPort, 53)
-
-        guard case .supported(let dynamicPlan) =
-            DockerPortPublicationPreflight.dynamicPortCreatePlan(
-                in: dynamic,
-                hostNetworkPortPublishing: true)
-        else {
-            return XCTFail("an opted-in host-network dynamic mapping needs the held lease path")
-        }
-        XCTAssertEqual(dynamicPlan.fixedPlan.guestDialPort, .containerPort)
-        XCTAssertEqual(dynamicPlan.requestedPublications.first?.containerPort, 80)
-    }
-
     func testContainerNetworkNeverEntersTheHostNetworkForwardingPath() {
         let sharedContainerNetwork = Data(
             #"{"HostConfig":{"NetworkMode":"container:anchor","PortBindings":{"80/tcp":[{"HostPort":"8080"}]}}}"#.utf8)
 
-        XCTAssertEqual(
-            DockerPortPublicationPreflight.inspectContainerCreate(
-                body: sharedContainerNetwork,
-                hostNetworkPortPublishing: true),
-            .allowed)
-        XCTAssertNil(DockerPortPublicationPreflight.fixedPortLeasePlan(
-            in: sharedContainerNetwork,
-            hostNetworkPortPublishing: true))
+        XCTAssertEqual(DockerPortPublicationPreflight.inspectContainerCreate(body: sharedContainerNetwork), .allowed)
+        XCTAssertNil(DockerPortPublicationPreflight.fixedPortLeasePlan(in: sharedContainerNetwork))
     }
 
     func testCustomBridgeNetworkKeepsTheHostPortReservationPath() {

@@ -273,6 +273,10 @@ final class DockerHijackDetectionTests: XCTestCase {
             head("POST", "/v1.47/containers/create")))
         XCTAssertFalse(DockerHijackDetection.isHijackCandidate(
             head("POST", "/v1.47/containers/abc/exec")))
+        XCTAssertFalse(DockerHijackDetection.isHijackCandidate(
+            head("GET", "/v1.47/exec/deadbeef/json")))
+        XCTAssertFalse(DockerHijackDetection.isHijackCandidate(
+            head("GET", "/v1.47/exec/deadbeef/start")))
     }
 
     func testOnlyTheEngineCanConfirmAHijack() {
@@ -411,6 +415,10 @@ final class DockerFramedRelayTests: XCTestCase {
         XCTAssertTrue(POSIXSocketSupport.writeAll(fd, Data(text.utf8)))
     }
 
+    private func write(_ data: Data, to fd: Int32) {
+        XCTAssertTrue(POSIXSocketSupport.writeAll(fd, data))
+    }
+
     private func readAvailable(_ fd: Int32, atLeast: Int, timeout: TimeInterval = 5) -> Data {
         var out = Data()
         let deadline = Date().addingTimeInterval(timeout)
@@ -516,6 +524,92 @@ final class DockerFramedRelayTests: XCTestCase {
         XCTAssertEqual(String(decoding: stdout, as: UTF8.self), "\u{01}\u{00}\u{00}\u{00}total 0\n")
 
         XCTAssertEqual(policy.framingFailures, [], "a hijacked connection must not be framed")
+        wired.relay.cancel()
+        wait(for: [wired.done], timeout: 10)
+    }
+
+    /// Attached non-TTY exec is the CLI's normal noninteractive path.  The create
+    /// and inspect calls remain ordinary HTTP; only the successful start response
+    /// hijacks the connection, where Docker multiplexes stdout and stderr with its
+    /// eight-byte stream header.  Closing stdin must still leave the final output
+    /// readable so the caller can then inspect its exit status on a new request.
+    func testAttachedNonTTYExecPreservesMultiplexedOutputAfterClientHalfClose() throws {
+        let wired = try makeRelay()
+        let body = #"{"Detach":false,"Tty":false}"#
+        let start = "POST /v1.47/exec/deadbeef/start HTTP/1.1\r\nHost: morbstack\r\n"
+            + "Content-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\n\r\n\(body)"
+        write(start, to: wired.client)
+        XCTAssertEqual(
+            String(decoding: readAvailable(wired.guest, atLeast: start.utf8.count), as: UTF8.self),
+            start)
+
+        let stdout = Data([1, 0, 0, 0, 0, 0, 0, 3]) + Data("out".utf8)
+        let stderr = Data([2, 0, 0, 0, 0, 0, 0, 3]) + Data("err".utf8)
+        let upgraded = Data((
+            "HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n"
+                + "Content-Type: application/vnd.docker.multiplexed-stream\r\n\r\n").utf8)
+            + stdout + stderr
+        write(upgraded, to: wired.guest)
+        XCTAssertEqual(
+            readAvailable(wired.client, atLeast: upgraded.count),
+            upgraded,
+            "the relay must neither decode nor discard Docker's stdout/stderr frames")
+
+        shutdown(wired.client, SHUT_WR)
+        var buffer = [UInt8](repeating: 0, count: 16)
+        let eof = buffer.withUnsafeMutableBytes { raw -> Int in
+            POSIXSocketSupport.readSome(wired.guest, into: raw.baseAddress!, count: raw.count)
+        }
+        XCTAssertEqual(eof, 0, "closing exec stdin must half-close only the Engine write side")
+
+        let tail = Data([1, 0, 0, 0, 0, 0, 0, 5]) + Data("later".utf8)
+        write(tail, to: wired.guest)
+        shutdown(wired.guest, SHUT_WR)
+        XCTAssertEqual(
+            readAvailable(wired.client, atLeast: tail.count),
+            tail,
+            "the final non-TTY output must drain after stdin closes")
+        XCTAssertEqual(policy.framingFailures, [])
+        wait(for: [wired.done], timeout: 10)
+    }
+
+    /// Docker creates an exec, starts it, then inspects it to read its final exit
+    /// status.  `create` and `json` must never be mistaken for a raw stream: both
+    /// stay in the HTTP request loop and preserve their JSON bodies byte for byte.
+    func testExecCreateAndInspectStayFramedOnAReusedConnection() throws {
+        let wired = try makeRelay()
+        let createBody = #"{"AttachStdin":false,"AttachStdout":true,"AttachStderr":true,"Tty":false,"Cmd":["sh","-c","exit 17"]}"#
+        let create = "POST /v1.47/containers/abc/exec HTTP/1.1\r\nHost: morbstack\r\n"
+            + "Content-Type: application/json\r\nContent-Length: \(createBody.utf8.count)\r\n\r\n\(createBody)"
+        write(create, to: wired.client)
+        XCTAssertEqual(
+            String(decoding: readAvailable(wired.guest, atLeast: create.utf8.count), as: UTF8.self),
+            create)
+
+        let createdBody = #"{"Id":"deadbeef"}"#
+        let created = "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\n"
+            + "Content-Length: \(createdBody.utf8.count)\r\n\r\n\(createdBody)"
+        write(created, to: wired.guest)
+        XCTAssertEqual(readAvailable(wired.client, atLeast: created.utf8.count), Data(created.utf8))
+
+        let inspect = "GET /v1.47/exec/deadbeef/json HTTP/1.1\r\nHost: morbstack\r\n\r\n"
+        write(inspect, to: wired.client)
+        XCTAssertEqual(
+            String(decoding: readAvailable(wired.guest, atLeast: inspect.utf8.count), as: UTF8.self),
+            inspect)
+
+        let inspectBody = #"{"ID":"deadbeef","Running":false,"ExitCode":17,"ProcessConfig":{"tty":false}}"#
+        let inspected = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+            + "Content-Length: \(inspectBody.utf8.count)\r\n\r\n\(inspectBody)"
+        write(inspected, to: wired.guest)
+        XCTAssertEqual(readAvailable(wired.client, atLeast: inspected.utf8.count), Data(inspected.utf8))
+
+        XCTAssertEqual(policy.seen.map { $0.head.target }, [
+            "/v1.47/containers/abc/exec",
+            "/v1.47/exec/deadbeef/json",
+        ])
+        XCTAssertTrue(policy.seen.allSatisfy { $0.body == nil }, "exec bodies must stream through untouched")
+
         wired.relay.cancel()
         wait(for: [wired.done], timeout: 10)
     }

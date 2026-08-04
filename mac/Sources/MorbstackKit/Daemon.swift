@@ -192,8 +192,7 @@ public final class Daemon {
         let portForwarder = PortForwarder(
             vm: vm,
             log: logger,
-            portExposure: config.allowLANPortPublishing ? .localNetwork : .loopbackOnly,
-            hostNetworkPortPublishing: config.allowHostNetworkPortPublishing)
+            portExposure: config.allowLANPortPublishing ? .localNetwork : .loopbackOnly)
         self.forwarder = portForwarder
         self.proxy = DockerProxy(vm: vm, log: logger, forwarder: portForwarder)
         self.liveShareTransport = MorbLiveShareTransport(vm: vm, config: config, log: logger)

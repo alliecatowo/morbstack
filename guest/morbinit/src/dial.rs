@@ -83,10 +83,7 @@ pub const BUSY_REASON: &str = "busy";
 
 /// The address the dialer connects to on the host's behalf.
 ///
-/// Normal bridge publications reach dockerd's `docker-proxy` listener here;
-/// an opted-in guest host-network publication reaches a process that is itself
-/// listening on loopback or all guest interfaces. Both are guest-local
-/// destinations, so the vsock protocol needs no second address grammar.
+/// Bridge publications reach dockerd's `docker-proxy` listener here.
 pub const DIAL_ADDR: &str = "127.0.0.1";
 
 /// Build an `ERR <reason>\n` reply.
@@ -107,9 +104,9 @@ pub fn err_line(reason: &str) -> Vec<u8> {
 /// The `ERR` reason for a failed dial to `127.0.0.1:<port>`.
 ///
 /// ECONNREFUSED gets its own wording because the host needs to distinguish a
-/// missing guest-local listener from a transport failure. It can mean a bridge
-/// publication without `docker-proxy`, or a guest host-network process that has
-/// not bound its declared port yet, so the message deliberately does not guess.
+/// missing guest-local bridge listener from a transport failure. It can mean a
+/// publication whose proxy has not bound yet, so the message deliberately does
+/// not guess.
 pub fn dial_error_reason(port: u16, e: &io::Error) -> String {
     if e.kind() == io::ErrorKind::ConnectionRefused {
         format!(
@@ -671,8 +668,7 @@ mod tests {
 
     #[test]
     fn the_dial_address_is_loopback() {
-        // Documented as load-bearing for bridge proxies and host-network
-        // processes alike. See DIAL_ADDR.
+        // Documented as load-bearing for bridge proxies. See DIAL_ADDR.
         assert_eq!(DIAL_ADDR, "127.0.0.1");
     }
 

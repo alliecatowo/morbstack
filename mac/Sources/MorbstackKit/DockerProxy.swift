@@ -343,10 +343,7 @@ extension DockerProxy: DockerRequestAdmissionPolicy {
         request: DockerRequestFramer.Request,
         body: Data
     ) -> DockerRequestAdmission {
-        switch DockerPortPublicationPreflight.inspectContainerCreate(
-            body: body,
-            hostNetworkPortPublishing: forwarder.hostNetworkPortPublishing)
-        {
+        switch DockerPortPublicationPreflight.inspectContainerCreate(body: body) {
         case .rejected(let message):
             return .reject(statusCode: 500, reason: "Internal Server Error", message: message)
         case .allowed:
@@ -371,10 +368,7 @@ extension DockerProxy: DockerRequestAdmissionPolicy {
             bindSourcesWereRewritten = wasRewritten
         }
 
-        switch DockerPortPublicationPreflight.dynamicPortCreatePlan(
-            in: admittedBody,
-            hostNetworkPortPublishing: forwarder.hostNetworkPortPublishing)
-        {
+        switch DockerPortPublicationPreflight.dynamicPortCreatePlan(in: admittedBody) {
         case .rejected(let message):
             return .reject(statusCode: 500, reason: "Internal Server Error", message: message)
 
@@ -388,9 +382,7 @@ extension DockerProxy: DockerRequestAdmissionPolicy {
         // A successful publication snapshot is still not enough. Hold the real
         // listeners before the create reaches dockerd, so a failed host bind has no
         // guest side effect to roll back.
-        let plan = DockerPortPublicationPreflight.fixedPortLeasePlan(
-            in: admittedBody,
-            hostNetworkPortPublishing: forwarder.hostNetworkPortPublishing)
+        let plan = DockerPortPublicationPreflight.fixedPortLeasePlan(in: admittedBody)
         let lease: PortForwarder.PortLease?
         do {
             lease = try plan.map { try forwarder.reserveExplicitPorts($0) }

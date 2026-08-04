@@ -48,23 +48,6 @@ public final class PortForwarder {
     /// How often the "is that port free yet?" timer fires.
     private static let bindRetryInterval: TimeInterval = 5
 
-    /// Host-network discovery must remain bounded even when an image declares an
-    /// implausibly large `EXPOSE` set. Explicit `-p` has the same host-listener
-    /// transaction ceiling; this applies it to event-driven discovery as well.
-    private static let maximumHostNetworkDiscoveryPorts =
-        DockerPortPublicationPreflight.maximumSynchronousFixedPortBindings
-
-    /// One refresh must not monopolize the serial forwarder queue when an Engine has
-    /// many host-network containers or an unhealthy guest broker. A later lifecycle
-    /// event or reconnect retries candidates that did not fit in this bounded pass.
-    private static let hostNetworkDiscoveryBudget: TimeInterval = 15
-
-    /// A container can emit `start` just before its process binds the declared port.
-    /// Retry a bounded number of times so a truthful initial `NO` does not turn into
-    /// a permanently invisible service, without polling an intentionally unbound one.
-    private static let maximumHostNetworkListenerRetries = 5
-    private static let hostNetworkListenerRetryBaseDelay: TimeInterval = 1
-
     /// Ceiling on stream-dials being established at once.
     ///
     /// Each dial parks a ``dialQueue`` worker for as long as the vsock connect plus the
@@ -384,10 +367,6 @@ public final class PortForwarder {
     /// idle, so the failure mode is an auto-suspend fired while connections are live.
     private var connectionCounts: [Int: Int] = [:]
     private var refreshQueued = false
-    /// Accessed only on ``workQueue``. A key is one Docker-effective port, not a
-    /// container-wide flag: one service may bind before another in the same network
-    /// namespace, and a positive answer must not suppress the other retry.
-    private var hostNetworkListenerRetryAttempts: [DockerHostNetworkExposedPort: Int] = [:]
     private var failedBinds: [DockerHostEndpoint: FailedBind] = [:]
     private var failedUDPBinds: [DockerHostEndpoint: FailedBind] = [:]
     /// Docker snapshots that claim one Mac endpoint for competing targets. These are
@@ -408,22 +387,15 @@ public final class PortForwarder {
 
     /// The immutable-at-engine-start port exposure policy selected in Settings.
     public let portExposure: MorbPortExposure
-    /// Whether an explicit `-p` declaration on guest host networking may be
-    /// bridged back to the Mac. The policy is read at daemon start with the rest of
-    /// the VM configuration, so Settings correctly requires an engine restart.
-    public let hostNetworkPortPublishing: Bool
-
     /// Creates a forwarder. Nothing happens until ``start()``.
     public init(
         vm: VMManager,
         log: MorbLog,
-        portExposure: MorbPortExposure = .localNetwork,
-        hostNetworkPortPublishing: Bool = false
+        portExposure: MorbPortExposure = .localNetwork
     ) {
         self.vm = vm
         self.log = log
         self.portExposure = portExposure
-        self.hostNetworkPortPublishing = hostNetworkPortPublishing
     }
 
     // MARK: - Observable state
@@ -678,8 +650,7 @@ public final class PortForwarder {
 
         guard let plan = DockerPortPublicationPreflight.stoppedContainerFixedPortLeasePlan(
             in: inspectBody,
-            expectedContainerID: containerID,
-            hostNetworkPortPublishing: hostNetworkPortPublishing)
+            expectedContainerID: containerID)
         else {
             return nil
         }
@@ -1624,7 +1595,6 @@ public final class PortForwarder {
                     // for a lease that intentionally kept its host port reserved.
                     releaseLease(forContainerID: event.containerID, reason: "container destroyed")
                 }
-                reconcileHostNetworkLease(forContainerID: event.containerID, action: event.action)
                 guard event.affectsPublishedPorts else { continue }
                 let who = event.containerName ?? String(event.containerID.prefix(12))
                 scheduleRefresh(reason: "container \(who) \(event.action)")
@@ -1700,136 +1670,16 @@ public final class PortForwarder {
         }
     }
 
-    /// Reads `GET /containers/json` and augments ordinary publications with
-    /// verified guest host-network listeners when the explicit policy is enabled.
+    /// Reads Moby's concrete bridge-network publications from `GET /containers/json`.
+    /// Host-network containers deliberately add no Mac listeners: they share the
+    /// Linux guest's network namespace, not macOS's network namespace.
     /// Blocking; called only from the forwarder's serial work queue.
     private func fetchForwardablePorts() throws -> [DockerPortBinding] {
         // 20 s overall: a 10 s connect plus a 10 s read, which is what this call had
         // before the budget became a single end-to-end number. Nothing waits on it, so
         // it can afford to be patient with a busy engine.
         let body = try getEngineJSON(path: DockerAPIDecoding.containersPath, timeout: 20)
-        let published = try DockerAPIDecoding.publishedPorts(containersJSON: body)
-        guard hostNetworkPortPublishing else { return published }
-        let running = try DockerAPIDecoding.runningContainers(containersJSON: body)
-        return published + discoverHostNetworkBindings(in: running)
-    }
-
-    /// Discovers **only** Docker-declared, guest-loopback-reachable listeners for
-    /// running host-network containers without an explicit `-p` declaration. This
-    /// closes the Desktop-VM visibility gap while leaving Docker's normal explicit
-    /// publication transaction authoritative whenever it was requested.
-    private func discoverHostNetworkBindings(
-        in containers: [DockerRunningContainer]
-    ) -> [DockerPortBinding] {
-        let hostIP = portExposure == .localNetwork ? "0.0.0.0" : "127.0.0.1"
-        let deadline = Date().addingTimeInterval(Self.hostNetworkDiscoveryBudget)
-        var discovered: [DockerPortBinding] = []
-        var admitted = 0
-        let runningIDs = Set(containers.map(\.id))
-        hostNetworkListenerRetryAttempts = hostNetworkListenerRetryAttempts.filter {
-            runningIDs.contains($0.key.containerID)
-        }
-
-        func remainingBudget(cappedAt maximum: TimeInterval) -> TimeInterval? {
-            let remaining = deadline.timeIntervalSinceNow
-            guard remaining > 0 else { return nil }
-            return min(maximum, remaining)
-        }
-
-        for container in containers {
-            guard let inspectTimeout = remainingBudget(cappedAt: 5) else {
-                log.warn("host-network discovery reached its \(Self.hostNetworkDiscoveryBudget)-second budget; remaining candidates will retry on a later refresh")
-                return discovered
-            }
-            let inspect: Data
-            do {
-                inspect = try getEngineJSON(
-                    path: DockerAPIDecoding.containerInspectPath(containerID: container.id),
-                    timeout: inspectTimeout)
-            } catch {
-                log.info(
-                    "could not inspect \(String(container.id.prefix(12))) for host-network listeners: \(error)")
-                continue
-            }
-            let candidates = DockerAPIDecoding.hostNetworkExposedPorts(
-                inspectJSON: inspect,
-                expectedContainerID: container.id,
-                containerName: container.name)
-            let candidateSet = Set(candidates)
-            hostNetworkListenerRetryAttempts = hostNetworkListenerRetryAttempts.filter {
-                $0.key.containerID != container.id || candidateSet.contains($0.key)
-            }
-            for candidate in candidates {
-                guard admitted < Self.maximumHostNetworkDiscoveryPorts else {
-                    log.warn(
-                        "host-network discovery reached its \(Self.maximumHostNetworkDiscoveryPorts)-port limit; ignoring further exposed ports")
-                    return discovered
-                }
-                admitted += 1
-                guard let probeTimeout = remainingBudget(cappedAt: StreamDial.replyTimeout) else {
-                    log.warn("host-network discovery reached its \(Self.hostNetworkDiscoveryBudget)-second budget; remaining candidates will retry on a later refresh")
-                    return discovered
-                }
-                let isListening: Bool
-                do {
-                    isListening = try guestReportsListening(candidate, timeout: probeTimeout)
-                } catch {
-                    log.info(
-                        "could not verify host-network \(candidate.transport.rawValue)/\(candidate.port) for \(String(candidate.containerID.prefix(12))): \(error)")
-                    scheduleHostNetworkListenerRetry(for: candidate)
-                    continue
-                }
-                guard isListening else {
-                    scheduleHostNetworkListenerRetry(for: candidate)
-                    continue
-                }
-                hostNetworkListenerRetryAttempts.removeValue(forKey: candidate)
-                discovered.append(DockerPortBinding(
-                    hostIP: hostIP,
-                    hostPort: candidate.port,
-                    containerPort: candidate.port,
-                    guestPort: candidate.port,
-                    networkProtocol: candidate.transport.rawValue,
-                    containerID: candidate.containerID,
-                    containerName: candidate.containerName))
-            }
-        }
-        return discovered
-    }
-
-    /// Called only from ``workQueue`` after the guest says an effective Docker port
-    /// is not ready yet. The next refresh goes through the same full Engine snapshot,
-    /// so a stop/destroy or configuration change can only remove a mapping, never
-    /// revive a stale one.
-    private func scheduleHostNetworkListenerRetry(for candidate: DockerHostNetworkExposedPort) {
-        let previous = hostNetworkListenerRetryAttempts[candidate] ?? 0
-        guard previous < Self.maximumHostNetworkListenerRetries else { return }
-        let attempt = previous + 1
-        hostNetworkListenerRetryAttempts[candidate] = attempt
-        let delay = min(
-            8,
-            Self.hostNetworkListenerRetryBaseDelay * pow(2, Double(attempt - 1)))
-        workQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
-            self?.scheduleRefresh(
-                reason: "host-network listener \(candidate.transport.rawValue)/\(candidate.port) retry \(attempt)")
-        }
-    }
-
-    /// Proves a Docker-effective exposed port has a guest listener that the existing
-    /// vsock dial path can actually reach. A `NO` is normal (an image may EXPOSE a
-    /// port before its process starts); a transport/protocol error is logged by the
-    /// caller and never turns an ordinary Docker refresh into an invented mapping.
-    private func guestReportsListening(
-        _ candidate: DockerHostNetworkExposedPort,
-        timeout: TimeInterval
-    ) throws -> Bool {
-        let fd = try vm.connectVsockBlocking(port: MorbVsockPorts.listenerProbe, timeout: timeout).get()
-        defer { Darwin.close(fd) }
-        return try GuestListenerProbe.perform(
-            fd: fd,
-            transport: candidate.transport,
-            guestPort: candidate.port,
-            timeout: timeout)
+        return try DockerAPIDecoding.publishedPorts(containersJSON: body)
     }
 
     /// Reclaims leases belonging to containers that no longer exist, including a
@@ -2012,16 +1862,6 @@ public final class PortForwarder {
         var tcpDesired = tcpReconciliation.listeners
         var udpDesired = udpReconciliation.listeners
 
-        // Moby intentionally omits host-network mappings from `/containers/json`.
-        // Their lease is activated only after the exact Docker start response (or
-        // a corresponding lifecycle event), then remains a first-class desired
-        // listener until the container stops. Without this merge, a routine event
-        // refresh would immediately tear down a truthful Mac bridge that Moby's
-        // standard snapshot cannot describe.
-        let hostNetworkLeases = activeHostNetworkLeaseBindings()
-        for (endpoint, binding) in hostNetworkLeases.tcp { tcpDesired[endpoint] = binding }
-        for (endpoint, binding) in hostNetworkLeases.udp { udpDesired[endpoint] = binding }
-
         let newTCPConflicts = updateTCPConflicts(tcpReconciliation.conflicts)
         let newUDPConflicts = updateUDPConflicts(udpReconciliation.conflicts)
         withdrawConflictingTCPLeaseListeners(
@@ -2040,55 +1880,6 @@ public final class PortForwarder {
 
         applyTCP(desired: tcpDesired, generation: generation, reason: reason)
         applyUDP(desired: udpDesired, generation: generation, reason: reason)
-    }
-
-    /// Returns the active Mac bridges Moby cannot represent in its normal published
-    /// ports snapshot. The forward maps are already the authoritative lifecycle
-    /// state: an entry appears only after a successful start handoff and disappears
-    /// synchronously when that container stops or is destroyed.
-    private func activeHostNetworkLeaseBindings() -> (
-        tcp: [DockerHostEndpoint: DockerPortBinding],
-        udp: [DockerHostEndpoint: DockerPortBinding]
-    ) {
-        lock.lock()
-        defer { lock.unlock() }
-        var tcp: [DockerHostEndpoint: DockerPortBinding] = [:]
-        var udp: [DockerHostEndpoint: DockerPortBinding] = [:]
-        for (endpoint, forward) in forwards {
-            guard let identifier = forward.leaseID,
-                  leases[identifier]?.lease.guestDialPort == .containerPort
-            else { continue }
-            tcp[endpoint] = forward.binding
-        }
-        for (endpoint, forward) in udpForwards {
-            guard let identifier = forward.leaseID,
-                  leases[identifier]?.lease.guestDialPort == .containerPort
-            else { continue }
-            udp[endpoint] = forward.binding
-        }
-        return (tcp, udp)
-    }
-
-    /// Moby's published-port snapshot deliberately says nothing about guest host
-    /// networking. Its lifecycle events still state whether the process sharing the
-    /// guest namespace is running, so use those events to pause or re-arm an already
-    /// associated opt-in bridge. Normal bridge leases continue to be reconciled from
-    /// Docker's concrete published-port list.
-    private func reconcileHostNetworkLease(forContainerID containerID: String, action: String) {
-        lock.lock()
-        let identifier = leaseByContainerID[containerID]
-        let isHostNetworkLease = identifier.flatMap { leases[$0]?.lease.guestDialPort } == .containerPort
-        lock.unlock()
-        guard let identifier, isHostNetworkLease else { return }
-
-        switch action {
-        case "start":
-            _ = promoteLease(identifier)
-        case "die", "stop", "kill", "restart":
-            deactivateLease(identifier, reason: "container \(action)")
-        default:
-            break
-        }
     }
 
     private func reconcileHeldLeases(

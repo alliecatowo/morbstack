@@ -161,9 +161,8 @@ public struct DockerPortBinding: Hashable, Sendable {
     public var hostPort: Int
     /// The port inside the container.
     public var containerPort: Int
-    /// The guest-local port the vsock dialer reaches. Bridge publications target
-    /// dockerd's proxy on `hostPort`; opted-in guest host networking targets the
-    /// process's `containerPort` directly.
+    /// The guest-local bridge-publication port the vsock dialer reaches.
+    /// Host-network containers never produce a Mac-side ``DockerPortBinding``.
     public var guestPort: Int
     /// `tcp` or `udp`, lowercased.
     public var networkProtocol: String
@@ -224,39 +223,6 @@ public struct DockerContainerEvent: Equatable, Sendable {
         default:
             return false
         }
-    }
-}
-
-/// One currently running Engine container, retained only long enough to inspect its
-/// effective network configuration during host-network listener discovery.
-public struct DockerRunningContainer: Hashable, Sendable {
-    public let id: String
-    public let name: String
-
-    public init(id: String, name: String) {
-        self.id = id
-        self.name = name
-    }
-}
-
-/// One Docker-declared port that an opted-in guest host-network container may make
-/// reachable from the Mac after the guest proves an actual local listener exists.
-public struct DockerHostNetworkExposedPort: Hashable, Sendable {
-    public let transport: GuestListenerProbe.Transport
-    public let port: Int
-    public let containerID: String
-    public let containerName: String
-
-    public init(
-        transport: GuestListenerProbe.Transport,
-        port: Int,
-        containerID: String,
-        containerName: String
-    ) {
-        self.transport = transport
-        self.port = port
-        self.containerID = containerID
-        self.containerName = containerName
     }
 }
 
@@ -338,74 +304,6 @@ public enum DockerAPIDecoding {
         })
     }
 
-    /// The running containers from the ordinary non-`all` list. An explicit state
-    /// check makes this decoder safe to use with fixture data or a future caller that
-    /// does not inherit Docker's default running-only filter.
-    public static func runningContainers(containersJSON data: Data) throws -> [DockerRunningContainer] {
-        let root = try JSONSerialization.jsonObject(with: data, options: [])
-        guard let containers = root as? [Any] else {
-            throw MorbError.protocolViolation("containers/json did not return a JSON array")
-        }
-        return containers.compactMap { entry in
-            guard let object = entry as? [String: Any],
-                  let id = object["Id"] as? String,
-                  !id.isEmpty,
-                  (object["State"] as? String).map({ $0 == "running" }) ?? true
-            else { return nil }
-            return DockerRunningContainer(
-                id: id,
-                name: displayName(id: id, names: object["Names"] as? [Any]))
-        }.sorted { lhs, rhs in lhs.id == rhs.id ? lhs.name < rhs.name : lhs.id < rhs.id }
-    }
-
-    /// Decodes the ports Docker effectively exposes for one **running** guest
-    /// host-network container that did not request any explicit Docker publishing.
-    ///
-    /// `Config.ExposedPorts` combines image metadata with `docker run --expose`, so
-    /// it is the Engine-owned declaration available when host networking has no
-    /// `NetworkSettings.Ports` records. The result remains only a candidate: the
-    /// guest listener probe must still prove that a loopback-reachable TCP/UDP socket
-    /// is actually bound before the Mac opens a listener.
-    public static func hostNetworkExposedPorts(
-        inspectJSON data: Data,
-        expectedContainerID: String,
-        containerName: String
-    ) -> [DockerHostNetworkExposedPort] {
-        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              (object["Id"] as? String) == expectedContainerID,
-              let state = object["State"] as? [String: Any],
-              (state["Running"] as? Bool) == true,
-              let hostConfig = object["HostConfig"] as? [String: Any],
-              (hostConfig["NetworkMode"] as? String) == "host",
-              (hostConfig["PublishAllPorts"] as? Bool) != true,
-              !hasExplicitPortBindings(hostConfig),
-              let config = object["Config"] as? [String: Any],
-              let exposedPorts = config["ExposedPorts"] as? [String: Any]
-        else { return [] }
-
-        return exposedPorts.keys.compactMap { key in
-            let pieces = key.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false)
-            guard let rawPort = pieces.first,
-                  let port = Int(rawPort),
-                  (1...65_535).contains(port)
-            else { return nil }
-            let transport: GuestListenerProbe.Transport
-            switch pieces.count == 2 ? pieces[1].lowercased() : "tcp" {
-            case "tcp": transport = .tcp
-            case "udp": transport = .udp
-            default: return nil
-            }
-            return DockerHostNetworkExposedPort(
-                transport: transport,
-                port: port,
-                containerID: expectedContainerID,
-                containerName: containerName)
-        }.sorted { lhs, rhs in
-            if lhs.port != rhs.port { return lhs.port < rhs.port }
-            return lhs.transport.rawValue < rhs.transport.rawValue
-        }
-    }
-
     /// Extracts every published port from a `GET /containers/json` response body.
     ///
     /// - Throws: ``MorbError/protocolViolation(_:)`` when the document is not the
@@ -482,11 +380,6 @@ public enum DockerAPIDecoding {
             return first.hasPrefix("/") ? String(first.dropFirst()) : first
         }
         return id.isEmpty ? "?" : String(id.prefix(12))
-    }
-
-    private static func hasExplicitPortBindings(_ hostConfig: [String: Any]) -> Bool {
-        guard let bindings = hostConfig["PortBindings"] as? [String: Any] else { return false }
-        return !bindings.isEmpty
     }
 
     /// JSON numbers arrive as `NSNumber`, but a permissive engine may send a string.

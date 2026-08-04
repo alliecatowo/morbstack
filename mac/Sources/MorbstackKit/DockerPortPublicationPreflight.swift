@@ -53,15 +53,9 @@ public enum DockerGuestDialPort: Hashable, Sendable {
     /// Normal bridge networking: dockerd's userland proxy listens on the guest's
     /// published host port, so the existing vsock dialer targets that port.
     case publishedHostPort
-    /// Guest host networking: no guest userland proxy exists, so Morbstack must dial
-    /// the requested container port directly in the guest network namespace.
-    case containerPort
 
-    func resolve(hostPort: Int, containerPort: Int) -> Int {
-        switch self {
-        case .publishedHostPort: hostPort
-        case .containerPort: containerPort
-        }
+    func resolve(hostPort: Int, containerPort _: Int) -> Int {
+        hostPort
     }
 }
 
@@ -409,7 +403,6 @@ public enum DockerPortPublicationPreflight {
 
     public static func inspectContainerCreate(
         body: Data,
-        hostNetworkPortPublishing: Bool = false,
         availability: HostPortAvailabilityProbe = HostPortPreflight.check(port:transport:hostAddress:)
     ) -> Verdict {
         guard
@@ -418,13 +411,11 @@ public enum DockerPortPublicationPreflight {
         else {
             return .allowed
         }
-        // A container namespace remains an unmodified Moby error. Guest host
-        // networking is different: when the explicit policy is enabled, a `-p`
-        // declaration is the one truthful way to name a guest listener that should
-        // be reachable from this Mac through VZNAT and vsock.
-        guard guestDialPort(
-            in: hostConfig,
-            hostNetworkPortPublishing: hostNetworkPortPublishing) != nil,
+        // Moby owns port-publishing warnings and errors for network modes that do
+        // not have a bridge publication. In particular, `--network host` shares
+        // the Linux guest network namespace: Docker discards `-p` and `-P`, and
+        // Morbstack must not invent a Mac listener for either declaration.
+        guard guestDialPort(in: hostConfig) != nil,
               let portBindings = hostConfig["PortBindings"] as? [String: Any]
         else {
             return .allowed
@@ -647,8 +638,7 @@ public enum DockerPortPublicationPreflight {
     /// ambiguous. This prevents a known fixed TCP/UDP endpoint from becoming a
     /// partial lease beside a shape Morbstack cannot own transactionally.
     public static func fixedPortLeasePlan(
-        in body: Data,
-        hostNetworkPortPublishing: Bool = false
+        in body: Data
     ) -> DockerFixedPortLeasePlan? {
         guard
             let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
@@ -658,9 +648,7 @@ public enum DockerPortPublicationPreflight {
         else {
             return nil
         }
-        guard let guestDialPort = guestDialPort(
-            in: hostConfig,
-            hostNetworkPortPublishing: hostNetworkPortPublishing) else {
+        guard let guestDialPort = guestDialPort(in: hostConfig) else {
             return nil
         }
         guard (hostConfig["PublishAllPorts"] as? Bool) != true else {
@@ -783,8 +771,7 @@ public enum DockerPortPublicationPreflight {
     /// original start bytes without a name/prefix reuse race.
     static func stoppedContainerFixedPortLeasePlan(
         in inspectBody: Data,
-        expectedContainerID: String,
-        hostNetworkPortPublishing: Bool = false
+        expectedContainerID: String
     ) -> DockerFixedPortLeasePlan? {
         guard isFullContainerID(expectedContainerID),
               let object = try? JSONSerialization.jsonObject(with: inspectBody) as? [String: Any],
@@ -799,9 +786,7 @@ public enum DockerPortPublicationPreflight {
         else {
             return nil
         }
-        guard let guestDialPort = guestDialPort(
-            in: hostConfig,
-            hostNetworkPortPublishing: hostNetworkPortPublishing) else {
+        guard let guestDialPort = guestDialPort(in: hostConfig) else {
             return nil
         }
         guard (hostConfig["PublishAllPorts"] as? Bool) != true else {
@@ -976,8 +961,7 @@ public enum DockerPortPublicationPreflight {
     /// invalid address/protocol values, and opaque sibling entries are rejected rather
     /// than silently falling back to an Engine-owned allocation.
     static func dynamicPortCreatePlan(
-        in body: Data,
-        hostNetworkPortPublishing: Bool = false
+        in body: Data
     ) -> DynamicPortVerdict {
         guard
             let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
@@ -992,9 +976,7 @@ public enum DockerPortPublicationPreflight {
         if let publishAllPorts = hostConfig["PublishAllPorts"] as? Bool, publishAllPorts {
             return .notDynamic
         }
-        guard let guestDialPort = guestDialPort(
-            in: hostConfig,
-            hostNetworkPortPublishing: hostNetworkPortPublishing) else {
+        guard let guestDialPort = guestDialPort(in: hostConfig) else {
             return .notDynamic
         }
 
@@ -1213,13 +1195,10 @@ public enum DockerPortPublicationPreflight {
         return Int(raw)
     }
 
-    private static func guestDialPort(
-        in hostConfig: [String: Any],
-        hostNetworkPortPublishing: Bool
-    ) -> DockerGuestDialPort? {
+    private static func guestDialPort(in hostConfig: [String: Any]) -> DockerGuestDialPort? {
         guard !networkModeHasContainerNamespace(in: hostConfig) else { return nil }
-        guard isGuestHostNetwork(in: hostConfig) else { return .publishedHostPort }
-        return hostNetworkPortPublishing ? .containerPort : nil
+        guard !isGuestHostNetwork(in: hostConfig) else { return nil }
+        return .publishedHostPort
     }
 
     /// `container:<id-or-name>` joins another container's namespace. Moby must own

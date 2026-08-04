@@ -33,7 +33,7 @@ const MAX_PAYLOAD: u32 = 1 << 20;
 /// The receiver is deliberately not a synthetic inotify injector. It authenticates a
 /// bounded data-plane session for an exact mounted VirtioFS root, then performs a
 /// descriptor-confined VFS metadata nudge so Linux generates an ordinary filesystem
-/// notification for workloads watching that object. See docs/protocol.md §3.6.
+/// notification for workloads watching that object. See docs/protocol.md §3.5.
 pub const SHARE_EVENT_BRIDGE_CAPABILITY: &str = crate::live_share::ADVERTISED_CAPABILITY;
 
 /// Version of the acknowledged share-event receiver contract. A host requires this

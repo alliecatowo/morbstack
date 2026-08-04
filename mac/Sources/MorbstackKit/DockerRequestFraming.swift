@@ -564,8 +564,12 @@ enum DockerHijackDetection {
         if components.count >= 2, components[components.count - 2] == "attach", last == "ws" {
             return true
         }
-        // `POST /exec/{id}/start`.
-        if components.count >= 3, components[components.count - 3] == "exec", last == "start" {
+        // Only `POST /exec/{id}/start` attaches an exec stream. In particular,
+        // `/containers/{id}/exec` and `/exec/{id}/json` remain ordinary HTTP.
+        if head.method.uppercased() == "POST",
+           components.count >= 3,
+           components[components.count - 3] == "exec",
+           last == "start" {
             return true
         }
         // BuildKit's session and gRPC upgrades.

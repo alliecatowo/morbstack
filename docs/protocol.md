@@ -15,16 +15,12 @@ The principal protocol families are below, over two transport families:
 3. **Datagram-dial**, host morbstackd <-> guest morbinit, over vsock port
    2378 — a one-line handshake followed by bounded framed UDP datagrams for
    published UDP container ports from the Mac.
-4. **Guest listener probe**, host morbstackd <-> guest morbinit, over vsock
-   port 2380 — a closed request/reply check for Docker-exposed host-network
-   ports.
-5. **Daemon control IPC**, CLI `morb` <-> host `morbstackd`, over a Unix
+4. **Daemon control IPC**, CLI `morb` <-> host `morbstackd`, over a Unix
    domain socket, newline-delimited JSON.
 
 They are unrelated to each other and must not be confused: MRB0, stream-dial,
-datagram-dial, and the listener probe all cross the host/guest boundary over
-vsock, on different ports and with different framing; daemon control IPC never
-leaves the host.
+and datagram-dial all cross the host/guest boundary over vsock, on different
+ports and with different framing; daemon control IPC never leaves the host.
 
 ---
 
@@ -320,7 +316,6 @@ Failure:
 | 2377 | Bulk payload install: host streams large files into the guest (used for the Kubernetes payload) |
 | 2378 | Datagram-dial: framed UDP relay for published container ports |
 | 2379 | Publish-all allocator: patched Moby asks the host to reserve `docker -P` endpoints |
-| 2380 | Listener probe: host verifies a Docker-exposed guest host-network TCP/UDP listener |
 | 2381 | Live-share receiver: authenticated host FSEvents invalidations for explicitly selected VirtioFS project roots |
 
 Port 2375 is the conventional plaintext Docker Engine API port; it is used
@@ -342,10 +337,10 @@ RAM-resident rootfs, so anything in the image is paid for in guest memory on
 every boot, including the overwhelming majority of boots where Kubernetes is
 off. Streaming it once, on the first `morb k8s enable`, and landing it on the
 persistent ext4 disk keeps the cost proportional to the feature's use. See
-§3.5.
+§3.4.
 
 New ports must be added to this table before use. Do not reuse 1024, 2375,
-2376, 2377, 2378, 2379, 2380, or 2381 for anything else.
+2376, 2377, 2378, 2379, or 2381 for anything else.
 
 ### 3.1 The vsock 2375 <-> `docker.sock` relay, end to end
 
@@ -432,12 +427,10 @@ guest -> host:  "OK\n"              connection established; splice begins
            or:  "ERR <reason>\n"    then the guest closes the connection
 ```
 
-- **`<port>`** is the *guest-local* port. For normal bridge networking it is
-  the published host port because dockerd's userland proxy listens there.
-  With `allow_host_network_port_publishing = true`, an explicit
-  `--network host -p HOST:CONTAINER` mapping instead sends `CONTAINER`; no
-  userland proxy exists in that network mode. The same protocol therefore
-  supports the two different host-to-guest mappings without a new wire format.
+- **`<port>`** is the *guest-local* bridge-publication port because dockerd's
+  userland proxy listens there. A `--network host` container shares the Linux
+  guest network namespace, not macOS's network namespace, and creates no
+  Mac-side stream-dial mapping; Docker discards its `-p` and `-P` declarations.
 - **The preamble is read one byte at a time on both the guest
   implementation (`dial.rs`) and the host implementation
   (`StreamDial.swift`)**, never buffered. Everything after the newline
@@ -624,29 +617,7 @@ both directions: [u32 big-endian payload length][exactly that many payload bytes
 
 ---
 
-### 3.4 The vsock 2380 listener-presence probe
-
-The host uses this read-only protocol only after Docker's inspect document
-proves all of the following: the container is running, its `NetworkMode` is
-`host`, it has no explicit `PortBindings` or `PublishAllPorts`, and its
-`Config.ExposedPorts` lists the candidate. It never asks the guest to enumerate
-ports, so an arbitrary undeclared guest service cannot become Mac-reachable.
-
-Transport: vsock, port 2380. One request and one reply per connection:
-
-```text
-host -> guest:  "LISTEN <tcp|udp> <port>\n"
-guest -> host:  "YES\n" | "NO\n" | "ERR <reason>\n"
-```
-
-`<port>` is decimal `1...65535`. The guest reads the matching Linux proc table
-(`tcp`/`tcp6` for TCP, `udp`/`udp6` for UDP), accepting only a listening socket
-bound to loopback or the wildcard address. TCP must be in `LISTEN`; UDP must be
-an unconnected bound socket. `YES` is therefore sufficient for the existing
-guest-local stream/datagram dialers to reach the service at `127.0.0.1:<port>`.
-`NO` is normal while a container is starting and produces no Mac listener.
-
-### 3.5 The vsock 2377 payload install protocol
+### 3.4 The vsock 2377 payload install protocol
 
 A line-oriented request/reply preamble followed, for a transfer, by a raw
 byte body. Text for the control words so a human tailing the guest console
@@ -698,7 +669,7 @@ has written, and the guest publishes its own received-byte count through the
 throughout — so a UI can render a progress bar without either side having to
 interleave control messages into a bulk stream.
 
-### 3.6 The vsock 2381 live-share notification protocol
+### 3.5 The vsock 2381 live-share notification protocol
 
 Transport: vsock, port 2381. This channel exists only when `live_share_paths`
 contains one or more explicit project directories. It is not a Docker API, a
@@ -963,7 +934,7 @@ share_event_bridge_contract_version: 1
 ```
 
 The operational wire, acknowledgement, root authority, and overflow behavior
-are §3.6. `morb status` reports `waiting-for-session`, `active`, or `failed`
+are §3.5. `morb status` reports `waiting-for-session`, `active`, or `failed`
 from the daemon-owned transport; compatibility alone is not active delivery.
 The implementation provides a host-edit-to-guest filesystem notification
 bridge for the selected VirtioFS objects. It does not reinterpret a host

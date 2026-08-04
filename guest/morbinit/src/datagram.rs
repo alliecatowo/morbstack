@@ -11,7 +11,7 @@
 //! ```
 //!
 //! After the successful handshake the guest owns one connected UDP socket to
-//! `127.0.0.1:<port>` (dockerd's bridge proxy or an opted-in host-network process).
+//! `127.0.0.1:<port>` (dockerd's bridge proxy).
 //! Frames moving in either direction are complete UDP datagrams, including zero-length
 //! datagrams. The portable parser and frame codec unit test on macOS; only the vsock
 //! listener lives under Linux.
