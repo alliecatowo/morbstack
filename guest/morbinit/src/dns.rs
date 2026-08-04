@@ -41,12 +41,17 @@
 //! straight into *that* container's own `/etc/resolv.conf`, dialed directly
 //! from the container's own network namespace. That rules out binding this
 //! stub only on loopback: a legacy-bridge container's `127.0.0.1` is its own
-//! isolated loopback, not the guest's. Binding on every guest address
-//! (`0.0.0.0`) and pointing dockerd's `--dns` at the guest's real `eth0`
-//! address (see `net::guest_ipv4`, wired up in `main.rs`) means the same
-//! stub is reachable both ways: directly, over the bridge, by a legacy
-//! container, and from the root network namespace by the embedded-DNS
-//! proxy's own upstream forwarding on a user-defined network.
+//! isolated loopback, not the guest's.
+//!
+//! The primary resolver is therefore the fixed default-bridge gateway
+//! (`172.17.0.1`; `supervisor` pins `--bip` to make that true), not the
+//! guest's NAT-facing `eth0` lease. A legacy bridge reaches its own gateway
+//! directly, while an eth0 route is not a Docker resolver contract. Binding
+//! on every guest address (`0.0.0.0`) before dockerd creates `docker0` is
+//! intentional: the socket accepts traffic to that interface as soon as
+//! dockerd adds it. `supervisor` also supplies the eth0 lease as a secondary
+//! resolver when available, giving an isolated user-defined bridge a normal
+//! outbound path to the same wildcard-bound stub.
 
 use std::net::Ipv4Addr;
 

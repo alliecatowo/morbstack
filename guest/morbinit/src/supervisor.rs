@@ -162,6 +162,18 @@ pub const GUEST_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:
 /// at `/var/lib/docker`.
 const DOCKER_RAMDISK_ENV: &str = "DOCKER_RAMDISK";
 
+/// Morbstack owns the default Docker bridge, so keep its gateway stable.
+///
+/// Containers on Docker's legacy default bridge reach the guest through this
+/// address, not through the VM's NAT-facing `eth0` lease. The split-DNS
+/// listener binds `0.0.0.0:53` before dockerd creates `docker0`, and the
+/// kernel attaches that already-bound socket to this address when dockerd
+/// brings the bridge up. Pinning `--bip` makes the DNS endpoint a real
+/// contract rather than an assumption about dockerd's current default.
+pub const DEFAULT_DOCKER_BRIDGE_GATEWAY: std::net::Ipv4Addr =
+    std::net::Ipv4Addr::new(172, 17, 0, 1);
+const DEFAULT_DOCKER_BRIDGE_CIDR: &str = "172.17.0.1/16";
+
 /// How many services `default_services` returns (containerd, dockerd).
 ///
 /// A constant rather than a `.len()` because `control::SHUTDOWN_REPLY_TIMEOUT`
@@ -196,6 +208,8 @@ pub fn default_services(docker_data_on_disk: bool) -> Vec<ServiceSpec> {
             "vfs"
         }
         .to_string(),
+        "--bip".to_string(),
+        DEFAULT_DOCKER_BRIDGE_CIDR.to_string(),
     ];
     // No `-H tcp://...`: the Docker API reaches the host over AF_VSOCK port
     // 2375, proxied by morbinit itself (see `proxy.rs`). A TCP listener here
@@ -273,19 +287,23 @@ pub fn default_services(docker_data_on_disk: bool) -> Vec<ServiceSpec> {
 /// (docs/parity.md #18/#19), onto an already-built `dockerd` spec.
 ///
 /// A separate function rather than extra parameters on `default_services`
-/// itself: the listener address is present only after `main` successfully
-/// bound and spawned the split-DNS service; the host-gateway address comes
-/// from DHCP/NAT routing and can legitimately be unavailable (no network).
-/// In either partial case this leaves out `--dns`, so dockerd keeps its
-/// ordinary resolver setup rather than pointing containers at a failed or
-/// nonexistent split-DNS listener. `default_services`'s own five existing
-/// call sites (four of them tests) stay untouched rather than growing two
-/// `Option` parameters they would all have to thread through as `None`.
+/// itself: the split-DNS listener is known ready only after `main` has bound
+/// and spawned it; the optional NAT-facing fallback and the host-gateway
+/// address come from DHCP/NAT routing and can legitimately be unavailable.
+/// If the listener failed to start this leaves out `--dns`, so dockerd keeps
+/// its ordinary resolver setup rather than pointing containers at a failed
+/// listener. `default_services`'s own five existing call sites (four of them
+/// tests) stay untouched rather than growing parameters they would all have
+/// to thread through as `None`.
 ///
-///   * `--dns <listener_ip>`: the address containers' own resolver actually
-///     dials. Must be one of the guest's *own* addresses — see `dns.rs`'s
-///     module docs for why the legacy default-bridge network requires this
-///     specifically, not the gateway or loopback.
+///   * first `--dns`: `DEFAULT_DOCKER_BRIDGE_GATEWAY`, which every legacy
+///     default-bridge container can reach directly. This is the primary path
+///     for `docker run` with no `--network`.
+///   * optional second `--dns <guest_eth0_ip>`: a NAT-facing fallback for
+///     user-defined bridge networks, whose isolation rules can prevent a
+///     packet from reaching `docker0` but still allow outbound traffic to the
+///     guest's normal interface. Both addresses reach the same wildcard-bound
+///     split-DNS socket.
 ///   * `--host-gateway-ip <gateway_ip>`: dockerd's own documented switch for
 ///     what the magic `host-gateway` string in `--add-host` resolves to.
 ///     Passing the same address `dns.rs`'s stub answers with keeps the two
@@ -297,17 +315,21 @@ pub fn default_services(docker_data_on_disk: bool) -> Vec<ServiceSpec> {
 /// than panicking on a table some future caller reshapes.
 pub fn apply_dns_flags(
     mut services: Vec<ServiceSpec>,
-    split_dns_listener_ip: Option<std::net::Ipv4Addr>,
+    split_dns_ready: bool,
+    guest_dns_fallback_ip: Option<std::net::Ipv4Addr>,
     host_gateway_ip: Option<std::net::Ipv4Addr>,
 ) -> Vec<ServiceSpec> {
     if let Some(dockerd) = services.iter_mut().find(|s| s.name == "dockerd") {
         // `--dns` is only useful after `main` has bound and spawned the
-        // split-DNS listener. Supplying a guest address based solely on DHCP
-        // state would replace containers' normal DNS with a listener that
-        // failed to start, breaking unrelated lookups during a partial boot.
-        if let Some(ip) = split_dns_listener_ip {
+        // split-DNS listener. Supplying either address before then would
+        // replace containers' normal DNS with a listener that does not exist.
+        if split_dns_ready {
             dockerd.args.push("--dns".to_string());
-            dockerd.args.push(ip.to_string());
+            dockerd.args.push(DEFAULT_DOCKER_BRIDGE_GATEWAY.to_string());
+            if let Some(ip) = guest_dns_fallback_ip {
+                dockerd.args.push("--dns".to_string());
+                dockerd.args.push(ip.to_string());
+            }
         }
         if let Some(ip) = host_gateway_ip {
             dockerd.args.push("--host-gateway-ip".to_string());
@@ -1863,10 +1885,15 @@ mod tests {
     fn apply_dns_flags_adds_dns_and_host_gateway_ip_to_dockerd_only() {
         let services = apply_dns_flags(
             default_services(true),
+            true,
             Some("192.168.64.3".parse().unwrap()),
             Some("192.168.64.1".parse().unwrap()),
         );
         let dockerd = services.iter().find(|s| s.name == "dockerd").unwrap();
+        assert!(dockerd
+            .args
+            .windows(2)
+            .any(|w| w == ["--dns", "172.17.0.1"]));
         assert!(dockerd
             .args
             .windows(2)
@@ -1883,7 +1910,7 @@ mod tests {
     #[test]
     fn apply_dns_flags_is_a_no_op_with_nothing_to_add() {
         let before = default_services(true);
-        let after = apply_dns_flags(default_services(true), None, None);
+        let after = apply_dns_flags(default_services(true), false, None, None);
         let before_args = &before.iter().find(|s| s.name == "dockerd").unwrap().args;
         let after_args = &after.iter().find(|s| s.name == "dockerd").unwrap().args;
         assert_eq!(before_args, after_args);
@@ -1893,7 +1920,8 @@ mod tests {
     fn apply_dns_flags_keeps_ordinary_dns_when_listener_failed_to_start() {
         let gateway_only = apply_dns_flags(
             default_services(true),
-            None,
+            false,
+            Some("192.168.64.3".parse().unwrap()),
             Some("10.0.0.1".parse().unwrap()),
         );
         let args = &gateway_only
@@ -1906,15 +1934,21 @@ mod tests {
     }
 
     #[test]
-    fn apply_dns_flags_uses_a_listener_that_is_known_ready() {
-        let dns_only = apply_dns_flags(
-            default_services(true),
-            Some("10.0.0.5".parse().unwrap()),
-            None,
-        );
+    fn apply_dns_flags_uses_the_bridge_gateway_when_the_listener_is_ready() {
+        let dns_only = apply_dns_flags(default_services(true), true, None, None);
         let args = &dns_only.iter().find(|s| s.name == "dockerd").unwrap().args;
-        assert!(args.windows(2).any(|w| w == ["--dns", "10.0.0.5"]));
+        assert!(args.windows(2).any(|w| w == ["--dns", "172.17.0.1"]));
         assert!(!args.iter().any(|a| a == "--host-gateway-ip"));
+    }
+
+    #[test]
+    fn dockerd_pins_the_default_bridge_that_hosts_the_primary_dns_endpoint() {
+        for on_disk in [true, false] {
+            let args = dockerd_args(on_disk);
+            assert!(args
+                .windows(2)
+                .any(|w| w == ["--bip", DEFAULT_DOCKER_BRIDGE_CIDR]));
+        }
     }
 
     #[test]

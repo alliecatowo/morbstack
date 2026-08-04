@@ -217,19 +217,26 @@ fn real_init() {
     net::enable_container_forwarding();
 
     // host.docker.internal / gateway.docker.internal (docs/parity.md
-    // #18/#19). The guest address, VM NAT gateway, and DHCP resolver can all
-    // legitimately be absent (no network) — loud but not fatal, matching
-    // every other best-effort step in this boot sequence. Computed before
-    // the services are built below, since `apply_dns_flags` needs a *ready*
-    // listener address, and the DNS stub itself is started before dockerd so
-    // it is already answering by the time the first container asks.
-    let guest_ip = net::guest_ipv4();
+    // #18/#19). The VM NAT gateway and DHCP resolver can legitimately be
+    // absent (no network) — loud but not fatal, matching every other
+    // best-effort step in this boot sequence. The primary DNS endpoint is
+    // Docker's stable bridge gateway, not the guest's DHCP lease: a legacy
+    // default-bridge container can always reach docker0, while its route to
+    // eth0 is not a resolver contract. Keep the guest lease only as a
+    // secondary resolver for user-defined bridges.
+    //
+    // Computed before the services are built below, since `apply_dns_flags`
+    // needs a *ready* listener, and the DNS stub itself starts before dockerd
+    // so it is already answering when the first container asks.
+    let guest_dns_fallback_ip = net::guest_ipv4();
     let host_gateway_ip = net::default_gateway();
     let dns_upstream_ip = net::dns_upstream_ipv4();
-    let split_dns_listener_ip = match (guest_ip, host_gateway_ip, dns_upstream_ip) {
-        (Some(guest_ip), Some(gateway_ip), Some(upstream_ip)) if upstream_ip != guest_ip => {
+    let split_dns_ready = match (host_gateway_ip, dns_upstream_ip) {
+        (Some(gateway_ip), Some(upstream_ip))
+            if upstream_ip != supervisor::DEFAULT_DOCKER_BRIDGE_GATEWAY =>
+        {
             match dns::spawn_split_dns(gateway_ip, upstream_ip) {
-                Ok(()) => Some(guest_ip),
+                Ok(()) => true,
                 Err(e) => {
                     log::log(&format!(
                         "WARNING: could not start the split DNS stub: {} — \
@@ -237,27 +244,28 @@ fn real_init() {
                          leaving dockerd's ordinary DNS configuration intact",
                         e
                     ));
-                    None
+                    false
                 }
             }
         }
-        (Some(guest_ip), Some(_), Some(upstream_ip)) => {
+        (Some(_), Some(upstream_ip)) => {
             log::log(&format!(
-                "WARNING: configured DNS resolver {} is this guest's own address {} — \
+                "WARNING: configured DNS resolver {} is Docker's bridge gateway {} — \
                  refusing a split-DNS forwarding loop; leaving dockerd's ordinary DNS \
                  configuration intact",
-                upstream_ip, guest_ip
+                upstream_ip,
+                supervisor::DEFAULT_DOCKER_BRIDGE_GATEWAY
             ));
-            None
+            false
         }
         _ => {
             log::log(
-                "WARNING: could not determine the guest address, VM NAT gateway, and/or \
-                 a usable IPv4 resolver — host.docker.internal/gateway.docker.internal \
-                 will not resolve; --add-host=<name>:host-gateway remains available only \
-                 when the VM NAT gateway was discovered",
+                "WARNING: could not determine the VM NAT gateway and/or a usable IPv4 \
+                 resolver — host.docker.internal/gateway.docker.internal will not resolve; \
+                 --add-host=<name>:host-gateway remains available only when the VM NAT \
+                 gateway was discovered",
             );
-            None
+            false
         }
     };
 
@@ -270,7 +278,8 @@ fn real_init() {
     supervisor::prepare_runtime_dirs();
     let services = supervisor::apply_dns_flags(
         supervisor::default_services(docker_data_on_disk),
-        split_dns_listener_ip,
+        split_dns_ready,
+        guest_dns_fallback_ip,
         host_gateway_ip,
     );
     // Captured before the table is handed to the supervisor: the host needs

@@ -186,18 +186,13 @@ fn write_resolv_conf() -> io::Result<()> {
 // ---------------------------------------------------------------------------
 // host.docker.internal / gateway.docker.internal (docs/parity.md #18/#19).
 //
-// Two addresses this module can discover, both needed by `dns.rs` and by the
-// `--dns`/`--host-gateway-ip` flags `supervisor::default_services` passes to
-// dockerd:
+// Two DHCP-derived addresses this module can discover for the split-DNS
+// startup path and `--host-gateway-ip`:
 //
-//   * the guest's own address on eth0 (`guest_ipv4`) — a normal, locally
-//     owned address that containers on the *legacy* default bridge network
-//     can dial directly (dockerd writes `--dns` server IPs straight into
-//     those containers' /etc/resolv.conf; there is no embedded-DNS layer to
-//     do any NAT/pointer trick for them, so the address has to be one the
-//     kernel actually routes back to this host, not merely "reachable in the
-//     abstract"). The split-DNS stub in `dns.rs` binds every guest address
-//     including this one, so it answers there too.
+//   * the guest's own address on eth0 (`guest_ipv4`) — an optional secondary
+//     resolver for user-defined bridges. The primary resolver is Docker's
+//     fixed `docker0` gateway, owned and pinned by `supervisor`, because a
+//     default-bridge container reaches that gateway directly.
 //   * the VM's default gateway (`default_gateway`) — the one address that is
 //     empirically confirmed (docs/parity.md #22) to reach a listener on the
 //     Mac, because Virtualization.framework's NAT device treats its own
