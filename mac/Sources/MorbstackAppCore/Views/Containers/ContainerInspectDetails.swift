@@ -61,8 +61,59 @@ struct TrackBInspectDetails: Equatable {
         }
     }
 
+    /// One network endpoint reported by `NetworkSettings.Networks` in Docker's inspect
+    /// document. A network name alone is enough for the inventory list, but the
+    /// selected-record inspector needs to keep its actual endpoint addresses and
+    /// aliases attached to that exact network instead of flattening them into a string.
+    struct NetworkEndpoint: Identifiable, Equatable {
+        let name: String
+        let networkID: String?
+        let endpointID: String?
+        let gateway: String?
+        let ipAddress: String?
+        let ipv6Gateway: String?
+        let globalIPv6Address: String?
+        let macAddress: String?
+        let aliases: [String]
+
+        var id: String { name }
+    }
+
+    /// Resource settings as configured in Docker. These are limits, not live
+    /// consumption; the Statistics tab owns measured CPU and memory use over time.
+    struct ResourceLimits: Equatable {
+        let memoryBytes: Int64?
+        let nanoCPUs: Int64?
+        let cpuShares: Int64?
+        let pidsLimit: Int64?
+        let readOnlyRootFilesystem: Bool?
+
+        var memoryLimitDescription: String {
+            guard let memoryBytes else { return "Not reported" }
+            return memoryBytes > 0 ? Formatters.bytesString(memoryBytes) : "No limit"
+        }
+
+        var cpuLimitDescription: String {
+            guard let nanoCPUs else { return "Not reported" }
+            guard nanoCPUs > 0 else { return "No limit" }
+            let cpus = Double(nanoCPUs) / 1_000_000_000
+            return String(format: "%.2f CPU%@", cpus, cpus == 1 ? "" : "s")
+        }
+
+        var cpuSharesDescription: String {
+            guard let cpuShares else { return "Not reported" }
+            return cpuShares > 0 ? "\(cpuShares) shares" : "Default"
+        }
+
+        var pidsLimitDescription: String {
+            guard let pidsLimit else { return "Not reported" }
+            return pidsLimit > 0 ? "\(pidsLimit) processes" : "No limit"
+        }
+    }
+
     // MARK: Fields
 
+    var id: String
     var name: String
     var imageRef: String
     var imageID: String
@@ -83,18 +134,25 @@ struct TrackBInspectDetails: Equatable {
     /// `healthy`, `unhealthy`, `starting`, or `nil` when the image declares no check.
     var health: String?
     var status: String
+    var resourceLimits: ResourceLimits
 
     var env: [EnvVar]
     var labels: [Label]
     var mounts: [Mount]
     var networks: [String]
+    var networkMode: String?
+    var networkEndpoints: [NetworkEndpoint]
 
     static let empty = TrackBInspectDetails(
-        name: "", imageRef: "", imageID: "", platform: nil,
+        id: "", name: "", imageRef: "", imageID: "", platform: nil,
         command: "", entrypoint: nil, workingDir: nil, user: nil,
         created: nil, startedAt: nil, finishedAt: nil, exitCode: nil,
         restartCount: 0, restartPolicy: nil, health: nil, status: "",
-        env: [], labels: [], mounts: [], networks: [])
+        resourceLimits: .init(
+            memoryBytes: nil, nanoCPUs: nil, cpuShares: nil, pidsLimit: nil,
+            readOnlyRootFilesystem: nil),
+        env: [], labels: [], mounts: [], networks: [], networkMode: nil,
+        networkEndpoints: [])
 
 }
 
@@ -115,6 +173,7 @@ extension TrackBInspectDetails {
     }
 
     private init(_ raw: Raw) {
+        id = raw.id ?? ""
         name = raw.name.map { $0.hasPrefix("/") ? String($0.dropFirst()) : $0 } ?? ""
         imageRef = raw.config?.image ?? ""
         imageID = raw.image ?? ""
@@ -137,8 +196,14 @@ extension TrackBInspectDetails {
         restartPolicy = (raw.hostConfig?.restartPolicy?.name).flatMap {
             ($0.isEmpty || $0 == "no") ? nil : $0
         }
-        health = raw.state?.health?.status
+        health = raw.state?.health?.status.flatMap { $0.isEmpty ? nil : $0 }
         status = raw.state?.status ?? ""
+        resourceLimits = ResourceLimits(
+            memoryBytes: raw.hostConfig?.memory,
+            nanoCPUs: raw.hostConfig?.nanoCPUs,
+            cpuShares: raw.hostConfig?.cpuShares,
+            pidsLimit: raw.hostConfig?.pidsLimit,
+            readOnlyRootFilesystem: raw.hostConfig?.readOnlyRootFilesystem)
 
         env = (raw.config?.env ?? []).enumerated().map { index, entry in
             guard let separator = entry.firstIndex(of: "=") else {
@@ -164,7 +229,22 @@ extension TrackBInspectDetails {
                 readOnly: !(mount.writable ?? true))
         }
 
-        networks = (raw.networkSettings?.networks ?? [:]).keys.sorted()
+        networkMode = raw.hostConfig?.networkMode.flatMap { $0.isEmpty ? nil : $0 }
+        networkEndpoints = (raw.networkSettings?.networks ?? [:])
+            .map { name, endpoint in
+                NetworkEndpoint(
+                    name: name,
+                    networkID: Self.nonEmpty(endpoint.networkID),
+                    endpointID: Self.nonEmpty(endpoint.endpointID),
+                    gateway: Self.nonEmpty(endpoint.gateway),
+                    ipAddress: Self.nonEmpty(endpoint.ipAddress),
+                    ipv6Gateway: Self.nonEmpty(endpoint.ipv6Gateway),
+                    globalIPv6Address: Self.nonEmpty(endpoint.globalIPv6Address),
+                    macAddress: Self.nonEmpty(endpoint.macAddress),
+                    aliases: (endpoint.aliases ?? []).filter { !$0.isEmpty }.sorted())
+            }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        networks = networkEndpoints.map(\.name)
     }
 
     // MARK: Derived
@@ -216,6 +296,10 @@ extension TrackBInspectDetails {
     static func date(_ text: String?) -> Date? {
         guard let text, !text.isEmpty, !text.hasPrefix("0001-01-01") else { return nil }
         return parseRFC3339(text)
+    }
+
+    private static func nonEmpty(_ value: String?) -> String? {
+        value.flatMap { $0.isEmpty ? nil : $0 }
     }
 
     private static let iso8601Fractional: ISO8601DateFormatter = {
@@ -329,13 +413,45 @@ extension TrackBInspectDetails {
             }
 
             var restartPolicy: RestartPolicyBlock?
-            enum CodingKeys: String, CodingKey { case restartPolicy = "RestartPolicy" }
+            var memory: Int64?
+            var nanoCPUs: Int64?
+            var cpuShares: Int64?
+            var pidsLimit: Int64?
+            var readOnlyRootFilesystem: Bool?
+            var networkMode: String?
+
+            enum CodingKeys: String, CodingKey {
+                case restartPolicy = "RestartPolicy"
+                case memory = "Memory"
+                case nanoCPUs = "NanoCpus"
+                case cpuShares = "CpuShares"
+                case pidsLimit = "PidsLimit"
+                case readOnlyRootFilesystem = "ReadonlyRootfs"
+                case networkMode = "NetworkMode"
+            }
         }
 
         struct NetworkSettingsBlock: Decodable {
-            /// Only the keys are used; the endpoint bodies are large and irrelevant here.
             struct Endpoint: Decodable {
-                init(from decoder: Decoder) throws { _ = decoder }
+                var networkID: String?
+                var endpointID: String?
+                var gateway: String?
+                var ipAddress: String?
+                var ipv6Gateway: String?
+                var globalIPv6Address: String?
+                var macAddress: String?
+                var aliases: [String]?
+
+                enum CodingKeys: String, CodingKey {
+                    case networkID = "NetworkID"
+                    case endpointID = "EndpointID"
+                    case gateway = "Gateway"
+                    case ipAddress = "IPAddress"
+                    case ipv6Gateway = "IPv6Gateway"
+                    case globalIPv6Address = "GlobalIPv6Address"
+                    case macAddress = "MacAddress"
+                    case aliases = "Aliases"
+                }
             }
 
             var networks: [String: Endpoint]?

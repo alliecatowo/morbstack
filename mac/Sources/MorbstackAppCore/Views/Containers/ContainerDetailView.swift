@@ -120,7 +120,10 @@ struct ContainerDetailView: View {
                 details: details,
                 isLoading: isLoadingInspect,
                 errorText: inspectError,
-                fileSharing: model.fileSharing)
+                fileSharing: model.fileSharing,
+                onRetry: {
+                    Task { await loadInspect() }
+                })
         case .logs:
             ContainerLogsTab(container: container, client: model.client, preloadedStore: preloadedLogs)
         case .stats:

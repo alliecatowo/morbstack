@@ -379,8 +379,30 @@ final class TrackBInspectDetailsTests: XCTestCase {
         { "Type": "volume", "Name": "data", "Source": "/var/lib/docker/volumes/data/_data",
           "Destination": "/data", "RW": false }
       ],
-      "HostConfig": { "RestartPolicy": { "Name": "unless-stopped" } },
-      "NetworkSettings": { "Networks": { "bridge": {}, "app_default": {} } }
+      "HostConfig": {
+        "RestartPolicy": { "Name": "unless-stopped" },
+        "Memory": 536870912,
+        "NanoCpus": 1500000000,
+        "CpuShares": 512,
+        "PidsLimit": 128,
+        "ReadonlyRootfs": true,
+        "NetworkMode": "app_default"
+      },
+      "NetworkSettings": {
+        "Networks": {
+          "bridge": {},
+          "app_default": {
+            "NetworkID": "network-app",
+            "EndpointID": "endpoint-app",
+            "Gateway": "172.20.0.1",
+            "IPAddress": "172.20.0.4",
+            "IPv6Gateway": "fd00::1",
+            "GlobalIPv6Address": "fd00::4",
+            "MacAddress": "02:42:ac:14:00:04",
+            "Aliases": ["web", "project-web"]
+          }
+        }
+      }
     }
     """
 
@@ -397,6 +419,11 @@ final class TrackBInspectDetailsTests: XCTestCase {
         XCTAssertEqual(details.restartPolicy, "unless-stopped")
         XCTAssertEqual(details.health, "healthy")
         XCTAssertEqual(details.status, "running")
+        XCTAssertEqual(details.resourceLimits.memoryBytes, 536870912)
+        XCTAssertEqual(details.resourceLimits.nanoCPUs, 1500000000)
+        XCTAssertEqual(details.resourceLimits.cpuShares, 512)
+        XCTAssertEqual(details.resourceLimits.pidsLimit, 128)
+        XCTAssertEqual(details.resourceLimits.readOnlyRootFilesystem, true)
     }
 
     func testParsesNineDigitFractionalTimestamps() throws {
@@ -431,6 +458,46 @@ final class TrackBInspectDetailsTests: XCTestCase {
         let details = try XCTUnwrap(TrackBInspectDetails(json: json))
         XCTAssertEqual(details.labels.map(\.key), ["a.label", "com.docker.compose.service"])
         XCTAssertEqual(details.networks, ["app_default", "bridge"])
+        XCTAssertEqual(details.networkMode, "app_default")
+        XCTAssertEqual(details.networkEndpoints[0].ipAddress, "172.20.0.4")
+        XCTAssertEqual(details.networkEndpoints[0].globalIPv6Address, "fd00::4")
+        XCTAssertEqual(details.networkEndpoints[0].aliases, ["project-web", "web"])
+        XCTAssertNil(details.networkEndpoints[1].endpointID)
+    }
+
+    func testResourceLimitDescriptionsKeepUnreportedAndUnlimitedStatesDistinct() {
+        let configured = TrackBInspectDetails.ResourceLimits(
+            memoryBytes: 536870912,
+            nanoCPUs: 1_500_000_000,
+            cpuShares: 512,
+            pidsLimit: 128,
+            readOnlyRootFilesystem: true)
+        XCTAssertEqual(configured.memoryLimitDescription, Formatters.bytesString(536870912))
+        XCTAssertTrue(configured.cpuLimitDescription.hasSuffix("CPUs"))
+        XCTAssertEqual(configured.cpuSharesDescription, "512 shares")
+        XCTAssertEqual(configured.pidsLimitDescription, "128 processes")
+
+        let unlimited = TrackBInspectDetails.ResourceLimits(
+            memoryBytes: 0,
+            nanoCPUs: 0,
+            cpuShares: 0,
+            pidsLimit: -1,
+            readOnlyRootFilesystem: false)
+        XCTAssertEqual(unlimited.memoryLimitDescription, "No limit")
+        XCTAssertEqual(unlimited.cpuLimitDescription, "No limit")
+        XCTAssertEqual(unlimited.cpuSharesDescription, "Default")
+        XCTAssertEqual(unlimited.pidsLimitDescription, "No limit")
+
+        let unknown = TrackBInspectDetails.ResourceLimits(
+            memoryBytes: nil,
+            nanoCPUs: nil,
+            cpuShares: nil,
+            pidsLimit: nil,
+            readOnlyRootFilesystem: nil)
+        XCTAssertEqual(unknown.memoryLimitDescription, "Not reported")
+        XCTAssertEqual(unknown.cpuLimitDescription, "Not reported")
+        XCTAssertEqual(unknown.cpuSharesDescription, "Not reported")
+        XCTAssertEqual(unknown.pidsLimitDescription, "Not reported")
     }
 
     func testTimelineForARunningContainer() throws {
