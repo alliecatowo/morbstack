@@ -4,8 +4,9 @@
 // The container browser uses a selected-record list because the current Tahoe Table
 // appearance makes unused rows read as a dashboard/skeleton at this route's typical
 // density. The selected row is described in the system-owned trailing inspector.
-// Lifecycle commands remain in the window toolbar and contextual menu rather than
-// becoming controls embedded in every row.
+// One state-appropriate lifecycle command remains in the window toolbar. The complete
+// record command set lives in the native contextual menu rather than becoming controls
+// embedded in every row or a hand-made toolbar overflow.
 
 import AppKit
 import MorbstackKit
@@ -133,25 +134,6 @@ struct ContainersRootView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        ToolbarItem(id: "containers.scope", placement: .automatic) {
-            Picker("Show", selection: $scope) {
-                ForEach(ContainerScope.allCases) { item in
-                    Text(item.title).tag(item)
-                }
-            }
-            .help("Show all containers or only running containers")
-        }
-
-        ToolbarItem(id: "containers.refresh", placement: .secondaryAction) {
-            Button {
-                Task { await model.refreshAll() }
-            } label: {
-                Image(systemName: "arrow.clockwise")
-            }
-            .accessibilityLabel("Refresh containers")
-            .help("Refresh containers")
-        }
-
         if !model.containers.isEmpty {
             ToolbarItem(id: "containers.inspector", placement: .automatic) {
                 Button { showsInspector.toggle() } label: {
@@ -172,46 +154,41 @@ struct ContainersRootView: View {
                     Button { perform(action, on: selected.id) } label: {
                         Image(systemName: action.symbol)
                     }
-                    .accessibilityLabel(action.title)
+                    .accessibilityLabel("\(action.title) \(selected.displayName)")
                     .help("\(action.title) \(selected.displayName)")
                 }
             }
-
-            ToolbarItem(id: "containers.more", placement: .secondaryAction) {
-                Menu {
-                    ForEach(secondaryLifecycleActions(for: selected), id: \.rawValue) { action in
-                        Button(action.title, systemImage: action.symbol) {
-                            perform(action, on: selected.id)
-                        }
-                    }
-                    if !secondaryLifecycleActions(for: selected).isEmpty {
-                        Divider()
-                    }
-                    Button("Copy Container ID") { MorbPasteboard.copy(selected.id) }
-                    Button("Copy Image") { MorbPasteboard.copy(selected.image) }
-                    if let url = selected.ports.compactMap(\.url).first {
-                        Button("Open in Browser…") { NSWorkspace.shared.open(url) }
-                    }
-                    Divider()
-                    Button("Remove…", role: .destructive) { removalTarget = selected }
-                } label: {
-                    Image(systemName: "ellipsis")
-                }
-                .accessibilityLabel("More container actions")
-                .help("More actions for \(selected.displayName)")
-            }
         }
 
-        ToolbarItem(id: "containers.prune", placement: .secondaryAction) {
-            Button(role: .destructive) { isShowingPruneConfirmation = true } label: {
-                Image(systemName: "trash")
+        // This is a semantic collection-options menu, not a second, manually managed
+        // overflow. It keeps filtering, refresh, and the infrequent prune operation
+        // together while the selected record's commands stay with that record.
+        ToolbarItem(id: "containers.options", placement: .secondaryAction) {
+            Menu {
+                Picker("Show", selection: $scope) {
+                    ForEach(ContainerScope.allCases) { item in
+                        Text(item.title).tag(item)
+                    }
+                }
+
+                Divider()
+
+                Button("Refresh", systemImage: "arrow.clockwise") {
+                    Task { await model.refreshAll() }
+                }
+
+                if stoppedCount > 0 {
+                    Divider()
+                    Button("Remove Stopped Containers…", role: .destructive) {
+                        isShowingPruneConfirmation = true
+                    }
+                    .disabled(isPruning)
+                }
+            } label: {
+                Label("Container options", systemImage: "slider.horizontal.3")
             }
-            .accessibilityLabel("Prune stopped containers")
-            .disabled(stoppedCount == 0 || isPruning)
-            .help(
-                stoppedCount == 0
-                    ? "No stopped containers to remove"
-                    : "Remove \(stoppedCount) stopped container\(stoppedCount == 1 ? "" : "s")")
+            .accessibilityLabel("Container options")
+            .help("Show, refresh, and cleanup options")
         }
     }
 
@@ -223,12 +200,6 @@ struct ContainersRootView: View {
         case "running", "restarting": return container.availableActions.contains(.stop) ? .stop : nil
         case "paused": return container.availableActions.contains(.unpause) ? .unpause : nil
         default: return container.availableActions.contains(.start) ? .start : nil
-        }
-    }
-
-    private func secondaryLifecycleActions(for container: ContainerSummary) -> [ContainerAction] {
-        container.availableActions.filter {
-            !$0.isDestructive && $0 != primaryLifecycleAction(for: container)
         }
     }
 
@@ -327,6 +298,7 @@ struct ContainersRootView: View {
         Divider()
         Button("Copy Name") { MorbPasteboard.copy(container.displayName) }
         Button("Copy Container ID") { MorbPasteboard.copy(container.id) }
+        Button("Copy Image") { MorbPasteboard.copy(container.image) }
         if let url = container.ports.compactMap(\.url).first {
             Button("Open in Browser…") { NSWorkspace.shared.open(url) }
         }
