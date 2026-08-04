@@ -268,6 +268,8 @@ final class DockerHijackDetectionTests: XCTestCase {
             head("GET", "/v1.47/containers/abc/logs?follow=1")))
         XCTAssertFalse(DockerHijackDetection.isHijackCandidate(head("GET", "/v1.47/events")))
         XCTAssertFalse(DockerHijackDetection.isHijackCandidate(
+            head("GET", "/v1.47/events", ["connection": "Upgrade"])))
+        XCTAssertFalse(DockerHijackDetection.isHijackCandidate(
             head("GET", "/v1.47/containers/abc/archive?path=/etc")))
         XCTAssertFalse(DockerHijackDetection.isHijackCandidate(
             head("POST", "/v1.47/containers/create")))
@@ -739,6 +741,66 @@ final class DockerFramedRelayTests: XCTestCase {
         XCTAssertEqual(policy.framingFailures, [])
 
         wired.relay.cancel()
+        wait(for: [wired.done], timeout: 10)
+    }
+
+    /// `docker events --until …` is a finite instance of the normal long-lived
+    /// events response. It is chunked JSON over ordinary HTTP, not a raw hijack;
+    /// once its terminal chunk arrives the client can reuse the connection.
+    func testChunkedEventsStreamStaysFramedAndAllowsReuseAfterUntil() throws {
+        let wired = try makeRelay()
+        let events = "GET /v1.47/events?since=1700000000&until=1700000001&filters=%7B%7D HTTP/1.1\r\n"
+            + "Host: morbstack\r\n\r\n"
+        write(events, to: wired.client)
+        XCTAssertEqual(readAvailable(wired.guest, atLeast: events.utf8.count), Data(events.utf8))
+
+        let event = Data(#"{"Type":"container","Action":"start","time":1700000000}"#.utf8)
+            + Data([0x0A])
+        let response = Data((
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                + "Transfer-Encoding: chunked\r\n\r\n").utf8)
+            + Self.chunked([event])
+        write(response, to: wired.guest)
+        XCTAssertEqual(
+            readAvailable(wired.client, atLeast: response.count),
+            response,
+            "events JSON and chunk delimiters must traverse untouched")
+
+        write(Self.ping, to: wired.client)
+        XCTAssertEqual(readAvailable(wired.guest, atLeast: Self.ping.utf8.count), Data(Self.ping.utf8))
+        XCTAssertEqual(policy.seen.map { $0.head.target }, [
+            "/v1.47/events?since=1700000000&until=1700000001&filters=%7B%7D",
+            "/_ping",
+        ])
+        XCTAssertEqual(policy.framingFailures, [])
+
+        wired.relay.cancel()
+        wait(for: [wired.done], timeout: 10)
+    }
+
+    /// A user stopping `docker events` closes the client write side while dockerd
+    /// may still have a live stream. The relay must propagate that cancellation to
+    /// the Engine without waiting for or parsing another event; a later invocation
+    /// will open a fresh Docker connection normally.
+    func testClientCancellationOfEventsStreamHalfClosesTheEngine() throws {
+        let wired = try makeRelay()
+        let events = "GET /v1.47/events HTTP/1.1\r\nHost: morbstack\r\n\r\n"
+        write(events, to: wired.client)
+        XCTAssertEqual(readAvailable(wired.guest, atLeast: events.utf8.count), Data(events.utf8))
+
+        let first = Data("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n".utf8)
+            + Data(#"{"Type":"container","Action":"create"}"#.utf8) + Data([0x0A])
+        write(first, to: wired.guest)
+        XCTAssertEqual(readAvailable(wired.client, atLeast: first.count), first)
+
+        shutdown(wired.client, SHUT_WR)
+        var buffer = [UInt8](repeating: 0, count: 16)
+        let eof = buffer.withUnsafeMutableBytes { raw -> Int in
+            POSIXSocketSupport.readSome(wired.guest, into: raw.baseAddress!, count: raw.count)
+        }
+        XCTAssertEqual(eof, 0, "cancelling docker events must close the Engine write side")
+
+        shutdown(wired.guest, SHUT_WR)
         wait(for: [wired.done], timeout: 10)
     }
 

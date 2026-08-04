@@ -551,13 +551,19 @@ enum DockerHijackDetection {
 
     /// Whether this request may take the connection over.
     static func isHijackCandidate(_ head: HTTPRequestHead) -> Bool {
-        if head.headers["upgrade"] != nil { return true }
-        if (head.headers["connection"] ?? "").lowercased().contains("upgrade") { return true }
-
         let path = head.target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
             .first.map(String.init) ?? ""
         let components = path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
         guard let last = components.last else { return false }
+
+        // The Engine documents `/events` as an ordinary streaming HTTP response.
+        // Do not let an accidental or stale Upgrade header turn it into a raw splice:
+        // event consumers need the response's chunk framing and a clean close to
+        // reconnect correctly.
+        if head.method.uppercased() == "GET", last == "events" { return false }
+
+        if head.headers["upgrade"] != nil { return true }
+        if (head.headers["connection"] ?? "").lowercased().contains("upgrade") { return true }
 
         // `POST /containers/{id}/attach` and its `GET` websocket sibling are
         // the only container-attach routes that may switch this connection to raw
