@@ -1158,6 +1158,22 @@ class DockerClient: @unchecked Sendable {
         return NetworkCreateResult(id: id, warning: response.Warning)
     }
 
+    /// Connects one selected running container to one selected network. The typed body
+    /// carries only Docker's documented endpoint aliases; static addresses, links,
+    /// driver options, gateway priority, and sysctls are intentionally absent.
+    func connectNetwork(_ request: NetworkConnectRequest) async throws {
+        let body = try JSONEncoder().encode(NetworkConnectPayload(request))
+        _ = try await postJSON("/networks/\(request.networkID)/connect", body: body)
+    }
+
+    /// Disconnects one selected running container after the route's confirmation.
+    /// `Force` remains false: a stopped-container force path would be a distinct,
+    /// more consequential workflow, not an invisible fallback for this command.
+    func disconnectNetwork(_ request: NetworkDisconnectRequest) async throws {
+        let body = try JSONEncoder().encode(NetworkDisconnectPayload(request))
+        _ = try await postJSON("/networks/\(request.networkID)/disconnect", body: body)
+    }
+
     func removeNetwork(id: String) async throws {
         try await delete("/networks/\(id)")
     }
@@ -1451,6 +1467,36 @@ private struct NetworkCreatePayload: Encodable {
 private struct NetworkCreateResponse: Decodable {
     let Id: String?
     let Warning: String?
+}
+
+/// The bounded Engine request for `POST /networks/{id}/connect`. `EndpointConfig` is
+/// omitted when there are no aliases, so this request cannot accidentally imply any
+/// IPAM/static-address configuration.
+private struct NetworkConnectPayload: Encodable {
+    let Container: String
+    let EndpointConfig: EndpointConfiguration?
+
+    struct EndpointConfiguration: Encodable {
+        let Aliases: [String]
+    }
+
+    init(_ request: NetworkConnectRequest) {
+        Container = request.containerID
+        EndpointConfig = request.aliases.isEmpty ? nil : EndpointConfiguration(Aliases: request.aliases)
+    }
+}
+
+/// The bounded Engine request for `POST /networks/{id}/disconnect`. The native route
+/// does not expose Docker's force-disconnect escape hatch, but serializes `false`
+/// explicitly so its non-forced behavior is unambiguous at the API boundary.
+private struct NetworkDisconnectPayload: Encodable {
+    let Container: String
+    let Force: Bool
+
+    init(_ request: NetworkDisconnectRequest) {
+        Container = request.containerID
+        Force = false
+    }
 }
 
 /// The only Engine request shape the app exposes for an attached command. There is no

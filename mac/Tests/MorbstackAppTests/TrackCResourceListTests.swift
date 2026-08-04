@@ -42,6 +42,29 @@ final class TrackCResourceListTests: XCTestCase {
         NetworkSummary(id: "net-\(name)", name: name, driver: driver, scope: "local", containers: containers)
     }
 
+    private func inspectedNetwork(
+        scope: String = "local",
+        isAttachable: Bool? = nil,
+        members: [NetworkInspection.Member] = []
+    ) -> NetworkInspection {
+        NetworkInspection(
+            id: "network-id",
+            name: "project_default",
+            driver: "bridge",
+            scope: scope,
+            enableIPv6: nil,
+            isInternal: nil,
+            isAttachable: isAttachable,
+            isIngress: nil,
+            isConfigOnly: nil,
+            configFrom: nil,
+            ipamDriver: nil,
+            ipamConfigurations: [],
+            options: [],
+            labels: [],
+            members: members)
+    }
+
     private let anonymousName = String(repeating: "0f1e2d3c", count: 8)
 
     // MARK: - Image search
@@ -481,6 +504,43 @@ final class TrackCResourceListTests: XCTestCase {
                 labels: [],
                 options: [NetworkCreateKeyValue(key: "", value: "1450")]),
             .failure(.optionKeyRequired))
+    }
+
+    func testNetworkMembershipCandidatesAreRunningAndNotAlreadyAttached() {
+        let attached = NetworkInspection.Member(
+            id: "container-api",
+            name: "api",
+            endpointID: nil,
+            macAddress: nil,
+            ipv4Address: nil,
+            ipv6Address: nil,
+            aliases: [])
+        var stopped = container("worker", image: "worker:latest")
+        stopped.state = "exited"
+        stopped.status = "Exited (0) 1 minute ago"
+        let available = container("database", image: "postgres:16")
+
+        let candidates = NetworkMembershipCandidates.connectable(
+            containers: [container("api", image: "api:latest"), stopped, available],
+            members: [attached])
+
+        XCTAssertEqual(candidates.map(\.id), ["container-database"])
+        XCTAssertEqual(candidates.map(\.name), ["database"])
+    }
+
+    func testNetworkMembershipAliasesKeepOnlyNonemptyCommaSeparatedValues() {
+        XCTAssertEqual(
+            NetworkMembershipCandidates.aliases(from: " api , , database,cache "),
+            ["api", "database", "cache"])
+    }
+
+    func testNetworkMembershipRespectsTheEngineScopeContract() {
+        XCTAssertTrue(NetworkMembershipCandidates.canConnect(to: inspectedNetwork(scope: "local")))
+        XCTAssertFalse(NetworkMembershipCandidates.canConnect(to: inspectedNetwork(scope: "global")))
+        XCTAssertFalse(NetworkMembershipCandidates.canConnect(to: inspectedNetwork(scope: "swarm")))
+        XCTAssertTrue(NetworkMembershipCandidates.canConnect(to: inspectedNetwork(scope: "swarm", isAttachable: true)))
+        XCTAssertTrue(NetworkMembershipCandidates.canDisconnect(from: inspectedNetwork(scope: "local")))
+        XCTAssertFalse(NetworkMembershipCandidates.canDisconnect(from: inspectedNetwork(scope: "swarm", isAttachable: true)))
     }
 
     func testNetworkNameSortIncludesBuiltInAndUserDefinedRecords() {

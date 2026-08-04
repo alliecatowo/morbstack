@@ -227,6 +227,9 @@ struct NetworksRootView: View {
     @State private var operationAlert: NetworkOperationAlert?
     @State private var isShowingNetworkCreate = false
     @State private var isCreatingNetwork = false
+    @State private var networkForConnection: NetworkInspection?
+    @State private var disconnectTarget: NetworkDisconnectRequest?
+    @State private var isChangingNetworkMembership = false
     @State private var inspection: NetworkInspection?
     @State private var inspectionError: String?
     @State private var isLoadingInspection = false
@@ -257,7 +260,7 @@ struct NetworksRootView: View {
     }
 
     private var isPerformingNetworkOperation: Bool {
-        busy || isCreatingNetwork
+        busy || isCreatingNetwork || isChangingNetworkMembership
     }
 
     var body: some View {
@@ -275,6 +278,33 @@ struct NetworksRootView: View {
                 NetworkCreateSheet { request in
                     try await createNetwork(request)
                 }
+            }
+            .sheet(item: $networkForConnection) { network in
+                NetworkConnectSheet(
+                    network: network,
+                    candidates: NetworkMembershipCandidates.connectable(
+                        containers: model.containers,
+                        members: network.members)
+                ) { request in
+                    try await connect(request)
+                }
+            }
+            .confirmationDialog(
+                disconnectTarget.map { "Disconnect \($0.containerName)?" } ?? "",
+                isPresented: Binding(
+                    get: { disconnectTarget != nil },
+                    set: { if !$0 { disconnectTarget = nil } }
+                ),
+                titleVisibility: .visible,
+                presenting: disconnectTarget
+            ) { target in
+                Button("Disconnect", role: .destructive) {
+                    disconnectTarget = nil
+                    Task { await disconnect(target) }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: { target in
+                Text("Docker will remove \(target.containerName) from \(target.networkName). The container remains running, but it can no longer communicate through this network.")
             }
             .alert(
                 removal.map { "Remove \($0.name)?" } ?? "",
@@ -367,6 +397,13 @@ struct NetworksRootView: View {
                     unusedCount == 0
                         ? "Every user-defined network has containers attached"
                         : "Review and remove \(unusedCount) unused network\(unusedCount == 1 ? "" : "s")")
+            }
+        }
+        if isChangingNetworkMembership {
+            ToolbarItem(id: "networks.membershipProgress", placement: .secondaryAction) {
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityLabel("Updating network membership")
             }
         }
         if !model.networks.isEmpty {
@@ -724,6 +761,51 @@ struct NetworksRootView: View {
     @ViewBuilder
     private func networkActions(_ inspection: NetworkInspection, summary: NetworkSummary) -> some View {
         Section("Actions") {
+            let connectableContainers = NetworkMembershipCandidates.connectable(
+                containers: model.containers,
+                members: inspection.members)
+            let disconnectableMembers = NetworkMembershipCandidates.disconnectable(
+                members: inspection.members,
+                containers: model.containers)
+            let canConnect = NetworkMembershipCandidates.canConnect(to: inspection)
+            let canDisconnect = NetworkMembershipCandidates.canDisconnect(from: inspection)
+
+            Button("Connect Container…") {
+                networkForConnection = inspection
+            }
+            .disabled(!canConnect || connectableContainers.isEmpty || isPerformingNetworkOperation)
+            .help(
+                !canConnect
+                    ? NetworkMembershipCandidates.connectUnavailableReason(for: inspection)
+                    : connectableContainers.isEmpty
+                    ? "Every running container is already attached, or no running containers are available"
+                    : "Connect a running container that is not already attached")
+
+            if !canConnect {
+                Text(NetworkMembershipCandidates.connectUnavailableReason(for: inspection))
+                    .foregroundStyle(.secondary)
+            } else if connectableContainers.isEmpty {
+                Text("No running container is available to connect to this network.")
+                    .foregroundStyle(.secondary)
+            }
+
+            if canDisconnect, !disconnectableMembers.isEmpty {
+                Menu("Disconnect Container…", systemImage: "network.badge.minus") {
+                    ForEach(disconnectableMembers) { member in
+                        Button(member.name, role: .destructive) {
+                            disconnectTarget = NetworkDisconnectRequest(network: inspection, container: member)
+                        }
+                    }
+                }
+                .disabled(isPerformingNetworkOperation)
+            } else if !canDisconnect, !inspection.members.isEmpty {
+                Text("Docker does not support disconnecting containers from a swarm-scoped network through this endpoint.")
+                    .foregroundStyle(.secondary)
+            } else if !inspection.members.isEmpty {
+                Text("Docker disconnects running containers. Stopped attached containers remain listed but are not offered for force-disconnect.")
+                    .foregroundStyle(.secondary)
+            }
+
             if summary.isBuiltIn {
                 Text("Docker manages this built-in network and does not allow removal.")
                     .foregroundStyle(.secondary)
@@ -790,6 +872,62 @@ struct NetworksRootView: View {
         let plan = UnusedNetworkRemovalPlan(networks: model.networks)
         guard !plan.targets.isEmpty else { return }
         unusedRemovalPlan = plan
+    }
+
+    /// The membership POST is the mutation authority. An inspection immediately after
+    /// it gives the selected-record pane Docker's new member map instead of guessing
+    /// locally; a failed refresh is reported separately from the already-successful
+    /// mutation.
+    @MainActor
+    private func refreshMembershipTruth(for networkID: String) async -> NetworkMembershipRefreshResult {
+        do {
+            let refreshed = try await model.client.inspectNetwork(id: networkID)
+            if selection == networkID {
+                inspection = refreshed
+                inspectionError = nil
+            }
+            await model.refreshAll()
+            return NetworkMembershipRefreshResult(inspectionWasRefreshed: true, warning: nil)
+        } catch {
+            await model.refreshAll()
+            return NetworkMembershipRefreshResult(
+                inspectionWasRefreshed: false,
+                warning: "Docker completed the change, but Morbstack could not refresh this network's details: \(MorbErrorMessage.text(for: error))")
+        }
+    }
+
+    @MainActor
+    private func connect(_ request: NetworkConnectRequest) async throws -> NetworkMembershipRefreshResult {
+        guard !isPerformingNetworkOperation else {
+            throw DockerClientError.transport("another network operation is already in progress")
+        }
+        isChangingNetworkMembership = true
+        defer { isChangingNetworkMembership = false }
+
+        try await model.client.connectNetwork(request)
+        return await refreshMembershipTruth(for: request.networkID)
+    }
+
+    @MainActor
+    private func disconnect(_ request: NetworkDisconnectRequest) async {
+        guard !isPerformingNetworkOperation else { return }
+        isChangingNetworkMembership = true
+        defer { isChangingNetworkMembership = false }
+
+        do {
+            try await model.client.disconnectNetwork(request)
+            let refreshed = await refreshMembershipTruth(for: request.networkID)
+            operationAlert = NetworkOperationAlert(
+                title: "Disconnected \(request.containerName)",
+                message: refreshed.warning
+                    ?? "Docker disconnected \(request.containerName) from \(request.networkName), and Morbstack refreshed the network details.",
+                focusID: request.networkID)
+        } catch {
+            operationAlert = NetworkOperationAlert(
+                title: "Could not disconnect \(request.containerName)",
+                message: MorbErrorMessage.text(for: error),
+                focusID: request.networkID)
+        }
     }
 
     @MainActor
