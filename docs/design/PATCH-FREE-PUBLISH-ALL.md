@@ -246,8 +246,23 @@ error text, delivered before the container exists. Given that this project's mos
 date was a proxy that failed open on every keep-alive connection, choosing the fail-closed mechanism
 is the right call twice over.
 
-### Still not proven
+### Previously owed, now run — 2026-08-04
 
-UDP publishing, port ranges, and Compose/BuildKit under the new proxy were not re-run in this pass.
-They are expected to be unaffected — they never touched the publish-all path — but "expected" is the
-word that got this project into trouble, so they are listed here as owed rather than assumed.
+These were listed as "expected to be unaffected", which is the phrasing that has repeatedly gone
+wrong in this project, so they were run rather than assumed:
+
+| Case | Result |
+| --- | --- |
+| UDP publish `-p 18600:9999/udp` | `9999/udp -> 0.0.0.0:18600`, datagram delivered from the Mac with no error |
+| Port range `-p 18700-18702:80` | `80/tcp -> 0.0.0.0:18700`, HTTP 200. One host port drawn from the range for one container port is upstream Docker's behaviour, not a truncation |
+| BuildKit `docker build` | image built, `docker run` of it printed the expected marker |
+| Compose with a healthcheck-gated dependency (`postgres:16-alpine` → `nginx`) | db reached `Healthy`, web started after it, **up in 3.06 s**, published port HTTP 200 |
+
+Nothing in the publish-all rework touched these paths, and nothing regressed. The `-P` matrix above
+plus this table is the full acceptance for TECH-1 on this host.
+
+### Genuinely still open
+
+- The **clean-profile matrix** (CP-01–CP-07) on a machine that has never had Docker. Everything above
+  was run on the developer's host, which has Docker Desktop installed; that is not the same claim.
+- Testcontainers and Dev Containers, which have never been exercised at all.
