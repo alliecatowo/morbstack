@@ -672,6 +672,24 @@ final class ImageReferenceTests: XCTestCase {
         XCTAssertEqual(split.tag, "sha256:abc123")
     }
 
+    func testTagPathUsesImmutableSourceIDAndEscapesTheTargetFields() throws {
+        let request = try XCTUnwrap(
+            ImageTagRequest(
+                sourceImageID: "sha256:deadbeef",
+                repository: "registry.local:5000/team/api",
+                tag: "build+42"))
+
+        XCTAssertEqual(
+            DockerClient.imageTagPath(request),
+            "/images/sha256:deadbeef/tag?repo=registry.local%3A5000%2Fteam%2Fapi&tag=build%2B42")
+    }
+
+    func testRemovalPathUsesTheSelectedImmutableIDWithoutForce() {
+        XCTAssertEqual(
+            DockerClient.imageRemovalPath(id: "sha256:deadbeef"),
+            "/images/sha256:deadbeef")
+    }
+
     func testRepositoryAndTagOnTheSummary() {
         let tagged = ImageSummary(
             id: "sha256:deadbeefcafe0000", repoTags: ["nginx:1.25"], size: 1, createdAt: .now,

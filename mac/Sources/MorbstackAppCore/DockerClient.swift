@@ -1129,8 +1129,35 @@ class DockerClient: @unchecked Sendable {
         try await delete("/containers/\(id)?v=1&force=1")
     }
 
-    func removeImage(id: String, force: Bool = false) async throws {
-        try await delete("/images/\(id)?force=\(force ? 1 : 0)")
+    /// Creates one additional local repository/tag alias for a selected immutable image
+    /// ID. The request intentionally has no registry credential, pull, or push fields.
+    func tagImage(_ request: ImageTagRequest) async throws {
+        try await post(Self.imageTagPath(request))
+    }
+
+    /// The bounded Docker Engine API request used by ``tagImage(_:)``.
+    ///
+    /// The source comes from a listed `ImageSummary.id`, whose Docker image-ID grammar
+    /// is safe in the endpoint path. Repository and tag remain query values so a
+    /// registry port, namespace slash, or punctuation cannot alter the request shape.
+    static func imageTagPath(_ request: ImageTagRequest) -> String {
+        "/images/\(request.sourceImageID)/tag?repo=\(MinimalHTTP.percentEncodeQueryValue(request.repository))"
+            + "&tag=\(MinimalHTTP.percentEncodeQueryValue(request.tag))"
+    }
+
+    /// Removes a selected immutable image ID without `force`. Docker is allowed to
+    /// reject dependent containers, additional tags, or a concurrently changed image;
+    /// callers present the engine's actual error instead of removing references behind
+    /// the person's back.
+    func removeImage(id: String) async throws {
+        try await delete(Self.imageRemovalPath(id: id))
+    }
+
+    /// The non-forced Engine endpoint for selected-record image removal. Keeping this
+    /// request path pure lets its omission of Docker's `force` query be locked down by
+    /// a focused test rather than relying on confirmation copy alone.
+    static func imageRemovalPath(id: String) -> String {
+        "/images/\(id)"
     }
 
     func removeVolume(name: String, force: Bool = false) async throws {

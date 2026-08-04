@@ -90,6 +90,27 @@ final class TrackCResourceListTests: XCTestCase {
         XCTAssertTrue(TrackCImageList.matches(subject, query: "1.25"))
     }
 
+    // MARK: - Image tag request
+
+    func testTagRequestKeepsRegistryHostPortSeparateFromTheTag() throws {
+        let request = try XCTUnwrap(
+            ImageTagRequest(
+                sourceImageID: "sha256:deadbeef",
+                repository: " registry.local:5000/team/api ",
+                tag: " build-42 "))
+
+        XCTAssertEqual(request.sourceImageID, "sha256:deadbeef")
+        XCTAssertEqual(request.repository, "registry.local:5000/team/api")
+        XCTAssertEqual(request.tag, "build-42")
+        XCTAssertEqual(request.targetReference, "registry.local:5000/team/api:build-42")
+    }
+
+    func testTagRequestRejectsOnlyEmptyFieldsRatherThanInventingReferenceRules() {
+        XCTAssertNil(ImageTagRequest(sourceImageID: "", repository: "team/api", tag: "v1"))
+        XCTAssertNil(ImageTagRequest(sourceImageID: "sha256:abc", repository: "   ", tag: "v1"))
+        XCTAssertNil(ImageTagRequest(sourceImageID: "sha256:abc", repository: "team/api", tag: "  "))
+    }
+
     // MARK: - Selected-image container references
 
     func testInspectorMatchesOnlyExactCurrentTagsOrTheFullImageID() {

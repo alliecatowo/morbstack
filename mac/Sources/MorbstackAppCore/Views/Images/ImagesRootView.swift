@@ -60,8 +60,19 @@ private struct ImageRemovalConfirmation: Identifiable {
     var image: ImageSummary
     var id: String { image.id }
 
-    var inUse: Bool { image.containersUsing > 0 }
     var label: String { image.repoTags.first ?? image.shortID }
+
+    var explanation: String {
+        let identity = "Morbstack will ask Docker to remove this image by immutable ID \(image.shortID), not only the displayed repository tag."
+        switch image.containersUsing {
+        case let count where count > 0:
+            return "\(identity) Docker reports \(count) dependent container\(count == 1 ? "" : "s"). Morbstack never forces image removal or removes containers; Docker will refuse while dependencies or additional tags remain, and its exact response will be shown."
+        case 0:
+            return "\(identity) Docker can still refuse if a container or another tag appeared since this list was refreshed. Morbstack does not force removal."
+        default:
+            return "\(identity) Docker did not report current container usage. Morbstack does not force removal; Docker will verify dependencies and report any refusal."
+        }
+    }
 }
 
 // MARK: - Root
@@ -92,6 +103,7 @@ struct ImagesRootView: View {
     @State private var repoTagsExpanded = false
 
     @State private var removal: ImageRemovalConfirmation?
+    @State private var imageTagTarget: ImageSummary?
     @State private var operationFailure: ImageOperationFailure?
     @State private var showsPruneConfirmation = false
     @State private var busy = false
@@ -126,6 +138,22 @@ struct ImagesRootView: View {
     }
 
     private var isPulling: Bool { pullState.isWorking }
+
+    /// Tagging and image removal are Docker Engine mutations. Stale inventory is still
+    /// useful to inspect while the engine is stopped, but it must not expose commands
+    /// that cannot reach their only backing implementation.
+    private var canMutateImages: Bool {
+        model.fixtureProvenance == nil && model.engine.isRunning && !busy
+    }
+
+    private func imageMutationHelp(_ availableAction: String) -> String {
+        if model.fixtureProvenance != nil {
+            return "Image mutations are unavailable in developer fixture data"
+        }
+        return model.engine.isRunning
+            ? availableAction
+            : "Start the Engine to change an image"
+    }
 
     private var pullReferenceToSubmit: String? {
         TrackCImagePullState.reference(from: pullReference)
@@ -211,20 +239,11 @@ struct ImagesRootView: View {
                 presenting: removal
             ) { target in
                 Button("Cancel", role: .cancel) {}
-                Button(target.inUse ? "Force Remove" : "Remove", role: .destructive) {
-                    Task { await remove(target.image, force: target.inUse) }
+                Button("Remove", role: .destructive) {
+                    Task { await remove(target.image) }
                 }
             } message: { target in
-                if target.inUse {
-                    Text(
-                        """
-                        \(target.image.containersUsing) container\(target.image.containersUsing == 1 ? "" : "s") \
-                        still reference this image. Forcing the removal untags it now; the layers are only \
-                        freed once the last container using them is gone.
-                        """)
-                } else {
-                    Text("This frees \(Formatters.bytesString(target.image.size)). Any container created from it later will have to pull it again.")
-                }
+                Text(target.explanation)
             }
             .onDeleteCommand(perform: stageSelectedImageForRemoval)
     }
@@ -244,6 +263,11 @@ struct ImagesRootView: View {
             }
             .sheet(item: $localImageRun) { image in
                 LocalImageRunSheet(image: image, model: model)
+            }
+            .sheet(item: $imageTagTarget) { image in
+                ImageTagSheet(image: image) { request in
+                    try await tagImage(request)
+                }
             }
             .sheet(item: $imageArchiveExport) { operation in
                 ImageArchiveExportSheet(operation: operation, cancel: cancelImageArchiveExport)
@@ -279,7 +303,7 @@ struct ImagesRootView: View {
 
     private var removalAlertTitle: String {
         guard let removal else { return "" }
-        return removal.inUse ? "\(removal.label) is in use" : "Remove \(removal.label)?"
+        return "Remove \(removal.label)?"
     }
 
     // MARK: Toolbar
@@ -316,6 +340,7 @@ struct ImagesRootView: View {
     }
 
     private func stageSelectedImageForRemoval() {
+        guard canMutateImages else { return }
         guard let selectedID = selection else { return }
         guard let image = model.images.first(where: { $0.id == selectedID }) else { return }
         removal = ImageRemovalConfirmation(image: image)
@@ -695,6 +720,12 @@ struct ImagesRootView: View {
                 Button("Copy Reference") { MorbPasteboard.copy(reference) }
             }
             Divider()
+            Button("Tag Image…") {
+                imageTagTarget = image
+            }
+            .disabled(!canMutateImages)
+            .help(imageMutationHelp("Create an additional local tag"))
+            Divider()
             Button("Run Local Image…") {
                 localImageRun = image
             }
@@ -706,6 +737,8 @@ struct ImagesRootView: View {
             .disabled(imageArchiveExport != nil)
             Divider()
             Button("Remove…", role: .destructive) { removal = ImageRemovalConfirmation(image: image) }
+                .disabled(!canMutateImages)
+                .help(imageMutationHelp("Remove the selected image"))
         }
     }
 
@@ -751,6 +784,19 @@ struct ImagesRootView: View {
 
                 containerReferencesSection(for: image)
                 compatibilitySection(for: image)
+
+                Section("Actions") {
+                    Button("Tag Image…") {
+                        imageTagTarget = image
+                    }
+                    .disabled(!canMutateImages)
+                    .help(imageMutationHelp("Create an additional local tag"))
+                    Button("Remove Image…", role: .destructive) {
+                        removal = ImageRemovalConfirmation(image: image)
+                    }
+                    .disabled(!canMutateImages)
+                    .help(imageMutationHelp("Remove the selected image"))
+                }
             }
             // The automatic system Form chooses the current macOS inspector alignment.
             // There is no custom surface, card, background, property grid, or row
@@ -1032,18 +1078,33 @@ struct ImagesRootView: View {
     }
 
     @MainActor
-    private func remove(_ image: ImageSummary, force: Bool) async {
+    private func tagImage(_ request: ImageTagRequest) async throws {
+        try await model.client.tagImage(request)
+        await model.refreshAll()
+    }
+
+    @MainActor
+    private func remove(_ image: ImageSummary) async {
         busy = true
         defer { busy = false }
         do {
-            try await model.client.removeImage(id: image.id, force: force)
+            try await model.client.removeImage(id: image.id)
             if selection == image.id { selection = nil }
             await model.refreshAll()
         } catch {
-            operationFailure = ImageOperationFailure(
-                title: "Couldn’t Remove Image",
-                message: MorbErrorMessage.text(for: error))
+            operationFailure = removalFailure(for: error)
         }
+    }
+
+    private func removalFailure(for error: Error) -> ImageOperationFailure {
+        let title: String
+        if let clientError = error as? DockerClientError,
+           case .http = clientError {
+            title = "Docker Refused to Remove Image"
+        } else {
+            title = "Couldn’t Remove Image"
+        }
+        return ImageOperationFailure(title: title, message: MorbErrorMessage.text(for: error))
     }
 
     @MainActor
