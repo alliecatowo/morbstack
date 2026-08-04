@@ -564,6 +564,59 @@ final class TrackCResourceListTests: XCTestCase {
         XCTAssertFalse(NetworkMembershipCandidates.canDisconnect(from: inspectedNetwork(scope: "swarm", isAttachable: true)))
     }
 
+    func testNetworkMembershipAvailabilityReasonsMatchTheOfferedCommands() {
+        let attached = NetworkInspection.Member(
+            id: "container-api",
+            name: "api",
+            endpointID: nil,
+            macAddress: nil,
+            ipv4Address: nil,
+            ipv6Address: nil,
+            aliases: [])
+        let running = container("api", image: "api:latest")
+        var stopped = container("api", image: "api:latest")
+        stopped.state = "exited"
+        stopped.status = "Exited (0) 1 minute ago"
+
+        XCTAssertNil(
+            NetworkMembershipCandidates.connectAvailabilityReason(
+                for: inspectedNetwork(scope: "local"),
+                candidates: [NetworkMembershipCandidate(running)]))
+        XCTAssertEqual(
+            NetworkMembershipCandidates.connectAvailabilityReason(
+                for: inspectedNetwork(scope: "swarm"),
+                candidates: [NetworkMembershipCandidate(running)]),
+            "Docker allows manual connections to a swarm network only when it is attachable.")
+        XCTAssertEqual(
+            NetworkMembershipCandidates.connectAvailabilityReason(
+                for: inspectedNetwork(scope: "local"),
+                candidates: []),
+            "No running container is available to connect to this network.")
+
+        XCTAssertNil(
+            NetworkMembershipCandidates.disconnectUnavailableReason(
+                for: inspectedNetwork(scope: "local", members: [attached]),
+                members: [attached],
+                containers: [stopped, running]))
+        XCTAssertEqual(
+            NetworkMembershipCandidates.disconnectUnavailableReason(
+                for: inspectedNetwork(scope: "swarm", members: [attached]),
+                members: [attached],
+                containers: [running]),
+            "Docker does not support disconnecting containers from a swarm-scoped network through this endpoint.")
+        XCTAssertEqual(
+            NetworkMembershipCandidates.disconnectUnavailableReason(
+                for: inspectedNetwork(scope: "local", members: [attached]),
+                members: [attached],
+                containers: [stopped]),
+            "Docker disconnects running containers. Stopped attached containers remain listed but are not offered for force-disconnect.")
+        XCTAssertNil(
+            NetworkMembershipCandidates.disconnectUnavailableReason(
+                for: inspectedNetwork(scope: "local"),
+                members: [],
+                containers: []))
+    }
+
     func testNetworkNameSortIncludesBuiltInAndUserDefinedRecords() {
         let networks = [
             network("none"),

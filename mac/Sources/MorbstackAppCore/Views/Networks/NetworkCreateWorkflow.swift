@@ -206,6 +206,7 @@ struct NetworkCreateSheet: View {
                         .font(.system(.body, design: .monospaced))
                         .focused($nameIsFocused)
                         .disabled(!isEditingEnabled)
+                        .accessibilityLabel("Network name")
                         .accessibilityHint("Docker validates the exact network name when you create it.")
 
                     LabeledContent("Driver", value: NetworkCreateDriver.bridge.displayName)
@@ -287,6 +288,9 @@ struct NetworkCreateSheet: View {
                     requestForConfirmation = requestedNetwork
                 }
                 .disabled(requestedNetwork == nil)
+                .accessibilityLabel(
+                    createButtonTitle == "Create" ? "Review network creation" : "Review network creation again")
+                .help("Review the exact network configuration before Docker receives the create request")
             }
         }
     }
@@ -359,8 +363,11 @@ struct NetworkCreateSheet: View {
                         Image(systemName: "minus.circle")
                     }
                     .disabled(!isEditingEnabled)
-                    .accessibilityLabel("Remove \(title.dropLast())")
-                    .help("Remove \(title.dropLast())")
+                    .accessibilityLabel(
+                        entry.key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            ? "Remove \(title.dropLast())"
+                            : "Remove \(title.dropLast()) \(entry.key)")
+                    .help("Remove this \(title.dropLast().lowercased()) from the create request")
                 }
             }
             Button(addLabel, systemImage: "plus") {

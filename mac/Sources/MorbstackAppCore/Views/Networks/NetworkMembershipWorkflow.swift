@@ -49,6 +49,21 @@ enum NetworkMembershipCandidates {
         return "Docker allows manual connections only to local networks or attachable swarm networks."
     }
 
+    /// The inspector and contextual menu share this one explanation, so a disabled
+    /// connect action never gives a different reason from the one VoiceOver announces.
+    static func connectAvailabilityReason(
+        for network: NetworkInspection,
+        candidates: [NetworkMembershipCandidate]
+    ) -> String? {
+        guard canConnect(to: network) else {
+            return connectUnavailableReason(for: network)
+        }
+        guard !candidates.isEmpty else {
+            return "No running container is available to connect to this network."
+        }
+        return nil
+    }
+
     /// Docker documents the non-forced disconnect endpoint as unsupported for swarm
     /// networks. Avoid offering a command that can only fail for this selected record.
     static func canDisconnect(from network: NetworkInspection) -> Bool {
@@ -84,6 +99,23 @@ enum NetworkMembershipCandidates {
     ) -> [NetworkInspection.Member] {
         let runningIDs = Set(containers.filter(\.isRunning).map(\.id))
         return members.filter { runningIDs.contains($0.id) }
+    }
+
+    /// Explains why a displayed membership has no non-forced disconnect command. An
+    /// empty member list needs no explanation because there is no member to act on.
+    static func disconnectUnavailableReason(
+        for network: NetworkInspection,
+        members: [NetworkInspection.Member],
+        containers: [ContainerSummary]
+    ) -> String? {
+        guard !members.isEmpty else { return nil }
+        guard canDisconnect(from: network) else {
+            return "Docker does not support disconnecting containers from a swarm-scoped network through this endpoint."
+        }
+        guard !disconnectable(members: members, containers: containers).isEmpty else {
+            return "Docker disconnects running containers. Stopped attached containers remain listed but are not offered for force-disconnect."
+        }
+        return nil
     }
 
     /// Docker's API accepts aliases as an array; the system form has one predictable
@@ -152,7 +184,12 @@ struct NetworkConnectSheet: View {
     @State private var selectedCandidateID: String?
     @State private var aliasesInput = ""
     @State private var state: State = .editing
-    @FocusState private var aliasesFieldIsFocused: Bool
+    @FocusState private var focusedField: FocusTarget?
+
+    private enum FocusTarget: Hashable {
+        case container
+        case aliases
+    }
 
     private enum State {
         case editing
@@ -211,7 +248,9 @@ struct NetworkConnectSheet: View {
                                 .tag(Optional(candidate.id))
                         }
                     }
+                    .focused($focusedField, equals: .container)
                     .disabled(!isEditingEnabled)
+                    .accessibilityHint("Choose a running container to connect to \(network.name).")
 
                     if let selectedCandidate {
                         LabeledContent("Status", value: selectedCandidate.status)
@@ -230,8 +269,10 @@ struct NetworkConnectSheet: View {
 
                 Section("Network Aliases") {
                     TextField("Aliases (optional)", text: $aliasesInput)
-                        .focused($aliasesFieldIsFocused)
+                        .focused($focusedField, equals: .aliases)
                         .disabled(!isEditingEnabled)
+                        .accessibilityLabel("Network aliases")
+                        .accessibilityHint("Optionally enter comma-separated aliases for the selected container on \(network.name).")
                     Text("Separate aliases with commas. Docker validates each alias for this network.")
                         .foregroundStyle(.secondary)
                 }
@@ -284,13 +325,19 @@ struct NetworkConnectSheet: View {
                             submit()
                         }
                         .disabled(selectedCandidate == nil || state.isConnecting)
+                        .accessibilityLabel("Connect selected container to \(network.name)")
+                        .help(
+                            selectedCandidate == nil
+                                ? "No running container is available to connect to this network"
+                                : "Connect \(selectedCandidate!.name) to \(network.name)")
                     }
                 }
             }
         }
         .frame(minWidth: 460, minHeight: 400)
+        .interactiveDismissDisabled(state.isConnecting)
         .onAppear {
-            aliasesFieldIsFocused = selectedCandidate != nil
+            focusedField = candidates.count > 1 ? .container : .aliases
         }
     }
 

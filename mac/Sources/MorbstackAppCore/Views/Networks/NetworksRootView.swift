@@ -174,8 +174,8 @@ private struct UnusedNetworkRemovalReview: View {
             List {
                 Section {
                     Text(
-                        "Review these networks before removing them. Containers created on a removed "
-                            + "network will need it recreated.")
+                        "Removing a network does not delete containers. To attach a container later, "
+                            + "create a network and connect the container to it.")
                 }
 
                 Section("Will Be Removed") {
@@ -304,7 +304,9 @@ struct NetworksRootView: View {
                 }
                 Button("Cancel", role: .cancel) {}
             } message: { target in
-                Text("Docker will remove \(target.containerName) from \(target.networkName). The container remains running, but it can no longer communicate through this network.")
+                Text(
+                    "Docker will detach \(target.containerName) from \(target.networkName). "
+                        + "It does not stop or remove the container, and it does not change its other network attachments.")
             }
             .alert(
                 removal.map { "Remove \($0.name)?" } ?? "",
@@ -315,8 +317,8 @@ struct NetworksRootView: View {
                 Button("Remove", role: .destructive) { Task { await remove(network) } }
             } message: { network in
                 Text(
-                    "Docker will remove this network only when no containers are attached. "
-                        + "Containers created on it later will need it recreated.")
+                    "Docker will permanently remove \(network.name). It does not delete containers. "
+                        + "Docker will refuse the removal if a container becomes attached before it completes.")
             }
             .alert(
                 operationAlert?.title ?? "",
@@ -509,11 +511,50 @@ struct NetworksRootView: View {
         if let id = ids.first, let network = model.networks.first(where: { $0.id == id }) {
             Button("Copy Name") { MorbPasteboard.copy(network.name) }
             Button("Copy Network ID") { MorbPasteboard.copy(network.id) }
+
+            // A context menu is the selected-record command path when a narrow window
+            // has hidden the trailing inspector. Show only operations Docker can accept
+            // for this inspected record; the inspector retains the full explanation for
+            // unavailable commands.
+            if let inspection, inspection.id == network.id {
+                let connectableContainers = NetworkMembershipCandidates.connectable(
+                    containers: model.containers,
+                    members: inspection.members)
+                let connectUnavailableReason = NetworkMembershipCandidates.connectAvailabilityReason(
+                    for: inspection,
+                    candidates: connectableContainers)
+                let disconnectableMembers = NetworkMembershipCandidates.disconnectable(
+                    members: inspection.members,
+                    containers: model.containers)
+                let disconnectUnavailableReason = NetworkMembershipCandidates.disconnectUnavailableReason(
+                    for: inspection,
+                    members: inspection.members,
+                    containers: model.containers)
+
+                if connectUnavailableReason == nil
+                    || (disconnectUnavailableReason == nil && !disconnectableMembers.isEmpty)
+                {
+                    Divider()
+                    if connectUnavailableReason == nil {
+                        Button("Connect Container…") {
+                            networkForConnection = inspection
+                        }
+                        .disabled(isPerformingNetworkOperation)
+                        .accessibilityLabel("Connect a container to \(inspection.name)")
+                        .help("Choose a running container that is not already attached to \(inspection.name)")
+                    }
+                    if disconnectUnavailableReason == nil, !disconnectableMembers.isEmpty {
+                        disconnectMenu(for: inspection, members: disconnectableMembers)
+                    }
+                }
+            }
+
             if !network.isBuiltIn {
                 let removable = canOfferRemoval(of: network)
                 Divider()
                 Button("Remove…", role: .destructive) { removal = network }
                     .disabled(!removable || isPerformingNetworkOperation)
+                    .accessibilityLabel("Remove network \(network.name)")
                     .help(
                         !removable
                             ? "Disconnect every attached container first"
@@ -767,42 +808,32 @@ struct NetworksRootView: View {
             let disconnectableMembers = NetworkMembershipCandidates.disconnectable(
                 members: inspection.members,
                 containers: model.containers)
-            let canConnect = NetworkMembershipCandidates.canConnect(to: inspection)
-            let canDisconnect = NetworkMembershipCandidates.canDisconnect(from: inspection)
+            let connectUnavailableReason = NetworkMembershipCandidates.connectAvailabilityReason(
+                for: inspection,
+                candidates: connectableContainers)
+            let disconnectUnavailableReason = NetworkMembershipCandidates.disconnectUnavailableReason(
+                for: inspection,
+                members: inspection.members,
+                containers: model.containers)
 
             Button("Connect Container…") {
                 networkForConnection = inspection
             }
-            .disabled(!canConnect || connectableContainers.isEmpty || isPerformingNetworkOperation)
+            .disabled(connectUnavailableReason != nil || isPerformingNetworkOperation)
+            .accessibilityLabel("Connect a container to \(inspection.name)")
             .help(
-                !canConnect
-                    ? NetworkMembershipCandidates.connectUnavailableReason(for: inspection)
-                    : connectableContainers.isEmpty
-                    ? "Every running container is already attached, or no running containers are available"
-                    : "Connect a running container that is not already attached")
+                connectUnavailableReason
+                    ?? "Connect a running container that is not already attached")
 
-            if !canConnect {
-                Text(NetworkMembershipCandidates.connectUnavailableReason(for: inspection))
-                    .foregroundStyle(.secondary)
-            } else if connectableContainers.isEmpty {
-                Text("No running container is available to connect to this network.")
+            if let connectUnavailableReason {
+                Text(connectUnavailableReason)
                     .foregroundStyle(.secondary)
             }
 
-            if canDisconnect, !disconnectableMembers.isEmpty {
-                Menu("Disconnect Container…", systemImage: "network.badge.minus") {
-                    ForEach(disconnectableMembers) { member in
-                        Button(member.name, role: .destructive) {
-                            disconnectTarget = NetworkDisconnectRequest(network: inspection, container: member)
-                        }
-                    }
-                }
-                .disabled(isPerformingNetworkOperation)
-            } else if !canDisconnect, !inspection.members.isEmpty {
-                Text("Docker does not support disconnecting containers from a swarm-scoped network through this endpoint.")
-                    .foregroundStyle(.secondary)
-            } else if !inspection.members.isEmpty {
-                Text("Docker disconnects running containers. Stopped attached containers remain listed but are not offered for force-disconnect.")
+            if disconnectUnavailableReason == nil, !disconnectableMembers.isEmpty {
+                disconnectMenu(for: inspection, members: disconnectableMembers)
+            } else if let disconnectUnavailableReason {
+                Text(disconnectUnavailableReason)
                     .foregroundStyle(.secondary)
             }
 
@@ -817,8 +848,29 @@ struct NetworksRootView: View {
                     removal = summary
                 }
                 .disabled(isPerformingNetworkOperation)
+                .accessibilityLabel("Remove network \(summary.name)")
+                .help("Review permanent removal of \(summary.name)")
             }
         }
+    }
+
+    @ViewBuilder
+    private func disconnectMenu(
+        for inspection: NetworkInspection,
+        members: [NetworkInspection.Member]
+    ) -> some View {
+        Menu("Disconnect Container…", systemImage: "network.badge.minus") {
+            ForEach(members) { member in
+                Button(member.name, role: .destructive) {
+                    disconnectTarget = NetworkDisconnectRequest(network: inspection, container: member)
+                }
+                .accessibilityLabel("Disconnect \(member.name) from \(inspection.name)")
+                .help("Review detaching \(member.name) from \(inspection.name)")
+            }
+        }
+        .disabled(isPerformingNetworkOperation)
+        .accessibilityLabel("Disconnect a container from \(inspection.name)")
+        .help("Choose a running container currently attached to \(inspection.name)")
     }
 
     private func selectableNetworkValue(_ value: String) -> some View {
