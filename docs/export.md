@@ -44,11 +44,13 @@ separately; this feature does not upload or encrypt it.
 
 ## Native local image archive import
 
-The native Images route can load one explicitly chosen **local `.tar` file**. It
-is an app document workflow, not a registry feature and not a counterpart to the
-images-only runtime migration tool. The system `NSOpenPanel` limits selection to
-tar archives, then a document-modal `Form` names the selected path and current
-file size before a separate confirmation. The app does not look inside
+The native Images route can load one explicitly chosen local Docker archive: an
+uncompressed `.tar`, or Docker-supported gzip (`.tar.gz`/`.tgz`), bzip2
+(`.tar.bz2`/`.tbz`/`.tbz2`), xz (`.tar.xz`/`.txz`), or zstd
+(`.tar.zst`/`.tzst`) compressed tar. It is an app document workflow, not a registry
+feature and not a counterpart to the images-only runtime migration tool. The system
+`NSOpenPanel` owns that filename-type filtering, then a document-modal `Form` names
+the selected path and current file size before a separate confirmation. The app does not look inside
 `manifest.json`, infer an image reference, or claim that a tag will be restored.
 
 After confirmation, the typed `ImageArchiveImporter` issues exactly one current
@@ -60,18 +62,19 @@ Content-Type: application/x-tar
 ```
 
 The selected file is opened and streamed in 1 MiB chunks with a real
-`Content-Length`; it is never materialized as one in-memory `Data`. The client
-stats the already-open descriptor before it writes that header, so the header
-describes the file that was actually opened. The reviewed file **size** is checked
-again before the Engine connection; if its size changed, the person must choose
-the file again. This is not a content hash or file-identity snapshot: a same-size
-replacement is not detected before the request. The importer does not
+`Content-Length`; it is never materialized as one in-memory `Data`. Review records
+the file's size plus its POSIX device/inode identity. At confirmation, the importer
+opens the path once, `fstat`s that descriptor, requires both facts to match, and
+streams that same descriptor; a path replacement, including a same-size replacement,
+is rejected before an Engine socket opens. This is not a content hash or immutable
+snapshot: an in-place writer with the same file identity can still alter bytes while
+the descriptor is open. The importer does not
 inspect the file's archive entries, request arbitrary Engine JSON, call the
 Docker CLI, read Docker configuration or credentials, pull/push an image, or
 contact a registry.
 
-Progress is the exact number of source bytes written to Docker, against the
-selected file's known size. When the complete file has been written, the sheet
+Progress is the exact number of source bytes written to the Engine connection, against
+the opened descriptor's verified size. When the complete file has been written, the sheet
 switches to an indeterminate **Waiting for Docker** phase: unpacking layers and
 registering tags can continue after upload progress reaches its endpoint. The
 Cancel control is available only while source bytes are still being sent. A
@@ -82,6 +85,10 @@ the only success condition. The UI displays a bounded, sanitized error sentence,
 but that presentation cap is not a transport or response-memory cap; the current
 Engine client reads the complete response body. The app does not derive image names
 or tag-preservation claims from the response.
+
+Docker CLI's API-1.48+ `--platform` image-load selection is intentionally not exposed
+by this bounded document workflow: it requests Docker's default load behavior rather
+than presenting a platform picker or claiming a selected platform was imported.
 
 ## Named-volume archive export
 

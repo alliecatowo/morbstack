@@ -62,7 +62,7 @@ struct ImageArchiveImportNotice: Identifiable {
 
 /// A locked flag shared between the document sheet and the blocking socket worker.
 /// Cancellation is checked before each source chunk is sent. After the complete file
-/// is handed to Docker, the workflow changes phase and does not expose a false
+/// is written to the Engine connection, the workflow changes phase and does not expose a false
 /// cancellation affordance while Docker finishes unpacking the archive.
 final class ImageArchiveImportCancellation: @unchecked Sendable {
     private let lock = NSLock()
@@ -191,7 +191,7 @@ struct ImageArchiveImportReviewSheet: View {
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("Docker will receive the selected \(Formatters.bytesString(request.bytes)) archive. After all bytes are sent, Docker may continue unpacking before it returns a result.")
+                Text("Morbstack will send the selected \(Formatters.bytesString(request.bytes)) archive to Docker. After all bytes are sent, Docker may continue unpacking before it returns a result.")
             }
         }
         .frame(minWidth: 500, idealWidth: 560, minHeight: 320)
@@ -230,7 +230,7 @@ struct ImageArchiveImportSheet: View {
                         }
                 case .waitingForDocker:
                     ProgressView("Waiting for Docker to load archive")
-                    Text("Docker has received the complete file and may still be unpacking layers or registering tags. This phase cannot be safely cancelled.")
+                    Text("Morbstack finished sending the complete file. Docker may still be unpacking layers or registering tags. This phase cannot be safely cancelled.")
                         .foregroundStyle(.secondary)
                 }
             }

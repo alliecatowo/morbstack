@@ -376,17 +376,41 @@ public final class EngineClient: @unchecked Sendable {
         let handle = try FileHandle(forReadingFrom: fileURL)
         defer { try? handle.close() }
 
-        // Size the already-open descriptor rather than resolving the path once for a
-        // size and then opening it again. That keeps Content-Length attached to the
-        // actual file descriptor supplying the upload bytes.
-        var sourceStat = stat()
-        guard Darwin.fstat(handle.fileDescriptor, &sourceStat) == 0 else {
-            throw EngineError.transport("could not stat the opened upload source")
+        let size = try uploadSourceSize(for: handle)
+        return try upload(
+            method, path, query: query, from: handle, sourceURL: fileURL, sourceSize: size,
+            contentType: contentType, timeout: timeout, onProgress: onProgress,
+            shouldContinue: shouldContinue, onUploadComplete: onUploadComplete)
+    }
+
+    /// Streams an already-open regular file to the Engine without resolving its path
+    /// again. `sourceSize` must be the size observed for this same descriptor during
+    /// the caller's review; a changed descriptor is rejected before any socket opens.
+    @discardableResult
+    public func upload(
+        _ method: String,
+        _ path: String,
+        query: [(String, String)] = [],
+        from handle: FileHandle,
+        sourceURL: URL,
+        sourceSize: Int64,
+        contentType: String = "application/x-tar",
+        timeout: TimeInterval = 600,
+        onProgress: ((Int64) -> Void)? = nil,
+        shouldContinue: (() -> Bool)? = nil,
+        onUploadComplete: (() -> Void)? = nil
+    ) throws -> EngineResponse {
+        guard sourceSize >= 0 else {
+            throw EngineError.transport("upload source has an invalid size")
         }
-        guard (sourceStat.st_mode & S_IFMT) == S_IFREG else {
-            throw EngineError.transport("upload source is not a regular file")
+
+        // Preserve the review-to-upload descriptor boundary. The URL overload opens
+        // once and reaches this overload with its fstat size; callers that review a
+        // descriptor can do the same. A different pathname can never be reopened.
+        guard try uploadSourceSize(for: handle) == sourceSize else {
+            throw EngineError.transport("upload source changed before request")
         }
-        let size = Int64(sourceStat.st_size)
+        try handle.seek(toOffset: 0)
 
         let fd = try openSocket(timeout: timeout)
         defer { Darwin.close(fd) }
@@ -397,12 +421,12 @@ public final class EngineClient: @unchecked Sendable {
         text += "User-Agent: morbstack/\(MorbVersion.string)\r\n"
         text += "Connection: close\r\n"
         text += "Content-Type: \(contentType)\r\n"
-        text += "Content-Length: \(size)\r\n"
+        text += "Content-Length: \(sourceSize)\r\n"
         text += "\r\n"
         try writeAll(fd: fd, Data(text.utf8))
 
         var sent: Int64 = 0
-        while sent < size {
+        while sent < sourceSize {
             guard shouldContinue?() ?? true else {
                 // Closing this one-request connection tells Docker that the promised
                 // Content-Length will not arrive. The caller still has to treat a
@@ -413,24 +437,35 @@ public final class EngineClient: @unchecked Sendable {
             // Keep every read inside the original descriptor size. If another writer
             // grows this file after `fstat`, the request still never sends more bytes
             // than its Content-Length promised to Docker.
-            let remaining = size - sent
+            let remaining = sourceSize - sent
             let chunk = handle.readData(ofLength: min(1 << 20, Int(remaining)))
             if chunk.isEmpty { break }
             try writeAll(fd: fd, chunk)
             sent += Int64(chunk.count)
             onProgress?(sent)
         }
-        guard sent == size else {
+        guard sent == sourceSize else {
             // Bailing out here rather than letting the engine block waiting for the
             // bytes we promised in Content-Length and will never send.
-            throw EngineError.transport("sent \(sent) of \(size) bytes from \(fileURL.lastPathComponent)")
+            throw EngineError.transport("sent \(sent) of \(sourceSize) bytes from \(sourceURL.lastPathComponent)")
         }
 
-        // The complete source is now in Docker's hands, but image unpacking and tag
-        // registration can still be in progress while `readResponse` waits. A UI can
+        // The complete source is written to this Engine connection, while Docker can
+        // still be unpacking and registering tags as `readResponse` waits. A UI can
         // use this boundary to stop offering a misleading cancellable progress bar.
         onUploadComplete?()
         return try readResponse(fd: fd, timeout: timeout, label: "\(method) \(path)")
+    }
+
+    private func uploadSourceSize(for handle: FileHandle) throws -> Int64 {
+        var sourceStat = stat()
+        guard Darwin.fstat(handle.fileDescriptor, &sourceStat) == 0 else {
+            throw EngineError.transport("could not stat the opened upload source")
+        }
+        guard (sourceStat.st_mode & S_IFMT) == S_IFREG else {
+            throw EngineError.transport("upload source is not a regular file")
+        }
+        return Int64(sourceStat.st_size)
     }
 
     /// Reads one complete response off an already-written connection.

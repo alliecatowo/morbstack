@@ -6,7 +6,43 @@
 // upload API: it sends exactly the file a person selected to the current local
 // Engine's documented image-load endpoint.
 
+import Darwin
 import Foundation
+
+/// The archive filename forms the native document chooser offers for Docker image
+/// loading. This is a chooser policy, not an archive parser: Docker remains
+/// authoritative for validating the selected stream.
+public enum ImageArchiveImportSelectionPolicy {
+    /// Docker CLI accepts a tar archive whether uncompressed or compressed with gzip,
+    /// bzip2, xz, or zstd. Keep aliases explicit because AppKit's content-type lookup
+    /// is filename based for several of these formats.
+    public static let supportedFilenameExtensions = [
+        "tar", "tar.gz", "tgz", "tar.bz2", "tbz", "tbz2", "tar.xz", "txz", "tar.zst", "tzst",
+    ]
+
+    public static func accepts(filename: String) -> Bool {
+        let lowercasedName = filename.lowercased()
+        return supportedFilenameExtensions.contains { lowercasedName.hasSuffix(".\($0)") }
+    }
+}
+
+/// A stable POSIX file identity recorded during review and compared with the descriptor
+/// that is actually streamed. A path can be atomically replaced without changing its
+/// name or byte count, so size by itself is not a sufficient review boundary.
+public struct ImageArchiveImportFileIdentity: Sendable, Equatable {
+    public let device: UInt64
+    public let inode: UInt64
+
+    init(device: UInt64, inode: UInt64) {
+        self.device = device
+        self.inode = inode
+    }
+}
+
+private struct ImageArchiveImportFileFacts {
+    let bytes: Int64
+    let identity: ImageArchiveImportFileIdentity
+}
 
 /// A selected local file whose current byte count is known before an image load starts.
 ///
@@ -15,23 +51,21 @@ import Foundation
 public struct ImageArchiveImportRequest: Sendable, Equatable, Identifiable {
     public let archiveURL: URL
     public let bytes: Int64
+    public let fileIdentity: ImageArchiveImportFileIdentity
 
     public var id: URL { archiveURL }
 
     public init(archiveURL: URL) throws {
         guard archiveURL.isFileURL else { throw ImageArchiveImportError.invalidArchiveURL }
 
-        let values: URLResourceValues
         do {
-            values = try archiveURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+            let facts = try imageArchiveImportFileFacts(at: archiveURL)
+            self.archiveURL = archiveURL
+            self.bytes = facts.bytes
+            self.fileIdentity = facts.identity
         } catch {
-            throw ImageArchiveImportError.archiveUnavailable
+            throw ImageArchiveImportError.fromFileInspection(error)
         }
-        guard values.isRegularFile == true else { throw ImageArchiveImportError.archiveIsNotAFile }
-        guard let bytes = values.fileSize, bytes > 0 else { throw ImageArchiveImportError.archiveIsEmpty }
-
-        self.archiveURL = archiveURL
-        self.bytes = Int64(bytes)
     }
 }
 
@@ -69,6 +103,7 @@ public enum ImageArchiveImportError: Error, CustomStringConvertible, LocalizedEr
     case archiveIsNotAFile
     case archiveIsEmpty
     case archiveSizeChanged
+    case archiveIdentityChanged
     case cancelled(bytesSent: Int64, totalBytes: Int64)
     case engineRejected(status: Int, message: String)
     case engineReportedFailure(String)
@@ -85,6 +120,8 @@ public enum ImageArchiveImportError: Error, CustomStringConvertible, LocalizedEr
             return "the selected image archive is empty"
         case .archiveSizeChanged:
             return "the selected image archive size changed after review; choose it again before loading"
+        case .archiveIdentityChanged:
+            return "the selected image archive was replaced after review; choose it again before loading"
         case .cancelled(let bytesSent, let totalBytes):
             return "image archive upload was cancelled after \(bytesSent) of \(totalBytes) bytes; Docker may have received part of it"
         case .engineRejected(let status, let message):
@@ -95,6 +132,17 @@ public enum ImageArchiveImportError: Error, CustomStringConvertible, LocalizedEr
     }
 
     public var errorDescription: String? { description }
+
+    fileprivate static func fromFileInspection(_ error: Error) -> Self {
+        switch error {
+        case ImageArchiveImportFileInspectionError.notARegularFile:
+            return .archiveIsNotAFile
+        case ImageArchiveImportFileInspectionError.empty:
+            return .archiveIsEmpty
+        default:
+            return .archiveUnavailable
+        }
+    }
 }
 
 /// Streams one selected local archive to Docker's image-load endpoint.
@@ -116,32 +164,28 @@ public enum ImageArchiveImporter {
         onProgress: ((ImageArchiveImportProgress) -> Void)? = nil,
         isCancelled: (() -> Bool)? = nil
     ) throws -> ImageArchiveImportResult {
-        // A person reviews the current file size in the native sheet. Refuse a changed
-        // size instead of letting the displayed denominator become stale before the
-        // request starts. This is deliberately not an identity/hash snapshot: a
-        // same-size replacement remains a new selected-file risk the document flow
-        // does not claim to detect. `EngineClient.upload` then opens and stats that
-        // descriptor, so the Content-Length belongs to the actual open file rather
-        // than its path.
-        let currentRequest = try ImageArchiveImportRequest(archiveURL: request.archiveURL)
-        guard currentRequest.bytes == request.bytes else {
-            throw ImageArchiveImportError.archiveSizeChanged
-        }
+        // Review records size and POSIX identity. Open exactly once at the mutation
+        // boundary, validate the opened descriptor against those facts, and hand that
+        // same descriptor to the Engine client. This closes the former path-restat to
+        // path-reopen race where a replacement could be streamed after review.
+        let source = try ImageArchiveImportSource.open(reviewed: request)
+        defer { try? source.handle.close() }
 
         var bytesSent: Int64 = 0
         var finishedSending = false
         do {
             let response = try engine.upload(
-                "POST", "/images/load", query: [("quiet", "1")], from: request.archiveURL,
+                "POST", "/images/load", query: [("quiet", "1")], from: source.handle,
+                sourceURL: request.archiveURL, sourceSize: source.facts.bytes,
                 contentType: "application/x-tar", timeout: timeout,
                 onProgress: { sent in
                     bytesSent = sent
-                    onProgress?(.uploading(bytesSent: sent, totalBytes: request.bytes))
+                    onProgress?(.uploading(bytesSent: sent, totalBytes: source.facts.bytes))
                 },
                 shouldContinue: { !(isCancelled?() ?? false) },
                 onUploadComplete: {
                     finishedSending = true
-                    onProgress?(.waitingForDocker(bytesSent: bytesSent, totalBytes: request.bytes))
+                    onProgress?(.waitingForDocker(bytesSent: bytesSent, totalBytes: source.facts.bytes))
                 })
 
             guard response.isSuccess else {
@@ -164,7 +208,7 @@ public enum ImageArchiveImporter {
             if !finishedSending, isCancelled?() == true {
                 throw ImageArchiveImportError.cancelled(
                     bytesSent: bytesSent,
-                    totalBytes: request.bytes)
+                    totalBytes: source.facts.bytes)
             }
             throw error
         }
@@ -186,5 +230,76 @@ public enum ImageArchiveImporter {
             CharacterSet.controlCharacters.contains($0) ? " " : String($0)
         }.joined()
         return String(sanitized.prefix(512))
+    }
+}
+
+private enum ImageArchiveImportFileInspectionError: Error {
+    case unavailable
+    case notARegularFile
+    case empty
+}
+
+private func imageArchiveImportFileFacts(at url: URL) throws -> ImageArchiveImportFileFacts {
+    var sourceStat = stat()
+    let status = url.withUnsafeFileSystemRepresentation { path -> Int32 in
+        guard let path else { return -1 }
+        return Darwin.stat(path, &sourceStat)
+    }
+    guard status == 0 else { throw ImageArchiveImportFileInspectionError.unavailable }
+    return try imageArchiveImportFileFacts(from: sourceStat)
+}
+
+private func imageArchiveImportFileFacts(from handle: FileHandle) throws -> ImageArchiveImportFileFacts {
+    var sourceStat = stat()
+    guard Darwin.fstat(handle.fileDescriptor, &sourceStat) == 0 else {
+        throw ImageArchiveImportFileInspectionError.unavailable
+    }
+    return try imageArchiveImportFileFacts(from: sourceStat)
+}
+
+private func imageArchiveImportFileFacts(from sourceStat: stat) throws -> ImageArchiveImportFileFacts {
+    guard (sourceStat.st_mode & S_IFMT) == S_IFREG else {
+        throw ImageArchiveImportFileInspectionError.notARegularFile
+    }
+    let bytes = Int64(sourceStat.st_size)
+    guard bytes > 0 else { throw ImageArchiveImportFileInspectionError.empty }
+    return ImageArchiveImportFileFacts(
+        bytes: bytes,
+        identity: ImageArchiveImportFileIdentity(
+            device: UInt64(sourceStat.st_dev),
+            inode: UInt64(sourceStat.st_ino)))
+}
+
+/// The single descriptor that has been checked against the review facts. Keeping it
+/// open eliminates pathname re-resolution between review validation and upload.
+private struct ImageArchiveImportSource {
+    let handle: FileHandle
+    let facts: ImageArchiveImportFileFacts
+
+    static func open(reviewed request: ImageArchiveImportRequest) throws -> Self {
+        let handle: FileHandle
+        do {
+            handle = try FileHandle(forReadingFrom: request.archiveURL)
+        } catch {
+            throw ImageArchiveImportError.archiveUnavailable
+        }
+
+        do {
+            let facts = try imageArchiveImportFileFacts(from: handle)
+            guard facts.bytes == request.bytes else {
+                try? handle.close()
+                throw ImageArchiveImportError.archiveSizeChanged
+            }
+            guard facts.identity == request.fileIdentity else {
+                try? handle.close()
+                throw ImageArchiveImportError.archiveIdentityChanged
+            }
+            return Self(handle: handle, facts: facts)
+        } catch let error as ImageArchiveImportError {
+            throw error
+        } catch {
+            try? handle.close()
+            throw ImageArchiveImportError.fromFileInspection(error)
+        }
     }
 }

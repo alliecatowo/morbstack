@@ -14,6 +14,21 @@ import MorbFeatures
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// Keep file choice in the native open panel. The engine, rather than the app,
+/// validates archive contents; these types merely expose Docker-supported tar and
+/// compressed-tar filename forms in the system file browser.
+private let imageArchiveImportContentTypes: [UTType] = {
+    var types: [UTType] = [.tarArchive]
+    for filenameExtension in ImageArchiveImportSelectionPolicy.supportedFilenameExtensions
+    where filenameExtension != "tar" {
+        guard let type = UTType(filenameExtension: filenameExtension), !types.contains(type) else {
+            continue
+        }
+        types.append(type)
+    }
+    return types
+}()
+
 // MARK: - Table sort
 //
 // `TrackCImageSortKey` and `TrackCImageList` (search, sort, section split, pull-log
@@ -1148,19 +1163,19 @@ struct ImagesRootView: View {
 
     /// Begins with the system-owned document chooser rather than a text field or an
     /// inferred default path. The review sheet is a separate explicit boundary before
-    /// any bytes reach Docker. `NSOpenPanel` narrows the UI to tar archives; the typed
-    /// service deliberately does not inspect the selected archive's contents.
+    /// any bytes reach Docker. `NSOpenPanel` offers Docker-supported tar and compressed
+    /// tar filename forms; the typed service deliberately does not inspect contents.
     @MainActor
     private func chooseImageArchiveForLoading() {
         guard canImportImages else { return }
 
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.tarArchive]
+        panel.allowedContentTypes = imageArchiveImportContentTypes
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
         panel.resolvesAliases = true
-        panel.message = "Choose a local Docker image archive (.tar) to load into Morbstack."
+        panel.message = "Choose a local Docker image archive (.tar, .tar.gz, .tar.bz2, .tar.xz, or .tar.zst) to load into Morbstack."
         panel.prompt = "Choose"
 
         guard panel.runModal() == .OK, let archiveURL = panel.url else { return }

@@ -21,7 +21,20 @@ final class ImageArchiveImportRequestTests: XCTestCase {
 
         XCTAssertEqual(request.archiveURL, archive)
         XCTAssertEqual(request.bytes, 1_337)
+        XCTAssertNotEqual(request.fileIdentity.inode, 0)
         XCTAssertEqual(ImageArchiveImporter.engineRequestDescription, "POST /images/load?quiet=1")
+    }
+
+    func testSelectionPolicyAdmitsDockerTarAndCompressedTarFilenameForms() {
+        [
+            "image.tar", "image.tar.gz", "image.tgz", "image.tar.bz2", "image.tbz",
+            "image.tbz2", "image.tar.xz", "image.txz", "image.tar.zst", "image.tzst",
+        ].forEach { filename in
+            XCTAssertTrue(ImageArchiveImportSelectionPolicy.accepts(filename: filename), filename)
+        }
+        ["image.zip", "image.tar.gz.backup", "image", "image.tar.zstd"].forEach { filename in
+            XCTAssertFalse(ImageArchiveImportSelectionPolicy.accepts(filename: filename), filename)
+        }
     }
 
     func testEmptyFileIsRejectedBeforeAnyEngineConnection() throws {
@@ -57,7 +70,7 @@ final class ImageArchiveImportRequestTests: XCTestCase {
         }
     }
 
-    func testSameSizeReplacementDoesNotClaimIdentityVerification() throws {
+    func testSameSizeReplacementIsRejectedBeforeOpeningEngineSocket() throws {
         let archive = try temporaryFile(named: "same-size.tar", data: Data([0x01]))
         let reviewed = try ImageArchiveImportRequest(archiveURL: archive)
         try Data([0x02]).write(to: archive, options: .atomic)
@@ -67,12 +80,7 @@ final class ImageArchiveImportRequestTests: XCTestCase {
                 reviewed,
                 engine: EngineClient(socketPath: "/tmp/morbstack-import-test-no-socket"))
         ) { error in
-            // The current contract checks the reviewed size, not a content hash or
-            // file identity. Same-size replacement therefore reaches the expected
-            // Engine connection attempt instead of being misreported as size drift.
-            guard case .unreachable? = error as? EngineError else {
-                return XCTFail("expected the test socket reachability failure, got \(error)")
-            }
+            XCTAssertEqual(error as? ImageArchiveImportError, .archiveIdentityChanged)
         }
     }
 }
