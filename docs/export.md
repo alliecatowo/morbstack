@@ -83,6 +83,17 @@ inventing a percentage. Cancel requests a stream stop and the service discards
 the private staging file. Success is shown only after the atomic commit; a
 failure or cancellation never claims that an archive was saved.
 
+### App streaming boundary
+
+The native app deliberately calls the typed `ImageArchiveExporter`, not
+`DockerClient`. `DockerClient` has no public typed file-streaming/atomic-archive
+contract; exposing a second raw archive writer there would duplicate chunk decoding,
+cancellation, error-body handling, and atomic staging policy.
+`ImageArchiveExporter` already owns that one reviewed
+`GET /images/get?names=<immutable-image-id>` stream and is shared with
+`morb export image`. This is a fixed local Engine reader, not a generic Docker
+request or registry client.
+
 There is no native volume-export action yet. A later volume route must begin
 from an explicit selected local volume, use `NSSavePanel`, disclose the temporary
 read-only helper and no-pull rule, and call `VolumeArchiveExporter` rather than

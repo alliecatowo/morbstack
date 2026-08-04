@@ -146,6 +146,18 @@ struct ImagesRootView: View {
         model.fixtureProvenance == nil && model.engine.isRunning && !busy
     }
 
+    /// Export reads a potentially large archive through Morbstack's current local
+    /// Engine socket. Fixture data is intentionally not backed by that Engine, so it
+    /// must never be allowed to fall through to the real archive exporter. Unlike a
+    /// fixture-aware `DockerClient` command, that service opens its own stream.
+    private var canExportImages: Bool {
+        model.fixtureProvenance == nil && model.engine.isRunning && imageArchiveExport == nil
+    }
+
+    private var canExportSelectedImage: Bool {
+        selectedImage != nil && canExportImages
+    }
+
     private func imageMutationHelp(_ availableAction: String) -> String {
         if model.fixtureProvenance != nil {
             return "Image mutations are unavailable in developer fixture data"
@@ -153,6 +165,19 @@ struct ImagesRootView: View {
         return model.engine.isRunning
             ? availableAction
             : "Start the Engine to change an image"
+    }
+
+    private func imageExportHelp(_ availableAction: String) -> String {
+        if model.fixtureProvenance != nil {
+            return "Image archive export is unavailable in developer fixture data"
+        }
+        if !model.engine.isRunning {
+            return "Start the Engine to export an image archive"
+        }
+        if imageArchiveExport != nil {
+            return "An image archive export is already in progress"
+        }
+        return availableAction
     }
 
     private var pullReferenceToSubmit: String? {
@@ -290,7 +315,7 @@ struct ImagesRootView: View {
     }
 
     private var imageArchiveExportAction: (() -> Void)? {
-        guard selectedImage != nil, imageArchiveExport == nil else { return nil }
+        guard canExportSelectedImage else { return nil }
         return chooseImageArchiveDestination
     }
 
@@ -379,8 +404,8 @@ struct ImagesRootView: View {
             .help(
                 selectedImage == nil
                     ? "Select an image to export"
-                    : "Export selected image as a Docker archive")
-            .disabled(selectedImage == nil || imageArchiveExport != nil)
+                    : imageExportHelp("Export selected image as a Docker archive"))
+            .disabled(!canExportSelectedImage)
         }
         ToolbarItem(id: "images.runLocal", placement: .secondaryAction) {
             Button {
@@ -734,7 +759,8 @@ struct ImagesRootView: View {
             Button("Export Image Archive…") {
                 chooseImageArchiveDestination(for: image)
             }
-            .disabled(imageArchiveExport != nil)
+            .disabled(!canExportImages)
+            .help(imageExportHelp("Export this image as a Docker archive"))
             Divider()
             Button("Remove…", role: .destructive) { removal = ImageRemovalConfirmation(image: image) }
                 .disabled(!canMutateImages)
@@ -784,6 +810,16 @@ struct ImagesRootView: View {
 
                 containerReferencesSection(for: image)
                 compatibilitySection(for: image)
+
+                Section("Archive") {
+                    Button {
+                        chooseImageArchiveDestination(for: image)
+                    } label: {
+                        Label("Export Image Archive…", systemImage: "square.and.arrow.down")
+                    }
+                    .disabled(!canExportImages)
+                    .help(imageExportHelp("Export this image as a Docker archive"))
+                }
 
                 Section("Actions") {
                     Button("Tag Image…") {
@@ -958,7 +994,7 @@ struct ImagesRootView: View {
 
     @MainActor
     private func chooseImageArchiveDestination(for image: ImageSummary) {
-        guard imageArchiveExport == nil else { return }
+        guard canExportImages else { return }
 
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.tarArchive]
