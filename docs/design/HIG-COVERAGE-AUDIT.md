@@ -527,9 +527,10 @@ For each route, record a compact review card before calling it complete:
 
 ### Volumes route handoff: selected-record identity and relationship evidence — 2026-08-03
 
-- **User task:** select one Docker volume to establish its identity, storage/use
-  facts, labels, known container relationships, and the consequences of export or
-  deletion. This is a record-inspection and safe-command task, not a dashboard.
+- **User task:** scan or select Docker volumes to establish identity, storage/use
+  facts, labels, and known container relationships; create a named local volume; or
+  understand the exact consequences of export or deletion. This is a record-inspection
+  and safe-command task, not a dashboard.
 - **HIG/API read:** [Designing for macOS](https://developer.apple.com/design/human-interface-guidelines/designing-for-macos/),
   [Lists and tables](https://developer.apple.com/design/human-interface-guidelines/lists-and-tables),
   [Alerts](https://developer.apple.com/design/human-interface-guidelines/alerts),
@@ -537,7 +538,9 @@ For each route, record a compact review card before calling it complete:
   [Progress indicators](https://developer.apple.com/design/human-interface-guidelines/progress-indicators),
   SwiftUI [Form](https://developer.apple.com/documentation/swiftui/form),
   [ContentUnavailableView](https://developer.apple.com/documentation/swiftui/contentunavailableview),
-  and [View.inspector](https://developer.apple.com/documentation/swiftui/view/inspector(ispresented:content:)).
+  and [View.inspector](https://developer.apple.com/documentation/swiftui/view/inspector(ispresented:content:)); Docker
+  [volume create](https://docs.docker.com/reference/cli/docker/volume/create/) and
+  [volume lifecycle](https://docs.docker.com/engine/storage/volumes/).
 - **Native choice:** the existing sortable system `Table` remains the comparison
   surface. The selected record uses the trailing system `.inspector` with a
   `Form`/`LabeledContent`; Docker labels and current known container relationships
@@ -553,8 +556,13 @@ For each route, record a compact review card before calling it complete:
   inventory is named as incomplete, and a disagreement tells the person to refresh;
   none of these states is treated as unused. Disk size and guest mount point use the
   same non-invented **Not reported** wording. The mount point remains copyable guest
-  metadata, never a Finder target. Export remains local-driver-only and routes through
-  the existing `NSSavePanel`/read-only archive flow. Remove stays a destructive
+  metadata, never a Finder target. Create is a narrow document-modal `Form` for one
+  explicitly named local-driver volume with no labels or driver options; its native
+  confirmation states Docker's same-driver name-reuse behavior instead of claiming a
+  fresh volume always results. Export remains local-driver-only and routes through
+  `NSSavePanel`, followed by a `Form` review of the selected source, destination, and
+  exact atomic-replacement or no-clobber consequence before the read-only archive
+  flow starts. Remove stays a destructive
   confirmation with its permanent-data-loss and non-forcing Docker consequence stated
   both before and in the alert; removal uses a real indeterminate `ProgressView` with
   an exact selected/count label while the Engine operation is in flight.
@@ -564,9 +572,10 @@ For each route, record a compact review card before calling it complete:
   dark at normal/minimum/expanded inspector widths, narrow table/toolbar overflow,
   labels and long mount/container text, keyboard/VoiceOver disclosure order, reduced
   transparency/increased contrast, empty/search/unreported/inconsistent states, and
-  the opened-then-cancelled archive/removal sheets. Real Engine evidence must include
+  the opened-then-cancelled create/archive/removal sheets. Real Engine evidence must include
   a labeled volume and containers mounting it, plus an intentionally unreported or
-  changed-inventory case; no destructive/export action is approved by this source note.
+  changed-inventory case; no create, destructive, or export action is approved by this
+  source note.
 
 ## Required evidence at handoff
 

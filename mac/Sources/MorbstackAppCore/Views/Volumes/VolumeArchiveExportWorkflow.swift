@@ -19,6 +19,79 @@ import Foundation
 import MorbFeatures
 import SwiftUI
 
+/// The exact source and destination selected before a real archive stream starts.
+/// Capturing replacement intent here avoids a second filesystem decision after the
+/// review sheet has already told the person what will happen.
+struct VolumeArchiveExportReview: Identifiable {
+    let id = UUID()
+    let volumeName: String
+    let outputURL: URL
+    let replacesExisting: Bool
+
+    var destinationConsequence: String {
+        if replacesExisting {
+            return "The existing destination archive is replaced atomically only after the export and temporary-helper cleanup succeed."
+        }
+        return "No existing destination archive is selected for replacement. If a file appears there before publication, Morbstack leaves it unchanged and does not save the archive."
+    }
+}
+
+/// The review step between the system save panel and the exporter. `NSSavePanel`
+/// chooses the file and owns its standard replacement prompt; this Form makes the
+/// selected source, target, and data consequence visible in the app before work begins.
+struct VolumeArchiveExportReviewSheet: View {
+    let review: VolumeArchiveExportReview
+    let export: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Archive") {
+                    LabeledContent("Volume") {
+                        Text(review.volumeName)
+                            .font(.system(.body, design: .monospaced))
+                            .textSelection(.enabled)
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                    }
+                    LabeledContent("Destination") {
+                        Text(review.outputURL.path)
+                            .font(.system(.body, design: .monospaced))
+                            .textSelection(.enabled)
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                    }
+                    LabeledContent(
+                        "Existing File",
+                        value: review.replacesExisting ? "Replace" : "None")
+                }
+
+                Section("What Will Happen") {
+                    Text("Morbstack creates a temporary stopped helper that mounts this local Docker volume at /data:ro. The source volume is not changed.")
+                    Text(review.destinationConsequence)
+                    Text("No image is pulled. Export does not import, clone, or restore a volume.")
+                }
+            }
+            .formStyle(.automatic)
+            .navigationTitle("Export Volume Archive")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Export") {
+                        dismiss()
+                        export()
+                    }
+                }
+            }
+        }
+        .frame(minWidth: 500, idealWidth: 580)
+    }
+}
+
 struct VolumeArchiveExportOperation: Identifiable {
     let id = UUID()
     let volumeName: String

@@ -337,6 +337,11 @@ struct VolumesRootView: View {
     @State private var removal: VolumeSummary?
     @State private var removalProgress: String?
     @State private var operationAlert: VolumeOperationAlert?
+    @State private var isVolumeCreatePresented = false
+    @State private var newVolumeName = ""
+    @State private var volumeCreateProgress: String?
+    @State private var volumeCreateFailure: String?
+    @State private var volumeArchiveExportReview: VolumeArchiveExportReview?
     @State private var volumeArchiveExport: VolumeArchiveExportOperation?
     @State private var volumeArchiveExportCancellation: VolumeArchiveExportCancellation?
     @State private var volumeArchiveExportNotice: VolumeArchiveExportNotice?
@@ -368,7 +373,7 @@ struct VolumesRootView: View {
     }
 
     private var isPerformingVolumeOperation: Bool {
-        removalProgress != nil || volumeArchiveExport != nil
+        removalProgress != nil || volumeCreateProgress != nil || volumeArchiveExport != nil
     }
 
     private var canExportSelectedVolume: Bool {
@@ -411,10 +416,29 @@ struct VolumesRootView: View {
     }
 
     private var volumeArchiveExportSheetContent: some View {
-        routeContent
+        volumeArchiveExportReviewContent
             .sheet(item: $volumeArchiveExport) { operation in
                 VolumeArchiveExportSheet(operation: operation, cancel: cancelVolumeArchiveExport)
                     .interactiveDismissDisabled()
+            }
+    }
+
+    private var volumeArchiveExportReviewContent: some View {
+        routeContent
+            .sheet(isPresented: $isVolumeCreatePresented) {
+                VolumeCreateSheet(
+                    name: $newVolumeName,
+                    progressLabel: volumeCreateProgress,
+                    failureMessage: volumeCreateFailure
+                ) { request in
+                    Task { await createVolume(request) }
+                }
+            }
+            .sheet(item: $volumeArchiveExportReview) { review in
+                VolumeArchiveExportReviewSheet(review: review) {
+                    volumeArchiveExportReview = nil
+                    beginVolumeArchiveExport(review)
+                }
             }
     }
 
@@ -509,6 +533,19 @@ struct VolumesRootView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
+        ToolbarItem(id: "volumes.create", placement: .primaryAction) {
+            Button {
+                presentVolumeCreateSheet()
+            } label: {
+                Image(systemName: "plus")
+            }
+            .disabled(isPerformingVolumeOperation)
+            .accessibilityLabel("Create volume")
+            .help(
+                isPerformingVolumeOperation
+                    ? "Wait for the current volume operation to finish"
+                    : "Create a named local Docker volume")
+        }
         ToolbarItem(id: "volumes.removeUnused", placement: .secondaryAction) {
             if let removalProgress {
                 ProgressView()
@@ -565,15 +602,15 @@ struct VolumesRootView: View {
                 Text("No Docker volumes are reported by the engine.")
             } actions: {
                 Button {
+                    presentVolumeCreateSheet()
+                } label: {
+                    Label("Create Volume", systemImage: "plus")
+                }
+                .disabled(isPerformingVolumeOperation)
+                Button {
                     Task { await model.refreshAll() }
                 } label: {
                     Label("Refresh", systemImage: "arrow.clockwise")
-                }
-                Button {
-                    MorbPasteboard.copy(
-                        "docker --host unix://\(MorbPaths.dockerSocket.path) volume create my-data")
-                } label: {
-                    Label("Copy a Create Command", systemImage: "doc.on.doc")
                 }
             }
         } else if visible.isEmpty {
@@ -823,9 +860,43 @@ struct VolumesRootView: View {
 
     // MARK: Operations
 
-    /// Uses the system save panel for the explicit selected-volume command. The panel
-    /// owns destination choice and replacement confirmation; the service repeats the
-    /// output safety checks before it ever publishes an archive.
+    @MainActor
+    private func presentVolumeCreateSheet() {
+        guard !isPerformingVolumeOperation else { return }
+        newVolumeName = ""
+        volumeCreateFailure = nil
+        isVolumeCreatePresented = true
+    }
+
+    /// Sends the exact reviewed name through the narrow `POST /volumes/create` client
+    /// operation. Docker owns validation and same-driver duplicate behavior, so the
+    /// completion wording does not pretend it can distinguish a new volume from an
+    /// existing local volume that Docker returned unchanged.
+    @MainActor
+    private func createVolume(_ request: VolumeCreateRequest) async {
+        guard volumeCreateProgress == nil else { return }
+        volumeCreateFailure = nil
+        volumeCreateProgress = "Creating \(request.name)…"
+        defer { volumeCreateProgress = nil }
+
+        do {
+            _ = try await model.client.createVolume(name: request.name)
+            await model.refreshAll()
+            selection = request.name
+            showsInspector = true
+            isVolumeCreatePresented = false
+            operationAlert = VolumeOperationAlert(
+                title: "Volume Available",
+                message: "Docker returned \(request.name). If a local volume with this name already existed, Docker kept its contents unchanged; otherwise it is a new empty volume.",
+                focusID: request.name)
+        } catch {
+            volumeCreateFailure = MorbErrorMessage.text(for: error)
+        }
+    }
+
+    /// Uses the system save panel for destination choice, then presents a native review
+    /// sheet with the selected source, destination, and replacement consequence. The
+    /// service repeats output safety checks before it ever publishes an archive.
     @MainActor
     private func chooseVolumeArchiveDestination() {
         guard let selectedVolume else { return }
@@ -846,16 +917,29 @@ struct VolumesRootView: View {
 
         guard panel.runModal() == .OK, let outputURL = panel.url else { return }
 
-        // NSSavePanel owns the system replacement confirmation. The service validates
-        // this again and publishes only after its temporary stopped helper is removed.
+        // NSSavePanel owns the standard system replacement confirmation. The review
+        // states that result in-app, and the service validates it again before
+        // publishing only after its temporary stopped helper is removed.
         let replaceExisting = FileManager.default.fileExists(atPath: outputURL.path)
+        volumeArchiveExportReview = VolumeArchiveExportReview(
+            volumeName: volume.name,
+            outputURL: outputURL,
+            replacesExisting: replaceExisting)
+    }
+
+    @MainActor
+    private func beginVolumeArchiveExport(_ review: VolumeArchiveExportReview) {
+        guard !isPerformingVolumeOperation else { return }
+
         let cancellation = VolumeArchiveExportCancellation()
-        let operation = VolumeArchiveExportOperation(volumeName: volume.name, outputURL: outputURL)
+        let operation = VolumeArchiveExportOperation(
+            volumeName: review.volumeName,
+            outputURL: review.outputURL)
         volumeArchiveExport = operation
         volumeArchiveExportCancellation = cancellation
 
         let operationID = operation.id
-        let volumeName = volume.name
+        let volumeName = review.volumeName
         let progressRelay = VolumeArchiveExportProgressRelay { progress in
             self.recordVolumeArchiveExportProgress(progress, for: operationID)
         }
@@ -863,8 +947,8 @@ struct VolumesRootView: View {
             do {
                 let result = try VolumeArchiveExporter.export(
                     volumeName: volumeName,
-                    to: outputURL,
-                    replaceExisting: replaceExisting,
+                    to: review.outputURL,
+                    replaceExisting: review.replacesExisting,
                     onProgress: { progress in
                         guard !cancellation.isRequested else { return false }
                         progressRelay.send(progress)

@@ -58,6 +58,24 @@ enum DockerClientError: Error, LocalizedError {
     }
 }
 
+/// The finite result of Morbstack's deliberately noninteractive container-command
+/// workflow. Docker reports stdout and stderr on one multiplexed connection when no
+/// TTY is allocated; keeping them separate preserves that fact for the result sheet.
+struct DockerExecResult: Sendable, Equatable {
+    let standardOutput: String
+    let standardError: String
+    /// `nil` means the output connection closed but Docker did not subsequently report
+    /// an exit status. It must not be displayed as success.
+    let exitCode: Int?
+    let standardOutputWasTruncated: Bool
+    let standardErrorWasTruncated: Bool
+
+    var exitStatusDescription: String {
+        guard let exitCode else { return "Not reported by Docker" }
+        return String(exitCode)
+    }
+}
+
 // MARK: - Connection
 
 /// One socket, owned by one request or one stream.
@@ -999,6 +1017,20 @@ class DockerClient: @unchecked Sendable {
         return id
     }
 
+    /// Creates or returns one named volume using Docker's default `local` driver. The
+    /// body deliberately contains no labels or driver options: the Volumes route
+    /// presents that narrow contract before sending it, and Docker remains the source
+    /// of truth for name validation and an existing same-driver name.
+    func createVolume(name: String) async throws -> VolumeSummary {
+        let body = try JSONEncoder().encode(VolumeCreatePayload(Name: name))
+        let data = try await postJSON("/volumes/create", body: body)
+        do {
+            return VolumeSummary(try Self.decoder.decode(Wire.Volume.self, from: data))
+        } catch {
+            throw DockerClientError.decoding("could not decode Docker's volume create response: \(error)")
+        }
+    }
+
     func startContainer(id: String) async throws { try await post("/containers/\(id)/start") }
     func stopContainer(id: String) async throws { try await post("/containers/\(id)/stop?t=10", timeout: 45) }
     func restartContainer(id: String) async throws { try await post("/containers/\(id)/restart?t=10", timeout: 45) }
@@ -1280,6 +1312,102 @@ private struct LocalImageCreateRequest: Encodable {
 /// Docker's successful container-create response contains the new immutable ID.
 private struct LocalImageCreateResponse: Decodable {
     let Id: String?
+}
+
+/// The fixed body for the native Volume creation sheet. Omitting `Driver` asks Docker
+/// for its documented default (`local`) while leaving labels and driver options absent.
+private struct VolumeCreatePayload: Encodable {
+    let Name: String
+}
+
+/// The only Engine request shape the app exposes for an attached command. There is no
+/// stdin, terminal allocation, detached execution, environment override, working
+/// directory override, privilege override, or generic JSON escape hatch in this first
+/// command workflow.
+private struct DockerExecCreateRequest: Encodable {
+    let AttachStdin: Bool
+    let AttachStdout: Bool
+    let AttachStderr: Bool
+    let Tty: Bool
+    let Cmd: [String]
+}
+
+private struct DockerExecCreateResponse: Decodable {
+    let Id: String?
+}
+
+private struct DockerExecStartRequest: Encodable {
+    let Detach: Bool
+    let Tty: Bool
+}
+
+private struct DockerExecInspectResponse: Decodable {
+    let ExitCode: Int?
+}
+
+/// Separates Docker's non-TTY stdcopy frames and retains a bounded prefix for each
+/// output stream. The per-stream cap avoids a chatty stdout stream hiding all stderr.
+private final class DockerExecOutputCollector: @unchecked Sendable {
+
+    private static let maximumStoredBytesPerStream = 2 * 1024 * 1024
+
+    private let lock = NSLock()
+    private var demuxer = StdcopyDemuxer(mode: .multiplexed)
+    private var standardOutput = Data()
+    private var standardError = Data()
+    private var standardOutputWasTruncated = false
+    private var standardErrorWasTruncated = false
+
+    func consume(_ data: Data) {
+        lock.lock()
+        defer { lock.unlock() }
+        append(demuxer.feed(data))
+    }
+
+    func finish() {
+        lock.lock()
+        defer { lock.unlock() }
+        append(demuxer.finish())
+    }
+
+    func result(exitCode: Int?) -> DockerExecResult {
+        lock.lock()
+        defer { lock.unlock() }
+        return DockerExecResult(
+            standardOutput: String(decoding: standardOutput, as: UTF8.self),
+            standardError: String(decoding: standardError, as: UTF8.self),
+            exitCode: exitCode,
+            standardOutputWasTruncated: standardOutputWasTruncated,
+            standardErrorWasTruncated: standardErrorWasTruncated)
+    }
+
+    private func append(_ frames: [StdcopyDemuxer.Frame]) {
+        for frame in frames {
+            switch frame.stream {
+            case .stdout:
+                append(
+                    frame.bytes,
+                    to: &standardOutput,
+                    truncated: &standardOutputWasTruncated)
+            case .stderr:
+                append(
+                    frame.bytes,
+                    to: &standardError,
+                    truncated: &standardErrorWasTruncated)
+            }
+        }
+    }
+
+    private func append(_ data: Data, to destination: inout Data, truncated: inout Bool) {
+        let remaining = Self.maximumStoredBytesPerStream - destination.count
+        guard remaining > 0 else {
+            if !data.isEmpty { truncated = true }
+            return
+        }
+        let retained = data.prefix(remaining)
+        destination.append(retained)
+        if retained.count < data.count { truncated = true }
+    }
 }
 
 // MARK: - Stream plumbing

@@ -144,4 +144,26 @@ final class VolumeInspectorTests: XCTestCase {
             TrackCVolumeInspector.removalConsequence(for: volume(refCount: nil)),
             "Removing permanently deletes this volume’s contents. Docker did not report current usage and will refuse if the volume is attached.")
     }
+
+    func testCreateRequestRequiresANonblankName() throws {
+        XCTAssertNil(VolumeCreateRequest(name: ""))
+        XCTAssertNil(VolumeCreateRequest(name: " \n\t "))
+
+        let request = try XCTUnwrap(VolumeCreateRequest(name: "project-data"))
+        XCTAssertEqual(request.name, "project-data")
+    }
+
+    func testArchiveReviewStatesWhetherTheSelectedDestinationWillBeReplaced() {
+        let newArchive = VolumeArchiveExportReview(
+            volumeName: "project-data",
+            outputURL: URL(fileURLWithPath: "/tmp/project-data.tar"),
+            replacesExisting: false)
+        let replacement = VolumeArchiveExportReview(
+            volumeName: "project-data",
+            outputURL: URL(fileURLWithPath: "/tmp/project-data.tar"),
+            replacesExisting: true)
+
+        XCTAssertTrue(newArchive.destinationConsequence.contains("does not save the archive"))
+        XCTAssertTrue(replacement.destinationConsequence.contains("replaced atomically"))
+    }
 }
