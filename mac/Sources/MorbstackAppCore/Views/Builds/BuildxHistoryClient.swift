@@ -46,6 +46,32 @@ enum BuildxHistoryClientError: LocalizedError {
 /// display command from silently querying a person's remote Docker context.
 enum BuildxHistoryClient {
 
+    /// Reads the identity and current node state of the active Buildx builder.
+    ///
+    /// `buildx inspect` is deliberately invoked without `--bootstrap`: Docker
+    /// documents that flag as starting a `docker-container` builder. The Builds route
+    /// needs to report the current state, not change it merely because it was opened.
+    static func currentBuilder(socketPath: String) async throws -> BuildxCurrentBuilder {
+        guard let docker = MorbCliPlugins.sourceDockerCLI() else {
+            throw BuildxHistoryClientError.dockerCLIMissing
+        }
+        guard let buildx = MorbCliPlugins.sourceBinary(for: MorbCliPlugins.buildx) else {
+            throw BuildxHistoryClientError.buildxPluginMissing
+        }
+
+        let output = try await BuildxHistoryCommand(
+            docker: docker,
+            buildx: buildx,
+            socketPath: socketPath,
+            arguments: ["buildx", "inspect", "--timeout=10s"])
+            .run()
+        guard !output.stdoutWasTruncated else {
+            throw BuildxHistoryClientError.decoding(
+                "Buildx builder inspection returned more data than Morbstack can safely display.")
+        }
+        return try decodeCurrentBuilder(output.stdout)
+    }
+
     static func list(socketPath: String) async throws -> [BuildxHistoryRecord] {
         guard let docker = MorbCliPlugins.sourceDockerCLI() else {
             throw BuildxHistoryClientError.dockerCLIMissing
@@ -174,6 +200,88 @@ enum BuildxHistoryClient {
             imageResolveMode: text(config?["ImageResolveMode"]),
             materials: materials(record["Materials"]),
             attachments: attachments(record["Attachments"]))
+    }
+
+    /// `buildx inspect` intentionally has no JSON mode. Docker documents its concise
+    /// labeled representation, so parse only those documented labels and leave every
+    /// absent field absent rather than deriving state from another Buildx command.
+    static func decodeCurrentBuilder(_ output: Data) throws -> BuildxCurrentBuilder {
+        let text = String(decoding: output, as: UTF8.self)
+        var name: String?
+        var driver: String?
+        var lastActivity: String?
+        var isReadingNodes = false
+        var currentNode: BuildxCurrentBuilder.Node?
+        var nodes: [BuildxCurrentBuilder.Node] = []
+
+        func finishCurrentNode() {
+            guard let currentNode else { return }
+            nodes.append(currentNode)
+        }
+
+        for rawLine in text.split(whereSeparator: \.isNewline) {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !line.isEmpty else { continue }
+            guard let separator = line.firstIndex(of: ":") else { continue }
+
+            let label = line[..<separator].trimmingCharacters(in: .whitespaces)
+            let value = line[line.index(after: separator)...]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !value.isEmpty else {
+                if label == "Nodes" { isReadingNodes = true }
+                continue
+            }
+
+            if label == "Nodes" {
+                isReadingNodes = true
+                continue
+            }
+
+            if !isReadingNodes {
+                switch label {
+                case "Name": name = value
+                case "Driver": driver = value
+                case "Last Activity": lastActivity = value
+                default: break
+                }
+                continue
+            }
+
+            switch label {
+            case "Name":
+                finishCurrentNode()
+                currentNode = BuildxCurrentBuilder.Node(
+                    name: value,
+                    endpoint: nil,
+                    status: nil,
+                    buildKitVersion: nil,
+                    platforms: nil,
+                    error: nil)
+            case "Endpoint":
+                currentNode?.endpoint = value
+            case "Status":
+                currentNode?.status = value
+            case "BuildKit":
+                currentNode?.buildKitVersion = value
+            case "Platforms":
+                currentNode?.platforms = value
+            case "Error":
+                currentNode?.error = value
+            default:
+                break
+            }
+        }
+        finishCurrentNode()
+
+        guard let name else {
+            throw BuildxHistoryClientError.decoding(
+                "Buildx did not report a current builder name.")
+        }
+        return BuildxCurrentBuilder(
+            name: name,
+            driver: driver,
+            lastActivity: lastActivity,
+            nodes: nodes)
     }
 
     private static func text(_ value: Any?) -> String? {
@@ -399,7 +507,7 @@ private final class BuildxHistoryCommand: @unchecked Sendable {
         switch execution.finish(process) {
         case .timedOut:
             continuation.resume(throwing: BuildxHistoryClientError.timedOut(
-                "Buildx history did not respond within \(Int(Self.deadline)) seconds."))
+                "Buildx did not respond within \(Int(Self.deadline)) seconds."))
             return
         case .cancelled:
             continuation.resume(throwing: CancellationError())
@@ -411,7 +519,7 @@ private final class BuildxHistoryCommand: @unchecked Sendable {
         guard process.terminationStatus == 0 else {
             continuation.resume(throwing: BuildxHistoryClientError.failed(
                 failure.isEmpty
-                    ? "Buildx history exited with status \(process.terminationStatus)."
+                    ? "Buildx exited with status \(process.terminationStatus)."
                     : failure))
             return
         }

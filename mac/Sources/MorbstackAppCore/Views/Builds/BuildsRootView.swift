@@ -205,6 +205,18 @@ struct BuildsRootView: View {
 
     private var unusedCount: Int { BuildCacheList.unused(records).count }
 
+    private var sharedCacheRecordCount: Int { records.filter(\.shared).count }
+
+    /// `/system/df` repeats shared BuildKit records for each parent that references
+    /// them. The route total intentionally excludes those records so it cannot
+    /// overstate cache storage; this explanation stays alongside the displayed total.
+    private var cacheStorageExplanation: String {
+        if sharedCacheRecordCount == 0 {
+            return "The cache total contains only records Docker does not mark shared. No shared records are currently excluded."
+        }
+        return "The cache total excludes \(sharedCacheRecordCount) record\(sharedCacheRecordCount == 1 ? "" : "s") Docker marks shared, so the same storage is not counted more than once."
+    }
+
     private var cacheSubtitle: String {
         if case .running(let request) = buildPhase { return "Building \(request.displayName)…" }
         if isPruning { return "Pruning unused cache…" }
@@ -216,7 +228,7 @@ struct BuildsRootView: View {
                 : "No cache · No space reclaimed"
         }
         var parts = ["\(records.count) record\(records.count == 1 ? "" : "s")"]
-        parts.append(Formatters.bytesString(BuildCacheList.storageSize(records)))
+        parts.append("\(Formatters.bytesString(BuildCacheList.storageSize(records))) deduplicated")
         if unusedCount > 0 { parts.append("\(unusedCount) unused") }
         if let lastPrunedBytes {
             let outcome = lastPrunedBytes > 0
@@ -242,18 +254,34 @@ struct BuildsRootView: View {
     }
 
     private var historySubtitle: String {
+        let history: String
         switch model.buildHistoryState {
         case .idle:
-            return "Buildx history not loaded"
+            history = "Buildx history not loaded"
         case .loading:
-            return "Loading Buildx history…"
+            history = "Loading Buildx history…"
         case .loaded:
             let count = model.buildHistory.count
-            return count == 0
+            history = count == 0
                 ? "No completed builds"
                 : "\(count) completed build\(count == 1 ? "" : "s")"
         case .unavailable:
-            return "Buildx history unavailable"
+            history = "Buildx history unavailable"
+        }
+
+        switch model.buildxCurrentBuilderState {
+        case .loaded:
+            guard let builder = model.buildxCurrentBuilder else { return history }
+            return [builder.name, builder.driver, builder.reportedNodeStatus]
+                .compactMap { $0 }
+                .joined(separator: " · ")
+                + " · " + history
+        case .loading:
+            return "Checking active Buildx builder… · \(history)"
+        case .unavailable:
+            return "Active Buildx builder unavailable · \(history)"
+        case .idle:
+            return history
         }
     }
 
@@ -467,7 +495,7 @@ struct BuildsRootView: View {
             ContentUnavailableView {
                 Label("No Build Cache", systemImage: "hammer")
             } description: {
-                Text("Build an image to create local BuildKit cache records.")
+                Text("Build an image to create local BuildKit cache records. Shared records are kept out of the route's storage total so the same bytes are not counted twice.")
             } actions: {
                 Button {
                     showsBuildSheet = true
@@ -648,6 +676,14 @@ struct BuildsRootView: View {
     private var detailPane: some View {
         if let record = selectedRecord {
             Form {
+                Section("Cache Storage") {
+                    LabeledContent("Deduplicated Total", value: Formatters.bytesString(BuildCacheList.storageSize(records)))
+                    LabeledContent("Records", value: "\(records.count)")
+                    LabeledContent("Unused", value: "\(unusedCount)")
+                    LabeledContent("Shared", value: "\(sharedCacheRecordCount)")
+                    Text(cacheStorageExplanation)
+                        .foregroundStyle(.secondary)
+                }
                 Section("Cache Record") {
                     LabeledContent("Description") {
                         Text(record.description)
@@ -670,7 +706,11 @@ struct BuildsRootView: View {
                         "Last Used",
                         value: record.lastUsedAt.map(Formatters.absoluteDate) ?? "Never")
                     LabeledContent("Used", value: "\(record.usageCount) time\(record.usageCount == 1 ? "" : "s")")
-                    LabeledContent("Storage", value: record.shared ? "Shared" : "Not shared")
+                    LabeledContent(
+                        "Storage",
+                        value: record.shared
+                            ? "Shared — excluded from deduplicated total"
+                            : "Included in deduplicated total")
                 }
             }
             .formStyle(.columns)
@@ -760,6 +800,27 @@ struct BuildsRootView: View {
 
     private func historyDetailsForm(_ detail: BuildxHistoryDetail) -> some View {
         Form {
+            if let builder = model.buildxCurrentBuilder,
+               case .loaded = model.buildxCurrentBuilderState {
+                Section("Active Builder") {
+                    LabeledContent("Name", value: builder.name)
+                    if let driver = builder.driver { LabeledContent("Driver", value: driver) }
+                    if let lastActivity = builder.lastActivity {
+                        LabeledContent("Last Activity", value: lastActivity)
+                    }
+                }
+                if !builder.nodes.isEmpty {
+                    Section("Builder Nodes") {
+                        ForEach(builder.nodes) { node in
+                            LabeledContent(node.name) {
+                                Text(node.reportedFacts ?? "No state reported")
+                                    .textSelection(.enabled)
+                                    .lineLimit(3)
+                            }
+                        }
+                    }
+                }
+            }
             if detail.name != nil || detail.reference != nil || detail.status != nil {
                 Section("Build") {
                     if let name = detail.name { LabeledContent("Name", value: name) }
@@ -1179,7 +1240,7 @@ struct BuildsRootView: View {
     private func buildProgressForm(for request: LocalBuildRequest) -> some View {
         Form {
             Section("Build") {
-                LabeledContent("Image", value: request.displayName)
+                LabeledContent("Build Request", value: request.displayName)
                 LabeledContent("Context") {
                     Text(request.contextDirectory.path)
                         .font(.system(.body, design: .monospaced))
@@ -1190,19 +1251,7 @@ struct BuildsRootView: View {
                 Text("BuildKit does not provide a reliable total step count before it runs, so this progress indicator is indeterminate.")
                     .foregroundStyle(.secondary)
             }
-            Section("Recent Output") {
-                if buildEvents.isEmpty {
-                    Text("Waiting for BuildKit…")
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(buildEvents.suffix(8)) { event in
-                        Text(event.message)
-                            .font(.system(.body, design: .monospaced))
-                            .foregroundStyle(event.isError ? .red : .primary)
-                            .lineLimit(2)
-                    }
-                }
-            }
+            buildOutputSection(emptyMessage: "Waiting for BuildKit…")
             Section {
                 Button("Cancel Build", role: .cancel) { buildTask?.cancel() }
             } footer: {
@@ -1216,12 +1265,18 @@ struct BuildsRootView: View {
         Form {
             Section {
                 Label("Build Completed", systemImage: "checkmark.circle")
-                LabeledContent("Image", value: request.displayName)
+                LabeledContent("Build Request", value: request.displayName)
+                LabeledContent(
+                    "Result",
+                    value: request.tag.isEmpty
+                        ? "Loaded an untagged image locally"
+                        : "Loaded locally as \(request.tag)")
                 Text(
                     "The result was loaded into Morbstack's local image store. Images and build-cache "
                         + "records update independently, so either list can still show its last successful refresh.")
                     .foregroundStyle(.secondary)
             }
+            buildOutputSection(emptyMessage: "Buildx produced no displayable progress lines.")
             buildResultActions
         }
         .formStyle(.automatic)
@@ -1231,10 +1286,11 @@ struct BuildsRootView: View {
         Form {
             Section {
                 Label("Build Canceled", systemImage: "xmark.circle")
-                LabeledContent("Image", value: request.displayName)
+                LabeledContent("Build Request", value: request.displayName)
                 Text("The client connection was closed. Refresh after retrying to inspect any cache BuildKit kept before cancellation.")
                     .foregroundStyle(.secondary)
             }
+            buildOutputSection(emptyMessage: "Buildx produced no displayable progress lines before cancellation.")
             buildResultActions
         }
         .formStyle(.automatic)
@@ -1244,14 +1300,41 @@ struct BuildsRootView: View {
         Form {
             Section {
                 Label("Build Failed", systemImage: "exclamationmark.triangle")
-                LabeledContent("Image", value: request.displayName)
+                LabeledContent("Build Request", value: request.displayName)
                 Text(detail)
                     .font(.system(.body, design: .monospaced))
                     .textSelection(.enabled)
             }
+            buildOutputSection(emptyMessage: "Buildx did not produce a displayable progress line before it failed.")
             buildResultActions
         }
         .formStyle(.automatic)
+    }
+
+    /// A bounded, literal view of the raw-JSON messages observed for this one local
+    /// build. The terminal forms keep it visible for recovery instead of replacing a
+    /// BuildKit diagnostic with app-authored prose or silently discarding it on exit.
+    @ViewBuilder
+    private func buildOutputSection(emptyMessage: String) -> some View {
+        Section("Observed Buildx Output") {
+            if buildEvents.isEmpty {
+                Text(emptyMessage)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(buildEvents.suffix(12)) { event in
+                    Text(event.message)
+                        .font(.system(.body, design: .monospaced))
+                        .foregroundStyle(event.isError ? .red : .primary)
+                        .lineLimit(2)
+                        .textSelection(.enabled)
+                }
+                if buildEvents.count > 12 {
+                    Text("Showing the latest 12 of \(buildEvents.count) observed Buildx messages.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
     }
 
     private var buildResultActions: some View {
@@ -1319,7 +1402,10 @@ struct BuildsRootView: View {
     private func appendBuildEvent(_ event: BuildProgressEvent) {
         guard isBuilding else { return }
         buildEvents.append(event)
-        if buildEvents.count > 32 { buildEvents.removeFirst(buildEvents.count - 32) }
+        // Progress can be arbitrarily verbose. Keep a useful bounded recovery window
+        // and state the displayed limit in the Form rather than passing it off as a
+        // complete build log; completed-build logs remain the explicit inspector read.
+        if buildEvents.count > 128 { buildEvents.removeFirst(buildEvents.count - 128) }
     }
 
     private func resetBuildSheetIfIdle() {

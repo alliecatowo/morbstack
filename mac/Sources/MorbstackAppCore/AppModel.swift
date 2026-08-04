@@ -175,6 +175,10 @@ final class AppModel {
     /// read-only query succeeds.
     var buildHistory: [BuildxHistoryRecord] = []
     var buildHistoryState: BuildxHistoryLoadState = .idle
+    /// Identity and node state reported by Buildx for the same current builder that
+    /// owns `buildHistory`. This is not inferred from cache or history records.
+    var buildxCurrentBuilder: BuildxCurrentBuilder?
+    var buildxCurrentBuilderState: BuildxCurrentBuilderLoadState = .idle
 
     var selection: Nav = .containers
     var selectedContainerID: String?
@@ -369,6 +373,8 @@ final class AppModel {
         buildCache = []
         buildHistory = []
         buildHistoryState = .idle
+        buildxCurrentBuilder = nil
+        buildxCurrentBuilderState = .idle
         selectedContainerID = nil
         busyContainerIDs.removeAll()
         startedAtLookups.removeAll()
@@ -464,12 +470,26 @@ final class AppModel {
     func refreshBuildHistory() async {
         guard engine.isRunning else { return }
         buildHistoryState = .loading
+        buildxCurrentBuilderState = .loading
+        let socketPath = MorbPaths.dockerSocket.path
+
+        // These are independent read-only Buildx operations, intentionally issued in
+        // sequence so opening one route never starts competing Buildx clients. Their
+        // outcomes remain separate: history support and builder inspection can differ
+        // by Buildx version, and a failed inspection must not erase good history.
         do {
-            buildHistory = try await BuildxHistoryClient.list(socketPath: MorbPaths.dockerSocket.path)
+            buildHistory = try await BuildxHistoryClient.list(socketPath: socketPath)
             buildHistoryState = .loaded
         } catch {
             buildHistory = []
             buildHistoryState = .unavailable(MorbErrorMessage.text(for: error))
+        }
+        do {
+            buildxCurrentBuilder = try await BuildxHistoryClient.currentBuilder(socketPath: socketPath)
+            buildxCurrentBuilderState = .loaded
+        } catch {
+            buildxCurrentBuilder = nil
+            buildxCurrentBuilderState = .unavailable(MorbErrorMessage.text(for: error))
         }
     }
 
