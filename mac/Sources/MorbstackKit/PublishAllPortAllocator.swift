@@ -89,9 +89,11 @@ final class PublishAllPortAllocator {
                 trace("event=lifecycle-complete-ignored succeeded=\(succeeded) reason=already-finished")
                 return
             }
-            // A durable Engine-restart-policy session remains registered after an
-            // explicit DockerProxy start succeeds. The next policy restart will use
-            // the same host session and request a fresh lease.
+            // Only a session created by restart-policy recovery remains registered
+            // after a successful lifecycle observation. A direct DockerProxy start
+            // owns one request/response transaction and must release its guest fd
+            // before reconciliation decides whether a persisted policy needs a
+            // separate durable session.
             if !succeeded || !remainsAvailableForRestartPolicy {
                 finished = true
             }

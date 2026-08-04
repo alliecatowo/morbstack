@@ -518,10 +518,8 @@ extension DockerProxy: DockerRequestAdmissionPolicy {
                 fd: fd,
                 containerID: containerID,
                 forwarder: forwarder,
-                log: log,
-                remainsAvailableForRestartPolicy: true)
+                log: log)
             try session.start()
-            forwarder.adoptPublishAllSession(session, forContainerID: containerID)
             return .forwardObserving(
                 DockerPortLeaseResponseObserver(kind: .start) { outcome in
                     session.complete(succeeded: outcome == .startSucceeded)

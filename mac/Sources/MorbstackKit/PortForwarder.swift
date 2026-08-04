@@ -1039,21 +1039,6 @@ public final class PortForwarder {
         return record.releaseOnStop
     }
 
-    /// A direct DockerProxy start registers a new guest-broker session for this
-    /// ID. Replace any durable recovery session that registration superseded; a
-    /// dictionary key alone is not evidence that the guest still routes to it.
-    func adoptPublishAllSession(
-        _ session: PublishAllPortAllocator.Session,
-        forContainerID containerID: String
-    ) {
-        lock.lock()
-        let replaced = publishAllRestartSessions.updateValue(session, forKey: containerID)
-        lock.unlock()
-        if let replaced, replaced !== session {
-            replaced.invalidate(reason: "superseded-by-direct-docker-start")
-        }
-    }
-
     /// Promotes a lease after Docker's normal `204` start reply is observed. The
     /// response observer runs before FDRelay writes those bytes to the client, so the
     /// service never sees a successful start while Morbstack has released its host

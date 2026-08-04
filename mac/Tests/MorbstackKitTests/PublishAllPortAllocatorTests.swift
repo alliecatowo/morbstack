@@ -1,6 +1,7 @@
 // Copyright 2026 The Morbstack Authors.
 // Licensed under the Apache License, Version 2.0 (the "License").
 
+import Darwin
 import Dispatch
 import Foundation
 import XCTest
@@ -61,6 +62,24 @@ final class PublishAllPortAllocatorTests: XCTestCase {
 
     private func containerID(_ character: Character) -> String {
         String(repeating: String(character), count: 64)
+    }
+
+    private func makeSession(
+        containerID: String,
+        remainsAvailableForRestartPolicy: Bool
+    ) throws -> (session: PublishAllPortAllocator.Session, peerFD: Int32) {
+        var descriptors: [Int32] = [-1, -1]
+        guard socketpair(AF_UNIX, SOCK_STREAM, 0, &descriptors) == 0 else {
+            throw XCTSkip("socketpair() failed")
+        }
+        return (
+            PublishAllPortAllocator.Session(
+                fd: descriptors[0],
+                containerID: containerID,
+                forwarder: makeForwarder(),
+                log: MorbLog(fileURL: nil, echoToStderr: false),
+                remainsAvailableForRestartPolicy: remainsAvailableForRestartPolicy),
+            descriptors[1])
     }
 
     func testPublishAllAllocationReturnsPortsInRequestOrderAndRequiresFreshRestartAllocation() throws {
@@ -126,8 +145,36 @@ final class PublishAllPortAllocatorTests: XCTestCase {
         rebound.stop()
     }
 
+    func testDirectPublishAllSessionEndsAfterItsObservedStart() throws {
+        let pair = try makeSession(
+            containerID: containerID("d"),
+            remainsAvailableForRestartPolicy: false)
+        defer { close(pair.peerFD) }
+
+        XCTAssertTrue(pair.session.isLive)
+        pair.session.complete(succeeded: true)
+        XCTAssertFalse(
+            pair.session.isLive,
+            "a direct DockerProxy start must not survive into restart-policy reconciliation")
+    }
+
+    func testOnlyRecoveryCreatedPublishAllSessionRemainsDurableAfterStart() throws {
+        let pair = try makeSession(
+            containerID: containerID("e"),
+            remainsAvailableForRestartPolicy: true)
+        defer {
+            pair.session.invalidate(reason: "test cleanup")
+            close(pair.peerFD)
+        }
+
+        pair.session.complete(succeeded: true)
+        XCTAssertTrue(
+            pair.session.isLive,
+            "restart-policy recovery owns the sole durable publish-all session type")
+    }
+
     func testRegistrationGrammarRetainsLegacyFormAndAddsOnlyTheTraceExtension() {
-        let containerID = containerID("d")
+        let containerID = containerID("f")
         let traceID = String(repeating: "e", count: 32)
 
         XCTAssertEqual(
