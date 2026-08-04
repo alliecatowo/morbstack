@@ -147,6 +147,50 @@ replacement Theme, Design, Style, or Appearance rendering module.
 | `Palette/**` | Search, menus/commands, sheets or panel modality, keyboard focus, accessibility | Native rewrite staged — live-window verification pending | A standard sheet is acceptable when a global command has no stable popover anchor; avoid a decorative Raycast clone. A destructive result never executes from a single Return: it must pass through a system confirmation dialog. |
 | `Views/Containers/**` | Tables, inspector, forms, logs/text, context menus, toolbar/search, Charts, progress, unavailable states, destructive actions | Native rewrite staged — partial dark real-window evidence recorded; broader verification pending | Main list/detail is table + inspector. Statistics is read-only: CPU/memory history and network throughput use real `/containers/{id}/stats` values, with `LabeledContent`, Swift Charts, Audio Graphs, and exact sample tables. Network throughput is derived only from complete monotonic counters; stopped, priming, missing, and reset data use system unavailable/progress states rather than placeholder values or a start action. The recorded dark Computer Use pass covers selecting one stopped container and its Overview inspector; it does not verify statistics, logs, lifecycle changes, menus, or destructive actions. Light/narrow, keyboard/accessibility, XCUITest, and those real-engine workflows remain pending. |
 | `Views/Images/**` | Tables, inspector, local filtering, public repository discovery, pull/tag sheets, image archive export, bounded local-image run, destructive image actions | Native source implementation — partial dark real-window evidence recorded; broader verification pending | **User task:** inspect the local Docker image inventory; separately discover a public repository without initiating a pull; give one selected immutable local image an additional repository/tag alias; or create and start one container from an explicitly selected already-local image. **HIG/API read:** [Lists and tables](https://developer.apple.com/design/human-interface-guidelines/lists-and-tables), [Toolbars](https://developer.apple.com/design/human-interface-guidelines/toolbars), [Search fields](https://developer.apple.com/design/human-interface-guidelines/search-fields), [Menus](https://developer.apple.com/design/human-interface-guidelines/menus), [Sheets](https://developer.apple.com/design/human-interface-guidelines/sheets), [Alerts](https://developer.apple.com/design/human-interface-guidelines/alerts), [Form](https://developer.apple.com/documentation/swiftui/form), [DisclosureGroup](https://developer.apple.com/documentation/swiftui/disclosuregroup), [ContentUnavailableView](https://developer.apple.com/documentation/swiftui/contentunavailableview), [LabeledContent](https://developer.apple.com/documentation/swiftui/labeledcontent), and [NSSavePanel](https://developer.apple.com/documentation/appkit/nsopenpanel); Docker [image tag](https://docs.docker.com/reference/cli/docker/image/tag/) and [image remove](https://docs.docker.com/reference/cli/docker/image/rm/). The local path is a sortable selected-record `Table` plus the system inspector at `340/400/460`; the bordered table style remains a narrow system-only visual hypothesis pending current-bundle Computer Use review. The inspector is an automatic `Form`: architecture is a scalar `LabeledContent`, a consequential mismatch receives one concise Compatibility section, and secondary Repo Tags use a count-labelled `DisclosureGroup` collapsed on selection. It has no duplicate command buttons, cards, custom materials, or manual layout. Pull Image is the first, truthful local-empty-state action; Refresh is secondary. Tag Image is a document-modal system `Form` that names the selected immutable ID separately from repository and tag, then sends only Docker's local tag request; it cannot pull, push, authenticate, browse an account, or contact a registry. Selected-record archive, run, copy, tag, and removal commands live in the Image inspector/context menu or selection-aware toolbar. Removal is explicitly confirmed and always calls Docker by immutable ID without force: the app never removes containers or references behind the person's back, and preserves Docker's exact current dependent-container/additional-tag refusal in a system alert. `.searchable` filters only local images. Public discovery stays a separate explicit system sheet, with no typed remote search, automatic pull, custom registry, credential, custom glass, card, or material behavior. The recorded dark Computer Use pass covers local-image table/selection/inspector and an opened then dismissed Pull sheet; it does **not** cover public discovery, local-image run, tag, or removal. Light/dark/narrow, keyboard/focus/VoiceOver, contrast/transparency/motion, toolbar overflow, XCUITest, archive/run/remove/tag/pull workflows, and real Docker evidence remain pending. |
+
+### 2026-08-03 Local-image Run form expansion
+
+**User task:** create and start one container from the already selected immutable local
+image, with a small, reviewable amount of configuration required for ordinary local
+development: an optional container name, literal environment declarations, and fixed
+TCP/UDP host-port mappings.
+
+**Apple sources consulted:** [Sheets](https://developer.apple.com/design/human-interface-guidelines/sheets),
+[Forms](https://developer.apple.com/documentation/swiftui/form),
+[DisclosureGroup](https://developer.apple.com/documentation/swiftui/disclosuregroup),
+[Pickers](https://developer.apple.com/design/human-interface-guidelines/pickers),
+[Text fields](https://developer.apple.com/design/human-interface-guidelines/text-fields),
+[Buttons](https://developer.apple.com/design/human-interface-guidelines/buttons),
+[Confirmation dialogs](https://developer.apple.com/documentation/swiftui/view/confirmationdialog(_:ispresented:titlevisibility:actions:message:)),
+and [ProgressView](https://developer.apple.com/documentation/swiftui/progressview).
+
+**Docker sources consulted:** [`docker container run`](https://docs.docker.com/reference/cli/docker/container/run/)
+defines `--name`, `--env`, and `--publish`; [port publishing](https://docs.docker.com/engine/network/port-publishing/)
+defines the host/container relationship; [the Engine API](https://docs.docker.com/reference/api/engine/)
+defines the versioned create contract used by the client.
+
+**Native choice:** `LocalImageRunSheet` is a document-modal `NavigationStack` and
+automatic `Form`, not a miniature container-dashboard. The immutable selected image
+stays a `LabeledContent` fact. Container name is a normal `TextField`. Variable and
+port collections are count-labelled system `DisclosureGroup`s whose entries use normal
+text fields and menu `Picker`s; fixed host exposure is explicit as either loopback or
+all-interface IPv4, never inferred from Docker's all-interface default. A disabled
+Run command and an in-form corrective message prevent only incomplete local rows from
+being silently dropped. The confirmation snapshots the checked request, names its
+literal environment count and exact host-port mappings, then delegates create/start
+and current conflict/name/image errors to Docker. Progress and failure use the system
+form presentation, with raw Docker failure text selectable. The request contains only
+`Image`, optional `Env`, and—when ports exist—`ExposedPorts` plus
+`HostConfig.PortBindings`; it has no generic JSON escape hatch, pull, mounts, custom
+network, privileges/capabilities, credentials, secret store, host-environment lookup,
+or dynamic/range/publish-all port behavior.
+
+**Evidence:** source implementation and focused pure request tests are required before
+handoff. This change intentionally performs no build, live Docker mutation, or visual
+acceptance. A serialized fixture-window/XCUITest/Computer Use pass remains required to
+check the expanded/disclosed form in light and dark appearance, at narrow width, with
+keyboard and VoiceOver traversal, plus a real Engine create/start/error matrix for
+literal environment and fixed TCP/UDP publications.
 | `Views/Builds/**` | Cache-record selection, local-build command/confirmation, indeterminate progress/cancel/recovery, active-builder scope, inspector, search, global cache prune, unavailable/history state | Native source implementation — partial dark real-window evidence recorded; broader verification pending | HIG/API read: [Lists and tables](https://developer.apple.com/design/human-interface-guidelines/lists-and-tables), [Toolbars](https://developer.apple.com/design/human-interface-guidelines/toolbars), [Pickers](https://developer.apple.com/design/human-interface-guidelines/pickers), [Sheets](https://developer.apple.com/design/human-interface-guidelines/sheets), [ProgressView](https://developer.apple.com/documentation/swiftui/progressview), [Form](https://developer.apple.com/documentation/swiftui/form), [LabeledContent](https://developer.apple.com/documentation/swiftui/labeledcontent), and [ContentUnavailableView](https://developer.apple.com/documentation/swiftui/contentunavailableview). The native Cache/History picker makes two separate Buildx collections explicit: BuildKit cache is a flat operational collection, while Buildx history contains only completed-build records returned by the active builder. Each uses a sortable `Table`, native search, selection/context menu, and a system inspector. Switching to History and its refresh control invoke only the read-only `refreshBuildHistory()` path; it is never requested on app launch and cache rows are never inferred as history. Selecting a history row performs no inspection: the inspector begins as a direct `ContentUnavailableView`, then the explicit **Load Details** action runs a bounded `buildx history inspect --format=json` for that selected reported ID only. Its loading state is a cancellable system `ProgressView`; the resulting `Form`/`LabeledContent` renders only JSON fields Buildx returned, never cache-derived values, attachments, export/import/open/remove controls, or a fabricated completion measure. Only after that inspected record loads does **Load Logs** run a separate bounded `buildx history logs --progress rawjson` read for the same selected ID. It has its own cancellable `ProgressView`/error state and presents only actual stdout in a selectable native scroll view; a retained 4 MB prefix is explicitly marked rather than presented as a complete transcript. The **Active Builder** secondary-toolbar sheet is a `Form`/`LabeledContent` view of one explicit, no-`--bootstrap` inspection; its idle/error states use direct `ContentUnavailableView` actions. It deliberately does not run `buildx ls`: Docker’s bundled Buildx implementation loads every configured builder node and might contact a remote endpoint. If the private Morbstack configuration was manually changed to make a remote builder active, the explicit inspection can reach that one active builder; it never fans out to all stored builders or adopts a shell context. The only selection command is the confirmed, app-private/local-socket `buildx use default`, with neither `--default` nor `--global`; it changes only later Morbstack builds and never starts, creates, removes, inventories, or remotely selects a builder, adopts shell context/configuration, or accesses Build Cloud. A local folder is a deliberate build command: a system sheet + `Form` selects it; the confirmation states that Dockerfile instructions execute in the VM and that the app will not push. The bundled Docker/Buildx client preserves Docker’s actual context/.dockerignore semantics and streams raw JSON, so the sheet uses only an indeterminate `ProgressView` plus observed output, a standard Cancel action, and retry after an actual failure. No count-only percent or fake completion is shown. Docker exposes only a broad `POST /build/prune`; the app labels that boundary and does not offer per-record delete. The history route uses a direct `ContentUnavailableView` with a real Retry for only its loading, empty, and unavailable states. The recorded dark Computer Use pass covers only the empty-cache state and an opened then dismissed Build sheet; this new active-builder sheet has no real-window evidence yet. History records, builder check/reset, detail/log loading, confirmation, progress/cancel, failure/retry, keyboard/focus, accessibility names/help, light/narrow sheet/table/inspector behavior, and XCUITest evidence remain pending. See [`docs/builds.md`](../builds.md). |
 | `Views/Volumes/**`, `Views/Networks/**` | Tables, inspectors, context menu, search, destructive confirmation | Native rewrite staged — partial dark volume evidence recorded; broader verification pending | HIG/API read for volume archive export: [Lists and tables](https://developer.apple.com/design/human-interface-guidelines/lists-and-tables), [Toolbars](https://developer.apple.com/design/human-interface-guidelines/toolbars), [Menus](https://developer.apple.com/design/human-interface-guidelines/menus), [Panels](https://developer.apple.com/design/human-interface-guidelines/panels), [Progress indicators](https://developer.apple.com/design/human-interface-guidelines/progress-indicators), [Form](https://developer.apple.com/documentation/swiftui/form), [LabeledContent](https://developer.apple.com/documentation/swiftui/labeledcontent), [ProgressView](https://developer.apple.com/documentation/swiftui/progressview), and [NSSavePanel](https://developer.apple.com/documentation/appkit/nssavepanel). Volumes retain a sortable native table with inspector/context-menu selection. Archive export is a selected-record symbol-only secondary toolbar action with matching context/inspector action; no selection or non-local driver opens a panel or reaches the Engine. `NSSavePanel` owns destination and replacement confirmation. The typed service validates the selected local driver anew, uses only an already-local image for a temporary stopped `/data:ro` helper, streams the archive to an atomic private sibling file, removes its owned helper before publication, and never pulls, modifies, or mounts the selected volume in Finder. Its native Form sheet shows a determinate `ProgressView` only for actual Content-Length, otherwise indeterminate work plus real written bytes; cancellation returns `false` to the stream so staging/helper cleanup happens and no archive is published. Success offers Show in Finder only for the completed published destination; unsupported/missing-helper/Engine/output/cancel states retain exact error/result messaging. Multi-volume and multi-network removal reviews enumerate the exact captured names or IDs and execute only those individual Docker deletes; a count-only confirmation is not sufficient. The recorded dark Computer Use pass covers one local-volume selection and its Guest Mount Point wording; it covers no Networks interaction. Light/narrow, keyboard/accessibility, XCUITest, destructive/archive flows, and real-engine evidence remain pending for both routes. |
 | `Views/Stacks/**` | Actual Compose hierarchy, selected-record inspector, contextual lifecycle actions, selected source editing, dirty/save/discard, destructive confirmation | Native source implementation — live-window verification pending | HIG/API read: [Designing for macOS](https://developer.apple.com/design/human-interface-guidelines/designing-for-macos/), [File management](https://developer.apple.com/design/human-interface-guidelines/file-management), [Modality](https://developer.apple.com/design/human-interface-guidelines/modality), [TextEditor](https://developer.apple.com/documentation/swiftui/texteditor), [Text input and output](https://developer.apple.com/documentation/swiftui/text-input-and-output), [NSFileCoordinator](https://developer.apple.com/documentation/foundation/nsfilecoordinator), [Form](https://developer.apple.com/documentation/swiftui/form), [DisclosureGroup](https://developer.apple.com/documentation/swiftui/disclosuregroup), [Inspectors](https://developer.apple.com/documentation/swiftui/view/inspector(ispresented:content:)), [Menus](https://developer.apple.com/design/human-interface-guidelines/menus), Docker’s [environment interpolation](https://docs.docker.com/compose/how-tos/environment-variables/variable-interpolation/), [environment precedence](https://docs.docker.com/compose/how-tos/environment-variables/envvars-precedence/), and [Compose secrets](https://docs.docker.com/reference/compose-file/secrets/). Following the binding [task-shaped content guidance](NATIVE-MACOS-PLAYBOOK.md#choose-the-content-form-not-a-house-style), Compose project → service remains a native `Table(children:)` outline with an inspector `Form`, while a person-selected source document opens in a `TextEditor`; neither is a dashboard/card hierarchy. **Edit Compose File…** selects exactly one regular, non-symlink `.yaml`/`.yml` file. **Edit Project Environment File…** separately selects exactly one regular, non-symlink literal `.env` file; it never infers or opens a sibling from a project label or Compose path. The document-modal editor uses a native `Form` for source facts and provenance, count-labelled standard `DisclosureGroup`s for bounded source declarations, a plain `TextEditor` for opaque UTF-8 source, and system toolbar/menu commands. The `.env` summary shows only declaration names, source-line provenance, and empty/set/redacted state; sensitive-looking values are redacted and no summary value is displayed. A Compose YAML summary recognizes only names from a conventional top-level block-style `secrets:` map; it does not parse complex YAML or inspect secret contents. A selected `.env` opens with values withheld in a `ContentUnavailableView`; only the explicit reveal command exposes editable source for that sheet session. Save opens a standard review, then performs the existing explicit coordinated/atomic write: it retains a UTF-8 BOM and previous POSIX mode where supported and compares live bytes with the open snapshot so external source edits reject rather than get overwritten. This is source fidelity, not a Compose-environment result: the route neither evaluates source, performs interpolation, determines Docker’s precedence, accesses Keychain/Docker/registry credentials, creates a clipboard/log record, auto-saves, executes Compose, deploys/recreates/reloads services, nor alters Docker/VM/Kubernetes state. The standard `.bordered` `Table` style is a narrow native hypothesis for the automatic Tahoe style’s repeated rounded empty-row bands; it adds no custom row/selection treatment and still requires latest-bundle Computer Use review. **Validate Compose Source…** is a separate saved-YAML-only command: a second document-modal automatic `Form` names Compose’s trust boundary before it invokes the bundled Compose executable directly with bounded `config --quiet --no-interpolate --no-env-resolution --no-path-resolution` diagnostics. It starts only after confirmation, has a 15-second deadline, distinguishes error/cancellation/timeout/truncation, and calls cancellation **requested** rather than claiming externally created helpers are stopped. It never reads an inferred `.env`, inherited Docker/user credentials/configuration, Keychain, Git/SSH/proxy environment, or performs lifecycle/build/pull/deploy/digest work. See [`docs/compose-source-validation.md`](../compose-source-validation.md). Existing live-window evidence covers only the project/service outline; YAML/.env selection, redaction/reveal, editing, external-change rejection, validation, bordered-table behavior, light/narrow, keyboard/accessibility, XCUITest, and safe real-file acceptance remain pending. |
@@ -183,6 +227,34 @@ Consulted: Apple’s [file management](https://developer.apple.com/design/human-
 [`container logs`](https://docs.docker.com/reference/cli/docker/container/logs/) reference.
 The source-only pass adds no real-window evidence: save-panel, error/retry, keyboard,
 VoiceOver, light/dark/narrow, transcript filtering, follow state, and live Docker
+validation remain pending.
+
+### 2026-08-03 Buildx history-log save
+
+The task is to save exactly the already-loaded text for one selected completed Buildx
+history record, not to query a second record or suggest a complete builder/CI history.
+The existing Log tab stays a selectable native monospaced transcript; its contextual
+secondary-toolbar **Save Visible Build Log…** action appears only after Buildx returned
+nonempty retained text. It freezes that value before `NSSavePanel` opens, so destination
+selection never starts another `history logs` process. `NSSavePanel` owns the standard
+location/replacement interaction; an atomic write failure receives a system retry alert
+that reuses the same frozen document.
+
+The `.log` preamble preserves selected Buildx record ID/name/status/created time, the
+save time, the exact `history logs --progress rawjson` source, no-log-filter scope, and
+the 4 MB retained-prefix state. It explicitly distinguishes a truncated prefix from
+output that stayed under the app limit, and never calls either one complete Buildx,
+Docker, CI, or build history. The body after the preamble is the exact already-loaded
+Buildx text; saving does not reformat, reload, or merge a different transcript.
+
+Consulted: Apple’s [file management](https://developer.apple.com/design/human-interface-guidelines/file-management),
+[toolbars](https://developer.apple.com/design/human-interface-guidelines/toolbars), and
+[`NSSavePanel`](https://developer.apple.com/documentation/appkit/nssavepanel), plus Docker
+Buildx [history logs](https://docs.docker.com/reference/cli/docker/buildx/history/logs/),
+[history inspect](https://docs.docker.com/reference/cli/docker/buildx/history/inspect/), and
+[history list](https://docs.docker.com/reference/cli/docker/buildx/history/ls/) documentation.
+This source-only pass has no real-window evidence; inspector-toolbar discovery/overflow,
+save panel, error/retry, keyboard, VoiceOver, light/dark/narrow, and live Buildx history
 validation remain pending.
 
 ### 2026-08-03 Stacks hierarchy correction
@@ -734,6 +806,41 @@ separately approved capture workflow later, but it does not replace XCUITest's s
 accessibility assertions or Computer Use's human review. No self-cached image can pass a
 titlebar, toolbar, sidebar, material, inspector, focus, or Liquid Glass acceptance gate.
 
+### Container published-port address actions — 2026-08-03
+
+- **User task:** copy or hand one selected container's concrete local browser address
+  to another app. This is a selected-record command on a reported port mapping, not a
+  service-discovery, protocol-detection, or health-check task.
+- **HIG/API read:** Apple [Menus](https://developer.apple.com/design/human-interface-guidelines/menus),
+  [Context menus](https://developer.apple.com/design/human-interface-guidelines/context-menus),
+  [Accessibility](https://developer.apple.com/design/human-interface-guidelines/accessibility),
+  SwiftUI [Menu](https://developer.apple.com/documentation/swiftui/menu),
+  [OpenURLAction](https://developer.apple.com/documentation/swiftui/openurlaction),
+  [EnvironmentValues.openURL](https://developer.apple.com/documentation/swiftui/environmentvalues/openurl),
+  and [accessibilityLabel(_:)](https://developer.apple.com/documentation/swiftui/view/accessibilitylabel(_:)).
+- **Native choice:** the selected-container inspector remains its system `Form` and
+  each port remains a `LabeledContent` fact. An eligible mapping adds a standard
+  `Menu` with **Copy Address** and **Open in Browser**; the selected row's native
+  context menu exposes the same actions, nested by exact address when more than one
+  eligible mapping exists. `openURL` delegates browser handoff to SwiftUI/system
+  conventions. No custom launch control, port card, or in-content toolbar is added.
+- **Truth and unavailable behavior:** Morbstack preserves Docker's literal reported
+  host address and port in the inspector. It derives an `http` URL with
+  `URLComponents` only for a TCP mapping explicitly bound to `127.0.0.1` or `::1`
+  with a valid host port. Wildcard/LAN, UDP, host-network/incomplete, malformed, and
+  otherwise non-loopback mappings show their factual reason that browser actions are
+  unavailable; they never receive a fabricated loopback link. The resulting address
+  is not a promise about service protocol, reachability, or health, and the app does
+  not probe it.
+- **Accessibility and evidence:** the inspector menu has a specific address label and
+  help text while textual menu commands retain their native labels. Focused pure
+  `PortMappingTests` cover IPv4/IPv6 loopback derivation and every unavailable class.
+  This parallel source lane runs no build, test, Docker/VM, app launch, XCUITest, or
+  Computer Use review. Before acceptance, the evidence owner must inspect one literal
+  loopback TCP mapping, wildcard/LAN and UDP/incomplete mapping messages, context-menu
+  multiple-address ordering, keyboard/VoiceOver traversal, and light/dark/narrow
+  inspector behavior in the real bundled window.
+
 ### Container resource history handoff: selected native chart — 2026-08-03
 
 - **User task:** inspect how one selected running container’s CPU usage, memory use, or
@@ -816,3 +923,140 @@ titlebar, toolbar, sidebar, material, inspector, focus, or Liquid Glass acceptan
   XCUITest, app launch, Docker/VM, or Computer Use operation ran here. The serialized
   evidence owner must run that test and review real light/dark, narrow/expanded toolbar,
   keyboard, VoiceOver, and menu-bar-extra behavior before acceptance.
+
+### Networks interaction, accessibility, and destructive-review correction — 2026-08-03
+
+- **User task:** select a Docker network, inspect its authoritative record, then safely
+  attach or detach one eligible container, create a bounded bridge network, or remove a
+  selected empty network. This is a selected-record operations workflow, not a generic
+  network editor or a dashboard.
+- **HIG/API read:** Apple [Designing for macOS](https://developer.apple.com/design/human-interface-guidelines/designing-for-macos/),
+  [Lists and tables](https://developer.apple.com/design/human-interface-guidelines/lists-and-tables),
+  [Menus](https://developer.apple.com/design/human-interface-guidelines/menus),
+  [Context menus](https://developer.apple.com/design/human-interface-guidelines/context-menus),
+  [Alerts](https://developer.apple.com/design/human-interface-guidelines/alerts), and
+  SwiftUI [Picker](https://developer.apple.com/documentation/swiftui/picker),
+  [Accessibility modifiers](https://developer.apple.com/documentation/swiftui/view-accessibility),
+  and [accessible descriptions](https://developer.apple.com/documentation/swiftui/accessible-descriptions).
+- **Native choice:** the route remains a sortable selectable system `Table` with the
+  selected record in its system `Form` inspector. The inspector remains the complete
+  factual explanation for unavailable operations. Its same eligible connect/disconnect
+  commands also appear in the table’s standard context menu, which is the compact-window
+  selected-record path while the standard View-menu inspector command remains available.
+  No custom action strip, hover control, manual overflow, or new network setting is
+  introduced. The connect sheet stays a document-modal `Form` and shifts initial
+  keyboard focus to its container `Picker` when a choice is meaningful, otherwise to
+  the optional aliases field; an in-flight request disables interactive dismissal.
+- **Accessibility and unavailable behavior:** standard textual controls keep SwiftUI’s
+  built-in role/value semantics. Context-specific VoiceOver labels and help identify the
+  selected network for connect, disconnect, and removal, while the aliases input names
+  both its optionality and target. One shared presentation policy now supplies the exact
+  visible, help, and testable reason for an unsupported network scope, no eligible
+  running container, swarm disconnect, or stopped-only membership. Commands the Engine
+  would reject are absent from the contextual shortcut instead of being presented as a
+  misleading enabled action.
+- **Destructive behavior and evidence:** disconnect review says Docker detaches only
+  the named container and does not stop/remove it or alter other attachments. Removal
+  names the exact network, says it is permanent, says containers are not deleted, and
+  acknowledges Docker can reject a newly in-use record. The unused-network review makes
+  the same no-container-deletion boundary explicit. Focused pure
+  `TrackCResourceListTests` cover each availability explanation; this parallel
+  source-only lane ran no build, test, Docker/VM, app launch, XCUITest, or Computer Use.
+  Before acceptance, an evidence owner must use keyboard-only table/context-menu and
+  sheet traversal, VoiceOver each selected-record command and unavailable reason, open
+  then cancel the destructive reviews, inspect narrow View-menu/context reachability,
+  and review light/dark at normal and compact widths in the real bundled app.
+
+### Local Docker image archive load — 2026-08-03
+
+- **User task:** choose one local Docker image archive, review its concrete document
+  scope, and load it into the current local Engine. This is a document-transfer task,
+  not a local-image record action, archive browser, migration plan, or registry flow.
+- **HIG/API read:** Apple [File management](https://developer.apple.com/design/human-interface-guidelines/file-management),
+  [Menus](https://developer.apple.com/design/human-interface-guidelines/menus),
+  [Toolbars](https://developer.apple.com/design/human-interface-guidelines/toolbars),
+  [Sheets](https://developer.apple.com/design/human-interface-guidelines/sheets),
+  [Alerts](https://developer.apple.com/design/human-interface-guidelines/alerts), and
+  [Progress indicators](https://developer.apple.com/design/human-interface-guidelines/progress-indicators),
+  plus AppKit [`NSOpenPanel`](https://developer.apple.com/documentation/appkit/nsopenpanel),
+  SwiftUI [`Form`](https://developer.apple.com/documentation/swiftui/form),
+  [`LabeledContent`](https://developer.apple.com/documentation/swiftui/labeledcontent),
+  [`confirmationDialog`](https://developer.apple.com/documentation/swiftui/view/confirmationdialog(_:ispresented:titlevisibility:actions:message:)),
+  and [`ProgressView`](https://developer.apple.com/documentation/swiftui/progressview).
+  Docker semantics were checked against [ImageLoad](https://docs.docker.com/reference/api/engine/version/v1.46/#tag/Image/operation/ImageLoad)
+  and [`docker image load`](https://docs.docker.com/reference/cli/docker/image/load/).
+- **Native choice:** Images offers **Load Image Archive…** from the standard Image
+  command menu, a compact native Image Archive toolbar `Menu`, and the selected-image
+  inspector; unlike export it remains reachable for an empty image inventory. The
+  system `NSOpenPanel` selects one uncompressed or Docker-supported compressed tar
+  document (`.tar`, gzip, bzip2, xz, or zstd filename forms), then a document-modal
+  `NavigationStack` + automatic `Form` presents path, current byte count, fixed local
+  Engine scope, and the fact that Docker—not Morbstack—decides archive images and tags.
+  A standard confirmation dialog is the only mutation boundary. The transfer sheet is
+  an automatic `Form` with `LabeledContent` and real determinate source-byte progress;
+  after all source bytes are sent it becomes an indeterminate system `ProgressView` for
+  Docker's own loading phase. No custom transfer dashboard, card, material, drop zone,
+  hand-drawn progress bar, registry selector, or fake result surface is introduced.
+- **Truth and cancellation:** `ImageArchiveImporter` streams only the selected file to
+  `POST /images/load?quiet=1`, opening and `fstat`-ing the same descriptor used for the
+  request body. It performs no archive-entry inspection, JSON request, Docker CLI/config/
+  credential access, registry request, pull, push, or tag inference. Review records size
+  and POSIX device/inode identity; confirmation opens once, requires both facts to match,
+  and streams that descriptor, so a path replacement (including same-size) rejects before
+  any Engine socket opens. It does not claim a content hash or immutable snapshot against
+  in-place writes to that file. The API-1.48+ Docker `--platform` selection is intentionally
+  unavailable in this bounded document workflow; it asks Docker for its default load behavior.
+  `quiet=1` asks Docker to
+  suppress ordinary progress but does not cap the transport response; only the displayed
+  error sentence is size-limited. Source-byte Cancel closes the
+  incomplete request; because Docker could have consumed a prefix, the cancellation
+  notice says to inspect local images rather than claiming no image loaded. Once all
+  bytes are sent, Cancel is absent while Docker may unpack/register the archive; the
+  result reports only Docker's response, not a guessed name/tag list. Success, failure,
+  and cancellation all request an inventory refresh.
+- **Evidence:** focused `ImageArchiveImportRequestTests` cover regular/nonempty,
+  directory, empty, size-changed-before-connect, same-size-replacement, and compressed
+  filename-selection source
+  behavior without an Engine. This source lane ran no build, test, Docker/VM operation,
+  app launch, XCUITest, or Computer Use review. Before acceptance, the evidence owner
+  must inspect the Image menu and toolbar-menu reachability at narrow width, Open-panel
+  type filtering, review/cancel/complete-wait/success/error flows, keyboard and VoiceOver
+  order, light/dark contrast, and a real local `docker save` → app load round trip in the
+  current signed bundle.
+
+### Developer fixture operation boundary — 2026-08-03
+
+- **User task:** deterministic fixture data must remain visibly non-live and must never
+  reach a host socket, bundled command, lifecycle mutation, or source-document chooser.
+  Fixture data remains useful for route and hierarchy review, but cannot claim that a
+  plausible-looking Docker record is actionable.
+- **HIG/API read:** Apple [Designing for macOS](https://developer.apple.com/design/human-interface-guidelines/designing-for-macos/),
+  [Toolbars](https://developer.apple.com/design/human-interface-guidelines/toolbars),
+  [Menus](https://developer.apple.com/design/human-interface-guidelines/menus),
+  [Status and feedback](https://developer.apple.com/design/human-interface-guidelines/status-and-feedback),
+  and SwiftUI [`ContentUnavailableView`](https://developer.apple.com/documentation/swiftui/contentunavailableview),
+  [`Form`](https://developer.apple.com/documentation/swiftui/form), and
+  [`disabled(_:)`](https://developer.apple.com/documentation/swiftui/view/disabled(_:)).
+- **Native choice:** the existing fixture window provenance remains the global truth
+  signal. A shared `AppModel.permitsExternalOperations` predicate disables standard
+  named toolbar/menu commands with an explanatory help string; no warning card, custom
+  overlay, fake progress, or replacement chrome is added. Builds keeps its injected
+  cache list readable but makes its Buildx History segment unavailable and presents a
+  standard `ContentUnavailableView` if restored state asks for it. The Buildx builder,
+  prune, and local-build commands are unavailable. Stacks keeps its native `List` /
+  `OutlineGroup` and `Form` inspectors readable, adds a plain Form section explaining
+  the boundary, and disables Compose source selection plus service/project lifecycle
+  commands before `NSOpenPanel`, a direct socket, or a process can be reached.
+- **Truth and defense in depth:** every affected action handler rechecks the shared
+  predicate, including history refresh/detail/log requests, builder inspection and
+  selection, local-build preparation/start, container/project lifecycle paths, and both
+  source choosers. Thus state restoration, accessibility invocation, or a stale visible
+  control cannot turn fixture records into host operations. Ordinary launches preserve
+  their former live behavior.
+- **Evidence:** added a focused `LaunchOptionsTests` assertion for fixture versus live
+  operation permission. This source-only lane ran no build, test, Docker/VM, app launch,
+  XCUITest, or Computer Use review. Before acceptance, the serialized evidence owner
+  must run the focused test, launch `--tour-fixtures`, inspect Builds and Stacks in light
+  and dark at ordinary and narrow widths, confirm disabled-controls help and VoiceOver
+  wording, attempt the unavailable routes, and verify that no host socket, process, or
+  document panel is reached.
