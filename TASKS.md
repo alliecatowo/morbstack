@@ -159,7 +159,7 @@ the author.
 | ID | Ticket | Severity | State |
 | --- | --- | --- | --- |
 | UI-1 | Fixture-mode watermark — a `--tour-fixtures` window is indistinguishable from live and its footer asserts "Engine running" while never dialling the engine | blocker | `open` |
-| UI-2 | Port renders as `18,099` — thousands separator on a port | blocker | `in-flight` (`codex/ui-ui2-port-display`) |
+| UI-2 | Port renders as `18,099` — thousands separator on a port | blocker | `done` (string-typed inspector display + focused regression) |
 | UI-3 | Add Show/Hide Sidebar to the View menu | major | `open` |
 | UI-4 | Unmatched search must use `ContentUnavailableView.search` | major | `open` |
 | UI-5 | Selecting a container must expose inspector content | major | `open` |
