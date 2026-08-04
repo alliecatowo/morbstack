@@ -169,6 +169,28 @@ pub const GUEST_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:
 /// at `/var/lib/docker`.
 const DOCKER_RAMDISK_ENV: &str = "DOCKER_RAMDISK";
 
+/// dockerd's documented switch for lowering the minimum API version it
+/// accepts, honoured by upstream moby since 25.0.
+///
+/// Stock moby 29 defaults its minimum to 1.44 and answers older version
+/// probes with HTTP 400 — an **upstream default, not Morbstack behaviour**.
+/// That default breaks a large installed base silently: testcontainers-java
+/// <= 1.20.x (docker-java <= 3.4.0) probes `GET /v1.32/info` during daemon
+/// discovery, treats the 400 as "not a working daemon", and fails over to
+/// whatever other engine is on the machine without a word to the user — a
+/// green test suite against the wrong Docker. No client-side environment
+/// variable rescues those versions, so the daemon has to accept the probe.
+///
+/// 1.24 is upstream's hard floor (`MinSupportedAPIVersion`); the daemon
+/// refuses to start with anything lower, and anything higher re-breaks some
+/// band of old clients for no gain. Lowering the minimum only *widens* what
+/// is accepted — modern clients still negotiate the highest mutual version
+/// exactly as before — which is also why this is unconditional rather than a
+/// config toggle: the failure it prevents is silent and severe, and the cost
+/// is accepting API verbs the engine already implements.
+const DOCKER_MIN_API_VERSION_ENV: &str = "DOCKER_MIN_API_VERSION";
+const DOCKER_MIN_API_VERSION: &str = "1.24";
+
 /// Morbstack owns the default Docker bridge, so keep its gateway stable.
 ///
 /// Containers on Docker's legacy default bridge reach the guest through this
@@ -297,7 +319,10 @@ pub fn default_services(docker_data_on_disk: bool) -> Vec<ServiceSpec> {
             name: "dockerd",
             path: "/usr/local/bin/dockerd",
             args: dockerd_args,
-            env: vec![(DOCKER_RAMDISK_ENV, "1")],
+            env: vec![
+                (DOCKER_RAMDISK_ENV, "1"),
+                (DOCKER_MIN_API_VERSION_ENV, DOCKER_MIN_API_VERSION),
+            ],
             gate: None,
         },
     ]
@@ -2058,6 +2083,27 @@ mod tests {
                     .find(|(k, _)| *k == DOCKER_RAMDISK_ENV)
                     .map(|(_, v)| *v),
                 Some("1")
+            );
+        }
+    }
+
+    #[test]
+    fn dockerd_accepts_old_api_clients() {
+        // Regression: stock moby 29's default minimum API version (1.44)
+        // 400s the `GET /v1.32/info` probe testcontainers-java <= 1.20.x
+        // uses for daemon discovery, and the library then silently fails
+        // over to another engine on the machine. DOCKER_MIN_API_VERSION at
+        // upstream's 1.24 floor keeps those clients on Morbstack.
+        for on_disk in [true, false] {
+            let services = default_services(on_disk);
+            let dockerd = services.iter().find(|s| s.name == "dockerd").unwrap();
+            assert_eq!(
+                dockerd
+                    .env
+                    .iter()
+                    .find(|(k, _)| *k == DOCKER_MIN_API_VERSION_ENV)
+                    .map(|(_, v)| *v),
+                Some("1.24")
             );
         }
     }
