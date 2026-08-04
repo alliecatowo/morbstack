@@ -5,7 +5,7 @@
 //
 // A real `Table` — sortable columns, a real `Dangling` section instead of a floating
 // footer band — replaces the hand-rolled grid, the pull field moves off a second bar of
-// its own and into the toolbar's `+` control, and a detail pane carries the digest, the
+// its own and into the toolbar's `+` control, and a detail pane carries the image ID,
 // full tag list and the architecture advice that used to live in a popover. Selection
 // reveals those facts in the system `.inspector(isPresented:)` trailing column.
 
@@ -88,7 +88,7 @@ struct ImagesRootView: View {
     /// launches for a trailing-column inspector, so it is not persisted here.
     @State private var showsInspector = true
     /// Tags are supporting metadata. Keep them collapsed until a person asks for the
-    /// full repository history rather than making every selected image read as a list.
+    /// full set of current references rather than making every selected image read as a list.
     @State private var repoTagsExpanded = false
 
     @State private var removal: ImageRemovalConfirmation?
@@ -643,34 +643,30 @@ struct ImagesRootView: View {
         if let image = selectedImage {
             Form {
                 Section("Image") {
-                    LabeledContent("Repository") {
+                    LabeledContent("Reference") {
                         Text(image.repoTags.first ?? "Untagged layer")
                             .textSelection(.enabled)
                             .lineLimit(2)
                             .truncationMode(.middle)
                     }
-                    LabeledContent("Size", value: Formatters.bytesString(image.size))
-                    LabeledContent(
-                        "Used by",
-                        value: image.containersUsing < 0
-                            ? "not reported"
-                            : image.containersUsing == 0
-                                ? "no containers"
-                                : "\(image.containersUsing) container\(image.containersUsing == 1 ? "" : "s")")
-                    architectureField(image)
-                    LabeledContent("Content digest") {
+                    LabeledContent("Image ID") {
                         Text(image.id)
                             .font(.system(.callout, design: .monospaced))
                             .textSelection(.enabled)
                             .lineLimit(1)
                             .truncationMode(.middle)
                     }
+                    LabeledContent("Size", value: Formatters.bytesString(image.size))
+                    architectureField(image)
+                }
+
+                Section("History") {
                     LabeledContent("Created", value: Formatters.absoluteDate(image.createdAt))
                 }
 
                 // Tags are secondary facts for the selected image. A direct system
                 // disclosure avoids wrapping one control in an empty form section.
-                if !image.repoTags.isEmpty {
+                if !image.isDangling, !image.repoTags.isEmpty {
                     DisclosureGroup("Repo Tags (\(image.repoTags.count))", isExpanded: $repoTagsExpanded) {
                         ForEach(image.repoTags, id: \.self) { tag in
                             Text(tag)
@@ -680,23 +676,88 @@ struct ImagesRootView: View {
                     }
                 }
 
+                containerReferencesSection(for: image)
                 compatibilitySection(for: image)
             }
-            // Use the system's compact trailing-inspector form columns. There is no
-            // custom inspector surface, card, background, or row treatment here.
-            .formStyle(.columns)
+            // The automatic system Form chooses the current macOS inspector alignment.
+            // There is no custom surface, card, background, property grid, or row
+            // treatment here.
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         } else {
             ContentUnavailableView {
-                Label("No Image Selected", systemImage: "square.on.square")
+                Label("Select an Image", systemImage: "square.on.square")
             } description: {
-                Text("Pick an image to see its platform, digest and tags.")
+                Text("Select a local image to inspect its identity, history, tags, and container references.")
             } actions: {
                 Button("Select First Image") {
                     selection = sections.tagged.first?.id ?? sections.dangling.first?.id
                 }
             }
         }
+    }
+
+    /// Image-list `Containers` is the source of truth for the count. Container names
+    /// are shown only when the separate inventory still has an exact image ID or tag
+    /// reference; retagging and refresh skew become an honest reconciliation message.
+    @ViewBuilder
+    private func containerReferencesSection(for image: ImageSummary) -> some View {
+        let usage = TrackCImageInspector.containerUsage(for: image, in: model.containers)
+
+        Section("Container References") {
+            switch usage {
+            case .unreported(let known):
+                LabeledContent("Reported use", value: "Not reported")
+                if known.isEmpty {
+                    Text("Docker did not report container usage for this image.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    containerReferenceRows(known)
+                    Text("Docker did not report a total. The listed containers match the current image ID or tag exactly.")
+                        .foregroundStyle(.secondary)
+                }
+
+            case .none:
+                LabeledContent("Reported use", value: "No containers")
+
+            case .complete(let known):
+                LabeledContent("Reported use", value: containerCountDescription(known.count))
+                containerReferenceRows(known)
+
+            case .incomplete(let known, let reported):
+                LabeledContent("Reported use", value: containerCountDescription(reported))
+                containerReferenceRows(known)
+                Text("\(reported - known.count) referenced container\(reported - known.count == 1 ? "" : "s") are not present in the current container inventory. Refresh to reconcile the two Docker responses.")
+                    .foregroundStyle(.secondary)
+
+            case .inconsistent(let known, let reported):
+                LabeledContent("Reported use", value: containerCountDescription(reported))
+                containerReferenceRows(known)
+                Text("The current container inventory has \(containerCountDescription(known.count)), but Docker's image inventory reports \(containerCountDescription(reported)). Refresh to reconcile the two Docker responses.")
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func containerReferenceRows(_ containers: [ContainerSummary]) -> some View {
+        ForEach(containers) { container in
+            LabeledContent("Container") {
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text(container.displayName)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text(container.statusDisplay())
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+            }
+        }
+    }
+
+    private func containerCountDescription(_ count: Int) -> String {
+        "\(count) container\(count == 1 ? "" : "s")"
     }
 
     /// The platform is a single selected-record fact; compatibility guidance has its
@@ -709,9 +770,10 @@ struct ImagesRootView: View {
                     .font(.system(.callout, design: .monospaced))
                     .textSelection(.enabled)
             } else {
-                // The lookup is commonly still in flight when the inspector first
-                // appears. This remains a scalar fact, not a custom loading row.
-                Text("Checking…")
+                // A missing image-list descriptor is not evidence of the native
+                // architecture. The selection task triggers a bounded inspection, but
+                // that request can fail or an older engine can omit the fact entirely.
+                Text("Not reported")
                     .foregroundStyle(.secondary)
             }
         }

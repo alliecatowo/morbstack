@@ -31,6 +31,13 @@ final class TrackCResourceListTests: XCTestCase {
             size: size, refCount: refCount)
     }
 
+    private func container(_ name: String, image: String) -> ContainerSummary {
+        ContainerSummary(
+            id: "container-\(name)", names: [name], displayName: name, image: image,
+            state: "running", status: "Up 1 minute", composeProject: nil,
+            composeService: nil, ports: [], createdAt: .distantPast)
+    }
+
     private func network(_ name: String, driver: String = "bridge", containers: Int = 0) -> NetworkSummary {
         NetworkSummary(id: "net-\(name)", name: name, driver: driver, scope: "local", containers: containers)
     }
@@ -58,6 +65,55 @@ final class TrackCResourceListTests: XCTestCase {
     func testSearchMatchesAnyTagNotJustTheFirst() {
         let subject = image(id: "sha256:aa", tags: ["nginx:latest", "nginx:1.25"])
         XCTAssertTrue(TrackCImageList.matches(subject, query: "1.25"))
+    }
+
+    // MARK: - Selected-image container references
+
+    func testInspectorMatchesOnlyExactCurrentTagsOrTheFullImageID() {
+        let subject = image(id: "sha256:deadbeef", tags: ["nginx:latest", "nginx:1.27"], used: 2)
+        let usage = TrackCImageInspector.containerUsage(
+            for: subject,
+            in: [
+                container("tagged", image: "nginx:latest"),
+                container("by-id", image: "sha256:deadbeef"),
+                container("other-tag", image: "nginx:1.26"),
+                container("similar-id", image: "sha256:deadbeef00"),
+            ])
+
+        XCTAssertEqual(
+            usage,
+            .complete([container("tagged", image: "nginx:latest"), container("by-id", image: "sha256:deadbeef")]),
+            "A partial tag or ID match could incorrectly present another image's container as a dependency.")
+    }
+
+    func testInspectorKeepsAnUnreportedContainerCountDistinctFromZero() {
+        let subject = image(id: "sha256:deadbeef", tags: ["nginx:latest"], used: -1)
+
+        XCTAssertEqual(
+            TrackCImageInspector.containerUsage(for: subject, in: []),
+            .unreported(known: []))
+    }
+
+    func testInspectorReportsMissingOrInconsistentContainerInventoryTruthfully() {
+        let subject = image(id: "sha256:deadbeef", tags: ["nginx:latest"], used: 2)
+        let known = container("web", image: "nginx:latest")
+
+        XCTAssertEqual(
+            TrackCImageInspector.containerUsage(for: subject, in: [known]),
+            .incomplete(known: [known], reported: 2))
+        XCTAssertEqual(
+            TrackCImageInspector.containerUsage(for: subject, in: [
+                known,
+                container("worker", image: "sha256:deadbeef"),
+                container("cron", image: "nginx:latest"),
+            ]),
+            .inconsistent(
+                known: [
+                    known,
+                    container("worker", image: "sha256:deadbeef"),
+                    container("cron", image: "nginx:latest"),
+                ],
+                reported: 2))
     }
 
     // MARK: - Image sorting

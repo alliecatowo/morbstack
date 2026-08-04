@@ -97,6 +97,59 @@ enum TrackCImageList {
     }
 }
 
+// MARK: - Selected-image dependencies
+
+/// The container relationship shown by the selected-image inspector.
+///
+/// Docker's image list supplies the authoritative reference count, while the container
+/// inventory can supply names only when a container's image reference exactly matches a
+/// current tag or the full image ID. Retagging and independently refreshed inventories
+/// can make those two views disagree, so the UI represents that disagreement instead of
+/// inventing a complete dependency list.
+enum TrackCImageInspector {
+
+    enum ContainerUsage: Equatable {
+        /// Docker omitted the image's `Containers` count. The names, if any, are still
+        /// exact matches from the current container inventory, not a total.
+        case unreported(known: [ContainerSummary])
+        case none
+        case complete([ContainerSummary])
+        /// Docker reported more references than are present in the current container
+        /// inventory. The missing references cannot safely be named.
+        case incomplete(known: [ContainerSummary], reported: Int)
+        /// The inventories disagree in the other direction, so neither count should be
+        /// presented as a complete dependency truth.
+        case inconsistent(known: [ContainerSummary], reported: Int)
+    }
+
+    static func containerUsage(
+        for image: ImageSummary,
+        in containers: [ContainerSummary]
+    ) -> ContainerUsage {
+        let currentReferences = Set(
+            image.repoTags.filter { !$0.isEmpty && $0 != "<none>:<none>" }
+        )
+        let known = containers.filter { container in
+            container.image == image.id || currentReferences.contains(container.image)
+        }
+
+        switch image.containersUsing {
+        case ..<0:
+            return .unreported(known: known)
+        case 0 where known.isEmpty:
+            return .none
+        case 0:
+            return .inconsistent(known: known, reported: 0)
+        case let reported where reported == known.count:
+            return .complete(known)
+        case let reported where known.count < reported:
+            return .incomplete(known: known, reported: reported)
+        default:
+            return .inconsistent(known: known, reported: image.containersUsing)
+        }
+    }
+}
+
 // MARK: - Pull log
 
 enum TrackCPullLog {
