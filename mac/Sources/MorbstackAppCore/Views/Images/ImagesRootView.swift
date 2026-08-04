@@ -496,6 +496,11 @@ struct ImagesRootView: View {
             TableColumn("Repository", sortUsing: ImageTableComparator(key: .repository)) { image in
                 repositoryCell(image)
             }
+            // Repository is the primary identity for this inventory. It must retain a
+            // readable minimum when the trailing system inspector is visible; the
+            // native Table can then manage any remaining overflow rather than reducing
+            // each record to a single character.
+            .width(min: 180, ideal: 260)
             TableColumn("Tag", sortUsing: ImageTableComparator(key: .tag)) { image in
                 Text(image.isDangling ? "—" : image.tag)
                     .foregroundStyle(.secondary)
