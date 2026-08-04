@@ -444,6 +444,18 @@ final class DockerFramedRelayTests: XCTestCase {
             + "Content-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\n\r\n" + body
     }
 
+    private static func chunked(_ chunks: [Data]) -> Data {
+        var wire = Data()
+        for chunk in chunks {
+            wire.append(Data(String(chunk.count, radix: 16).utf8))
+            wire.append(Data("\r\n".utf8))
+            wire.append(chunk)
+            wire.append(Data("\r\n".utf8))
+        }
+        wire.append(Data("0\r\n\r\n".utf8))
+        return wire
+    }
+
     /// **The test whose absence let the defect ship.**
     ///
     /// A `docker` CLI invocation pings and then reuses the same connection for the
@@ -675,6 +687,70 @@ final class DockerFramedRelayTests: XCTestCase {
         let relayed = readAvailable(wired.guest, atLeast: request.count, timeout: 15)
         XCTAssertEqual(relayed.count, request.count)
         XCTAssertEqual(Data(relayed.dropFirst(headLength)), payload)
+
+        wired.relay.cancel()
+        wait(for: [wired.done], timeout: 10)
+    }
+
+    /// `docker cp` uploads a tar stream with `PUT /archive`, then downloads one with
+    /// `GET /archive`. Neither direction has a JSON envelope for the proxy to own:
+    /// chunk framing, tar bytes, and the path-stat response metadata must remain
+    /// opaque. A following request proves the chunked upload did not desynchronise
+    /// the shared HTTP/1.1 connection.
+    func testChunkedContainerArchiveUploadAndDownloadStayByteExactOnKeepAlive() throws {
+        let wired = try makeRelay()
+        let tar = Data([
+            0x75, 0x73, 0x74, 0x61, 0x72, 0x00, 0x0A, 0x00,
+            0xFF, 0x00, 0x72, 0x61, 0x77, 0x0D, 0x0A, 0x62,
+        ])
+        let uploadBody = Self.chunked([
+            Data(tar.prefix(5)),
+            Data(tar.dropFirst(5)),
+        ])
+        var upload = Data((
+            "PUT /v1.47/containers/abc/archive?path=%2Fwork HTTP/1.1\r\n"
+                + "Host: morbstack\r\nContent-Type: application/x-tar\r\n"
+                + "Transfer-Encoding: chunked\r\n\r\n").utf8)
+        upload.append(uploadBody)
+        write(upload, to: wired.client)
+        XCTAssertEqual(
+            readAvailable(wired.guest, atLeast: upload.count),
+            upload,
+            "a chunked tar upload must reach the Engine without decoding or re-chunking")
+
+        let extracted = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+        write(extracted, to: wired.guest)
+        XCTAssertEqual(readAvailable(wired.client, atLeast: extracted.utf8.count), Data(extracted.utf8))
+
+        let download = Data((
+            "GET /v1.47/containers/abc/archive?path=%2Fwork HTTP/1.1\r\n"
+                + "Host: morbstack\r\n\r\n").utf8)
+        write(download, to: wired.client)
+        XCTAssertEqual(readAvailable(wired.guest, atLeast: download.count), download)
+
+        let downloadedBody = Self.chunked([Data(tar.prefix(9)), Data(tar.dropFirst(9))])
+        var downloaded = Data((
+            "HTTP/1.1 200 OK\r\nContent-Type: application/x-tar\r\n"
+                + "Transfer-Encoding: chunked\r\n"
+                + "X-Docker-Container-Path-Stat: eyJuYW1lIjoid29yayJ9\r\n\r\n").utf8)
+        downloaded.append(downloadedBody)
+        write(downloaded, to: wired.guest)
+        XCTAssertEqual(
+            readAvailable(wired.client, atLeast: downloaded.count),
+            downloaded,
+            "a tar download and Docker's path-stat header must be relayed unchanged")
+
+        write(Self.ping, to: wired.client)
+        XCTAssertEqual(
+            readAvailable(wired.guest, atLeast: Self.ping.utf8.count),
+            Data(Self.ping.utf8),
+            "the request after a chunked archive upload must remain framed")
+        XCTAssertEqual(policy.seen.map { $0.head.target }, [
+            "/v1.47/containers/abc/archive?path=%2Fwork",
+            "/v1.47/containers/abc/archive?path=%2Fwork",
+            "/_ping",
+        ])
+        XCTAssertTrue(policy.seen.allSatisfy { $0.body == nil }, "archive bodies must never be inspected")
 
         wired.relay.cancel()
         wait(for: [wired.done], timeout: 10)
