@@ -12,6 +12,23 @@ Status: `open` · `in-flight` · `decided` · `done` · `blocked`
 
 ---
 
+## Current Codex swarm
+
+- **Preserved Claude baseline:** `code/native-content-continuation` at `7158f5d`
+  (*Checkpoint Claude consolidation audit baseline*).
+- **Active integration branch:** `codex/claude-continuation`, forked directly from
+  that baseline. New work uses `codex/<epic>-<ticket>` branches when isolated
+  worktrees are available; shared-worktree agents return scoped handoffs to this
+  integration branch instead.
+- **Lane owner:** the integration agent alone runs package builds, guest-image
+  work, daemon/app lifecycle, XCUITest, and Docker acceptance. Parallel agents
+  may audit, research, write isolated source, and run static checks only.
+- **Next planning gate:** reconcile the completed engine matrix and audit board,
+  then start non-machine tickets in parallel while the machine lane is reserved
+  for an explicit, controlled guest/runtime acceptance pass.
+
+---
+
 ## Spikes — decisions that reshape other tickets
 
 ### SP-1 · Docker proxy: policy for bodies too large to buffer · `in-flight`

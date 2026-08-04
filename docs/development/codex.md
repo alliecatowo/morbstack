@@ -53,6 +53,32 @@ Use the smallest command that proves the change. `mise run app` assembles and si
 application bundle, while `mise run run-daemon` starts a long-running development daemon;
 assign both to the integration lane when several agents are active.
 
+## Branch and swarm workflow
+
+Keep a Claude-consolidated checkpoint immutable, then make all new Codex work explicit
+and reviewable below it:
+
+1. Inspect the current worktree and commit every intentional handoff artifact on the
+   consolidation branch before beginning new work. Never silently absorb another agent's
+   uncommitted changes into a feature commit.
+2. Create `codex/<source>-continuation` from that exact checkpoint (for example,
+   `codex/claude-continuation`). It is the integration branch for the next work wave.
+3. Give each independently reviewable ticket its own branch when worktrees are available:
+   `codex/<epic>-<ticket>` (for example, `codex/engine-ports-01`). A branch may name two
+   ticket numbers only when the changes share one inseparable seam; otherwise use separate
+   branches and integrate them deliberately.
+4. In a shared-worktree agent session, agents must not switch branches or commit. Give them
+   a non-overlapping file/behavior scope, have them return an evidence-backed handoff, and
+   let the integration owner apply/commit that work on the active `codex/` branch.
+5. Record the source checkpoint, the active integration branch, ticket branches, ownership,
+   lane, verification, and merge order in `TASKS.md`. Keep the build and machine lanes to
+   one owner even when source review and implementation fan out widely.
+6. Before a new swarm, commit the integrated state and start its task branches from that
+   known tip. Do not use a force reset or fold unrelated dirty work into a ticket.
+
+This convention keeps the prior Claude work recoverable, makes Codex-owned work obvious in
+history, and preserves a single place to serialize app/guest builds and real-machine runs.
+
 ## Native-window evidence
 
 The app frame is composed by macOS, so validation uses complementary layers:
