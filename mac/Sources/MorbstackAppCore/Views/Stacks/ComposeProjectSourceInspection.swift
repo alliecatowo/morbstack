@@ -13,6 +13,7 @@ struct ComposeProjectSourceInspection: Equatable {
     struct EnvironmentDeclaration: Identifiable, Equatable {
         enum ValueDisposition: Equatable {
             case empty
+            case unset
             case set
             case redacted
         }
@@ -137,23 +138,28 @@ struct ComposeProjectSourceInspection: Equatable {
                 line.removeFirst("export ".count)
                 line = line.trimmingCharacters(in: .whitespaces)
             }
-            guard let separator = line.firstIndex(of: "=") else { return nil }
-            let key = String(line[..<separator]).trimmingCharacters(in: .whitespaces)
-            guard isEnvironmentName(key) else { return nil }
+            let separator = line.firstIndex { $0 == "=" || $0 == ":" }
+            let key = separator.map { String(line[..<$0]) } ?? line
+            let normalizedKey = key.trimmingCharacters(in: .whitespaces)
+            guard isEnvironmentName(normalizedKey) else { return nil }
 
-            let value = String(line[line.index(after: separator)...])
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            let isPotentiallySensitive = looksSensitive(key: key)
+            let isPotentiallySensitive = looksSensitive(key: normalizedKey)
             let disposition: EnvironmentDeclaration.ValueDisposition
-            if value.isEmpty {
-                disposition = .empty
-            } else if isPotentiallySensitive {
-                disposition = .redacted
+            if let separator {
+                let value = String(line[line.index(after: separator)...])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if value.isEmpty {
+                    disposition = .empty
+                } else if isPotentiallySensitive {
+                    disposition = .redacted
+                } else {
+                    disposition = .set
+                }
             } else {
-                disposition = .set
+                disposition = .unset
             }
             return EnvironmentDeclaration(
-                key: key,
+                key: normalizedKey,
                 line: offset + 1,
                 valueDisposition: disposition,
                 isPotentiallySensitive: isPotentiallySensitive)

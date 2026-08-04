@@ -14,6 +14,9 @@ final class ComposeProjectSourceInspectionTests: XCTestCase {
             API_TOKEN=not-for-display
             EMPTY=
             export FEATURE_FLAG=true
+            COLON_STYLE: enabled
+            UNSET
+            export OPTIONAL
             not an assignment
             """,
             sourceKind: .projectEnvironment)
@@ -21,12 +24,15 @@ final class ComposeProjectSourceInspectionTests: XCTestCase {
         XCTAssertEqual(inspection.secretDeclarations, [])
         XCTAssertEqual(
             inspection.environmentDeclarations.map(\.key),
-            ["PORT", "API_TOKEN", "EMPTY", "FEATURE_FLAG"])
-        XCTAssertEqual(inspection.environmentDeclarations.map(\.line), [1, 2, 3, 4])
+            ["PORT", "API_TOKEN", "EMPTY", "FEATURE_FLAG", "COLON_STYLE", "UNSET", "OPTIONAL"])
+        XCTAssertEqual(inspection.environmentDeclarations.map(\.line), [1, 2, 3, 4, 5, 6, 7])
         XCTAssertEqual(inspection.environmentDeclarations[0].valueDisposition, .set)
         XCTAssertEqual(inspection.environmentDeclarations[1].valueDisposition, .redacted)
         XCTAssertTrue(inspection.environmentDeclarations[1].isPotentiallySensitive)
         XCTAssertEqual(inspection.environmentDeclarations[2].valueDisposition, .empty)
+        XCTAssertEqual(inspection.environmentDeclarations[4].valueDisposition, .set)
+        XCTAssertEqual(inspection.environmentDeclarations[5].valueDisposition, .unset)
+        XCTAssertEqual(inspection.environmentDeclarations[6].valueDisposition, .unset)
     }
 
     func testComposeInspectionReportsSourceMetadataWithoutEvaluatingValues() {
