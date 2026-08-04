@@ -39,11 +39,54 @@ const MAX_RESCAN_NUDGES: usize = 65_536;
 const MAX_RESCAN_DEPTH: usize = 64;
 const PROTOCOL_VERSION: i64 = 1;
 
+/// The reason word `dial::BUSY_REASON` uses for its own connection-cap
+/// rejection, reused here so every over-capacity guest listener answers with
+/// the same stable, matchable word.
+pub const BUSY_REASON: &str = "busy";
+
+/// Build the busy rejection line, in `dial.rs`'s `ERR <reason>\n` shape.
+///
+/// This channel does not otherwise speak `ERR` lines — its wire grammar (see
+/// the module docs) is `BOOT`/`HELLO`/`ROOT`/`COMMIT`/`READY`/`EVENT`/`ACK`/
+/// `CLOSE`/`STOPPED`, and every other failure just closes the connection
+/// rather than naming itself. Busy is the deliberate exception: it is sent
+/// *before* `BOOT`, in place of it, on a connection this listener is about
+/// to refuse outright, so `dial.rs`'s stable one-word reason is reused here
+/// rather than inventing a second vocabulary for the same fact.
+///
+/// Portable (no vsock needed) so it unit tests directly; see
+/// `the_busy_rejection_is_a_well_formed_err_line` below.
+pub fn busy_line() -> Vec<u8> {
+    format!("ERR {}\n", BUSY_REASON).into_bytes()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_busy_rejection_is_a_well_formed_err_line() {
+        // Connection-cap backpressure used to close the connection with only a
+        // log line, which the host's BOOT reader cannot distinguish from any
+        // other malformed opener. It has to arrive as an ordinary, parseable
+        // ERR line instead — dial.rs's shape, since this is the only busy
+        // signal this line-oriented channel has ever needed.
+        let line = busy_line();
+        assert_eq!(line, b"ERR busy\n".to_vec());
+        let text = String::from_utf8(line).unwrap();
+        assert!(text.starts_with("ERR "));
+        assert_eq!(text.matches('\n').count(), 1, "reply must be one line");
+        // One stable word, so a caller can match on it exactly like
+        // `dial::BUSY_REASON`.
+        assert!(!BUSY_REASON.contains(char::is_whitespace));
+    }
+}
+
 #[cfg(target_os = "linux")]
 mod imp {
     use super::{
-        MAX_CONNECTIONS, MAX_LINE_BYTES, MAX_RESCAN_DEPTH, MAX_RESCAN_NUDGES, PROTOCOL_VERSION,
-        VSOCK_LIVE_SHARE_PORT,
+        busy_line, BUSY_REASON, MAX_CONNECTIONS, MAX_LINE_BYTES, MAX_RESCAN_DEPTH,
+        MAX_RESCAN_NUDGES, PROTOCOL_VERSION, VSOCK_LIVE_SHARE_PORT,
     };
     use crate::live_share::{
         self, Direction, Hello, MountedShare, RecordHeader, RootClaim, SequenceCursor,
@@ -63,6 +106,45 @@ mod imp {
     use std::time::{Duration, Instant};
 
     const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// How long the busy rejection line has to reach the host before we give
+    /// up on it and close anyway. Mirrors `dial::BUSY_REPLY_TIMEOUT_MS`: the
+    /// line is nine bytes onto a socket that just finished its vsock
+    /// handshake, so this bound is only ever spent on a peer that is already
+    /// gone.
+    const BUSY_REPLY_TIMEOUT_MS: i32 = 250;
+
+    /// Best-effort busy rejection on a connection about to be refused.
+    ///
+    /// Same discipline as `dial::send_busy`: `poll(2)` bounds the wait so a
+    /// wedged peer cannot stall the accept loop, and any failure — including
+    /// the timeout — just falls through to closing the connection, which is
+    /// what happened before this existed.
+    fn send_busy(mut connection: File) {
+        let reply = busy_line();
+        match sys::poll_writable(connection.as_raw_fd(), BUSY_REPLY_TIMEOUT_MS) {
+            Ok(true) => {
+                if let Err(error) = connection
+                    .write_all(&reply)
+                    .and_then(|()| connection.flush())
+                {
+                    log::log(&format!(
+                        "could not send the live-share busy rejection: {}",
+                        error
+                    ));
+                }
+            }
+            Ok(false) => log::log(
+                "live-share busy rejection could not be sent within its timeout — closing \
+                 the connection instead",
+            ),
+            Err(error) => log::log(&format!(
+                "could not poll a rejected live-share connection for writability: {} — \
+                 closing it instead",
+                error
+            )),
+        }
+    }
 
     #[derive(Clone)]
     struct ReceiverContext {
@@ -126,7 +208,17 @@ mod imp {
                 }
             };
             if live.load(Ordering::SeqCst) >= MAX_CONNECTIONS {
-                log::log("live-share receiver is at its connection cap; dropping peer");
+                log::log(&format!(
+                    "live-share receiver at connection cap ({}) — rejecting new vsock \
+                     connection with ERR {}",
+                    MAX_CONNECTIONS, BUSY_REASON
+                ));
+                // Say so before hanging up, matching dial.rs: closing silently
+                // makes documented backpressure indistinguishable from a peer
+                // that never spoke the protocol. Sent in place of `BOOT`,
+                // since this connection is refused before `serve_connection`
+                // would send it.
+                send_busy(connection);
                 continue;
             }
             live.fetch_add(1, Ordering::SeqCst);

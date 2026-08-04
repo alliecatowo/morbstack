@@ -352,6 +352,33 @@ public enum Doctor {
             let controlPath = MorbPaths.controlSocket.path
             if UnixSocketClient.isAlive(path: controlPath) {
                 checks.append(DoctorCheck(name: "daemon", status: .pass, detail: "responding on \(controlPath)"))
+
+                // 11b. Guest protocol compatibility. `morbinit_version` is the field
+                // the protocol nominates as its compatibility probe; this is where a
+                // human finds out the guest image predates the daemon. Only asked of
+                // a live daemon — with no daemon there is no guest to have answered.
+                switch guestMorbinitVersion() {
+                case .some(let reported):
+                    let older = MorbVersion.isOlder(
+                        reported, than: MorbVersion.minimumCompatibleMorbinit)
+                    checks.append(
+                        DoctorCheck(
+                            name: "guest-morbinit",
+                            status: older ? .warn : .pass,
+                            detail: older
+                                ? "guest reports morbinit \(reported), older than the oldest "
+                                    + "supported \(MorbVersion.minimumCompatibleMorbinit) — "
+                                    + "rebuild the guest image with `make guest-image`"
+                                : "guest reports morbinit \(reported) "
+                                    + "(minimum supported \(MorbVersion.minimumCompatibleMorbinit))"))
+                case .none:
+                    checks.append(
+                        DoctorCheck(
+                            name: "guest-morbinit",
+                            status: .info,
+                            detail: "no guest has reported a morbinit version on this boot "
+                                + "(the VM is stopped, still booting, or the image predates the field)"))
+                }
             } else {
                 checks.append(
                     DoctorCheck(
@@ -512,6 +539,19 @@ public enum Doctor {
                     detail: "/private/tmp is not configured, so the guest will not keep aliasing /tmp "
                         + "to the Mac after its next start; add it to shared_paths before using bare /tmp bind sources"))
         }
+    }
+
+    /// Asks a running daemon for the guest's reported `morbinit_version`, or `nil`
+    /// when there is no daemon, the daemon does not answer, or no guest has
+    /// reported one on the current boot.
+    private static func guestMorbinitVersion() -> String? {
+        guard FileManager.default.fileExists(atPath: MorbPaths.controlSocket.path),
+            let response = try? UnixSocketClient.roundTrip(
+                path: MorbPaths.controlSocket.path, request: DaemonRequest(cmd: "status"), timeout: 5),
+            response.ok,
+            case .string(let version)? = response.data?["morbinit_version"]
+        else { return nil }
+        return version
     }
 
     /// Asks a running daemon what the guest did with each share, or `nil` when there

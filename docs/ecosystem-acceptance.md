@@ -1,9 +1,13 @@
 # Ecosystem acceptance harness
 
-Status: `source-only` evidence harness. No Testcontainers or Dev Containers
-result is `runs-here` until an evidence owner runs the relevant locked probe
-against a current signed candidate. This is EN-8 / EN-9 preparation, not
-clean-profile CP-06 / CP-07 evidence.
+Status: **executed 2026-08-04** against the running dev daemon (server
+29.7.1). Results, exact commands, and per-suite verdicts live in
+[`audit/ECOSYSTEM-MATRIX.md`](audit/ECOSYSTEM-MATRIX.md): Node/Python/Go and
+Java-1.21.x Testcontainers and the Dev Containers CLI are `runs-here`;
+testcontainers-java ≤1.20.x fails against any engine-29 daemon (docker-java's
+pinned `/v1.32` probe vs upstream `MinAPIVersion 1.40`) and silently fails
+over to a stale Docker Desktop socket. This is still not clean-profile
+CP-06 / CP-07 evidence.
 
 [`scripts/ecosystem-acceptance.sh`](../scripts/ecosystem-acceptance.sh) makes
 the configuration boundary explicit. It does not build, sign, launch, stop, or
@@ -111,17 +115,27 @@ scripts/ecosystem-acceptance.sh devcontainers-cli -- \
 ```
 
 Follow with an in-container sentinel and a foreground cleanup, using the same
-workspace folder and label:
+workspace folder **and the same `--id-label`** — passing `--id-label` to `up`
+replaces the CLI's default `devcontainer.local_folder` identity labels, so an
+`exec` without it fails with `Error: Dev container not found.` (verified
+against `@devcontainers/cli` 0.88.0):
 
 ```sh
 scripts/ecosystem-acceptance.sh devcontainers-cli -- \
   devcontainer exec \
     --workspace-folder "$PWD/integrations/fixtures/devcontainer" \
+    --id-label "dev.morbstack.acceptance=devcontainers-cli-<same stamp as up>" \
     sh -lc 'test "$(cat /tmp/morbstack-devcontainer-sentinel)" = ready'
+```
 
-scripts/ecosystem-acceptance.sh devcontainers-cli -- \
-  devcontainer down \
-    --workspace-folder "$PWD/integrations/fixtures/devcontainer"
+`@devcontainers/cli` 0.88.0 has no `devcontainer down` subcommand. Teardown is
+explicit, with the candidate CLI, scoped to the label you supplied:
+
+```sh
+scripts/ecosystem-acceptance.sh devcontainers-cli -- sh -c \
+  '"$MORBSTACK_DOCKER_BIN" ps -aq \
+     --filter "label=dev.morbstack.acceptance=devcontainers-cli-<stamp>" \
+   | xargs "$MORBSTACK_DOCKER_BIN" rm -f'
 ```
 
 Record the exact Dev Containers CLI version and fixture revision. If the CLI

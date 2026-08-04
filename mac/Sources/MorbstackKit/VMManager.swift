@@ -319,6 +319,14 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
         return _dockerDataOnDisk
     }
 
+    /// The `morbinit` version the current boot reported, or `nil` while no guest
+    /// has answered `info`. Compare with ``MorbVersion/minimumCompatibleMorbinit``.
+    public var guestMorbinitVersion: String? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _guestMorbinitVersion
+    }
+
     /// Mirror of ``controlReady`` for cross-thread reads, guarded by ``stateLock``.
     private var _controlReadySnapshot = false
 
@@ -327,6 +335,17 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
 
     /// Last `docker_data_on_disk` value reported by the guest.
     private var _dockerDataOnDisk: Bool?
+
+    /// Last `morbinit_version` reported by the guest's `info` reply.
+    ///
+    /// This is the field `docs/protocol.md` nominates as *the* compatibility probe
+    /// for the control channel, so it must not stay write-only: the boot probe
+    /// records it once per boot and compares it against
+    /// ``MorbVersion/minimumCompatibleMorbinit`` (see `beginControlProbe`), and
+    /// `morb status` / `morb doctor` surface it. `nil` means the guest has not
+    /// answered `info` on this boot — an initramfs old enough to omit the field
+    /// predates every release that shipped one.
+    private var _guestMorbinitVersion: String?
 
     /// Last `rosetta` value reported by the guest: the share mounted *and* an
     /// interpreter was registered from it.
@@ -492,9 +511,15 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
 
     /// Records the guest's `/tmp`-alias outcome for the running boot. Safe from any
     /// thread; absence is kept distinct from a reported failure.
-    private func noteGuestTmpAliasMounted(_ mounted: Bool?) {
+    ///
+    /// This and the other `ifCurrent` note functions are written from the probe
+    /// worker while it holds no queue confinement, so each write checks the probe
+    /// generation *inside* the state lock: a probe superseded mid-exchange must not
+    /// deposit the previous boot's answers into snapshots the next boot just reset
+    /// (see `invalidateControlReadiness`, which bumps the generation before wiping).
+    private func noteGuestTmpAliasMounted(_ mounted: Bool?, ifCurrent generation: Int) {
         stateLock.lock()
-        _guestTmpAliasMounted = mounted
+        if _probeGeneration == generation { _guestTmpAliasMounted = mounted }
         stateLock.unlock()
     }
 
@@ -534,6 +559,7 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
             // Everything learned from the guest belongs to the boot that just ended.
             _guestPingedSnapshot = false
             _dockerDataOnDisk = nil
+            _guestMorbinitVersion = nil
             _guestShareStates = [:]
             _guestTmpAliasMounted = nil
             _guestRosetta = nil
@@ -552,6 +578,20 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
         stateLock.unlock()
     }
 
+    /// Records that `morbinit` answered, but only while `generation` is still the
+    /// current probe generation. Safe from any thread.
+    ///
+    /// The check and the write share one critical section with
+    /// ``bumpProbeGeneration()``, so a probe superseded mid-exchange cannot slip a
+    /// stale "the guest answered" into the snapshots the next boot just reset —
+    /// provided invalidation bumps the generation *before* it wipes (see
+    /// ``invalidateControlReadiness()``).
+    private func noteGuestPinged(ifCurrent generation: Int) {
+        stateLock.lock()
+        if _probeGeneration == generation { _guestPingedSnapshot = true }
+        stateLock.unlock()
+    }
+
     /// Records the guest's `docker_data_on_disk` answer. Safe from any thread.
     private func noteDockerDataOnDisk(_ value: Bool?) {
         stateLock.lock()
@@ -563,31 +603,50 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
     ///
     /// Both are left untouched when the guest omits them, so a single reply from
     /// an older initramfs cannot erase what a newer one already told us.
-    private func noteGuestRosetta(rosetta: Bool?, binfmtAmd64: String?) {
+    private func noteGuestRosetta(
+        rosetta: Bool?, binfmtAmd64: String?, ifCurrent generation: Int
+    ) {
         stateLock.lock()
-        if let rosetta { _guestRosetta = rosetta }
-        if let binfmtAmd64 { _guestBinfmtAmd64 = binfmtAmd64 }
+        if _probeGeneration == generation {
+            if let rosetta { _guestRosetta = rosetta }
+            if let binfmtAmd64 { _guestBinfmtAmd64 = binfmtAmd64 }
+        }
+        stateLock.unlock()
+    }
+
+    /// Records the guest's `morbinit_version`. Left untouched when omitted: an
+    /// older initramfs not repeating the field must not erase a prior report.
+    private func noteGuestMorbinitVersion(_ version: String?, ifCurrent generation: Int) {
+        guard let version else { return }
+        stateLock.lock()
+        if _probeGeneration == generation { _guestMorbinitVersion = version }
         stateLock.unlock()
     }
 
     /// Records the guest's additive event-delivery capability. Absence from an older
     /// guest intentionally leaves the prior observation untouched for this boot, just
     /// as the other additive `info` fields do.
-    private func noteGuestShareEventBridge(capability: String?, contractVersion: Int?) {
+    private func noteGuestShareEventBridge(
+        capability: String?, contractVersion: Int?, ifCurrent generation: Int
+    ) {
         guard capability != nil || contractVersion != nil else { return }
         stateLock.lock()
-        if let capability { _guestShareEventBridge = capability }
-        if let contractVersion { _guestShareEventBridgeContractVersion = contractVersion }
+        if _probeGeneration == generation {
+            if let capability { _guestShareEventBridge = capability }
+            if let contractVersion { _guestShareEventBridgeContractVersion = contractVersion }
+        }
         stateLock.unlock()
     }
 
     /// Records the guest's additive disk-resize capability. Like other `info`
     /// capabilities, an older guest's absence must not become a false `ready`.
-    private func noteGuestDiskResize(_ capability: String?) {
+    private func noteGuestDiskResize(_ capability: String?, ifCurrent generation: Int) {
         guard let capability else { return }
         stateLock.lock()
-        _guestDiskResize = capability
-        _lastGuestDiskResize = capability
+        if _probeGeneration == generation {
+            _guestDiskResize = capability
+            _lastGuestDiskResize = capability
+        }
         stateLock.unlock()
     }
 
@@ -1024,7 +1083,7 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
                     // The ack means the data is safe; the guest is now on its way to
                     // powering itself off. Letting it get there means the hypervisor
                     // sees an orderly halt instead of a yanked plug.
-                    self.whenGuestPowersOff(timeout: VMManager.guestPowerOffTimeout) { [weak self] timedOut in
+                    self.whenGuestPowersOff(vm, timeout: VMManager.guestPowerOffTimeout) { [weak self] timedOut in
                         guard let self else { return done.fire(.failure(CompletionOnce.managerGone)) }
                         if timedOut {
                             self.log.info(
@@ -1051,11 +1110,24 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
         }
     }
 
-    /// Calls `body` on ``queue`` once the guest powers itself off, or after `timeout`.
+    /// Calls `body` on ``queue`` once `vm` powers itself off, or after `timeout`.
     ///
     /// Must run on ``queue``. `body` receives `true` when the deadline expired first.
-    private func whenGuestPowersOff(timeout: TimeInterval, _ body: @escaping (Bool) -> Void) {
-        guard virtualMachine != nil else {
+    ///
+    /// Ordering-safe against `guestDidStop`: the registration is scheduled from the
+    /// guest-control worker after the shutdown ack, and the guest can power off —
+    /// and the delegate callback land on ``queue`` — before that hop arrives. The
+    /// event is therefore *recorded* rather than merely broadcast: every path that
+    /// empties the VM slot goes through ``releaseVirtualMachine(_:)``, so
+    /// `virtualMachine !== vm` here means the power-off (or its moral equivalent)
+    /// already happened and `body` runs immediately instead of burning the deadline.
+    /// Comparing identity rather than nil-ness also keeps a registration that lost
+    /// the race from latching onto a *newer* boot that slipped into the slot and
+    /// then hard-stopping it five seconds later.
+    private func whenGuestPowersOff(
+        _ vm: VZVirtualMachine, timeout: TimeInterval, _ body: @escaping (Bool) -> Void
+    ) {
+        guard virtualMachine === vm else {
             body(false)
             return
         }
@@ -1064,15 +1136,28 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
         queue.asyncAfter(deadline: .now() + timeout) { [weak self] in
             guard let self else { return observer.fire(timedOut: true) }
             self.guestStopObservers.removeAll { $0 === observer }
+            // A no-op when the observer already fired: `releaseVirtualMachine`
+            // flushes pending observers, and `fire` is one-shot.
             observer.fire(timedOut: true)
         }
     }
 
     /// Fires every pending power-off observer. Must run on ``queue``.
+    ///
+    /// The observers fire on the *next* queue turn, not inline: the release that
+    /// triggers this flush sits mid-way through a delegate callback or stop path
+    /// that still has its own state and waiter bookkeeping to finish (for example,
+    /// `guestDidStop` fails the run waiters *after* releasing the VM). An observer
+    /// body runs `hardStopOnQueue`, which services waiters — reentering that inside
+    /// the callback would interleave the two and can boot a new VM before the
+    /// callback has even recorded that the old one stopped.
     private func flushGuestStopObservers() {
         let observers = guestStopObservers
         guestStopObservers.removeAll()
-        for observer in observers { observer.fire(timedOut: false) }
+        guard !observers.isEmpty else { return }
+        queue.async {
+            for observer in observers { observer.fire(timedOut: false) }
+        }
     }
 
     /// Unconditional `vm.stop()`; must run on the VM queue.
@@ -1619,6 +1704,13 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
         guestListeners.removeAll()
         closeConsole()
         invalidateControlReadiness()
+        // This is the one place the VM slot empties, which makes it the one place
+        // that can promise `whenGuestPowersOff` observers never outlive the VM they
+        // watch: whatever emptied the slot (clean power-off, error, hard stop,
+        // suspend) is the event they were waiting for. A clean stop is usually
+        // waiting on exactly this; releasing it here saves the five seconds its
+        // deadline would otherwise burn.
+        flushGuestStopObservers()
     }
 
     private func closeConsole() {
@@ -1698,10 +1790,15 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
 
     /// Invalidates guest-control readiness and orphans any probe in flight.
     /// Must run on ``queue``.
+    ///
+    /// The generation bump comes *first*: once the snapshots are wiped, any write
+    /// still guarded by the old generation must already be failing its check, or a
+    /// superseded probe could repopulate the wiped snapshots in the window between
+    /// the wipe and the bump.
     private func invalidateControlReadiness() {
+        bumpProbeGeneration()
         setControlReady(false)
         controlProbeInFlight = false
-        bumpProbeGeneration()
     }
 
     /// What one connect + `ping` (+ `info`) exchange with the guest established.
@@ -1732,8 +1829,11 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
         guard !controlProbeInFlight else { return }
         guard state == .running else { return }
         controlProbeInFlight = true
-        setControlReady(false)
+        // Bump before wiping, for the same reason as `invalidateControlReadiness()`:
+        // after the wipe, a write guarded by the previous generation must already
+        // be stale.
         let generation = bumpProbeGeneration()
+        setControlReady(false)
         let started = bringUpStartedAt ?? Date()
         let deadline = Date().addingTimeInterval(VMManager.controlReadyTimeout)
 
@@ -1753,19 +1853,17 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
                     lastError = MorbError.vm("the VM left the running state during boot")
                     break
                 }
-                switch self.probeGuestControlOnce(syncClock: needsClockSync) {
+                switch self.probeGuestControlOnce(syncClock: needsClockSync, generation: generation) {
                 case .ready(let uptimeMilliseconds, let dataOnDisk, let shares):
                     let elapsed = Date().timeIntervalSince(started)
-                    self.noteGuestPinged()
-                    self.noteDockerDataOnDisk(dataOnDisk)
-                    self.noteGuestShares(shares)
-                    self.log.info(
-                        String(
-                            format: "guest ready %.2fs after bring-up (guest uptime %dms, "
-                                + "docker data on %@)",
-                            elapsed, uptimeMilliseconds,
-                            dataOnDisk == nil ? "unknown storage" : (dataOnDisk! ? "disk" : "tmpfs")))
-                    self.reportShareMounts(shares)
+                    // Everything learned from this exchange is recorded only behind
+                    // the generation check on ``queue``. Recording it out here first
+                    // looks harmless but is not: this closure can belong to a probe
+                    // from a superseded boot, whose `invalidateControlReadiness()`
+                    // already wiped the snapshots for the next boot. An unguarded
+                    // write here would repopulate them with the *previous* boot's
+                    // answers, and `morb status`/`doctor` would report data the
+                    // current guest never sent.
                     self.queue.async { [weak self] in
                         guard let self, generation == self.probeGeneration else { return }
                         self.controlProbeInFlight = false
@@ -1773,6 +1871,34 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
                         self.noteGuestPinged()
                         self.noteDockerDataOnDisk(dataOnDisk)
                         self.noteGuestShares(shares)
+                        // The one place per boot the protocol compatibility field is
+                        // consulted. `info` was already exchanged, so a silent gap
+                        // here would leave `morbinit_version` decoded-but-unread —
+                        // the doc calls it the compatibility probe, and a probe
+                        // nobody reads gates nothing.
+                        if let reported = self.guestMorbinitVersion {
+                            if MorbVersion.isOlder(
+                                reported, than: MorbVersion.minimumCompatibleMorbinit) {
+                                self.log.warn(
+                                    "guest morbinit \(reported) is older than the oldest "
+                                        + "version this daemon supports "
+                                        + "(\(MorbVersion.minimumCompatibleMorbinit)) — "
+                                        + "rebuild the guest image with `make guest-image`")
+                            }
+                        } else {
+                            self.log.warn(
+                                "the guest did not report morbinit_version — it predates "
+                                    + "every supported guest image; rebuild it with "
+                                    + "`make guest-image`")
+                        }
+                        self.log.info(
+                            String(
+                                format: "guest ready %.2fs after bring-up (guest uptime %dms, "
+                                    + "docker data on %@)",
+                                elapsed, uptimeMilliseconds,
+                                dataOnDisk == nil
+                                    ? "unknown storage" : (dataOnDisk! ? "disk" : "tmpfs")))
+                        self.reportShareMounts(shares)
                         if !self.diskGrowthInFlight {
                             self.flushWaiters(.success(()))
                         }
@@ -1786,7 +1912,11 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
                     }
                     guestAnswered = true
                     needsClockSync = false  // done once, on the first successful exchange
-                    self.noteGuestPinged()
+                    // Guarded: the generation check at the top of the loop ran
+                    // *before* the blocking exchange, and an invalidation can land
+                    // during it. The atomic form keeps a superseded probe from
+                    // marking the next boot's guest as having answered.
+                    self.noteGuestPinged(ifCurrent: generation)
                     lastError = MorbError.timeout("dockerd has not finished starting")
                     usleep(VMManager.controlProbeInterval)
                 case .unreachable(let error):
@@ -1844,7 +1974,7 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
     }
 
     /// One connect + `ping` + `info` exchange. Blocking; never call from ``queue``.
-    private func probeGuestControlOnce(syncClock: Bool) -> ProbeOutcome {
+    private func probeGuestControlOnce(syncClock: Bool, generation: Int) -> ProbeOutcome {
         switch connectVsockBlocking(port: MorbVsockPorts.guestControl, timeout: 3) {
         case .failure(let error):
             return .unreachable(error)
@@ -1870,12 +2000,16 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
                 // translation is set up long before the engine is up (binfmt at
                 // ~220ms, dockerd ready at ~730ms), so `morb rosetta` should be able
                 // to answer during that window instead of reporting "unknown".
-                noteGuestRosetta(rosetta: info.rosetta, binfmtAmd64: info.binfmtAmd64)
-                noteGuestTmpAliasMounted(info.tmpAliasMounted)
+                noteGuestRosetta(
+                    rosetta: info.rosetta, binfmtAmd64: info.binfmtAmd64,
+                    ifCurrent: generation)
+                noteGuestMorbinitVersion(info.morbinitVersion, ifCurrent: generation)
+                noteGuestTmpAliasMounted(info.tmpAliasMounted, ifCurrent: generation)
                 noteGuestShareEventBridge(
                     capability: info.shareEventBridge,
-                    contractVersion: info.shareEventBridgeContractVersion)
-                noteGuestDiskResize(info.diskResize)
+                    contractVersion: info.shareEventBridgeContractVersion,
+                    ifCurrent: generation)
+                noteGuestDiskResize(info.diskResize, ifCurrent: generation)
                 // A guest too old to report the field cannot tell us dockerd is up;
                 // treating "absent" as ready keeps this compatible rather than
                 // hanging for the whole boot budget against an older initramfs.
@@ -2168,12 +2302,11 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
     /// Called when the guest powers itself off.
     public func guestDidStop(_ virtualMachine: VZVirtualMachine) {
         log.info("guest stopped")
+        // releaseVirtualMachine also flushes the power-off observers a clean stop
+        // parks in `whenGuestPowersOff`.
         releaseVirtualMachine(virtualMachine)
         setState(.stopped)
         flushWaiters(.failure(MorbError.vm("guest stopped before reaching a usable state")))
-        // A clean stop is waiting on exactly this; releasing it here saves the five
-        // seconds its deadline would otherwise burn.
-        flushGuestStopObservers()
     }
 
     /// Called when the VM stops because of an error.
@@ -2183,7 +2316,6 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
         releaseVirtualMachine(virtualMachine)
         setState(.error(message))
         flushWaiters(.failure(MorbError.vm(message)))
-        flushGuestStopObservers()
     }
 
     /// Called when a network attachment drops; logged so `morb doctor` users can see it.
@@ -2204,6 +2336,10 @@ public enum MorbVsockPorts {
     ///
     /// See ``StreamDial`` for the one-line preamble that opens the exchange.
     public static let streamDial: UInt32 = 2376
+    /// Kubernetes payload install channel: the host streams k3s/cri-dockerd
+    /// binaries the guest does not already have. Mirrors the guest's
+    /// `k8s::VSOCK_K8S_INSTALL_PORT`; see ``K8s`` for the transfer protocol.
+    public static let k8sInstall: UInt32 = 2377
     /// Datagram-dial: framed UDP messages for published UDP container ports.
     ///
     /// The stream transport preserves each UDP payload with explicit frames; see

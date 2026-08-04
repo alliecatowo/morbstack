@@ -97,6 +97,58 @@ public enum POSIXSocketSupport {
     }
 }
 
+/// A listening descriptor, with accept and close serialised against each other.
+///
+/// The serialisation is the point. A listener's `stop()` has to close the socket
+/// *synchronously* (see ``TCPListener/stop()`` and ``UnixSocketServer/stop()``), and
+/// a bare `close(2)` racing an in-flight `accept(2)` on the same number is the
+/// classic descriptor-reuse bug: the accept lands on whatever the process opened
+/// next. Funnelling both through one lock makes "closed" a state the accept loop
+/// observes rather than a race it runs into.
+///
+/// Shared by ``TCPListener`` and ``UnixSocketServer`` so the two listener types
+/// cannot drift on what `stop()` means: the descriptor is closed — and the port or
+/// path free — by the time it returns.
+final class POSIXListenSocket {
+
+    /// How long a `stop()` waits for the accept source's cancel handler before
+    /// closing the descriptor itself.
+    ///
+    /// Only reached if the listener's queue is wedged; the handler normally runs in
+    /// well under a millisecond. The fallback exists so a stuck queue degrades into
+    /// a late close rather than a descriptor — and a bound endpoint — leaked
+    /// forever.
+    static let cancelHandlerGrace: TimeInterval = 2
+
+    private let lock = NSLock()
+    private let fd: Int32
+    private var closed = false
+
+    /// Signalled exactly once, by whichever caller performs the close.
+    let closedSignal = DispatchSemaphore(value: 0)
+
+    init(_ fd: Int32) { self.fd = fd }
+
+    /// Closes the socket if it is still open. Idempotent.
+    func close() {
+        lock.lock()
+        let alreadyClosed = closed
+        closed = true
+        lock.unlock()
+        guard !alreadyClosed else { return }
+        Darwin.close(fd)
+        closedSignal.signal()
+    }
+
+    /// One non-blocking `accept(2)`, or `-1` once the socket has been closed.
+    func acceptOne() -> Int32 {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !closed else { return -1 }
+        return POSIXSocketSupport.retryOnInterrupt { Darwin.accept(fd, nil, nil) }
+    }
+}
+
 /// A unix-domain socket listener that hands accepted file descriptors to a callback.
 ///
 /// The listener owns the socket file: it unlinks a stale path before binding and
@@ -120,7 +172,7 @@ public final class UnixSocketServer {
     public var onConnection: ((Int32) -> Void)?
 
     private let queue: DispatchQueue
-    private var listenFD: Int32 = -1
+    private var listenSocket: POSIXListenSocket?
     private var acceptSource: DispatchSourceRead?
     private var running = false
     private let lock = NSLock()
@@ -188,20 +240,21 @@ public final class UnixSocketServer {
         }
 
         POSIXSocketSupport.setNonBlocking(fd, true)
-        listenFD = fd
+        let bound = POSIXListenSocket(fd)
+        listenSocket = bound
 
-        var bound = stat()
-        if stat(path, &bound) == 0 {
-            boundDevice = bound.st_dev
-            boundInode = bound.st_ino
+        var boundStat = stat()
+        if stat(path, &boundStat) == 0 {
+            boundDevice = boundStat.st_dev
+            boundInode = boundStat.st_ino
         }
 
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
         source.setEventHandler { [weak self] in
             self?.drainAccepts()
         }
-        source.setCancelHandler { [fd] in
-            Darwin.close(fd)
+        source.setCancelHandler { [bound] in
+            bound.close()
         }
         acceptSource = source
         running = true
@@ -210,21 +263,40 @@ public final class UnixSocketServer {
 
     /// Stops accepting, closes the listening socket and unlinks the socket file —
     /// but only if the file at `path` is still the one this server bound.
+    ///
+    /// **Synchronous by contract**, mirroring ``TCPListener/stop()``: the descriptor
+    /// is closed by the time this returns, not merely queued for the dispatch
+    /// cancel handler to close later. A caller's very next act is often to bind the
+    /// same path again (a daemon restart re-binds the control socket the previous
+    /// instance just released), and the unlink below removes the *path* while an
+    /// unwaited-for cancel handler could still hold the *descriptor* — leaking it,
+    /// and leaving `stop()` meaning something different here than it does one file
+    /// over. Cancel the source, wait for its handler to close the socket, and close
+    /// it here if that wait runs out; ``POSIXListenSocket`` closes exactly once no
+    /// matter which of the two paths gets there first.
     public func stop() {
         lock.lock()
         let source = acceptSource
+        let bound = listenSocket
         let wasRunning = running
         let device = boundDevice
         let inode = boundInode
         acceptSource = nil
-        listenFD = -1
+        listenSocket = nil
         running = false
         boundDevice = nil
         boundInode = nil
         lock.unlock()
 
-        guard wasRunning else { return }
+        guard wasRunning, let bound else { return }
         source?.cancel()  // cancel handler closes the fd
+        if bound.closedSignal.wait(timeout: .now() + POSIXListenSocket.cancelHandlerGrace)
+            == .timedOut {
+            // The listener's queue is not draining. Closing from here is still safe:
+            // the accept loop takes the same lock the close does, so it cannot be
+            // holding a descriptor this call is about to invalidate.
+            bound.close()
+        }
 
         guard let device, let inode else { return }
         var current = stat()
@@ -238,15 +310,15 @@ public final class UnixSocketServer {
     /// Accepts every pending connection; the read source is edge-ish, so we loop.
     private func drainAccepts() {
         lock.lock()
-        let fd = listenFD
+        let bound = listenSocket
         lock.unlock()
-        guard fd >= 0 else { return }
+        guard let bound else { return }
 
         while true {
-            let client = POSIXSocketSupport.retryOnInterrupt { Darwin.accept(fd, nil, nil) }
+            let client = bound.acceptOne()
             if client < 0 {
-                // EAGAIN/EWOULDBLOCK simply means we drained the backlog.
-                if errno == EAGAIN || errno == EWOULDBLOCK { return }
+                // EAGAIN/EWOULDBLOCK simply means we drained the backlog; -1 with
+                // the socket closed means the listener was stopped.
                 return
             }
             // Accepted sockets do not inherit O_NONBLOCK on Darwin, but be explicit.

@@ -437,7 +437,17 @@ private extension MorbLiveShareTransport {
             shares: [MorbDirectoryShare]
         ) throws -> Session {
             let boot = try Self.readLine(fd: descriptor)
-            let bootFields = boot.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
+            let trimmedBoot = boot.trimmingCharacters(in: .whitespacesAndNewlines)
+            // The receiver's deliberate over-cap rejection (`ERR busy`, in place of
+            // `BOOT`) must stay distinguishable from a peer that never spoke the
+            // protocol — that distinction is the entire point of the guest sending
+            // it before closing.
+            guard !trimmedBoot.hasPrefix("ERR ") else {
+                throw MorbError.protocolViolation(
+                    "live-share receiver refused the connection: "
+                        + trimmedBoot.dropFirst("ERR ".count))
+            }
+            let bootFields = trimmedBoot.split(separator: " ")
             guard bootFields.count == 2, bootFields[0] == "BOOT",
                   let bootData = Data(hexadecimal: String(bootFields[1])), bootData.count == 16
             else {

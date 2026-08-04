@@ -398,7 +398,14 @@ must preserve:
   (each proxied connection costs the guest two threads — a copy-in and a
   copy-out — so this bounds morbinit's own thread usage). The host-side
   `DockerProxy` does not impose a separate cap of its own; the guest-side
-  64 is the effective ceiling on concurrent Docker API connections.
+  64 is the effective ceiling on concurrent Docker API connections. Past
+  the cap the guest writes a synthetic `503 Service Unavailable` HTTP
+  response — JSON body `{"message": "morbstack: docker relay is busy
+  (connection cap of 64 reached); retry"}`, `Connection: close` — before
+  closing, rather than dropping the vsock connection silently; this pairs
+  with the host's own synthetic `502 Bad Gateway` below (used when the
+  guest cannot be reached at all) so a client can tell "no guest to ask"
+  apart from "guest reachable, relay saturated".
 - **No TCP listener inside the guest, ever.** dockerd is started with
   `--host unix:///var/run/docker.sock` only (see `supervisor.rs`); the
   vsock link is the only path to it, and vsock port 2375 is not reachable

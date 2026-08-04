@@ -152,8 +152,8 @@ the author.
 | EN-5 | Reclaim the 72 GiB `disk.img` | Safe reclamation path for the test artifact left on the dev machine | `open` |
 | EN-6 | `host.docker.internal` without `--add-host` | Resolves by default | `open` |
 | EN-7 | Live-share / hot reload proven | First compile was today. Publish a **watcher conformance matrix**: the mechanism is a same-mode `fchmod(2)` emitting `IN_ATTRIB` only — fine for chokidar/nodemon/vite and Python watchdog, filtered out by Go tools like `air`. Also `liveSharePaths` defaults to `[]` with **no CLI or GUI writer**. The correctness-mode alternative for `air`-class watchers is DIF-1a. | `open` |
-| EN-8 | Testcontainers (Java/Go/Node/Python) | Never tested | `open` |
-| EN-9 | Dev Containers | Never tested | `open` |
+| EN-8 | Testcontainers (Java/Go/Node/Python) | Executed 2026-08-04 with real Postgres suites via `scripts/ecosystem-acceptance.sh`: Node 12.1.0, Python 4.15.0, Go v0.43.0, Java 1.21.4 all PASS with `DOCKER_HOST` + `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE`; Ryuk works in all four. Java ≤1.20.x FAILs against any engine-29 daemon (docker-java `/v1.32` probe vs upstream `MinAPIVersion 1.40`) and, like Node/Go zero-config, **silently runs against a stale Docker Desktop socket** — see `docs/audit/ECOSYSTEM-MATRIX.md`. Proposed guest-side mitigation: `DOCKER_MIN_API_VERSION=1.24` in morbinit's dockerd env (guest lane owns the change). | `done` (evidence: `docs/audit/ECOSYSTEM-MATRIX.md`; CP-06 clean-profile still pending) |
+| EN-9 | Dev Containers | Executed 2026-08-04: `@devcontainers/cli` 0.88.0 `up`/`exec` PASS against Morbstack with context-only discovery — lifecycle, two-way workspace bind mount, `postCreateCommand`, and a features/derived-image build (Go feature) all worked. Two harness-doc bugs fixed (`exec` needs the same `--id-label` as `up`; CLI 0.88 has no `down`). VS Code extension flow remains untested (CP-07). | `done` (CLI; extension/CP-07 pending) |
 | EN-10 | Clean-profile CP-01–CP-07 | The release gate. Never run. Nobody has ever installed this. | `blocked` (EN-1, REL-2) |
 | EN-11 | Pinned `kubectl` for pod port-forward | `KubectlTool.swift:16-30` needs a binary not in the repo; the path is a hardcoded unavailable | `open` |
 
@@ -332,3 +332,18 @@ architecture audit may file overlapping `ARCH-` tickets; merge rather than dupli
 | MOD-3 | Two hand-maintained Docker Engine model sets will drift | `AppCore/Models.swift` (1,450 LOC typed structs) vs `MorbFeatures/EngineClient.swift` raw `[String: Any]`. `morb` deliberately never links AppCore, so this is a real architectural fork, not an oversight — collapsing it is multi-day. Decide whether to unify or to accept and document the fork. | `open` |
 | MOD-4 | `K8s.installPort` = 2377 lives outside `MorbVsockPorts` | The port-constant registry is not actually singular (`K8s.swift:53` vs `VMManager.swift:2102-2119`). | `open` |
 | MOD-5 | Adding one MRB0 field touches 6–9 files across 3 modules | Wire protocol is hand-duplicated on both sides with no codegen. Shotgun surgery by construction; grows linearly with feature count. | `open` |
+
+## Ecosystem — from EN-8/EN-9 acceptance (2026-08-04)
+
+| ID | Ticket | Deliverable | State |
+| --- | --- | --- | --- |
+| ECO-1 | **Silent wrong-daemon execution — the biggest ecosystem gap** | Unconfigured, Morbstack is *invisible* to Testcontainers Node/Go/Java: they never read `docker context`, find no `DOCKER_HOST`, fall through to whatever socket exists, and run **green against Docker Desktop 27.4.0**. Reconfirmed live in three languages. This is worse than failing — a user's suite passes while testing the wrong engine. Fix so that a correctly installed Morbstack is discoverable with **no environment variables at all**: own `/var/run/docker.sock` (or a documented equivalent), and make first-run create *and select* a `morbstack` docker context. Directly serves the standing "single-path install" requirement. | `open` |
+| ECO-2 | `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE` is mandatory, not optional | Without `=/var/run/docker.sock`, Ryuk's socket mount **500s in every language**. Ryuk itself works fine once set (0.14.0/0.8.1/0.12.0, self-reaps in ~10 s, `TESTCONTAINERS_RYUK_DISABLED` never needed). Requiring the incantation is a gap; folds into ECO-1. | `open` |
+| PROTO-7 | dockerd `MinAPIVersion` blocks older clients | Verified on the live socket: `/v1.32/info` → **400**, `/v1.44/info` → **200**. This is upstream moby 29's default of 1.40, **not** a Morbstack behaviour. `testcontainers-java` ≤1.20.x probes `/v1.32/info`, gets the 400, and silently fails over to another daemon. Proposed: `DOCKER_MIN_API_VERSION=1.24` in morbinit's dockerd env — verify moby 29 honours a floor that low before shipping. Would make Morbstack the engine-29 distribution that the ≤1.20.x installed base works against; Docker Desktop is only insulated because it still ships engine 27. | `open` (routed to the guest lane) |
+
+**What passed**, all with real Postgres-backed suites against server 29.7.1: Testcontainers Node 12.1.0,
+Python 4.15.0, Go v0.43.0 and Java 1.21.4 (warm totals 1.7–5.9 s, clean teardown, zero leftovers), and
+Dev Containers CLI 0.88.0 in full — `up`, two-way workspace bind mount, `postCreateCommand`, `exec`,
+and a features/derived-image build through Morbstack BuildKit. Only Testcontainers **Python** and the
+Dev Containers CLI find Morbstack without `DOCKER_HOST`; they are the two that read `docker context`.
+Evidence: [audit/ECOSYSTEM-MATRIX.md](docs/audit/ECOSYSTEM-MATRIX.md).

@@ -53,6 +53,59 @@ const MAX_CONNECTIONS: usize = 64;
 /// response chunk and keeps syscall counts low for image pulls/pushes.
 const COPY_BUF_LEN: usize = 64 * 1024;
 
+/// The reason word `dial::BUSY_REASON` uses for its own connection-cap
+/// rejection, reused here so every over-capacity guest listener reports the
+/// same stable, matchable word.
+pub const BUSY_REASON: &str = "busy";
+
+/// The HTTP response morbinit writes when the Docker relay is at its
+/// connection cap, immediately before closing the connection.
+///
+/// This port carries plain HTTP/1.1 with no framing of its own (see the
+/// module docs), and its peer is always an HTTP client — so unlike
+/// `dial.rs`'s line-oriented `ERR busy\n`, the busy signal here has to *be*
+/// a well-formed HTTP response, or the client's own parser sees an
+/// unparseable reply rather than a server error it already knows how to
+/// render.
+///
+/// `mac/Sources/MorbstackKit/DockerFramedRelay.swift`'s response side
+/// (`runResponseSide`, `.passthrough` mode) relays whatever bytes the guest
+/// writes back to the real client unmodified — it does not require a
+/// hijack, a particular status line, or any cooperation beyond "valid
+/// HTTP" — so this reaches the Docker client exactly as if dockerd itself
+/// had answered. `503 Service Unavailable` is the correct status for
+/// exactly this ("temporarily unable to handle the request"), and pairs
+/// with the host's own synthetic `502 Bad Gateway`
+/// (`DockerProxy.writeGatewayError`, used when the guest cannot be reached
+/// at all): together the two codes let a client tell "no guest to ask" (host
+/// 502) apart from "guest reachable, relay saturated" (guest 503). The JSON
+/// body, `{"message": "..."}`, is exactly `DockerEngineErrorResponse`'s
+/// shape on the host side and the shape the real Docker Engine API uses for
+/// its own errors, so the `docker` CLI's ordinary error rendering picks it
+/// up without special-casing morbstack. `Connection: close` is not just
+/// convention here — the guest is about to close the vsock connection
+/// outright, and a client that thought it could keep the socket alive would
+/// be wrong.
+///
+/// Portable (no vsock needed) so it unit tests directly; see
+/// `the_busy_rejection_is_a_well_formed_http_response` below.
+pub fn busy_response() -> Vec<u8> {
+    let body = format!(
+        "{{\"message\":\"morbstack: docker relay is {} (connection cap of {} reached); retry\"}}",
+        BUSY_REASON, MAX_CONNECTIONS
+    );
+    let mut response = format!(
+        "HTTP/1.1 503 Service Unavailable\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\
+         \r\n",
+        body.len()
+    );
+    response.push_str(&body);
+    response.into_bytes()
+}
+
 /// Copy every byte from `src` to `dst` until `src` reports EOF.
 ///
 /// Unlike `io::copy` this is explicit about the two things that matter here:
@@ -98,10 +151,10 @@ pub fn copy_stream<R: Read + ?Sized, W: Write + ?Sized>(
 
 #[cfg(target_os = "linux")]
 mod imp {
-    use super::{copy_stream, DOCKER_SOCK, MAX_CONNECTIONS, VSOCK_DOCKER_PORT};
+    use super::{busy_response, copy_stream, DOCKER_SOCK, MAX_CONNECTIONS, VSOCK_DOCKER_PORT};
     use crate::log;
     use crate::sys;
-    use std::io;
+    use std::io::{self, Write};
     use std::net::Shutdown;
     use std::os::fd::{AsRawFd, RawFd};
     use std::os::unix::net::UnixStream;
@@ -117,6 +170,12 @@ mod imp {
     const DOCKERD_CONNECT_INITIAL_BACKOFF: Duration = Duration::from_millis(50);
     const DOCKERD_CONNECT_MAX_BACKOFF: Duration = Duration::from_millis(500);
 
+    /// How long the busy HTTP response has to reach the host before we give
+    /// up on it and close anyway. Mirrors `dial::BUSY_REPLY_TIMEOUT_MS`: the
+    /// reply lands on a socket that just finished its vsock handshake, so
+    /// this bound is only ever spent on a peer that is already gone.
+    const BUSY_REPLY_TIMEOUT_MS: i32 = 250;
+
     /// Decrements the live-connection counter however the handler thread
     /// exits (return, error, or panic).
     struct ConnGuard(Arc<AtomicUsize>);
@@ -124,6 +183,35 @@ mod imp {
     impl Drop for ConnGuard {
         fn drop(&mut self) {
             self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Best-effort busy rejection on a connection about to be refused.
+    ///
+    /// Same discipline as `dial::send_busy`: `poll(2)` bounds the wait so a
+    /// wedged peer cannot stall the accept loop, and any failure — including
+    /// the timeout — just falls through to closing the connection, which is
+    /// what happened before this existed.
+    fn send_busy(mut conn: std::fs::File) {
+        let reply = busy_response();
+        match sys::poll_writable(conn.as_raw_fd(), BUSY_REPLY_TIMEOUT_MS) {
+            Ok(true) => {
+                if let Err(e) = conn.write_all(&reply) {
+                    log::log(&format!(
+                        "could not send the docker proxy busy rejection: {}",
+                        e
+                    ));
+                }
+            }
+            Ok(false) => log::log(
+                "docker proxy busy rejection could not be sent within its timeout — \
+                 closing the connection instead",
+            ),
+            Err(e) => log::log(&format!(
+                "could not poll a rejected docker proxy connection for writability: {} \
+                 — closing it instead",
+                e
+            )),
         }
     }
 
@@ -159,10 +247,14 @@ mod imp {
 
             if live.load(Ordering::SeqCst) >= MAX_CONNECTIONS {
                 log::log(&format!(
-                    "docker proxy at connection cap ({}) — dropping new vsock connection",
+                    "docker proxy at connection cap ({}) — rejecting new vsock \
+                     connection with an HTTP 503",
                     MAX_CONNECTIONS
                 ));
-                drop(conn); // closes the fd; host sees the connection close
+                // Say so before hanging up, matching dial.rs: closing silently
+                // makes documented backpressure indistinguishable from a peer
+                // that never spoke HTTP at all.
+                send_busy(conn);
                 continue;
             }
 
@@ -420,5 +512,44 @@ mod tests {
         let n = copy_stream(&mut src, &mut dst).unwrap();
         assert_eq!(n, 16);
         assert_eq!(dst, b"docker api bytes");
+    }
+
+    #[test]
+    fn the_busy_rejection_is_a_well_formed_http_response() {
+        // Connection-cap backpressure used to close the vsock connection
+        // silently, which an HTTP client on the other end reports as a bare
+        // reset rather than a diagnosable server error. It has to arrive as
+        // an ordinary, parseable HTTP response instead — the same
+        // `{"message": ...}` shape the real Docker Engine API (and the
+        // host's own synthetic errors) already use.
+        let response = busy_response();
+        let text = String::from_utf8(response).expect("busy response is valid UTF-8");
+
+        let (head, body) = text
+            .split_once("\r\n\r\n")
+            .expect("response has a head/body separator");
+        assert!(head.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
+        let header_lines: Vec<&str> = head.lines().skip(1).collect();
+        assert!(header_lines.contains(&"Connection: close"));
+        assert!(header_lines.contains(&"Content-Type: application/json"));
+
+        let content_length: usize = head
+            .lines()
+            .find_map(|line| line.strip_prefix("Content-Length: "))
+            .expect("response declares Content-Length")
+            .parse()
+            .expect("Content-Length is a decimal number");
+        assert_eq!(content_length, body.len());
+
+        assert!(body.starts_with('{') && body.ends_with('}'));
+        assert!(
+            body.contains(BUSY_REASON),
+            "body {:?} should contain the stable reason word {:?}",
+            body,
+            BUSY_REASON
+        );
+        // Every header line and the body are exactly one line each — nothing
+        // downstream can smuggle a second status line or an extra frame.
+        assert!(!body.contains('\n'));
     }
 }

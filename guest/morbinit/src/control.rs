@@ -612,6 +612,37 @@ fn error_response(msg: &str) -> Vec<u8> {
     .into_bytes()
 }
 
+/// The reason word `dial.rs`'s `BUSY_REASON` uses for its own connection-cap
+/// rejection, reused here so every over-capacity guest listener answers with
+/// the same stable, matchable word.
+pub const BUSY_REASON: &str = "busy";
+
+/// The complete MRB0 frame morbinit sends when the control server is at its
+/// connection cap: magic + length + the ordinary `error` reply payload
+/// carrying `BUSY_REASON`.
+///
+/// A bare `ERR busy\n` (dial.rs's style) is wrong here: MRB0 is length-
+/// prefixed framed JSON, not a line protocol, so an unframed line would
+/// desync a reader expecting a 4-byte magic next. `error` is already the
+/// documented generic-failure reply for *any* request (see the message
+/// table in docs/protocol.md), so wrapping `BUSY_REASON` in one costs
+/// nothing new on the wire — the host's `GuestControl.unexpected(_:expected:)`
+/// (mac/Sources/MorbstackKit/GuestControl.swift) already special-cases an
+/// `error` reply into `"guest reported: <message>"` instead of the generic
+/// "expected `X`, got `error`" it produces for any other type mismatch, so a
+/// caller sees `"guest reported: busy"` rather than a confusing complaint
+/// about a reply type it never asked for.
+///
+/// Portable (no vsock needed) so it unit tests directly; see
+/// `the_busy_rejection_is_a_well_formed_mrb0_error_frame` below.
+pub fn busy_frame() -> Vec<u8> {
+    let mut buf = Vec::new();
+    // Cannot fail: the payload is a small fixed JSON object, far under
+    // MAX_PAYLOAD.
+    write_frame(&mut buf, &error_response(BUSY_REASON)).expect("busy frame payload is tiny");
+    buf
+}
+
 /// Serve requests over a single already-accepted connection until it closes
 /// or a `shutdown` request has been carried out. Returns `true` if shutdown
 /// was requested.
@@ -696,6 +727,42 @@ pub fn spawn_server(
     Ok(())
 }
 
+/// How long the busy rejection gets to reach the host before we give up on
+/// it and close anyway. Mirrors `dial::BUSY_REPLY_TIMEOUT_MS`: the frame is a
+/// handful of bytes onto a socket that just finished its vsock handshake, so
+/// this is only ever spent on a peer that is already gone.
+#[cfg(target_os = "linux")]
+const BUSY_REPLY_TIMEOUT_MS: i32 = 250;
+
+/// Best-effort busy rejection on a control connection about to be refused.
+///
+/// Same discipline as `dial::send_busy`: `poll(2)` bounds the wait so a
+/// wedged peer cannot stall the accept loop, and any failure — including the
+/// timeout — just falls through to closing the connection, which is what
+/// happened before this existed.
+#[cfg(target_os = "linux")]
+fn send_busy(mut conn: std::fs::File) {
+    use std::os::fd::AsRawFd;
+
+    let reply = busy_frame();
+    match crate::sys::poll_writable(conn.as_raw_fd(), BUSY_REPLY_TIMEOUT_MS) {
+        Ok(true) => {
+            if let Err(e) = conn.write_all(&reply).and_then(|()| conn.flush()) {
+                log::log(&format!("could not send the control busy rejection: {}", e));
+            }
+        }
+        Ok(false) => log::log(
+            "control busy rejection could not be sent within its timeout — closing the \
+             connection instead",
+        ),
+        Err(e) => log::log(&format!(
+            "could not poll a rejected control connection for writability: {} — closing \
+             it instead",
+            e
+        )),
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn accept_loop(listener: crate::sys::VsockListener, ctx: Arc<ControlContext>) {
     use std::sync::atomic::AtomicUsize;
@@ -720,9 +787,14 @@ fn accept_loop(listener: crate::sys::VsockListener, ctx: Arc<ControlContext>) {
 
         if live.load(Ordering::SeqCst) >= MAX_CONTROL_CONNECTIONS {
             log::log(&format!(
-                "control server at connection cap ({}) — dropping connection",
-                MAX_CONTROL_CONNECTIONS
+                "control server at connection cap ({}) — rejecting new vsock \
+                 connection with an MRB0 ERR {} frame",
+                MAX_CONTROL_CONNECTIONS, BUSY_REASON
             ));
+            // Say so before hanging up, matching dial.rs: closing silently makes
+            // documented backpressure indistinguishable from a peer that never
+            // spoke the protocol.
+            send_busy(conn);
             continue;
         }
 
@@ -1005,6 +1077,29 @@ mod tests {
         assert!(!shutdown);
         let fields = jsonlite::parse(std::str::from_utf8(&resp).unwrap()).unwrap();
         assert_eq!(fields.get("type"), Some(&Value::Str("error".to_string())));
+    }
+
+    #[test]
+    fn the_busy_rejection_is_a_well_formed_mrb0_error_frame() {
+        // Connection-cap backpressure on the control port used to close silently,
+        // which the host's frame reader could not tell apart from a genuinely
+        // desynchronized connection. It has to arrive as an ordinary, parseable
+        // MRB0 frame carrying the same generic `error` reply any other refused
+        // request gets — never a bare unframed line, which would desync MRB0's
+        // length-prefixed reader.
+        let frame = busy_frame();
+        assert_eq!(&frame[0..4], MAGIC);
+        let mut cursor = Cursor::new(frame);
+        let payload = read_frame(&mut cursor).unwrap();
+        let fields = jsonlite::parse(std::str::from_utf8(&payload).unwrap()).unwrap();
+        assert_eq!(fields.get("type"), Some(&Value::Str("error".to_string())));
+        assert_eq!(
+            fields.get("message"),
+            Some(&Value::Str(BUSY_REASON.to_string()))
+        );
+        // One stable word, so a caller can match on it exactly like
+        // `dial::BUSY_REASON`.
+        assert!(!BUSY_REASON.contains(char::is_whitespace));
     }
 
     /// A tiny in-memory duplex stream so `handle_connection` (which needs

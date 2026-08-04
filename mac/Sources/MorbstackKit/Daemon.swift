@@ -761,6 +761,12 @@ public final class Daemon {
                 "vm_state": .string(vm.state.description),
                 "guest_control": .string(vm.isGuestControlReady ? "ready" : "not ready"),
                 "docker_ready": .bool(vm.isDockerReady),
+                // The protocol's compatibility probe, surfaced rather than merely
+                // decoded. `null` while no guest has answered `info` on this boot;
+                // `morb status` and `morb doctor` compare it against
+                // `MorbVersion.minimumCompatibleMorbinit`.
+                "morbinit_version": vm.guestMorbinitVersion.map { AnyCodableValue.string($0) }
+                    ?? .null,
                 // `null` rather than `false` when the guest has not said: "we do not
                 // know" and "the data is on a tmpfs and will not survive a stop" are
                 // very different things to tell somebody about their images.
@@ -1312,8 +1318,24 @@ public final class Daemon {
         // when the signal landed are logged as the expected casualties they are.
         proxy.beginOrderlyShutdown()
         proxy.stop()
-        forwarder.stop(reason: "daemon shutting down")
-        k8s.cancelPodPortForwards(reason: "the daemon is shutting down")
+        // Through `forwarderQueue`, synchronously — never straight onto the
+        // forwarder. Every other start/stop funnels through that serial queue
+        // precisely so a fast running → stopped → running flap cannot reorder into
+        // a stop that lands after the start it preceded (see the queue's comment);
+        // stopping directly from here would race a queued `forwarder.start()` from
+        // a late VM state change and could leave listeners bound on the way out.
+        // Sync is safe: nothing on `forwarderQueue` ever blocks back on the caller
+        // (its hops are all `async`), and the lines below assume the ports are
+        // already free.
+        forwarderQueue.sync {
+            forwarder.stop(reason: "daemon shutting down")
+            // The generation bump orphans any scheduled Kubernetes reconciliation
+            // that would otherwise re-publish 127.0.0.1:6443 between here and exit,
+            // and the listener itself comes down with the rest of the ports.
+            kubernetesForwardGeneration &+= 1
+            k8s.cancelPodPortForwards(reason: "the daemon is shutting down")
+            k8s.forward.stop()
+        }
         controlServer.stop()
 
         let semaphore = DispatchSemaphore(value: 0)

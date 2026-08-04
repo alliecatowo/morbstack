@@ -695,6 +695,17 @@ case "status":
             ("memory", (data["memory_mib"]?.displayString).map { "\($0) MiB" } ?? "-"),
             ("auto-suspend", (data["auto_suspend_minutes"]?.displayString).map { $0 == "0" ? "off" : "\($0)m" } ?? "-"),
             ("daemon", data["version"]?.displayString ?? "-"),
+            // The guest's protocol compatibility statement. "-" while nothing has
+            // booted; flagged inline when it predates what this daemon supports,
+            // because a version mismatch explains failures that nothing else in
+            // this table will.
+            ("guest morbinit", {
+                guard case .string(let reported)? = data["morbinit_version"] else { return "-" }
+                if MorbVersion.isOlder(reported, than: MorbVersion.minimumCompatibleMorbinit) {
+                    return "\(reported) (older than supported \(MorbVersion.minimumCompatibleMorbinit) — rebuild with `make guest-image`)"
+                }
+                return reported
+            }()),
         ])
 
         // Published ports are the thing a user is most likely to be checking for, so

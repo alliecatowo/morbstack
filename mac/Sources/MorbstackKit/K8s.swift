@@ -49,8 +49,12 @@ public enum K8s {
             sha256: "d52b7a79376560d7dcb5490e16dcb78578bd0f040c1e70dec220824fae74ae7e"),
     ]
 
-    /// vsock port the payload is streamed over. Mirrors `k8s::VSOCK_K8S_INSTALL_PORT`.
-    public static let installPort: UInt32 = 2377
+    /// vsock port the payload is streamed over.
+    ///
+    /// An alias into ``MorbVsockPorts`` — the one registry of guest vsock ports —
+    /// kept here for the K8s-flavoured name and doc trail. Defining a literal here
+    /// instead would quietly fork the registry.
+    public static let installPort: UInt32 = MorbVsockPorts.k8sInstall
 
     /// The apiserver's port inside the guest. Mirrors `k8s::APISERVER_PORT`.
     public static let guestAPIServerPort = 6443

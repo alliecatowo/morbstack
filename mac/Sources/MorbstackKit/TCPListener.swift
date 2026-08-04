@@ -58,51 +58,9 @@ public final class TCPListener {
         }
     }
 
-    /// How long ``stop()`` waits for the accept source's cancel handler before closing
-    /// the descriptor itself.
-    ///
-    /// Only reached if the listener's queue is wedged; the handler normally runs in
-    /// well under a millisecond. The fallback exists so a stuck queue degrades into a
-    /// late close rather than a descriptor — and a bound port — leaked forever.
-    private static let cancelHandlerGrace: TimeInterval = 2
-
-    /// The listening descriptor, with accept and close serialised against each other.
-    ///
-    /// The serialisation is the point. `stop()` has to close the socket *synchronously*
-    /// (see ``TCPListener/stop()``), and a bare `close(2)` racing an in-flight
-    /// `accept(2)` on the same number is the classic descriptor-reuse bug: the accept
-    /// lands on whatever the process opened next. Funnelling both through one lock
-    /// makes "closed" a state the accept loop observes rather than a race it runs into.
-    private final class ListenSocket {
-
-        private let lock = NSLock()
-        private let fd: Int32
-        private var closed = false
-
-        /// Signalled exactly once, by whichever caller performs the close.
-        let closedSignal = DispatchSemaphore(value: 0)
-
-        init(_ fd: Int32) { self.fd = fd }
-
-        /// Closes the socket if it is still open. Idempotent.
-        func close() {
-            lock.lock()
-            let alreadyClosed = closed
-            closed = true
-            lock.unlock()
-            guard !alreadyClosed else { return }
-            Darwin.close(fd)
-            closedSignal.signal()
-        }
-
-        /// One non-blocking `accept(2)`, or `-1` once the socket has been closed.
-        func acceptOne() -> Int32 {
-            lock.lock()
-            defer { lock.unlock() }
-            guard !closed else { return -1 }
-            return POSIXSocketSupport.retryOnInterrupt { Darwin.accept(fd, nil, nil) }
-        }
-    }
+    // The listening descriptor lives in a ``POSIXListenSocket`` (shared with
+    // ``UnixSocketServer``), which serialises accept against close and lets
+    // ``stop()`` wait for the dispatch cancel handler; see that class for why.
 
     /// The port this listener binds.
     ///
@@ -130,7 +88,7 @@ public final class TCPListener {
 
     private let queue: DispatchQueue
     private let lock = NSLock()
-    private var listenSocket: ListenSocket?
+    private var listenSocket: POSIXListenSocket?
     private var acceptSource: DispatchSourceRead?
     private var running = false
 
@@ -304,7 +262,7 @@ public final class TCPListener {
         }
 
         POSIXSocketSupport.setNonBlocking(fd, true)
-        let bound = ListenSocket(fd)
+        let bound = POSIXListenSocket(fd)
         listenSocket = bound
 
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
@@ -330,7 +288,7 @@ public final class TCPListener {
     /// published port stayed dark until something unrelated triggered another refresh.
     ///
     /// So: cancel the source, then *wait* for its handler to close the socket, and
-    /// close it here if that wait runs out. ``ListenSocket`` closes exactly once no
+    /// close it here if that wait runs out. ``POSIXListenSocket`` closes exactly once no
     /// matter which of the two paths gets there first.
     public func stop() {
         lock.lock()
@@ -345,7 +303,7 @@ public final class TCPListener {
 
         guard wasRunning, let bound else { return }
         source?.cancel()
-        if bound.closedSignal.wait(timeout: .now() + TCPListener.cancelHandlerGrace) == .timedOut {
+        if bound.closedSignal.wait(timeout: .now() + POSIXListenSocket.cancelHandlerGrace) == .timedOut {
             // The listener's queue is not draining. Closing from here is still safe:
             // the accept loop takes the same lock the close does, so it cannot be
             // holding a descriptor this call is about to invalidate.

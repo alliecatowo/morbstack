@@ -87,6 +87,38 @@ BuildKit, the 3-service compose fixture). Design, evidence and residual risk:
 **`docs/audit/PROXY-FRAMING.md`**; status rows in `docs/MASTER-PLAN.md` §1.0
 and §1.3.
 
+### Ecosystem clients: Testcontainers and Dev Containers (EN-8/EN-9, run 2026-08-04)
+
+Real container-backed suites were executed against the running engine
+(server 29.7.1) through `scripts/ecosystem-acceptance.sh`; full commands,
+output, and timings in [`audit/ECOSYSTEM-MATRIX.md`](audit/ECOSYSTEM-MATRIX.md):
+
+- **Testcontainers Node 12.1.0, Python 4.15.0, Go v0.43.0, Java 1.21.4:
+  PASS** with a real Postgres round-trip each, Ryuk enabled and self-reaping,
+  warm-start totals of 1.7–5.9 s — but only with
+  `DOCKER_HOST=unix://$HOME/.morbstack/run/docker.sock` **and**
+  `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock`. Without the
+  override, Ryuk's socket bind mount fails with an HTTP 500 in every
+  language (the `DOCKER_HOST` Mac-side path does not exist in the guest).
+- **Zero-config discovery**: only Testcontainers **Python** (via docker-py's
+  context awareness) and the **Dev Containers CLI** (docker context) find
+  Morbstack without `DOCKER_HOST`. Node, Go, and Java walk their hardcoded
+  socket lists and, on this machine, **silently ran green against the stale
+  Docker Desktop 27.4.0 socket** — the wrong-daemon footgun, reconfirmed
+  live in three languages.
+- **testcontainers-java ≤1.20.x fails against any engine-29 daemon**:
+  docker-java ≤3.4.0 probes `GET /v1.32/info`, upstream moby 29's default
+  `MinAPIVersion` is 1.40 (verified: not a Morbstack modification), the 400
+  is treated as "no daemon", and the client silently fails over. 1.21.4
+  (docker-java 3.4.2, probes /v1.44) passes. Proposed mitigation for the
+  guest lane: `DOCKER_MIN_API_VERSION=1.24` in morbinit's dockerd
+  environment.
+- **Dev Containers CLI 0.88.0: PASS end-to-end** with context-only
+  discovery — `up` (34 s incl. pull), two-way workspace bind mount,
+  `postCreateCommand`, `exec`, and a features/derived-image build
+  (`ghcr.io/devcontainers/features/go:1` on the debian base) through
+  Morbstack BuildKit. The VS Code extension flow remains CP-07.
+
 ### Current delivery state (not a replacement for this audit)
 
 The current checkout also packages Buildx and implements a consented
