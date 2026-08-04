@@ -72,6 +72,16 @@ enum Formatters {
 
     // MARK: - Numbers
 
+    /// Ports, PIDs, exit codes, sequence numbers: identifiers render digits-only.
+    ///
+    /// Never hand one of these to a locale-aware number format — `18099` is a port,
+    /// `18,099` is a lie. In SwiftUI, interpolating an `Int` into a `Text` string
+    /// literal builds a `LocalizedStringKey`, which *does* group thousands; route any
+    /// numeric identifier through this instead.
+    static func identifier(_ value: some BinaryInteger) -> String {
+        String(value)
+    }
+
     /// `12.4%`. Clamped at zero because a CPU delta straddling a container restart can
     /// come out negative, and rounded to one place because the second place is noise.
     static func percent(_ value: Double) -> String {

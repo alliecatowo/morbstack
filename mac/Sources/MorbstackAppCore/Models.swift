@@ -221,6 +221,16 @@ struct PortMapping: Hashable, Sendable, Identifiable {
         }
         return "\(containerPort)/\(proto)"
     }
+
+    /// `0.0.0.0:18099`, or `nil` when unpublished.
+    ///
+    /// Deliberately `String`-typed. Handing the interpolation to SwiftUI's `Text`
+    /// lets it resolve as a `LocalizedStringKey`, whose `Int` interpolation applies
+    /// locale grouping — which is how a port once rendered as `18,099`. A port is an
+    /// identifier, not a quantity; it is never grouped.
+    var hostDisplay: String? {
+        hostPort.map { "\(hostIP ?? "0.0.0.0"):\($0)" }
+    }
 }
 
 // MARK: - Containers
