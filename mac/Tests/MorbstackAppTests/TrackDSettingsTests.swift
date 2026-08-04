@@ -175,6 +175,15 @@ final class TrackDConfigEditorTests: XCTestCase {
         XCTAssertTrue(TrackDConfigEditor.restartSummary(from: applied, to: pending).contains("host-network"))
     }
 
+    func testRestartIsRequiredForLiveReloadPathChanges() {
+        let applied = MorbConfig()
+        var pending = applied
+        pending.liveSharePaths = ["/Users/me/project"]
+
+        XCTAssertTrue(TrackDConfigEditor.requiresEngineRestart(from: applied, to: pending))
+        XCTAssertTrue(TrackDConfigEditor.restartSummary(from: applied, to: pending).contains("live reload"))
+    }
+
     func testRestartSummaryNamesTheSentinel() {
         var applied = MorbConfig()
         applied.cpus = 0
@@ -393,5 +402,20 @@ final class TrackDConfigRoundTripTests: XCTestCase {
         XCTAssertEqual(store.saved.autoSuspendMinutes, 45)
         XCTAssertEqual(store.draft.autoSuspendMinutes, 45)
         XCTAssertFalse(store.isDirty)
+    }
+
+    @MainActor
+    func testLiveReloadPathsUseThePreservingConfigWriter() throws {
+        try "# keep this note\nshared_paths = [\"/Users\"]\n[future]\nfeature = \"still here\"\n".write(
+            to: configURL, atomically: true, encoding: .utf8)
+        let store = TrackDSettingsStore(url: configURL, limits: limits)
+        store.draft.liveSharePaths = ["/Users/me/project"]
+
+        XCTAssertTrue(store.save())
+        XCTAssertEqual(try MorbConfig.load(from: configURL).liveSharePaths, ["/Users/me/project"])
+        let written = try String(contentsOf: configURL, encoding: .utf8)
+        XCTAssertTrue(written.contains("# keep this note"))
+        XCTAssertTrue(written.contains("[future]"))
+        XCTAssertTrue(written.contains("feature = \"still here\""))
     }
 }

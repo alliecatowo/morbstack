@@ -205,7 +205,19 @@ public enum MorbLiveShareBridge {
                 throw MorbError.config(
                     "live_share_paths entry \"\(path)\" is a broad VirtioFS root; select a narrower project directory beneath \(backing.path)")
             }
-            roots.append(Root(path: path, backingSharePath: backing.path))
+            let root = Root(path: path, backingSharePath: backing.path)
+            // The guest treats a selected root as an immutable authority. Two
+            // overlapping authorities would make one FSEvent eligible for two
+            // independently sequenced claims, so the guest correctly rejects them
+            // during its authenticated hello. Reject the same configuration before
+            // the host can create a session that is guaranteed to fail.
+            if let overlap = roots.first(where: {
+                isWithin(root.path, root: $0.path) || isWithin($0.path, root: root.path)
+            }) {
+                throw MorbError.config(
+                    "live_share_paths entries \"\(overlap.path)\" and \"\(root.path)\" overlap; select separate project directories")
+            }
+            roots.append(root)
         }
         return Plan(roots: roots)
     }
@@ -577,7 +589,7 @@ public enum MorbLiveShareBridge {
                 guestCapability: guestAdvertisement.capability,
                 guestContractVersion: guestAdvertisement.contractVersion,
                 contractCompatibility: guestAdvertisement.compatibility,
-                detail: "No live_share_paths are configured; Morbstack does not watch broad VirtioFS roots.")
+                detail: "Live reload is off. Add narrow project directories to live_share_paths in config.toml, then restart the engine; Morbstack never watches broad VirtioFS roots.")
         }
         let plan: Plan
         do {

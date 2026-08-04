@@ -66,6 +66,19 @@ public final class MorbLiveShareTransport: @unchecked Sendable {
     /// into a self-sustaining host→guest loop; a root rescan is never suppressed.
     private var echoedPaths: [String: Date] = [:]
 
+    /// The immutable root authority serialized in the authenticated hello. This
+    /// remains internal so focused tests can prove that the running transport uses
+    /// the same narrow-plan and backing-share contract as the guest receiver, without
+    /// opening a vsock connection or an FSEvent stream.
+    struct WireClaim: Equatable {
+        let rootID: String
+        let tag: String
+        let rootPath: String
+        let backingPath: String
+        let readOnly: Bool
+        let epoch: UInt64
+    }
+
     public init(vm: VMManager, config: MorbConfig, log: MorbLog) {
         self.vm = vm
         self.config = config
@@ -320,6 +333,39 @@ public final class MorbLiveShareTransport: @unchecked Sendable {
         echoedPaths = echoedPaths.filter { $0.value > now }
     }
 
+    /// Builds the exact root claims accepted by the guest's hello validator.
+    ///
+    /// This is pure protocol construction: callers must still establish the fresh
+    /// authenticated receiver session before these claims become authority.
+    static func makeWireClaims(
+        plan: MorbLiveShareBridge.Plan,
+        shares: [MorbDirectoryShare],
+        epoch: UInt64
+    ) throws -> [WireClaim] {
+        guard epoch > 0 else {
+            throw MorbError.protocolViolation("live-share root claim epoch must be nonzero")
+        }
+        var ids = Set<String>()
+        return try plan.roots.map { root in
+            guard let share = shares.first(where: { $0.path == root.backingSharePath }) else {
+                throw MorbError.protocolViolation("live-share root has no current backing share")
+            }
+            var material = Data()
+            material.append(Data(share.tag.utf8)); material.append(0)
+            material.append(Data(root.path.utf8)); material.append(0)
+            material.append(Data(root.backingSharePath.utf8)); material.append(0)
+            material.append(share.readOnly ? 1 : 0)
+            let id = "root_" + SHA256.hash(data: material)
+                .map { String(format: "%02x", $0) }.joined().prefix(59)
+            guard ids.insert(String(id)).inserted else {
+                throw MorbError.protocolViolation("live-share generated duplicate root claim")
+            }
+            return WireClaim(
+                rootID: String(id), tag: share.tag, rootPath: root.path,
+                backingPath: root.backingSharePath, readOnly: share.readOnly, epoch: epoch)
+        }
+    }
+
     private static func validateHostRoots(
         _ roots: [MorbLiveShareBridge.Root],
         shares: [MorbDirectoryShare]
@@ -400,7 +446,8 @@ private extension MorbLiveShareTransport {
             let capability = try Self.randomBytes(count: 32)
             let session = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
             let epoch = Self.epochFromCapability(capability)
-            let claims = try Self.makeClaims(plan: plan, shares: shares, epoch: epoch)
+            let claims = try MorbLiveShareTransport.makeWireClaims(
+                plan: plan, shares: shares, epoch: epoch)
             let hello = "HELLO 1 \(session) \(bootFields[1]) \(capability.hexadecimalString) \(claims.count)"
             var transcript = Data((hello + "\n").utf8)
             try Self.sendLine(fd: descriptor, hello)
@@ -491,41 +538,6 @@ private extension MorbLiveShareTransport {
             _ = try? Self.sendLine(fd: fd, "\(body) \(Self.hmacHex(key: capability, message: Data(body.utf8)))")
             _ = Darwin.shutdown(fd, SHUT_RDWR)
             Darwin.close(fd)
-        }
-
-        private struct WireClaim {
-            let rootID: String
-            let tag: String
-            let rootPath: String
-            let backingPath: String
-            let readOnly: Bool
-            let epoch: UInt64
-        }
-
-        private static func makeClaims(
-            plan: MorbLiveShareBridge.Plan,
-            shares: [MorbDirectoryShare],
-            epoch: UInt64
-        ) throws -> [WireClaim] {
-            var ids = Set<String>()
-            return try plan.roots.map { root in
-                guard let share = shares.first(where: { $0.path == root.backingSharePath }) else {
-                    throw MorbError.protocolViolation("live-share root has no current backing share")
-                }
-                var material = Data()
-                material.append(Data(share.tag.utf8)); material.append(0)
-                material.append(Data(root.path.utf8)); material.append(0)
-                material.append(Data(root.backingSharePath.utf8)); material.append(0)
-                material.append(share.readOnly ? 1 : 0)
-                let id = "root_" + SHA256.hash(data: material)
-                    .map { String(format: "%02x", $0) }.joined().prefix(59)
-                guard ids.insert(String(id)).inserted else {
-                    throw MorbError.protocolViolation("live-share generated duplicate root claim")
-                }
-                return WireClaim(
-                    rootID: String(id), tag: share.tag, rootPath: root.path,
-                    backingPath: root.backingSharePath, readOnly: share.readOnly, epoch: epoch)
-            }
         }
 
         private static func readLine(fd: Int32) throws -> String {

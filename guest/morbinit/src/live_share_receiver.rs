@@ -608,6 +608,53 @@ mod imp {
     fn protocol_error(message: impl fmt::Display) -> io::Error {
         io::Error::new(io::ErrorKind::InvalidData, message.to_string())
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn capability() -> [u8; live_share::CAPABILITY_BYTES] {
+            [0x5a; live_share::CAPABILITY_BYTES]
+        }
+
+        #[test]
+        fn acknowledgement_has_the_exact_authenticated_host_wire_shape() {
+            let key = capability();
+            let line = acknowledgement_line(&key, "aabb", "ccdd", 7, "applied");
+            let fields: Vec<_> = line.split(' ').collect();
+
+            assert_eq!(fields.len(), 6);
+            assert_eq!(&fields[..5], ["ACK", "aabb", "ccdd", "7", "applied"]);
+            let body = fields[..5].join(" ");
+            assert!(verify_hmac(&key, &body, fields[5]));
+        }
+
+        #[test]
+        fn root_claim_parser_keeps_encoded_paths_as_data_until_validation() {
+            let claim = parse_root("ROOT root_project morbshare0 /Users/me/project /Users 0 41")
+                .expect("well-formed root claim");
+
+            assert_eq!(claim.root_id, "root_project");
+            assert_eq!(claim.guest_path, "/Users/me/project");
+            assert_eq!(claim.backing_share_path, "/Users");
+            assert!(!claim.read_only);
+            assert_eq!(claim.epoch, 41);
+            assert!(
+                parse_root("ROOT root_project morbshare0 /Users/me/project /Users 0 0").is_err()
+            );
+        }
+
+        #[test]
+        fn percent_decoder_rejects_unframed_whitespace_and_malformed_escapes() {
+            assert_eq!(
+                percent_decode("src%20main/%E2%9C%93").expect("well-formed UTF-8 escapes"),
+                "src main/✓"
+            );
+            assert!(percent_decode("src main").is_err());
+            assert!(percent_decode("src%2").is_err());
+            assert!(percent_decode("src%XZ").is_err());
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]

@@ -179,6 +179,8 @@ pub enum ValidationError {
     },
     InvalidRootID(String),
     InvalidShareTag(String),
+    DuplicateMountedShareTag(String),
+    DuplicateMountedSharePath(String),
     DuplicateRootID(String),
     InvalidEpoch {
         root: String,
@@ -241,6 +243,20 @@ impl fmt::Display for ValidationError {
             Self::InvalidRootID(root) => write!(f, "invalid synchronized-share root id {:?}", root),
             Self::InvalidShareTag(tag) => {
                 write!(f, "invalid synchronized-share backing tag {:?}", tag)
+            }
+            Self::DuplicateMountedShareTag(tag) => {
+                write!(
+                    f,
+                    "duplicate synchronized-share mounted backing tag {:?}",
+                    tag
+                )
+            }
+            Self::DuplicateMountedSharePath(path) => {
+                write!(
+                    f,
+                    "duplicate synchronized-share mounted backing path {:?}",
+                    path
+                )
             }
             Self::DuplicateRootID(root) => {
                 write!(f, "duplicate synchronized-share root id {:?}", root)
@@ -334,9 +350,19 @@ pub fn validate_hello(
     }
 
     let mut root_ids = HashSet::with_capacity(hello.roots.len());
+    let mut mounted_tags = HashSet::with_capacity(mounted_shares.len());
+    let mut mounted_paths = HashSet::with_capacity(mounted_shares.len());
     for share in mounted_shares {
         validate_share_tag(&share.tag)?;
         validate_absolute_path("mounted share", &share.guest_path)?;
+        if !mounted_tags.insert(share.tag.as_str()) {
+            return Err(ValidationError::DuplicateMountedShareTag(share.tag.clone()));
+        }
+        if !mounted_paths.insert(share.guest_path.as_str()) {
+            return Err(ValidationError::DuplicateMountedSharePath(
+                share.guest_path.clone(),
+            ));
+        }
     }
     let mut roots = Vec::with_capacity(hello.roots.len());
     for root in hello.roots {
@@ -575,4 +601,182 @@ fn is_equal_or_descendant(path: &str, root: &str) -> bool {
 
 fn is_all_zero(bytes: &[u8]) -> bool {
     bytes.iter().all(|byte| *byte == 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mounted(read_only: bool) -> Vec<MountedShare> {
+        vec![MountedShare {
+            tag: "morbshare0".to_string(),
+            guest_path: "/Users".to_string(),
+            read_only,
+        }]
+    }
+
+    fn root(id: &str, path: &str) -> RootClaim {
+        RootClaim {
+            root_id: id.to_string(),
+            backing_share_tag: "morbshare0".to_string(),
+            guest_path: path.to_string(),
+            backing_share_path: "/Users".to_string(),
+            read_only: false,
+            epoch: 41,
+        }
+    }
+
+    fn hello(roots: Vec<RootClaim>) -> Hello {
+        Hello {
+            contract_version: CONTRACT_VERSION,
+            session_id: [1; SESSION_ID_BYTES],
+            guest_boot_id: [2; GUEST_BOOT_ID_BYTES],
+            peer_capability: [3; CAPABILITY_BYTES],
+            roots,
+        }
+    }
+
+    fn header(sequence: u64) -> RecordHeader {
+        RecordHeader {
+            contract_version: CONTRACT_VERSION,
+            session_id: [1; SESSION_ID_BYTES],
+            guest_boot_id: [2; GUEST_BOOT_ID_BYTES],
+            root_id: "root_project".to_string(),
+            epoch: 41,
+            direction: Direction::HostToGuest,
+            sequence,
+            base_revision: 0,
+        }
+    }
+
+    #[test]
+    fn exact_mounted_share_and_narrow_root_become_session_authority() {
+        let session = validate_hello(
+            hello(vec![root("root_project", "/Users/me/project")]),
+            &mounted(false),
+        )
+        .expect("exact mounted narrow root must be accepted");
+
+        assert_eq!(
+            session.guest_path_for_root("root_project"),
+            Ok("/Users/me/project")
+        );
+        assert_eq!(session.epoch_for_root("root_project"), Ok(41));
+        assert_eq!(session.root_is_read_only("root_project"), Ok(false));
+    }
+
+    #[test]
+    fn overlapping_selected_roots_are_rejected_before_any_event_is_accepted() {
+        let error = match validate_hello(
+            hello(vec![
+                root("root_project", "/Users/me/project"),
+                root("root_sources", "/Users/me/project/Sources"),
+            ]),
+            &mounted(false),
+        ) {
+            Ok(_) => panic!("one path must not gain two independently sequenced authorities"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(error, ValidationError::OverlappingRoots { .. }));
+    }
+
+    #[test]
+    fn ambiguous_mounted_share_snapshot_is_rejected() {
+        let mut ambiguous = mounted(false);
+        ambiguous.push(MountedShare {
+            tag: "morbshare0".to_string(),
+            guest_path: "/Volumes".to_string(),
+            read_only: false,
+        });
+
+        let error = match validate_hello(
+            hello(vec![root("root_project", "/Users/me/project")]),
+            &ambiguous,
+        ) {
+            Ok(_) => panic!("a tag must name one exact mounted share"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            ValidationError::DuplicateMountedShareTag(_)
+        ));
+    }
+
+    #[test]
+    fn changed_backing_share_access_cannot_be_reused_as_authority() {
+        let error = match validate_hello(
+            hello(vec![root("root_project", "/Users/me/project")]),
+            &mounted(true),
+        ) {
+            Ok(_) => panic!("a changed mount access mode must reject the hello"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            ValidationError::BackingShareAccessChanged { .. }
+        ));
+    }
+
+    #[test]
+    fn rejected_or_skipped_sequence_does_not_advance_the_replay_cursor() {
+        let session = validate_hello(
+            hello(vec![root("root_project", "/Users/me/project")]),
+            &mounted(false),
+        )
+        .unwrap();
+        let mut cursor = SequenceCursor::default();
+
+        let skipped = session.validate_next_inbound_header(&mut cursor, &header(2));
+        assert!(matches!(
+            skipped,
+            Err(ValidationError::UnexpectedSequence {
+                actual: 2,
+                expected: 1
+            })
+        ));
+        session
+            .validate_next_inbound_header(&mut cursor, &header(1))
+            .expect("the original first record remains valid after a rejected skip");
+        let replay = session.validate_next_inbound_header(&mut cursor, &header(1));
+        assert!(matches!(
+            replay,
+            Err(ValidationError::UnexpectedSequence {
+                actual: 1,
+                expected: 2
+            })
+        ));
+    }
+
+    #[test]
+    fn entry_paths_never_authorize_traversal_or_an_unknown_root() {
+        let session = validate_hello(
+            hello(vec![root("root_project", "/Users/me/project")]),
+            &mounted(false),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            session.validate_entry_path("root_project", "src/../secret"),
+            Err(ValidationError::InvalidRelativePath(_))
+        ));
+        assert!(matches!(
+            session.validate_entry_path("root_project", "/etc/passwd"),
+            Err(ValidationError::InvalidRelativePath(_))
+        ));
+        assert!(matches!(
+            session.validate_entry_path("other", "src/main.swift"),
+            Err(ValidationError::UnknownRoot(_))
+        ));
+    }
+
+    #[test]
+    fn read_only_claim_remains_visible_to_the_receiver() {
+        let mut read_only_root = root("root_project", "/Users/me/project");
+        read_only_root.read_only = true;
+        let session = validate_hello(hello(vec![read_only_root]), &mounted(true)).unwrap();
+
+        assert_eq!(session.root_is_read_only("root_project"), Ok(true));
+    }
 }

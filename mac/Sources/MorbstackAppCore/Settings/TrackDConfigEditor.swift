@@ -130,6 +130,10 @@ enum TrackDConfigEditor {
             || applied.autoSuspendMinutes != pending.autoSuspendMinutes
             || applied.allowLANPortPublishing != pending.allowLANPortPublishing
             || applied.allowHostNetworkPortPublishing != pending.allowHostNetworkPortPublishing
+            // The daemon captures selected roots when it creates the transport. A
+            // config write cannot retarget an authenticated receiver session, so a
+            // live-reload edit becomes effective only after the next VM lifecycle.
+            || applied.liveSharePaths != pending.liveSharePaths
     }
 
     /// A one-line description of what changed, for the restart banner.
@@ -152,6 +156,9 @@ enum TrackDConfigEditor {
         }
         if applied.allowHostNetworkPortPublishing != pending.allowHostNetworkPortPublishing {
             changes.append("host-network port forwarding \(pending.allowHostNetworkPortPublishing ? "on" : "off")")
+        }
+        if applied.liveSharePaths != pending.liveSharePaths {
+            changes.append("live reload projects")
         }
         if applied.kernelPath != pending.kernelPath
             || applied.initrdPath != pending.initrdPath

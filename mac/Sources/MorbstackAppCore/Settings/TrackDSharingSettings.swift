@@ -2,9 +2,9 @@
 // Licensed under the Apache License, Version 2.0 (the "License").
 //
 // Settings › File Sharing presents the configuration and the guest's observed mount
-// state. It is intentionally read-only: the writer cannot safely round-trip the shared
-// paths array yet, and sharing a host folder is a security decision. The config file is
-// therefore the deliberate editing surface.
+// state. Broad VirtioFS roots remain configuration-file-only because exposing a folder
+// is a security decision. The narrower live-reload roots are selected through the
+// system directory panel and persisted with the same conflict-preserving writer.
 
 import AppKit
 import MorbstackKit
@@ -14,6 +14,7 @@ struct TrackDSharingSettings: View {
 
     let model: AppModel
     let store: TrackDSettingsStore
+    @State private var liveReloadError: String?
 
     private var status: MorbShareSurface.Report { model.fileSharing }
 
@@ -65,6 +66,51 @@ struct TrackDSharingSettings: View {
             } footer: {
                 Text(
                     "Shared folders appear in the virtual machine at the same path as on your Mac. Edit shared_paths in config.toml, then restart the engine to apply changes."
+                )
+            }
+
+            Section("Live Reload") {
+                if store.draft.liveSharePaths.isEmpty {
+                    LabeledContent("Project Folders") {
+                        Text("Off")
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    ForEach(store.draft.liveSharePaths, id: \.self) { path in
+                        LabeledContent {
+                            Button("Remove", systemImage: "minus.circle") {
+                                removeLiveReloadPath(path)
+                            }
+                            .accessibilityLabel("Remove \(path) from live reload")
+                        } label: {
+                            Text(path)
+                                .font(.system(.body, design: .monospaced))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .textSelection(.enabled)
+                        }
+                    }
+                }
+
+                Button("Add Project Folder…", systemImage: "plus") {
+                    chooseLiveReloadFolder()
+                }
+
+                if let liveReloadError {
+                    Label(liveReloadError, systemImage: "exclamationmark.triangle")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if store.needsEngineRestart, model.engine.isRunning {
+                    Button("Restart Engine", systemImage: "arrow.clockwise") {
+                        restartEngine()
+                    }
+                }
+            } footer: {
+                Text(
+                    "Choose only project folders beneath a shared folder. Changes apply after an engine restart. Morbstack emits metadata invalidations (IN_ATTRIB), not synthetic writes, renames, or deletes; run morb shares to confirm delivery after restarting."
                 )
             }
 
@@ -125,6 +171,39 @@ struct TrackDSharingSettings: View {
             await model.engineAction(.start)
             await model.refreshFileSharing()
         }
+    }
+
+    private func chooseLiveReloadFolder() {
+        let panel = NSOpenPanel()
+        panel.message = "Choose a project folder for live reload"
+        panel.prompt = "Add Project Folder"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        updateLiveReloadPaths(store.draft.liveSharePaths + [url.path])
+    }
+
+    private func removeLiveReloadPath(_ path: String) {
+        updateLiveReloadPaths(store.draft.liveSharePaths.filter { $0 != path })
+    }
+
+    private func updateLiveReloadPaths(_ paths: [String]) {
+        var candidate = store.draft
+        candidate.liveSharePaths = paths
+        do {
+            let shares = try candidate.sharePlan().shares
+            _ = try MorbLiveShareBridge.plan(paths: candidate.liveSharePaths, shares: shares)
+        } catch {
+            liveReloadError = (error as? MorbError)?.description ?? error.localizedDescription
+            return
+        }
+        store.draft = candidate
+        guard store.save() else {
+            liveReloadError = store.saveError ?? "Couldn’t save live reload settings."
+            return
+        }
+        liveReloadError = nil
     }
 }
 

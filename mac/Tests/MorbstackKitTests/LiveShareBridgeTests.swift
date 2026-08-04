@@ -37,6 +37,64 @@ final class LiveShareBridgeTests: XCTestCase {
             "a path outside the running share plan cannot leak into a future watcher")
     }
 
+    func testPlanRejectsOverlappingProjectAuthoritiesBeforeOpeningATransport() {
+        XCTAssertThrowsError(
+            try MorbLiveShareBridge.plan(
+                paths: ["/Users/me/project", "/Users/me/project/Sources"],
+                shares: shares)
+        ) { error in
+            XCTAssertTrue("\(error)".contains("overlap"))
+        }
+    }
+
+    func testExactGuestAdvertisementIsRequiredBeforeConfigurationCanAwaitASession() throws {
+        let exact = MorbLiveShareBridge.GuestAdvertisement(
+            wireCapability: "ready", contractVersion: MorbLiveShareBridge.contractVersion)
+        let pending = MorbLiveShareBridge.diagnose(
+            paths: ["/Users/me/project"],
+            shares: shares,
+            guestShareStates: ["/Users": .mounted],
+            guestAdvertisement: exact)
+        XCTAssertEqual(pending.state, .waitingForSession)
+        XCTAssertFalse(pending.isActive, "configuration and capability are not an authenticated session")
+
+        let omittedVersion = MorbLiveShareBridge.GuestAdvertisement(
+            wireCapability: "ready", contractVersion: nil)
+        XCTAssertEqual(
+            MorbLiveShareBridge.DeliveryAdmission.evaluate(omittedVersion),
+            .unsupportedContractVersion(actual: nil))
+
+        let newerVersion = MorbLiveShareBridge.GuestAdvertisement(
+            wireCapability: "ready", contractVersion: MorbLiveShareBridge.contractVersion + 1)
+        XCTAssertEqual(
+            MorbLiveShareBridge.DeliveryAdmission.evaluate(newerVersion),
+            .unsupportedContractVersion(actual: MorbLiveShareBridge.contractVersion + 1))
+
+        let waitingForMount = MorbLiveShareBridge.diagnose(
+            paths: ["/Users/me/project"],
+            shares: shares,
+            guestShareStates: [:],
+            guestAdvertisement: exact)
+        XCTAssertEqual(waitingForMount.state, .waitingForGuestMount)
+        XCTAssertFalse(waitingForMount.isActive)
+    }
+
+    func testTransportClaimsAreBoundToTheExactNarrowPlan() throws {
+        let plan = try MorbLiveShareBridge.plan(paths: ["/Users/me/project"], shares: shares)
+        let claims = try MorbLiveShareTransport.makeWireClaims(
+            plan: plan, shares: shares, epoch: 41)
+
+        XCTAssertEqual(claims.count, 1)
+        XCTAssertTrue(claims[0].rootID.hasPrefix("root_"))
+        XCTAssertEqual(claims[0].tag, "morbshare0")
+        XCTAssertEqual(claims[0].rootPath, "/Users/me/project")
+        XCTAssertEqual(claims[0].backingPath, "/Users")
+        XCTAssertFalse(claims[0].readOnly)
+        XCTAssertEqual(claims[0].epoch, 41)
+        XCTAssertThrowsError(
+            try MorbLiveShareTransport.makeWireClaims(plan: plan, shares: shares, epoch: 0))
+    }
+
     func testFSEventsMustScanBecomesARootRescan() throws {
         let plan = try MorbLiveShareBridge.plan(paths: ["/Users/me/project"], shares: shares)
         let buffer = MorbLiveShareBridge.EventBuffer(plan: plan, capacity: 1)
@@ -104,5 +162,18 @@ final class LiveShareBridgeTests: XCTestCase {
         XCTAssertEqual(diagnostic.state, .deliveryUnavailable)
         XCTAssertFalse(diagnostic.isActive)
         XCTAssertTrue(diagnostic.detail.contains("no inotify injection endpoint"))
+    }
+
+    func testDisabledDiagnosticExplainsTheNarrowConfigAndRestartBoundary() {
+        let diagnostic = MorbLiveShareBridge.diagnose(
+            paths: [],
+            shares: shares,
+            guestShareStates: [:],
+            guestAdvertisement: .init(wireCapability: nil, contractVersion: nil))
+
+        XCTAssertEqual(diagnostic.state, .disabled)
+        XCTAssertFalse(diagnostic.isActive)
+        XCTAssertTrue(diagnostic.detail.contains("live_share_paths"))
+        XCTAssertTrue(diagnostic.detail.contains("restart"))
     }
 }
