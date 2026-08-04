@@ -562,9 +562,19 @@ enum DockerHijackDetection {
         // reconnect correctly.
         if head.method.uppercased() == "GET", last == "events" { return false }
 
-        // Image pulls are ordinary streaming HTTP as well. `fromImage` and `tag`
-        // are query values the relay must preserve, and pull failures are terminal
-        // JSON records in the response stream rather than a connection upgrade.
+        // Container export is an ordinary tar response. It must retain HTTP chunk
+        // framing and cancellation semantics even if a stale Upgrade header arrives.
+        if head.method.uppercased() == "GET",
+           components.count >= 3,
+           components[components.count - 3] == "containers",
+           last == "export" {
+            return false
+        }
+
+        // Image pull and import share this ordinary streaming HTTP route.
+        // `fromImage`/`tag` and `fromSrc=-`/`repo` are query values the relay must
+        // preserve; an import archive is a request body, while pull/import progress
+        // or failures are response data rather than a connection upgrade.
         if head.method.uppercased() == "POST",
            components.count >= 2,
            components[components.count - 2] == "images",

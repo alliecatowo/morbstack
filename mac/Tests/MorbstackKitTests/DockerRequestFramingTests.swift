@@ -272,6 +272,8 @@ final class DockerHijackDetectionTests: XCTestCase {
         XCTAssertFalse(DockerHijackDetection.isHijackCandidate(
             head("POST", "/v1.47/images/create?fromImage=alpine", ["connection": "Upgrade"])))
         XCTAssertFalse(DockerHijackDetection.isHijackCandidate(
+            head("POST", "/v1.47/images/create?fromSrc=-&repo=imported&tag=v1", ["connection": "Upgrade"])))
+        XCTAssertFalse(DockerHijackDetection.isHijackCandidate(
             head("POST", "/v1.47/images/registry.example.com%2Fteam%2Fimage/push?tag=v1.2.3", ["connection": "Upgrade"])))
         XCTAssertFalse(DockerHijackDetection.isHijackCandidate(
             head("POST", "/v1.47/build?t=example%2Fimage", ["connection": "Upgrade"])))
@@ -281,6 +283,8 @@ final class DockerHijackDetectionTests: XCTestCase {
             head("POST", "/v1.47/images/load?quiet=0", ["connection": "Upgrade"])))
         XCTAssertFalse(DockerHijackDetection.isHijackCandidate(
             head("GET", "/v1.47/containers/abc/archive?path=/etc")))
+        XCTAssertFalse(DockerHijackDetection.isHijackCandidate(
+            head("GET", "/v1.47/containers/exported/export", ["connection": "Upgrade"])))
         XCTAssertFalse(DockerHijackDetection.isHijackCandidate(
             head("POST", "/v1.47/containers/create")))
         XCTAssertFalse(DockerHijackDetection.isHijackCandidate(
@@ -1116,6 +1120,123 @@ final class DockerFramedRelayTests: XCTestCase {
 
         shutdown(wired.guest, SHUT_WR)
         wait(for: [wired.done], timeout: 10)
+    }
+
+    /// `docker export` writes a container root filesystem tar to stdout, while
+    /// `docker import -` streams a root filesystem tar to `POST /images/create`.
+    /// The proxy owns neither archive format: it must retain opaque chunk boundaries
+    /// and resume the shared HTTP/1.1 connection after each finite response.
+    func testContainerExportAndImageImportTarStreamsStayByteExactOnKeepAlive() throws {
+        let wired = try makeRelay()
+        var archive = Data("rootfs\u{00}etc\u{00}usr\u{00}ustar\u{00}".utf8)
+        archive.append(Data(repeating: 0xC3, count: 200_000))
+        let archiveChunks = Self.chunked([
+            Data(archive.prefix(67_003)),
+            Data(archive.dropFirst(67_003).prefix(94_005)),
+            Data(archive.dropFirst(161_008)),
+        ])
+
+        let export = "GET /v1.47/containers/exported/export HTTP/1.1\r\nHost: morbstack\r\n\r\n"
+        write(export, to: wired.client)
+        XCTAssertEqual(readAvailable(wired.guest, atLeast: export.utf8.count), Data(export.utf8))
+
+        let exportResponse = Data((
+            "HTTP/1.1 200 OK\r\nContent-Type: application/x-tar\r\n"
+                + "Transfer-Encoding: chunked\r\n\r\n").utf8)
+            + archiveChunks
+        DispatchQueue(label: "test.container-export-writer").async { [guest = wired.guest] in
+            _ = POSIXSocketSupport.writeAll(guest, exportResponse)
+        }
+        XCTAssertEqual(
+            readAvailable(wired.client, atLeast: exportResponse.count, timeout: 15),
+            exportResponse,
+            "the container-export tar and its chunk delimiters must reach the client unchanged")
+
+        var imageImport = Data((
+            "POST /v1.47/images/create?fromSrc=-&repo=registry.example.com%2Fteam%2Fimported&tag=v1.2.3"
+                + "&message=imported%20rootfs&changes=ENV%20DEBUG%3Dtrue&platform=linux%2Farm64 HTTP/1.1\r\n"
+                + "Host: morbstack\r\nContent-Type: application/x-tar\r\n"
+                + "Transfer-Encoding: chunked\r\n\r\n").utf8)
+        imageImport.append(archiveChunks)
+        DispatchQueue(label: "test.image-import-writer").async { [client = wired.client] in
+            _ = POSIXSocketSupport.writeAll(client, imageImport)
+        }
+        XCTAssertEqual(
+            readAvailable(wired.guest, atLeast: imageImport.count, timeout: 15),
+            imageImport,
+            "the image-import tar and all query values must reach dockerd without decoding or re-chunking")
+
+        let importStatus = Data(#"{"status":"Imported image: registry.example.com/team/imported:v1.2.3"}"#.utf8)
+            + Data([0x0A])
+        let importResponse = Data((
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                + "Transfer-Encoding: chunked\r\n\r\n").utf8)
+            + Self.chunked([importStatus])
+        write(importResponse, to: wired.guest)
+        XCTAssertEqual(
+            readAvailable(wired.client, atLeast: importResponse.count),
+            importResponse,
+            "the ordinary image-import response must stay byte-exact")
+
+        write(Self.ping, to: wired.client)
+        XCTAssertEqual(readAvailable(wired.guest, atLeast: Self.ping.utf8.count), Data(Self.ping.utf8))
+        XCTAssertEqual(policy.seen.map { $0.head.target }, [
+            "/v1.47/containers/exported/export",
+            "/v1.47/images/create?fromSrc=-&repo=registry.example.com%2Fteam%2Fimported&tag=v1.2.3&message=imported%20rootfs&changes=ENV%20DEBUG%3Dtrue&platform=linux%2Farm64",
+            "/_ping",
+        ])
+        XCTAssertTrue(policy.seen.allSatisfy { $0.body == nil }, "export/import archive bodies must never be inspected")
+        XCTAssertEqual(policy.framingFailures, [])
+
+        wired.relay.cancel()
+        wait(for: [wired.done], timeout: 10)
+    }
+
+    /// Closing an export or import while its tar/progress conversation is still
+    /// active must half-close dockerd's write side. The relay must not manufacture a
+    /// result, consume archive bytes, or wait for the rest of either stream.
+    func testClientCancellationOfContainerExportAndImageImportHalfClosesTheEngine() throws {
+        let exported = try makeRelay()
+        let export = "GET /v1.47/containers/exported/export HTTP/1.1\r\nHost: morbstack\r\n\r\n"
+        write(export, to: exported.client)
+        XCTAssertEqual(readAvailable(exported.guest, atLeast: export.utf8.count), Data(export.utf8))
+
+        let firstTar = Data("HTTP/1.1 200 OK\r\nContent-Type: application/x-tar\r\n\r\n".utf8)
+            + Data("rootfs\u{00}partial-tar".utf8)
+        write(firstTar, to: exported.guest)
+        XCTAssertEqual(readAvailable(exported.client, atLeast: firstTar.count), firstTar)
+
+        shutdown(exported.client, SHUT_WR)
+        var buffer = [UInt8](repeating: 0, count: 16)
+        let exportEOF = buffer.withUnsafeMutableBytes { raw -> Int in
+            POSIXSocketSupport.readSome(exported.guest, into: raw.baseAddress!, count: raw.count)
+        }
+        XCTAssertEqual(exportEOF, 0, "cancelling docker export must close the Engine write side")
+        shutdown(exported.guest, SHUT_WR)
+        wait(for: [exported.done], timeout: 10)
+
+        let imported = try makeRelay()
+        let rootfs = Data("rootfs\u{00}ustar\u{00}".utf8)
+        var imageImport = Data((
+            "POST /v1.47/images/create?fromSrc=-&repo=imported&tag=v1 HTTP/1.1\r\n"
+                + "Host: morbstack\r\nContent-Type: application/x-tar\r\n"
+                + "Content-Length: \(rootfs.count)\r\n\r\n").utf8)
+        imageImport.append(rootfs)
+        write(imageImport, to: imported.client)
+        XCTAssertEqual(readAvailable(imported.guest, atLeast: imageImport.count), imageImport)
+
+        let firstProgress = Data("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n".utf8)
+            + Data(#"{"status":"Importing"}"#.utf8) + Data([0x0A])
+        write(firstProgress, to: imported.guest)
+        XCTAssertEqual(readAvailable(imported.client, atLeast: firstProgress.count), firstProgress)
+
+        shutdown(imported.client, SHUT_WR)
+        let importEOF = buffer.withUnsafeMutableBytes { raw -> Int in
+            POSIXSocketSupport.readSome(imported.guest, into: raw.baseAddress!, count: raw.count)
+        }
+        XCTAssertEqual(importEOF, 0, "cancelling docker import must close the Engine write side")
+        shutdown(imported.guest, SHUT_WR)
+        wait(for: [imported.done], timeout: 10)
     }
 
     /// A large uninspected body must arrive byte for byte, which is what `docker cp`
