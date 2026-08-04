@@ -1049,7 +1049,9 @@ public final class PortForwarder {
         lock.lock()
         let replaced = publishAllRestartSessions.updateValue(session, forKey: containerID)
         lock.unlock()
-        if let replaced, replaced !== session { replaced.invalidate() }
+        if let replaced, replaced !== session {
+            replaced.invalidate(reason: "superseded-by-direct-docker-start")
+        }
     }
 
     /// Promotes a lease after Docker's normal `204` start reply is observed. The
@@ -1425,7 +1427,9 @@ public final class PortForwarder {
             for listener in lease.udpListeners.values { listener.stop() }
         }
         for relay in inFlight { relay.cancel() }
-        for session in restartSessions { session.invalidate() }
+        for session in restartSessions {
+            session.invalidate(reason: reason ?? "port-forwarder-stop")
+        }
 
         let because = reason.map { " (\($0))" } ?? ""
         if closing.isEmpty, closingUDP.isEmpty, closingLeases.isEmpty {
@@ -1902,7 +1906,7 @@ public final class PortForwarder {
         }
         let missing = wanted.filter { publishAllRestartSessions[$0] == nil }
         lock.unlock()
-        for session in stale { session.invalidate() }
+        for session in stale { session.invalidate(reason: "restart-policy-reconciliation") }
 
         for containerID in missing {
             guard case .success(let fd) = vm.connectVsockBlocking(
@@ -1926,7 +1930,7 @@ public final class PortForwarder {
                     lock.unlock()
                 } else {
                     lock.unlock()
-                    session.invalidate()
+                    session.invalidate(reason: "restart-policy-session-discarded")
                 }
             } catch {
                 Darwin.close(fd)

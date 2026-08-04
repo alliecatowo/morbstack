@@ -32,12 +32,22 @@ mod imp {
     use std::fs::{self, File};
     use std::io::{Read, Write};
     use std::os::unix::fs::FileTypeExt;
+    use std::os::unix::io::AsRawFd;
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Duration;
 
-    type Sessions = Arc<Mutex<HashMap<String, Arc<Mutex<File>>>>>;
+    /// The host descriptor remains owned by this map after registration.  The
+    /// optional trace token is never used for allocation; it only correlates an
+    /// opt-in host diagnostic run with the guest's PID-1 log.
+    #[derive(Clone)]
+    struct HostSession {
+        stream: Arc<Mutex<File>>,
+        trace_id: Option<String>,
+    }
+
+    type Sessions = Arc<Mutex<HashMap<String, HostSession>>>;
 
     pub fn spawn_publish_all_allocator() -> io::Result<()> {
         let vsock = sys::VsockListener::bind(VSOCK_PUBLISH_ALL_ALLOCATOR_PORT)?;
@@ -108,10 +118,20 @@ mod imp {
                 return;
             }
         };
-        let Some(container_id) = line.strip_prefix("REGISTER ").filter(|id| valid_id(id)) else {
-            let _ = stream.write_all(b"ERR malformed registration\n");
-            return;
+        let fields: Vec<_> = line.split(' ').collect();
+        let (container_id, trace_id) = match fields.as_slice() {
+            ["REGISTER", container_id] if valid_id(container_id) => (*container_id, None),
+            ["REGISTER", container_id, "TRACE", trace_id]
+                if valid_id(container_id) && valid_trace_id(trace_id) =>
+            {
+                (*container_id, Some(*trace_id))
+            }
+            _ => {
+                let _ = stream.write_all(b"ERR malformed registration\n");
+                return;
+            }
         };
+        let accepted_fd = stream.as_raw_fd();
         let cloned = match stream.try_clone() {
             Ok(cloned) => cloned,
             Err(error) => {
@@ -123,7 +143,11 @@ mod imp {
                 return;
             }
         };
-        let session = Arc::new(Mutex::new(cloned));
+        let retained_fd = cloned.as_raw_fd();
+        let session = HostSession {
+            stream: Arc::new(Mutex::new(cloned)),
+            trace_id: trace_id.map(|trace_id| trace_id.to_string()),
+        };
         match sessions.lock() {
             Ok(mut sessions) => {
                 sessions.insert(container_id.to_string(), session);
@@ -133,11 +157,35 @@ mod imp {
                 return;
             }
         }
+        trace(
+            trace_id,
+            format!(
+                "event=register-accepted container={} accepted-fd={} retained-fd={}",
+                short_id(container_id),
+                accepted_fd,
+                retained_fd
+            ),
+        );
         if let Err(error) = stream.write_all(b"READY\n").and_then(|()| stream.flush()) {
+            trace(
+                trace_id,
+                format!("event=ready-write-failed error={}", error),
+            );
             log::log(&format!(
                 "publish-all host registration reply failed: {}",
                 error
             ));
+        } else {
+            // `stream` returns from this function now, but `retained-fd` in the
+            // session map remains open.  This line rules out that expected drop as
+            // the source of a later host-side EOF.
+            trace(
+                trace_id,
+                format!(
+                    "event=ready-sent original-fd-will-drop retained-fd={}",
+                    retained_fd
+                ),
+            );
         }
     }
 
@@ -179,23 +227,58 @@ mod imp {
             return;
         };
         let forwarded = request.encode();
-        let reply = match session.lock() {
-            Ok(mut host) => host
-                .write_all(forwarded.as_bytes())
-                .and_then(|()| host.flush())
-                .and_then(|()| read_allocation_reply(&mut host, request.count)),
-            Err(_) => Err(io::Error::new(
-                io::ErrorKind::Other,
-                "host allocator lock poisoned",
-            )),
+        let trace_id = session.trace_id.as_deref();
+        trace(
+            trace_id,
+            format!(
+                "event=alloc-request container={} count={}",
+                short_id(&request.container_id),
+                request.count
+            ),
+        );
+        let reply = match session.stream.lock() {
+            Ok(mut host) => {
+                trace(
+                    trace_id,
+                    format!("event=alloc-forward fd={}", host.as_raw_fd()),
+                );
+                if let Err(error) = host.write_all(forwarded.as_bytes()) {
+                    Err(format!("write allocation request: {}", error))
+                } else if let Err(error) = host.flush() {
+                    Err(format!("flush allocation request: {}", error))
+                } else {
+                    trace(trace_id, "event=alloc-forwarded".to_string());
+                    read_allocation_reply(&mut host, request.count)
+                        .map_err(|error| format!("read allocation reply: {}", error))
+                }
+            }
+            Err(_) => Err("host allocator lock poisoned".to_string()),
         };
         match reply {
             Ok(reply) => {
-                let _ = local
+                trace(
+                    trace_id,
+                    format!("event=host-reply-received bytes={}", reply.len()),
+                );
+                match local
                     .write_all(reply.as_bytes())
-                    .and_then(|()| local.flush());
+                    .and_then(|()| local.flush())
+                {
+                    Ok(()) => trace(
+                        trace_id,
+                        "event=reply-relayed-to-moby session-retained".to_string(),
+                    ),
+                    Err(error) => trace(
+                        trace_id,
+                        format!("event=reply-relay-failed error={}", error),
+                    ),
+                }
             }
             Err(error) => {
+                trace(
+                    trace_id,
+                    format!("event=host-session-failed error={}", error),
+                );
                 if let Ok(mut sessions) = sessions.lock() {
                     sessions.remove(&request.container_id);
                 }
@@ -205,12 +288,12 @@ mod imp {
         }
     }
 
-    fn wait_for_host_session(sessions: &Sessions, container_id: &str) -> Option<Arc<Mutex<File>>> {
+    fn wait_for_host_session(sessions: &Sessions, container_id: &str) -> Option<HostSession> {
         let deadline = std::time::Instant::now() + HOST_REGISTRATION_WAIT;
         loop {
             if let Ok(sessions) = sessions.lock() {
                 if let Some(session) = sessions.get(container_id) {
-                    return Some(Arc::clone(session));
+                    return Some(session.clone());
                 }
             }
             if std::time::Instant::now() >= deadline {
@@ -324,6 +407,26 @@ mod imp {
             && id
                 .bytes()
                 .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    }
+
+    fn valid_trace_id(trace_id: &str) -> bool {
+        trace_id.len() == 32
+            && trace_id
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    }
+
+    fn short_id(id: &str) -> &str {
+        id.get(..12).unwrap_or(id)
+    }
+
+    fn trace(trace_id: Option<&str>, message: String) {
+        if let Some(trace_id) = trace_id {
+            log::log(&format!(
+                "publish-all trace={} endpoint=guest {}",
+                trace_id, message
+            ));
+        }
     }
 
     fn sanitize(reason: &str) -> String {

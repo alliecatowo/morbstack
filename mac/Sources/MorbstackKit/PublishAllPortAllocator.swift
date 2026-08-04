@@ -18,6 +18,15 @@ final class PublishAllPortAllocator {
         private let forwarder: PortForwarder
         private let log: MorbLog
         private let remainsAvailableForRestartPolicy: Bool
+        /// An opt-in correlation ID shared with morbinit for one diagnostic run.
+        ///
+        /// `-P` normally uses the original two-field registration grammar.  The
+        /// extension is sent only when the daemon starts with
+        /// `MORBSTACK_PUBLISH_ALL_TRACE=1`, so ordinary allocation behaviour and
+        /// compatibility remain unchanged.  The guest accepts the extension and
+        /// includes the same token in its PID-1 log, which lets one reproduction
+        /// establish whether the host closed the vsock fd or the guest did.
+        private let traceID: String?
         private let queue = DispatchQueue(label: "dev.morbstack.publish-all")
         private let lock = NSLock()
         private var lease: PortForwarder.PortLease?
@@ -35,24 +44,46 @@ final class PublishAllPortAllocator {
             self.forwarder = forwarder
             self.log = log
             self.remainsAvailableForRestartPolicy = remainsAvailableForRestartPolicy
+            self.traceID = Self.makeTraceID()
         }
 
-        deinit { Darwin.close(fd) }
+        deinit {
+            trace("event=deinit-close fd=\(fd)")
+            Darwin.close(fd)
+        }
 
         /// Performs the registration handshake before the Docker lifecycle relay
         /// begins. The blocking allocator work itself runs on a dedicated queue.
         func start() throws {
-            guard POSIXSocketSupport.writeAll(fd, Data("REGISTER \(containerID)\n".utf8)),
-                  try Self.readLine(fd, timeout: 5) == "READY"
-            else {
+            let registration: String
+            if let traceID {
+                registration = "REGISTER \(containerID) TRACE \(traceID)\n"
+            } else {
+                registration = "REGISTER \(containerID)\n"
+            }
+            trace("event=register-send fd=\(fd) durable=\(remainsAvailableForRestartPolicy)")
+            guard POSIXSocketSupport.writeAll(fd, Data(registration.utf8)) else {
+                trace("event=register-write-failed errno=\(Self.errnoDescription())")
                 throw MorbError.protocolViolation("the guest publish-all allocator did not accept the host session")
             }
+            let reply = try Self.readLine(fd, timeout: 5) { [weak self] event in
+                self?.trace(event)
+            }
+            trace("event=register-reply value=\(reply)")
+            guard reply == "READY" else {
+                throw MorbError.protocolViolation("the guest publish-all allocator did not accept the host session")
+            }
+            trace("event=serve-scheduled")
             queue.async { [weak self] in self?.serve() }
         }
 
         func complete(succeeded: Bool) {
             lock.lock()
-            guard !finished else { lock.unlock(); return }
+            guard !finished else {
+                lock.unlock()
+                trace("event=lifecycle-complete-ignored succeeded=\(succeeded) reason=already-finished")
+                return
+            }
             // A durable Engine-restart-policy session remains registered after an
             // explicit DockerProxy start succeeds. The next policy restart will use
             // the same host session and request a fresh lease.
@@ -60,7 +91,9 @@ final class PublishAllPortAllocator {
                 finished = true
             }
             let lease = self.lease
+            let retained = !finished
             lock.unlock()
+            trace("event=lifecycle-complete succeeded=\(succeeded) session-retained=\(retained)")
             if let lease {
                 if succeeded {
                     _ = forwarder.completeStart(lease, succeeded: true)
@@ -70,10 +103,13 @@ final class PublishAllPortAllocator {
             }
         }
 
-        func invalidate() {
+        /// The only intentional host-side close.  A reason makes the opt-in trace
+        /// distinguish a PortForwarder lifecycle teardown from a peer EOF.
+        func invalidate(reason: String) {
             lock.lock()
             finished = true
             lock.unlock()
+            trace("event=host-initiated-shutdown fd=\(fd) reason=\(reason)")
             _ = Darwin.shutdown(fd, SHUT_RDWR)
         }
 
@@ -86,52 +122,63 @@ final class PublishAllPortAllocator {
         private func serve() {
             while !isFinished {
                 do {
-                let header = try Self.readLine(
-                    fd,
-                    timeout: remainsAvailableForRestartPolicy ? 86_400 : 20)
-                let fields = header.split(separator: " ", omittingEmptySubsequences: false)
-                guard fields.count == 3,
-                      fields[0] == "ALLOC",
-                      String(fields[1]) == containerID,
-                      let count = Int(fields[2]),
-                      (1...DockerPortPublicationPreflight.maximumSynchronousFixedPortBindings).contains(count)
-                else {
-                    throw MorbError.protocolViolation("guest publish-all allocator sent an invalid request header")
-                }
-                var requests: [DockerPublishAllPortRequest] = []
-                requests.reserveCapacity(count)
-                for _ in 0..<count {
-                    requests.append(try Self.parseRequest(try Self.readLine(fd, timeout: 5)))
-                }
-                let ports = try forwarder.reservePublishAllPorts(containerID: containerID, requests: requests)
-                lock.lock()
-                guard !finished else {
+                    trace("event=await-alloc fd=\(fd)")
+                    let header = try Self.readLine(
+                        fd,
+                        timeout: remainsAvailableForRestartPolicy ? 86_400 : 20
+                    ) { [weak self] event in
+                        self?.trace(event)
+                    }
+                    let fields = header.split(separator: " ", omittingEmptySubsequences: false)
+                    guard fields.count == 3,
+                          fields[0] == "ALLOC",
+                          String(fields[1]) == containerID,
+                          let count = Int(fields[2]),
+                          (1...DockerPortPublicationPreflight.maximumSynchronousFixedPortBindings).contains(count)
+                    else {
+                        throw MorbError.protocolViolation("guest publish-all allocator sent an invalid request header")
+                    }
+                    trace("event=alloc-received count=\(count)")
+                    var requests: [DockerPublishAllPortRequest] = []
+                    requests.reserveCapacity(count)
+                    for _ in 0..<count {
+                        let request = try Self.readLine(fd, timeout: 5) { [weak self] event in
+                            self?.trace(event)
+                        }
+                        requests.append(try Self.parseRequest(request))
+                    }
+                    let ports = try forwarder.reservePublishAllPorts(containerID: containerID, requests: requests)
+                    lock.lock()
+                    guard !finished else {
+                        lock.unlock()
+                        forwarder.releaseLease(
+                            forContainerID: containerID,
+                            reason: "publish-all lifecycle finished before allocation completed")
+                        throw MorbError.protocolViolation("publish-all start finished before allocation completed")
+                    }
+                    let activeLease = forwarder.claimStartLease(containerIdentifier: containerID)
+                    // `claimStartLease` marks the record, which gives a failed start the
+                    // normal cleanup path. It must be the lease just created above.
+                    guard let activeLease else {
+                        lock.unlock()
+                        throw MorbError.protocolViolation("publish-all allocation lost its held port lease")
+                    }
+                    lease = activeLease
                     lock.unlock()
-                    forwarder.releaseLease(
-                        forContainerID: containerID,
-                        reason: "publish-all lifecycle finished before allocation completed")
-                    throw MorbError.protocolViolation("publish-all start finished before allocation completed")
-                }
-                let activeLease = forwarder.claimStartLease(containerIdentifier: containerID)
-                // `claimStartLease` marks the record, which gives a failed start the
-                // normal cleanup path. It must be the lease just created above.
-                guard let activeLease else {
-                    lock.unlock()
-                    throw MorbError.protocolViolation("publish-all allocation lost its held port lease")
-                }
-                lease = activeLease
-                lock.unlock()
 
-                var reply = "OK \(ports.count)\n"
-                for port in ports { reply += "PORT \(port)\n" }
-                guard POSIXSocketSupport.writeAll(fd, Data(reply.utf8)) else {
-                    throw MorbError.io("could not return the publish-all allocation to the guest")
-                }
+                    var reply = "OK \(ports.count)\n"
+                    for port in ports { reply += "PORT \(port)\n" }
+                    guard POSIXSocketSupport.writeAll(fd, Data(reply.utf8)) else {
+                        trace("event=alloc-reply-write-failed errno=\(Self.errnoDescription())")
+                        throw MorbError.io("could not return the publish-all allocation to the guest")
+                    }
+                    trace("event=alloc-reply-sent count=\(ports.count) session-retained=\(remainsAvailableForRestartPolicy)")
                 } catch {
                     let message = error.localizedDescription
                         .replacingOccurrences(of: "\n", with: " ")
                     _ = POSIXSocketSupport.writeAll(fd, Data("ERR \(message)\n".utf8))
                     complete(succeeded: false)
+                    trace("event=serve-failed error=\(message)")
                     log.warn("publish-all allocator for \(String(containerID.prefix(12))) failed: \(message)")
                     return
                 }
@@ -169,7 +216,11 @@ final class PublishAllPortAllocator {
                 containerPort: containerPort)
         }
 
-        private static func readLine(_ fd: Int32, timeout: TimeInterval) throws -> String {
+        private static func readLine(
+            _ fd: Int32,
+            timeout: TimeInterval,
+            trace: ((String) -> Void)? = nil
+        ) throws -> String {
             let deadline = Date().addingTimeInterval(timeout)
             var bytes: [UInt8] = []
             while bytes.count < 512 {
@@ -179,10 +230,21 @@ final class PublishAllPortAllocator {
                 let ready = POSIXSocketSupport.retryOnInterrupt {
                     withUnsafeMutablePointer(to: &descriptor) { poll($0, 1, Int32(remaining * 1_000)) }
                 }
+                if ready <= 0 {
+                    trace?("event=poll-unready result=\(ready) errno=\(Self.errnoDescription())")
+                }
                 guard ready > 0 else { throw MorbError.io("the guest publish-all allocator disconnected") }
+                if descriptor.revents & ~Int16(POLLIN) != 0 {
+                    trace?("event=poll-nonread revents=0x\(String(Int(descriptor.revents), radix: 16))")
+                }
                 var byte: UInt8 = 0
                 let read = withUnsafeMutablePointer(to: &byte) {
                     POSIXSocketSupport.readSome(fd, into: UnsafeMutableRawPointer($0), count: 1)
+                }
+                if read == 0 {
+                    trace?("event=read-eof peer=guest")
+                } else if read < 0 {
+                    trace?("event=read-error errno=\(Self.errnoDescription())")
                 }
                 guard read == 1 else { throw MorbError.io("could not read the guest publish-all allocator") }
                 if byte == 0x0A { return String(decoding: bytes, as: UTF8.self) }
@@ -194,6 +256,23 @@ final class PublishAllPortAllocator {
                 bytes.append(byte)
             }
             throw MorbError.protocolViolation("the guest publish-all allocator sent an oversized line")
+        }
+
+        private static func makeTraceID() -> String? {
+            guard ProcessInfo.processInfo.environment["MORBSTACK_PUBLISH_ALL_TRACE"] == "1" else {
+                return nil
+            }
+            return UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        }
+
+        private func trace(_ message: String) {
+            guard let traceID else { return }
+            log.info(
+                "publish-all trace=\(traceID) endpoint=host container=\(String(containerID.prefix(12))) \(message)")
+        }
+
+        private static func errnoDescription() -> String {
+            "\(errno) \(String(cString: strerror(errno)))"
         }
     }
 }
