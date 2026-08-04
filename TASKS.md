@@ -188,19 +188,19 @@ the author.
 | --- | --- | --- | --- |
 | UI-1 | Fixture-mode provenance — `--tour-fixtures` must be visibly and accessibly distinct from live data | blocker | `done` (title/footer/a11y truth plus `1f5d779` source guards against Builds/Stacks external operations; real-window/XCUITest evidence pending) |
 | UI-2 | Port renders as `18,099` — thousands separator on a port | blocker | `done` (string-typed inspector display + focused regression) |
-| UI-3 | Add Show/Hide Sidebar to the View menu | major | `open` |
-| UI-4 | Unmatched search must use `ContentUnavailableView.search` | major | `open` |
-| UI-5 | Selecting a container must expose inspector content | major | `open` |
-| UI-6 | 8 undescribed elements, 3 contrast failures | major | `blocked` (SP-8) |
-| UI-7 | Containers toolbar: ~12 symbol-only items in 6 groups against a cap of 3, incl. **two identical trash cans** | major | `open` |
-| UI-8 | Toolbar items vanish at narrow width with no overflow — with UI-3, some commands become unreachable | major | `open` |
-| UI-9 | Images table: Repository column crushes to one character per row | major | `done` (native `TableColumn` minimum width; narrow-window evidence still pending) |
-| UI-10 | Disk inspector overlaps and overdraws the table | major | `open` |
-| UI-11 | Container uptime freezes ("Up 23 seconds" vs `docker ps` "Up About a minute") | major | `open` |
-| UI-12 | **Second UI pass** — Stacks, Kubernetes, Networks, Builds, Migration, Settings, ⌘K, menu-bar extra, light mode, prune/pull were never toured. The 32 issues are a floor. | major | `open` |
+| UI-3 | Add Show/Hide Sidebar to the View menu | major | `done` (`SidebarCommands()`/`InspectorCommands()` + ⌘1–⌘9 route commands in `App.swift`; XCUITest rerun blocked on Automation Mode — see UI-AUDIT UI-016) |
+| UI-4 | Unmatched search must use `ContentUnavailableView.search` | major | `done` (every searchable route + scoped filters — see UI-AUDIT UI-028) |
+| UI-5 | Selecting a container must expose inspector content | major | `done` (real `.inspector`, forced open on selection; live-window verified — see UI-AUDIT UI-029) |
+| UI-6 | 8 undescribed elements, 3 contrast failures | major | `in-flight` — every symbol-only control now carries a label/help or is marked decorative (145 `accessibilityLabel` sites); naming the specific 8 elements + 3 contrast pairs needs a `performAccessibilityAudit` rerun, blocked on macOS Automation Mode (retried 2026-08-04, still "Timed out while enabling automation mode") |
+| UI-7 | Containers toolbar: ~12 symbol-only items in 6 groups against a cap of 3, incl. **two identical trash cans** | major | `done` (route toolbars rebuilt to stable system-placed groups; at most one labelled trash per route — see UI-AUDIT UI-003/004/005) |
+| UI-8 | Toolbar items vanish at narrow width with no overflow — with UI-3, some commands become unreachable | major | `done` (all items in system placements, no manual overflow; prune commands mirrored into the Engine menu — see UI-AUDIT UI-019) |
+| UI-9 | Images table: Repository column crushes to one character per row | major | `done` (native `TableColumn` minimum width; narrow-window real-window evidence captured 2026-08-04 second-pass tour) |
+| UI-10 | Disk inspector overlaps and overdraws the table | major | `done` (real `.inspector` + 520 pt table minimum — see UI-AUDIT UI-018) |
+| UI-11 | Container uptime freezes ("Up 23 seconds" vs `docker ps` "Up About a minute") | major | `done` (per-second `TimelineView` tick; K8s ages, Images Created, Builds relative columns tick too — see UI-AUDIT UI-020) |
+| UI-12 | **Second UI pass** — Stacks, Kubernetes, Networks, Builds, Migration, Settings, ⌘K, menu-bar extra, light mode, prune/pull were never toured. The 32 issues are a floor. | major | `in-flight` — full source review landed rows UI-033…UI-048 (all fixed); real-window tour of the rebuilt app in both appearances/widths in progress 2026-08-04 |
 | UI-13 | Add accessibility identifiers | major | `blocked` (SP-8) |
-| UI-14 | XCUITest cannot attach screenshots — "Image creation failed. Disable automatic screenshots in your test plan's configuration." | minor | `open` |
-| UI-15 | The remaining 14 minor + 8 polish items in UI-AUDIT.md | minor/polish | `open` |
+| UI-14 | XCUITest cannot attach screenshots — "Image creation failed. Disable automatic screenshots in your test plan's configuration." | minor | `done` in source (`MorbstackUITests.xctestplan`: `systemAttachmentLifetime: keepNever`, explicit `screenshots` capture format); validation blocked on Automation Mode |
+| UI-15 | The remaining 14 minor + 8 polish items in UI-AUDIT.md | minor/polish | `in-flight` — all register rows fixed except UI-014 (CLI/daemon lane, outside GUI scope), UI-030 (validation blocked on Automation Mode), UI-032 (retest with settle delay pending) |
 
 ## Documentation
 

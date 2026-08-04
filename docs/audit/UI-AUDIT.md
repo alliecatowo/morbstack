@@ -190,6 +190,15 @@ Constraints hit during this pass, so later verification can pick up where it sto
   needs interactive re-authentication — every `xcodebuild … test` run fails with
   "Timed out while enabling automation mode." UI-016/027/029/030 test reruns and the
   accessibility audit (the named 8 + 3 elements) are blocked on exactly this.
+  Retried once on 2026-08-04 (fresh derived data, fresh result bundle at
+  `dist/xcui/MorbstackUITests-124249.xcresult`): still "Timed out while enabling
+  automation mode." Do not burn further runs until
+  `sudo automationmodetool enable-automationmode-without-authentication` has been run.
+- **The Mac's screen was locked** during the 2026-08-04 real-window slot
+  (`CGSSessionScreenIsLocked = 1`) — computer use sees only the lock-screen wallpaper,
+  so the rebuilt app's tour (light mode, narrow width, untoured routes, fixture-banner
+  re-shoot) could not start until the user unlocked. Check the lock state before
+  burning a GUI-lane slot.
 - The GUI lane was intermittently contended by the interactive user; the fixture
   banner, sidebar restoration fix, and Containers route were verified in the real
   window (dark, 1440×900). Light mode, narrow width, and the remaining routes still
