@@ -18,6 +18,14 @@ been executed by anything. See [audit/MASTER-AUDIT.md](audit/MASTER-AUDIT.md).
 | `runs-here` | executed on a developer machine against the current build, with recorded output. |
 | `accepted` | passed the clean-profile matrix on a machine that never had Docker. |
 
+> **Current-candidate boundary (2026-08-03):** this plan preserves the dated
+> audit narrative. For the active `codex/claude-continuation` candidate, the
+> authoritative current state is [`TASKS.md`](../TASKS.md) and
+> [`claude-continuation-handoff-2026-08-03.md`](claude-continuation-handoff-2026-08-03.md).
+> `33fd00e`, `f79a090`, and `3960359` changed bind admission, chunked create
+> rewriting, and `-P` lifecycle ownership after the recorded live matrix.
+> They are source-covered only until the serialized rebuilt-guest matrix reruns.
+
 ---
 
 ## Phase 0 — Operational integrity

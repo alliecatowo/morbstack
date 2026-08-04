@@ -26,10 +26,16 @@ Status: `open` · `in-flight` · `decided` · `done` · `blocked`
 - **Next planning gate:** reconcile the completed engine matrix and audit board,
   then start non-machine tickets in parallel while the machine lane is reserved
   for an explicit, controlled guest/runtime acceptance pass.
+- **Current Codex checkpoint:** `ccdfa60` on 2026-08-03. The committed source
+  batch adds native image-archive load and its descriptor/chooser hardening,
+  fixture isolation for Builds and Stacks, chunked create rewriting, and a new
+  `-P` lifecycle-owner correction. Each has focused static handoff evidence;
+  none has current-candidate runtime acceptance yet. See
+  [`docs/claude-continuation-handoff-2026-08-03.md`](docs/claude-continuation-handoff-2026-08-03.md).
 - **Runtime-evidence boundary:** the recorded Engine/Proxy matrix is evidence for
   its 2026-08-03 candidate, not for the current source tree. `33fd00e`
-  changed bind-admission/framed-relay behavior after that run, and the pending
-  chunked-create rewrite changes the same boundary again. Neither may inherit a
+  changed bind-admission/framed-relay behavior after that run, and `f79a090`
+  subsequently changed chunked-create rewriting. Neither may inherit a
   `runs-here` verdict until the serialized `guest-image` → `app` → restart and
   live matrix rerun completes on the current candidate.
 
@@ -94,11 +100,14 @@ callers, `assess()` has **no success path at all**), `LocalDomainClaimReconciler
 Dead code that ships is worse than a stub screen: it looks like a feature to every reader.
 **Rewrites:** DIF-6, DIF-13.
 
-### SP-6 · `-P` session persistence root cause · `in-flight` (`codex/parity-sp6-publish-all`)
-**Deliverable:** an instrumented repro proving *which* side closes the fd and why. The durable session
-EOFs 6 ms after its **successful** first allocation, so first run works and every restart fails. A
-full 64-hex container ID fails identically, which already **refutes** the name-vs-ID theory. Do not
-guess a fix — the last guess was wrong.
+### SP-6 · `-P` session persistence root cause · `in-flight` (source correction; runtime pending)
+**Deliverable:** prove direct and restart-policy allocation ownership over a real guest/host lifecycle.
+`3960359` makes direct one-shot allocator sessions close their guest fd at the observed
+outcome, installs a durable owner before direct lifecycle admission for restart-policy
+containers, and serializes direct/recovery registration by immutable container ID. It is a
+source correction, not a result: prove normal start/restart, automatic policy restart on a
+keep-alive API connection, direct/recovery contention, and VM restart against the rebuilt
+candidate before closing this spike.
 **Rewrites:** EN-2.
 
 ### SP-7 · Status-documentation consolidation · `open`
@@ -125,8 +134,8 @@ the author.
 
 | ID | Ticket | Deliverable | State |
 | --- | --- | --- | --- |
-| EN-1 | **Docker proxy request framing** | The 2026-08-03 candidate framed every request until a legitimate hijack, rejected too-large and ambiguous bodies fail-closed, returned `400` for fresh and second keep-alive creates, and completed stream/BuildKit/Compose regressions. `33fd00e` and the pending chunked-create rewrite changed this boundary after that candidate, so current-source rebuilt-guest acceptance remains required. See `docs/audit/PROXY-FRAMING.md`. | `in-flight` (current-candidate acceptance) |
-| EN-2 | `-P` across stop/start/restart | Mapping survives lifecycle | `blocked` (SP-6) |
+| EN-1 | **Docker proxy request framing** | The 2026-08-03 candidate framed every request until a legitimate hijack, rejected too-large and ambiguous bodies fail-closed, returned `400` for fresh and second keep-alive creates, and completed stream/BuildKit/Compose regressions. `33fd00e` and `f79a090` changed this boundary after that candidate, so current-source rebuilt-guest acceptance remains required. See `docs/audit/PROXY-FRAMING.md`. | `in-flight` (current-candidate acceptance) |
+| EN-2 | `-P` across stop/start/restart | `3960359` is source-covered for direct/durable session ownership and direct-FD retirement; prove TCP/UDP reachability, automatic restart policy on a keep-alive client, direct/recovery contention, and VM restart after rebuilding the candidate. | `in-flight` (SP-6 runtime acceptance) |
 | EN-3 | Bind mounts `/etc`, `/var`, unshared roots | The 2026-08-03 candidate recorded refusals for `/etc`, `/var`, `/Library`, and symlink traversal, plus working `/tmp`, `/private/tmp`, and `$HOME` bind writes. `33fd00e` then changed bind-admission and relay behavior; rebuild the guest and rerun this exact matrix before assigning those results to the current source. See `docs/audit/PROXY-FRAMING.md`. | `in-flight` (post-`33fd00e` rebuilt-guest acceptance) |
 | EN-4 | `morb disk grow` | Fix `keyNotFound: 'device'` host/guest contract mismatch. Image grew to 72 GiB while the guest filesystem stayed 62.4 G, and a **refused** grow still mutated configured capacity. Add the journal tests it never had. | `in-flight` (`codex/parity-en4-disk-grow`) |
 | EN-5 | Reclaim the 72 GiB `disk.img` | Safe reclamation path for the test artifact left on the dev machine | `open` |
@@ -166,7 +175,7 @@ the author.
 
 | ID | Ticket | Severity | State |
 | --- | --- | --- | --- |
-| UI-1 | Fixture-mode provenance — `--tour-fixtures` must be visibly and accessibly distinct from live data | blocker | `done` (fixture title/footer/a11y never claim a live Engine) |
+| UI-1 | Fixture-mode provenance — `--tour-fixtures` must be visibly and accessibly distinct from live data | blocker | `done` (title/footer/a11y truth plus `1f5d779` source guards against Builds/Stacks external operations; real-window/XCUITest evidence pending) |
 | UI-2 | Port renders as `18,099` — thousands separator on a port | blocker | `done` (string-typed inspector display + focused regression) |
 | UI-3 | Add Show/Hide Sidebar to the View menu | major | `open` |
 | UI-4 | Unmatched search must use `ContentUnavailableView.search` | major | `open` |
