@@ -183,6 +183,180 @@ final class MorbstackFixtureUITests: XCTestCase {
         try app.performAccessibilityAudit()
     }
 
+    /// Reviews Image pull and run boundaries without making a network request. Fixture
+    /// mode deliberately disables tag mutation, while Run stops at its explicit review
+    /// instead of manufacturing a container on the developer's daemon.
+    func testImageReviewControlsRespectFixtureBoundaries() throws {
+        let app = try launchFixture(appearance: .light)
+        try selectSidebarRoute("Images", in: app)
+        try assertFixtureMarker("postgres", in: app)
+
+        let pull = app.buttons["Pull an image"]
+        XCTAssertTrue(pull.waitForExistence(timeout: 10))
+        pull.click()
+        try assertStaticText("Pull Image", in: app)
+        XCTAssertTrue(app.textFields["Reference"].exists)
+        XCTAssertFalse(app.buttons["Pull"].isEnabled, "An empty image reference must not start a pull.")
+        try cancelPresentedSheet(in: app)
+
+        let image = app.staticTexts["postgres"]
+        XCTAssertTrue(image.waitForExistence(timeout: 10))
+        image.click()
+        let tag = app.buttons["Tag Image…"]
+        XCTAssertTrue(tag.waitForExistence(timeout: 10))
+        XCTAssertFalse(tag.isEnabled, "Fixture data must not offer an invented image-tag mutation.")
+
+        let run = app.buttons["Run selected local image"]
+        XCTAssertTrue(run.waitForExistence(timeout: 10))
+        XCTAssertTrue(run.isEnabled, "A selected local fixture image should reach its explicit run review.")
+        run.click()
+        try assertStaticText("Run Local Image", in: app)
+        XCTAssertTrue(app.textFields["Name (Optional)"].exists)
+        XCTAssertTrue(app.buttons["Run"].isEnabled)
+        try cancelPresentedSheet(in: app)
+    }
+
+    /// Creates only review state. The test cancels before Docker's create endpoint, so
+    /// it validates the native confirmation boundary without treating fixtures as live
+    /// Engine data.
+    func testNetworkAndVolumeCreationRequireExplicitConfirmation() throws {
+        let app = try launchFixture(appearance: .light)
+
+        try selectSidebarRoute("Networks", in: app)
+        try assertFixtureMarker("morb-ingress", in: app)
+        let createNetwork = app.buttons["Create network"]
+        XCTAssertTrue(createNetwork.waitForExistence(timeout: 10))
+        createNetwork.click()
+        try assertStaticText("Create Network", in: app)
+        let networkName = app.textFields["Name"]
+        XCTAssertTrue(networkName.waitForExistence(timeout: 10))
+        networkName.typeText("fixture-network")
+        app.buttons["Create"].click()
+        try assertStaticText("Create fixture-network?", in: app)
+        try cancelPresentedConfirmation(in: app)
+        try cancelPresentedSheet(in: app)
+
+        try selectSidebarRoute("Volumes", in: app)
+        try assertFixtureMarker("shopfront_pgdata", in: app)
+        let createVolume = app.buttons["Create volume"]
+        XCTAssertTrue(createVolume.waitForExistence(timeout: 10))
+        createVolume.click()
+        try assertStaticText("Create Volume", in: app)
+        let volumeName = app.textFields["Name"]
+        XCTAssertTrue(volumeName.waitForExistence(timeout: 10))
+        volumeName.typeText("fixture-volume")
+        app.buttons["Create"].click()
+        try assertStaticText("Create fixture-volume?", in: app)
+        try cancelPresentedConfirmation(in: app)
+        try cancelPresentedSheet(in: app)
+
+        let volume = app.staticTexts["shopfront_pgdata"]
+        XCTAssertTrue(volume.waitForExistence(timeout: 10))
+        volume.click()
+        let export = app.buttons["Export selected volume"]
+        XCTAssertTrue(export.waitForExistence(timeout: 10))
+        XCTAssertTrue(export.isEnabled, "A selected local volume must expose the system export command.")
+    }
+
+    /// Selected-network membership commands use native form and confirmation states.
+    /// Both mutation points are deliberately cancelled before the fixture client is
+    /// asked to change membership.
+    func testNetworkMembershipReviewsAreReachableAndCancellable() throws {
+        let app = try launchFixture(appearance: .light)
+        try selectSidebarRoute("Networks", in: app)
+        try assertFixtureMarker("morb-ingress", in: app)
+
+        let network = app.staticTexts["morb-ingress"]
+        XCTAssertTrue(network.waitForExistence(timeout: 10))
+        network.click()
+        let connect = app.buttons["Connect Container…"]
+        XCTAssertTrue(connect.waitForExistence(timeout: 10))
+        XCTAssertTrue(connect.isEnabled)
+        connect.click()
+        try assertStaticText("Connect Container", in: app)
+        XCTAssertTrue(app.popUpButtons["Container"].exists || app.buttons["Container"].exists)
+        XCTAssertTrue(app.textFields["Aliases (optional)"].exists)
+        try cancelPresentedSheet(in: app)
+
+        let disconnect = app.buttons["Disconnect Container…"]
+        XCTAssertTrue(disconnect.waitForExistence(timeout: 10))
+        XCTAssertTrue(disconnect.isEnabled)
+        disconnect.click()
+        let member = app.menuItems["shopfront-web-1"]
+        XCTAssertTrue(member.waitForExistence(timeout: 10))
+        member.click()
+        try assertStaticText("Disconnect shopfront-web-1?", in: app)
+        try cancelPresentedConfirmation(in: app)
+    }
+
+    /// Exercises the finite exec review plus the fixture client's explicit refusal,
+    /// then verifies that log export is exposed as a system-save-panel command without
+    /// opening that panel in this deterministic process.
+    func testContainerExecAndLogExportRemainExplicitInFixtureMode() throws {
+        let app = try launchFixture(appearance: .light)
+        try assertFixtureMarker("shopfront-api-1", in: app)
+
+        let container = app.staticTexts["shopfront-api-1"]
+        XCTAssertTrue(container.waitForExistence(timeout: 10))
+        container.click()
+        let runCommand = app.buttons["Run command in shopfront-api-1"]
+        XCTAssertTrue(runCommand.waitForExistence(timeout: 10))
+        runCommand.click()
+        try assertStaticText("Run Command", in: app)
+        let program = app.textFields["Program"]
+        XCTAssertTrue(program.waitForExistence(timeout: 10))
+        program.typeText("true")
+        app.buttons["Run Command"].click()
+        try assertStaticText("Couldn’t Run Command", in: app)
+        try assertStaticText("Run Command is unavailable in fixture mode; no Docker command was performed.", in: app)
+        try dismissPresentedSheet(in: app, button: "Done")
+
+        let logs = app.buttons["Logs"]
+        XCTAssertTrue(logs.waitForExistence(timeout: 10))
+        logs.click()
+        let options = app.buttons["Log options"]
+        XCTAssertTrue(options.waitForExistence(timeout: 10))
+        options.click()
+        let saveTranscript = app.menuItems["Save Visible Transcript…"]
+        XCTAssertTrue(saveTranscript.waitForExistence(timeout: 10))
+        XCTAssertTrue(saveTranscript.isEnabled)
+    }
+
+    /// VM capacity comes from local Morbstack state, not fixture Docker data. Its
+    /// potentially destructive growth controls must therefore remain absent while the
+    /// developer fixture banner is active.
+    func testFixtureDiskRouteOmitsDiskGrowthActions() throws {
+        let app = try launchFixture(appearance: .light)
+        try selectSidebarRoute("Disk", in: app)
+        try assertFixtureMarker("Build cache", in: app)
+        try assertStaticText("VM disk capacity is unavailable in developer fixture data.", in: app)
+        XCTAssertFalse(app.buttons["Review Disk Growth…"].exists)
+        XCTAssertFalse(app.buttons["Review Disk Recovery…"].exists)
+    }
+
+    /// The Stack project menu must present a review before a Compose lifecycle call.
+    /// Cancel leaves the fixture collection untouched while checking the selected
+    /// project's target count and destructive consequence copy.
+    func testComposeLifecycleUsesProjectReviewBeforeMutation() throws {
+        let app = try launchFixture(appearance: .light)
+        try selectSidebarRoute("Stacks", in: app)
+        try assertFixtureMarker("shopfront", in: app)
+
+        let project = app.staticTexts["shopfront"]
+        XCTAssertTrue(project.waitForExistence(timeout: 10))
+        project.click()
+        let actions = app.buttons["Actions for shopfront"]
+        XCTAssertTrue(actions.waitForExistence(timeout: 10))
+        actions.click()
+        let stop = app.menuItems["Stop 5 Running Services"]
+        XCTAssertTrue(stop.waitForExistence(timeout: 10))
+        XCTAssertTrue(stop.isEnabled)
+        stop.click()
+        try assertStaticText("Stop 5 Running Services?", in: app)
+        try assertStaticText("Their containers, images, networks, and named volumes are kept.", in: app)
+        try cancelPresentedConfirmation(in: app)
+    }
+
     // MARK: - Fixture launch and route assertions
 
     private func launchFixture(appearance: Appearance) throws -> XCUIApplication {
@@ -256,6 +430,46 @@ final class MorbstackFixtureUITests: XCTestCase {
                 line: line)
             throw HarnessError(message: "Missing fixture marker \(marker).")
         }
+    }
+
+    private func assertStaticText(
+        _ value: String,
+        in app: XCUIApplication,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws {
+        let text = app.staticTexts[value]
+        guard text.waitForExistence(timeout: 10) else {
+            XCTFail("Expected visible text \(value).", file: file, line: line)
+            throw HarnessError(message: "Missing visible text \(value).")
+        }
+    }
+
+    private func cancelPresentedConfirmation(in app: XCUIApplication) throws {
+        let cancel = app.buttons["Cancel"].firstMatch
+        guard cancel.waitForExistence(timeout: 10) else {
+            throw HarnessError(message: "The required confirmation did not expose Cancel.")
+        }
+        cancel.click()
+    }
+
+    private func cancelPresentedSheet(in app: XCUIApplication) throws {
+        try dismissPresentedSheet(in: app, button: "Cancel")
+    }
+
+    private func dismissPresentedSheet(
+        in app: XCUIApplication,
+        button: String
+    ) throws {
+        let sheet = app.sheets.firstMatch
+        guard sheet.waitForExistence(timeout: 10) else {
+            throw HarnessError(message: "Expected a document-modal sheet.")
+        }
+        let action = sheet.buttons[button]
+        guard action.waitForExistence(timeout: 10) else {
+            throw HarnessError(message: "The sheet did not expose \(button).")
+        }
+        action.click()
     }
 
     private func sidebarMenuCommand(in app: XCUIApplication) throws -> XCUIElement {

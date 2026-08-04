@@ -29,12 +29,24 @@ system material. This replaces neither production code nor Computer Use review.
   `NavigationSplitView` sidebar behavior people already liked rather than replacing it
   with a drawn control.
 - Apple's `XCUIApplication.performAccessibilityAudit()` over a fixture route.
+- Image pull/run review, image-tag fixture gating, native network and volume creation
+  confirmations, selected-network connect/disconnect review, finite container-command
+  refusal, log-export availability, fixture disk-growth exclusion, and Compose project
+  lifecycle review. Every test cancels before a normal Engine mutation; exec is the one
+  deliberate exception, and its fixture client returns an explicit no-Docker-performed
+  refusal that the test asserts.
 
-The tests intentionally do **not** press lifecycle, pull, prune, remove, or setup
-actions. Fixture data means they never need the daemon, a VM, Docker Desktop, or a
-network connection. A unit test failure reports a real interaction or accessibility
-regression; the screenshot attachments are review evidence, not a synthetic pixel
-baseline and not a claim that an offscreen render represents Tahoe chrome.
+The tests intentionally do **not confirm** lifecycle, pull, prune, remove, network,
+volume, or disk-growth mutations. Fixture data means they never need the daemon, a VM,
+Docker Desktop, or a network connection. The fixture client rejects the one exercised
+exec boundary with a specific error rather than simulating a result. Volume and log
+export each begin with `NSSavePanel`, which is a separate macOS process boundary: these
+tests assert that their commands are reachable, while the serialized visual-evidence
+run must inspect destination selection and the in-app volume export review after an
+explicit safe test destination is supplied. A unit test failure reports a real
+interaction or accessibility regression; the screenshot attachments are review
+evidence, not a synthetic pixel baseline and not a claim that an offscreen render
+represents Tahoe chrome.
 
 ## Run it after the source tree is quiet
 
