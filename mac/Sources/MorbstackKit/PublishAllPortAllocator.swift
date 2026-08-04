@@ -55,12 +55,7 @@ final class PublishAllPortAllocator {
         /// Performs the registration handshake before the Docker lifecycle relay
         /// begins. The blocking allocator work itself runs on a dedicated queue.
         func start() throws {
-            let registration: String
-            if let traceID {
-                registration = "REGISTER \(containerID) TRACE \(traceID)\n"
-            } else {
-                registration = "REGISTER \(containerID)\n"
-            }
+            let registration = Self.registrationLine(containerID: containerID, traceID: traceID)
             trace("event=register-send fd=\(fd) durable=\(remainsAvailableForRestartPolicy)")
             guard POSIXSocketSupport.writeAll(fd, Data(registration.utf8)) else {
                 trace("event=register-write-failed errno=\(Self.errnoDescription())")
@@ -75,6 +70,16 @@ final class PublishAllPortAllocator {
             }
             trace("event=serve-scheduled")
             queue.async { [weak self] in self?.serve() }
+        }
+
+        /// The original two-field registration remains the default wire grammar.
+        /// The diagnostic extension is deliberately opt-in so an uninstrumented
+        /// guest accepts exactly the same registration it did before SP-6.
+        static func registrationLine(containerID: String, traceID: String?) -> String {
+            if let traceID {
+                return "REGISTER \(containerID) TRACE \(traceID)\n"
+            }
+            return "REGISTER \(containerID)\n"
         }
 
         func complete(succeeded: Bool) {

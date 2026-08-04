@@ -21,11 +21,60 @@ const MAX_LINE_BYTES: usize = 512;
 const MAX_BINDINGS: usize = 128;
 const HOST_REGISTRATION_WAIT: std::time::Duration = std::time::Duration::from_secs(45);
 
+/// A host session's immutable routing identity plus its optional diagnostic
+/// correlation token. The parser stays outside the Linux-only broker so both
+/// the normal host test lane and the guest target pin the wire grammar.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, Eq, PartialEq)]
+struct HostRegistration<'a> {
+    container_id: &'a str,
+    trace_id: Option<&'a str>,
+}
+
+/// Accept the original two-field registration and exactly one backwards-
+/// compatible SP-6 extension. Nothing downstream of this parser uses the
+/// trace token for allocation or authorization.
+#[cfg(any(target_os = "linux", test))]
+fn parse_host_registration(line: &str) -> Option<HostRegistration<'_>> {
+    let fields: Vec<_> = line.split(' ').collect();
+    match fields.as_slice() {
+        ["REGISTER", container_id] if valid_container_id(container_id) => Some(HostRegistration {
+            container_id,
+            trace_id: None,
+        }),
+        ["REGISTER", container_id, "TRACE", trace_id]
+            if valid_container_id(container_id) && valid_trace_id(trace_id) =>
+        {
+            Some(HostRegistration {
+                container_id,
+                trace_id: Some(trace_id),
+            })
+        }
+        _ => None,
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn valid_container_id(id: &str) -> bool {
+    id.len() == 64
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn valid_trace_id(trace_id: &str) -> bool {
+    trace_id.len() == 32
+        && trace_id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
 #[cfg(target_os = "linux")]
 mod imp {
     use super::{
-        io, HOST_REGISTRATION_WAIT, MAX_BINDINGS, MAX_LINE_BYTES, PUBLISH_ALL_SOCKET,
-        VSOCK_PUBLISH_ALL_ALLOCATOR_PORT,
+        io, parse_host_registration, valid_container_id, HOST_REGISTRATION_WAIT, MAX_BINDINGS,
+        MAX_LINE_BYTES, PUBLISH_ALL_SOCKET, VSOCK_PUBLISH_ALL_ALLOCATOR_PORT,
     };
     use crate::{log, sys};
     use std::collections::HashMap;
@@ -118,19 +167,12 @@ mod imp {
                 return;
             }
         };
-        let fields: Vec<_> = line.split(' ').collect();
-        let (container_id, trace_id) = match fields.as_slice() {
-            ["REGISTER", container_id] if valid_id(container_id) => (*container_id, None),
-            ["REGISTER", container_id, "TRACE", trace_id]
-                if valid_id(container_id) && valid_trace_id(trace_id) =>
-            {
-                (*container_id, Some(*trace_id))
-            }
-            _ => {
-                let _ = stream.write_all(b"ERR malformed registration\n");
-                return;
-            }
+        let Some(registration) = parse_host_registration(&line) else {
+            let _ = stream.write_all(b"ERR malformed registration\n");
+            return;
         };
+        let container_id = registration.container_id;
+        let trace_id = registration.trace_id;
         let accepted_fd = stream.as_raw_fd();
         let cloned = match stream.try_clone() {
             Ok(cloned) => cloned,
@@ -323,7 +365,7 @@ mod imp {
     fn read_allocation_request(stream: &mut UnixStream) -> io::Result<AllocationRequest> {
         let header = read_line(stream)?;
         let fields: Vec<_> = header.split(' ').collect();
-        if fields.len() != 3 || fields[0] != "ALLOC" || !valid_id(fields[1]) {
+        if fields.len() != 3 || fields[0] != "ALLOC" || !valid_container_id(fields[1]) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "invalid ALLOC header",
@@ -402,20 +444,6 @@ mod imp {
             && (fields[3] == "0" || port(fields[3]))
     }
 
-    fn valid_id(id: &str) -> bool {
-        id.len() == 64
-            && id
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-    }
-
-    fn valid_trace_id(trace_id: &str) -> bool {
-        trace_id.len() == 32
-            && trace_id
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-    }
-
     fn short_id(id: &str) -> &str {
         id.get(..12).unwrap_or(id)
     }
@@ -460,6 +488,50 @@ mod imp {
         }
         String::from_utf8(bytes)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "line is not UTF-8"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_host_registration, HostRegistration};
+
+    const CONTAINER_ID: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const TRACE_ID: &str = "0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn registration_grammar_keeps_the_original_two_field_form() {
+        assert_eq!(
+            parse_host_registration(&format!("REGISTER {CONTAINER_ID}")),
+            Some(HostRegistration {
+                container_id: CONTAINER_ID,
+                trace_id: None,
+            })
+        );
+    }
+
+    #[test]
+    fn registration_grammar_accepts_the_opt_in_trace_extension() {
+        assert_eq!(
+            parse_host_registration(&format!("REGISTER {CONTAINER_ID} TRACE {TRACE_ID}")),
+            Some(HostRegistration {
+                container_id: CONTAINER_ID,
+                trace_id: Some(TRACE_ID),
+            })
+        );
+    }
+
+    #[test]
+    fn registration_grammar_rejects_malformed_or_unsafe_trace_extensions() {
+        let uppercase_trace = TRACE_ID.replace('a', "A");
+        for line in [
+            format!("REGISTER {CONTAINER_ID} TRACE"),
+            format!("REGISTER {CONTAINER_ID} TRACE {uppercase_trace}"),
+            format!("REGISTER {CONTAINER_ID} TRACE {TRACE_ID} extra"),
+            format!("REGISTER {}", &CONTAINER_ID[..63]),
+            format!("REGISTER {}", CONTAINER_ID.to_uppercase()),
+        ] {
+            assert_eq!(parse_host_registration(&line), None, "{line}");
+        }
     }
 }
 
