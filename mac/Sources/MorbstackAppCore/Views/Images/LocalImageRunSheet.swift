@@ -3,9 +3,10 @@
 //
 // One deliberately bounded way to run an image already in the local Engine.
 //
-// This is a record-scoped command, not a container builder. The only mutable input is
-// an optional container name; all runtime configuration continues to be the selected
-// image's own Docker configuration and the Engine's defaults.
+// This is a record-scoped command, not a container builder. Its only configurable
+// Docker fields are a name, literal environment declarations, and fixed TCP/UDP
+// published ports; all other runtime configuration remains the selected image's own
+// Docker configuration and the Engine's defaults.
 
 import SwiftUI
 
@@ -31,7 +32,9 @@ struct LocalImageRunSheet: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var requestedName = ""
-    @State private var showsConfirmation = false
+    @State private var environment: [LocalImageEnvironmentEntry] = []
+    @State private var publishedPorts: [LocalImagePortMappingEntry] = []
+    @State private var requestForConfirmation: LocalImageRunRequest?
     @State private var state: RunState = .review
     @FocusState private var nameIsFocused: Bool
 
@@ -51,9 +54,27 @@ struct LocalImageRunSheet: View {
         image.repoTags.first ?? image.shortID
     }
 
-    private var normalizedName: String? {
-        let name = requestedName.trimmingCharacters(in: .whitespacesAndNewlines)
-        return name.isEmpty ? nil : name
+    private var requestResult: Result<LocalImageRunRequest, LocalImageRunValidation> {
+        LocalImageRunRequest.make(
+            requestedName: requestedName,
+            environment: environment,
+            publishedPorts: publishedPorts)
+    }
+
+    private var requestedRun: LocalImageRunRequest? {
+        guard case .success(let request) = requestResult else { return nil }
+        return request
+    }
+
+    private var validationMessage: String? {
+        guard case .failure(let error) = requestResult else { return nil }
+        return error.localizedDescription
+    }
+
+    private var isEditingEnabled: Bool {
+        guard !state.isWorking else { return false }
+        if case .succeeded = state { return false }
+        return true
     }
 
     var body: some View {
@@ -80,18 +101,93 @@ struct LocalImageRunSheet: View {
                     TextField("Name (Optional)", text: $requestedName)
                         .font(.system(.body, design: .monospaced))
                         .focused($nameIsFocused)
-                        .disabled(state.isWorking || !isReviewing)
+                        .disabled(!isEditingEnabled)
                 } header: {
                     Text("Container")
                 } footer: {
                     Text("Leave the name empty to let Docker assign one. Docker validates any name you enter.")
                 }
 
+                Section("Environment") {
+                    DisclosureGroup("Environment Variables (\(environment.count))") {
+                        ForEach(environment.indices, id: \.self) { index in
+                            Text("Environment Variable \(index + 1)")
+                                .font(.headline)
+                            TextField("Name", text: $environment[index].name, prompt: Text("LOG_LEVEL"))
+                                .font(.system(.body, design: .monospaced))
+                                .disabled(!isEditingEnabled)
+                                .accessibilityLabel("Environment variable \(index + 1) name")
+                            TextField("Value", text: $environment[index].value, prompt: Text("debug"))
+                                .font(.system(.body, design: .monospaced))
+                                .disabled(!isEditingEnabled)
+                                .accessibilityLabel("Environment variable \(index + 1) value")
+                            Button("Remove Environment Variable \(index + 1)", role: .destructive) {
+                                environment.remove(at: index)
+                            }
+                            .disabled(!isEditingEnabled)
+                        }
+                        Button("Add Environment Variable", systemImage: "plus") {
+                            environment.append(LocalImageEnvironmentEntry())
+                        }
+                        .disabled(!isEditingEnabled)
+                    }
+                } footer: {
+                    Text("Values are sent literally as entered. Morbstack does not read your Mac environment, .env files, keychain, or a secret store.")
+                }
+
+                Section("Published Ports") {
+                    DisclosureGroup("Published Ports (\(publishedPorts.count))") {
+                        ForEach(publishedPorts.indices, id: \.self) { index in
+                            Text("Published Port \(index + 1)")
+                                .font(.headline)
+                            TextField("Host Port", text: $publishedPorts[index].hostPort, prompt: Text("8080"))
+                                .font(.system(.body, design: .monospaced))
+                                .disabled(!isEditingEnabled)
+                                .accessibilityLabel("Published port \(index + 1) host port")
+                            TextField("Container Port", text: $publishedPorts[index].containerPort, prompt: Text("80"))
+                                .font(.system(.body, design: .monospaced))
+                                .disabled(!isEditingEnabled)
+                                .accessibilityLabel("Published port \(index + 1) container port")
+                            Picker("Protocol", selection: $publishedPorts[index].transport) {
+                                ForEach(LocalImagePortTransport.allCases, id: \.self) { transport in
+                                    Text(transport.displayName).tag(transport)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .disabled(!isEditingEnabled)
+                            Picker("Exposure", selection: $publishedPorts[index].exposure) {
+                                ForEach(LocalImagePortExposure.allCases, id: \.self) { exposure in
+                                    Text(exposure.displayName).tag(exposure)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .disabled(!isEditingEnabled)
+                            Button("Remove Published Port \(index + 1)", role: .destructive) {
+                                publishedPorts.remove(at: index)
+                            }
+                            .disabled(!isEditingEnabled)
+                        }
+                        Button("Add Published Port", systemImage: "plus") {
+                            publishedPorts.append(LocalImagePortMappingEntry())
+                        }
+                        .disabled(!isEditingEnabled)
+                    }
+                } footer: {
+                    Text("Each mapping is one fixed TCP or UDP host port. Docker and Morbstack's normal port preflight report current binding conflicts; this form does not create dynamic ports, ranges, or publish-all mappings.")
+                }
+
                 Section("Authority") {
                     Text(
-                        "Creates and starts one new container from this local image ID. Docker uses the image’s configured entrypoint, command, user, working directory, and environment.")
+                        "Creates and starts one new container from this local image ID. Docker uses the image’s configured entrypoint, command, user, and working directory; literal declarations here may override the image environment.")
                     Text(
-                        "Morbstack does not pull an image or configure ports, bind mounts, custom networking, privilege, environment variables, or secrets.")
+                        "Morbstack does not pull an image or configure bind mounts, custom networking, privilege, capabilities, credentials, secrets, host networking, or arbitrary Docker JSON.")
+                }
+
+                if let validationMessage, isEditingEnabled {
+                    Section("Check the Request") {
+                        Text(validationMessage)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 stateSection
@@ -103,33 +199,37 @@ struct LocalImageRunSheet: View {
                         Button(closeTitle) { dismiss() }
                     }
                 }
-                if isReviewing {
+                if isEditingEnabled {
                     ToolbarItem(placement: .confirmationAction) {
-                        Button("Run") { showsConfirmation = true }
+                        Button(runButtonTitle) { requestForConfirmation = requestedRun }
+                            .disabled(requestedRun == nil)
                     }
                 }
             }
         }
-        .frame(minWidth: 460, idealWidth: 520, minHeight: 390)
+        .frame(minWidth: 500, idealWidth: 560, minHeight: 460)
         .interactiveDismissDisabled(state.isWorking)
         .confirmationDialog(
             "Run \(imageLabel)?",
-            isPresented: $showsConfirmation,
+            isPresented: Binding(
+                get: { requestForConfirmation != nil },
+                set: { if !$0 { requestForConfirmation = nil } }
+            ),
+            presenting: requestForConfirmation,
             titleVisibility: .visible
-        ) {
+        ) { request in
             Button("Run") {
-                Task { await run() }
+                requestForConfirmation = nil
+                Task { await run(request) }
             }
             Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(confirmationMessage)
+        } message: { request in
+            Text(confirmationMessage(for: request))
         }
         .onAppear { nameIsFocused = true }
-    }
-
-    private var isReviewing: Bool {
-        if case .review = state { return true }
-        return false
+        .onChange(of: requestedName) { _, _ in clearFailureAfterEdit() }
+        .onChange(of: environment) { _, _ in clearFailureAfterEdit() }
+        .onChange(of: publishedPorts) { _, _ in clearFailureAfterEdit() }
     }
 
     private var closeTitle: String {
@@ -140,13 +240,31 @@ struct LocalImageRunSheet: View {
         }
     }
 
-    private var confirmationMessage: String {
-        var message = "This creates and starts one container using the selected local image and its default Docker configuration."
-        if let normalizedName {
-            message += " Docker will be asked to name it \(normalizedName)."
+    private var runButtonTitle: String {
+        if case .failed = state { return "Try Again" }
+        return "Run"
+    }
+
+    private func confirmationMessage(for request: LocalImageRunRequest) -> String {
+        var message = "This creates and starts one container from the selected local image ID."
+        if let name = request.requestedName {
+            message += " Docker will be asked to name it \(name)."
+        } else {
+            message += " Docker will assign its name."
         }
-        message += " No image will be pulled and no host ports, mounts, custom network, privilege, environment variables, or secrets will be configured."
+        let environmentCount = request.environment.count
+        message += " It will receive \(environmentCount) explicit environment declaration\(environmentCount == 1 ? "" : "s"); none are copied from this Mac."
+        if request.publishedPorts.isEmpty {
+            message += " It will not publish a host port."
+        } else {
+            message += " It will publish \(request.publishedPorts.count) fixed host port\(request.publishedPorts.count == 1 ? "" : "s"): \(request.publishedPorts.map(portDescription).joined(separator: ", "))."
+        }
+        message += " No image will be pulled and no mounts, custom network, privilege, capability, credential, secret, host-networking, or arbitrary Docker configuration will be added."
         return message
+    }
+
+    private func portDescription(_ port: LocalImagePublishedPort) -> String {
+        "\(port.hostIP):\(port.hostPort) → \(port.containerPort)/\(port.transport.displayName)"
     }
 
     @ViewBuilder
@@ -195,13 +313,13 @@ struct LocalImageRunSheet: View {
     }
 
     @MainActor
-    private func run() async {
-        guard isReviewing else { return }
+    private func run(_ request: LocalImageRunRequest) async {
+        guard isEditingEnabled else { return }
         state = .working(.creating)
         do {
             let result = try await model.runLocalImage(
                 imageID: image.id,
-                requestedName: normalizedName,
+                request: request,
                 progress: { state = .working($0) })
             state = .succeeded(result)
         } catch {
@@ -216,5 +334,9 @@ struct LocalImageRunSheet: View {
                 message: MorbErrorMessage.text(for: error),
                 containerID: containerID)
         }
+    }
+
+    private func clearFailureAfterEdit() {
+        if case .failed = state { state = .review }
     }
 }

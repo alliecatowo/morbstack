@@ -117,6 +117,204 @@ enum LocalImageRunProgress: Sendable {
     }
 }
 
+/// The two transport protocols the local-image form can publish. This is deliberately
+/// not Docker's open-ended protocol field: the host forwarder has a reviewed TCP/UDP
+/// contract, while SCTP and arbitrary Engine create documents need their own work.
+enum LocalImagePortTransport: String, CaseIterable, Equatable, Hashable, Sendable {
+    case tcp
+    case udp
+
+    var displayName: String { rawValue.uppercased() }
+}
+
+/// The two explicit IPv4 exposure choices that the host-port preflight understands.
+/// The form never relies on Docker's implicit all-interface default.
+enum LocalImagePortExposure: String, CaseIterable, Equatable, Hashable, Sendable {
+    case thisMac
+    case allInterfaces
+
+    var displayName: String {
+        switch self {
+        case .thisMac: return "This Mac only (127.0.0.1)"
+        case .allInterfaces: return "All network interfaces (0.0.0.0)"
+        }
+    }
+
+    var dockerHostIP: String {
+        switch self {
+        case .thisMac: return "127.0.0.1"
+        case .allInterfaces: return "0.0.0.0"
+        }
+    }
+}
+
+/// One editable, explicit environment declaration in the local-image form. This is
+/// only draft state; ``LocalImageRunRequest`` decides whether it becomes a Docker
+/// `Env` entry. In particular, no host environment, file, keychain, or secret store
+/// can populate this type.
+struct LocalImageEnvironmentEntry: Identifiable, Equatable, Sendable {
+    let id: UUID
+    var name: String
+    var value: String
+
+    init(id: UUID = UUID(), name: String = "", value: String = "") {
+        self.id = id
+        self.name = name
+        self.value = value
+    }
+}
+
+/// One checked `NAME=value` declaration that will be sent to Docker. It cannot
+/// represent host-environment inheritance because the value is always present,
+/// including when it is the intentionally empty string.
+struct LocalImageEnvironmentDeclaration: Equatable, Sendable {
+    let name: String
+    let value: String
+
+    var engineValue: String { "\(name)=\(value)" }
+}
+
+/// One editable, fixed published-port declaration in the local-image form. Both
+/// port numbers remain strings only while a person is typing; a successful request
+/// contains checked integer values, never a raw Docker range or dynamic allocation.
+struct LocalImagePortMappingEntry: Identifiable, Equatable, Sendable {
+    let id: UUID
+    var hostPort: String
+    var containerPort: String
+    var transport: LocalImagePortTransport
+    var exposure: LocalImagePortExposure
+
+    init(
+        id: UUID = UUID(),
+        hostPort: String = "",
+        containerPort: String = "",
+        transport: LocalImagePortTransport = .tcp,
+        exposure: LocalImagePortExposure = .thisMac
+    ) {
+        self.id = id
+        self.hostPort = hostPort
+        self.containerPort = containerPort
+        self.transport = transport
+        self.exposure = exposure
+    }
+}
+
+/// A checked, ordinary Docker port publication. The Engine request writes both
+/// `ExposedPorts` and `HostConfig.PortBindings` for this value, matching Docker's
+/// container-create schema rather than relying on client-only CLI syntax.
+struct LocalImagePublishedPort: Equatable, Sendable {
+    let hostPort: Int
+    let containerPort: Int
+    let transport: LocalImagePortTransport
+    let exposure: LocalImagePortExposure
+
+    var containerPortKey: String { "\(containerPort)/\(transport.rawValue)" }
+    var hostIP: String { exposure.dockerHostIP }
+}
+
+/// A correctable validation problem in the small typed local-image form. Docker
+/// remains the authority for container names, image state, port availability, and
+/// every Engine-side create/start error; these cases only prevent an incomplete form
+/// row from being silently omitted or turned into a different request.
+enum LocalImageRunValidation: LocalizedError, Equatable, Sendable {
+    case environmentNameRequired(entry: Int)
+    case environmentNameContainsEquals(entry: Int)
+    case duplicateEnvironmentName(String)
+    case portMappingIncomplete(entry: Int)
+    case invalidHostPort(entry: Int)
+    case invalidContainerPort(entry: Int)
+
+    var errorDescription: String? {
+        switch self {
+        case .environmentNameRequired(let entry):
+            return "Environment variable \(entry) needs a name."
+        case .environmentNameContainsEquals(let entry):
+            return "Environment variable \(entry)'s name cannot contain =."
+        case .duplicateEnvironmentName(let name):
+            return "Environment variable \(name) appears more than once."
+        case .portMappingIncomplete(let entry):
+            return "Published port \(entry) needs both a host port and a container port."
+        case .invalidHostPort(let entry):
+            return "Published port \(entry)'s host port must be a number from 1 through 65535."
+        case .invalidContainerPort(let entry):
+            return "Published port \(entry)'s container port must be a number from 1 through 65535."
+        }
+    }
+}
+
+/// The complete, intentionally small create contract for the Images route. It has no
+/// generic dictionary or escape hatch: a request is an optional container name,
+/// literal `NAME=value` environment declarations, and fixed TCP/UDP publications.
+///
+/// A new UI field must be modeled here, reviewed against the Docker Engine schema,
+/// and sent explicitly by ``DockerClient``. That keeps unreviewed Docker fields from
+/// becoming invisible defaults in an otherwise safe form.
+struct LocalImageRunRequest: Equatable, Sendable {
+    let requestedName: String?
+    let environment: [LocalImageEnvironmentDeclaration]
+    let publishedPorts: [LocalImagePublishedPort]
+
+    static func make(
+        requestedName: String,
+        environment entries: [LocalImageEnvironmentEntry],
+        publishedPorts portEntries: [LocalImagePortMappingEntry]
+    ) -> Result<LocalImageRunRequest, LocalImageRunValidation> {
+        let name = requestedName.trimmingCharacters(in: .whitespacesAndNewlines)
+        var environment: [LocalImageEnvironmentDeclaration] = []
+        var environmentNames: Set<String> = []
+
+        for (offset, entry) in entries.enumerated() {
+            let trimmedName = entry.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmedName.isEmpty {
+                // An untouched Add row does not declare anything. A value without a
+                // name would be ambiguous, so it is a correctable form error.
+                guard entry.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    return .failure(.environmentNameRequired(entry: offset + 1))
+                }
+                continue
+            }
+            guard !trimmedName.contains("=") else {
+                return .failure(.environmentNameContainsEquals(entry: offset + 1))
+            }
+            guard environmentNames.insert(trimmedName).inserted else {
+                return .failure(.duplicateEnvironmentName(trimmedName))
+            }
+            environment.append(LocalImageEnvironmentDeclaration(name: trimmedName, value: entry.value))
+        }
+
+        var publishedPorts: [LocalImagePublishedPort] = []
+        for (offset, entry) in portEntries.enumerated() {
+            let rawHostPort = entry.hostPort.trimmingCharacters(in: .whitespacesAndNewlines)
+            let rawContainerPort = entry.containerPort.trimmingCharacters(in: .whitespacesAndNewlines)
+            if rawHostPort.isEmpty && rawContainerPort.isEmpty {
+                // Like a blank environment row, a blank port row makes no request.
+                continue
+            }
+            guard !rawHostPort.isEmpty, !rawContainerPort.isEmpty else {
+                return .failure(.portMappingIncomplete(entry: offset + 1))
+            }
+            guard let hostPort = Int(rawHostPort), (1...65_535).contains(hostPort) else {
+                return .failure(.invalidHostPort(entry: offset + 1))
+            }
+            guard let containerPort = Int(rawContainerPort), (1...65_535).contains(containerPort) else {
+                return .failure(.invalidContainerPort(entry: offset + 1))
+            }
+            publishedPorts.append(
+                LocalImagePublishedPort(
+                    hostPort: hostPort,
+                    containerPort: containerPort,
+                    transport: entry.transport,
+                    exposure: entry.exposure))
+        }
+
+        return .success(
+            LocalImageRunRequest(
+                requestedName: name.isEmpty ? nil : name,
+                environment: environment,
+                publishedPorts: publishedPorts))
+    }
+}
+
 /// The Engine identity of one container created and started by the local-image flow.
 struct LocalImageRunResult: Sendable, Equatable {
     let containerID: String

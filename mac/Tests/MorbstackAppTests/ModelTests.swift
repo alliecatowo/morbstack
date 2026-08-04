@@ -707,6 +707,121 @@ final class ImageReferenceTests: XCTestCase {
     }
 }
 
+// MARK: - Local image run request
+
+final class LocalImageRunRequestTests: XCTestCase {
+
+    func testMakesOnlyLiteralEnvironmentAndFixedPublishedPortDeclarations() throws {
+        let result = LocalImageRunRequest.make(
+            requestedName: " web ",
+            environment: [
+                LocalImageEnvironmentEntry(name: "LOG_LEVEL", value: "debug"),
+                LocalImageEnvironmentEntry(name: "EMPTY_VALUE", value: ""),
+            ],
+            publishedPorts: [
+                LocalImagePortMappingEntry(
+                    hostPort: "8080",
+                    containerPort: "80",
+                    transport: .tcp,
+                    exposure: .thisMac),
+                LocalImagePortMappingEntry(
+                    hostPort: "5353",
+                    containerPort: "53",
+                    transport: .udp,
+                    exposure: .allInterfaces),
+            ])
+
+        guard case .success(let request) = result else {
+            return XCTFail("Expected a checked local-image request")
+        }
+        XCTAssertEqual(request.requestedName, "web")
+        XCTAssertEqual(
+            request.environment,
+            [
+                LocalImageEnvironmentDeclaration(name: "LOG_LEVEL", value: "debug"),
+                LocalImageEnvironmentDeclaration(name: "EMPTY_VALUE", value: ""),
+            ])
+        XCTAssertEqual(
+            request.publishedPorts,
+            [
+                LocalImagePublishedPort(
+                    hostPort: 8080, containerPort: 80, transport: .tcp, exposure: .thisMac),
+                LocalImagePublishedPort(
+                    hostPort: 5353, containerPort: 53, transport: .udp, exposure: .allInterfaces),
+            ])
+    }
+
+    func testRejectsIncompleteEnvironmentAndNonfixedPortRowsRatherThanDroppingThem() {
+        XCTAssertEqual(
+            LocalImageRunRequest.make(
+                requestedName: "",
+                environment: [LocalImageEnvironmentEntry(value: "present")],
+                publishedPorts: []),
+            .failure(.environmentNameRequired(entry: 1)))
+        XCTAssertEqual(
+            LocalImageRunRequest.make(
+                requestedName: "",
+                environment: [LocalImageEnvironmentEntry(name: "A=B", value: "present")],
+                publishedPorts: []),
+            .failure(.environmentNameContainsEquals(entry: 1)))
+        XCTAssertEqual(
+            LocalImageRunRequest.make(
+                requestedName: "",
+                environment: [],
+                publishedPorts: [LocalImagePortMappingEntry(hostPort: "0", containerPort: "80")]),
+            .failure(.invalidHostPort(entry: 1)),
+            "This form deliberately has no dynamic or publish-all port behavior.")
+        XCTAssertEqual(
+            LocalImageRunRequest.make(
+                requestedName: "",
+                environment: [],
+                publishedPorts: [LocalImagePortMappingEntry(hostPort: "8080", containerPort: "")]),
+            .failure(.portMappingIncomplete(entry: 1)))
+    }
+
+    func testEncodesTheExactV143EnvironmentAndPortCreateShape() throws {
+        let request = try LocalImageRunRequest.make(
+            requestedName: "web",
+            environment: [LocalImageEnvironmentEntry(name: "LOG_LEVEL", value: "debug")],
+            publishedPorts: [
+                LocalImagePortMappingEntry(
+                    hostPort: "8080", containerPort: "80", transport: .tcp, exposure: .thisMac),
+                LocalImagePortMappingEntry(
+                    hostPort: "5353", containerPort: "53", transport: .udp, exposure: .allInterfaces),
+            ]).get()
+        let data = try DockerClient.localImageCreateBody(imageID: "sha256:immutable", request: request)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+
+        XCTAssertEqual(object["Image"] as? String, "sha256:immutable")
+        XCTAssertEqual(object["Env"] as? [String], ["LOG_LEVEL=debug"])
+        let exposedPorts = try XCTUnwrap(object["ExposedPorts"] as? [String: Any])
+        XCTAssertEqual(Set(exposedPorts.keys), Set(["80/tcp", "53/udp"]))
+        XCTAssertEqual((exposedPorts["80/tcp"] as? [String: Any])?.count, 0)
+        XCTAssertEqual((exposedPorts["53/udp"] as? [String: Any])?.count, 0)
+
+        let hostConfig = try XCTUnwrap(object["HostConfig"] as? [String: Any])
+        XCTAssertEqual(Set(hostConfig.keys), Set(["PortBindings"]))
+        let bindings = try XCTUnwrap(hostConfig["PortBindings"] as? [String: Any])
+        let tcpBinding = try XCTUnwrap((bindings["80/tcp"] as? [[String: String]])?.first)
+        XCTAssertEqual(tcpBinding, ["HostIp": "127.0.0.1", "HostPort": "8080"])
+        let udpBinding = try XCTUnwrap((bindings["53/udp"] as? [[String: String]])?.first)
+        XCTAssertEqual(udpBinding, ["HostIp": "0.0.0.0", "HostPort": "5353"])
+
+        XCTAssertNil(object["Binds"])
+        XCTAssertNil(object["NetworkingConfig"])
+        XCTAssertNil(object["Privileged"])
+    }
+
+    func testOmitsEnvironmentAndHostConfigWhenTheFormHasNoDeclarations() throws {
+        let request = try LocalImageRunRequest.make(
+            requestedName: "", environment: [], publishedPorts: []).get()
+        let data = try DockerClient.localImageCreateBody(imageID: "sha256:immutable", request: request)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+
+        XCTAssertEqual(object.keys.sorted(), ["Image"])
+    }
+}
+
 // MARK: - Launch options
 
 final class LaunchOptionsTests: XCTestCase {

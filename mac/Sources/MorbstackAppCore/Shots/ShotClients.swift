@@ -108,7 +108,7 @@ final class ShotDockerClient: DockerClient, @unchecked Sendable {
     // calls are safe no-ops for future confirmation tests; a new container creation
     // instead fails explicitly so a fixture review cannot mistake an invented result
     // for a real Engine action.
-    override func createLocalImageContainer(imageID: String, requestedName: String?) async throws -> String {
+    override func createLocalImageContainer(imageID: String, request: LocalImageRunRequest) async throws -> String {
         throw DockerClientError.http(
             status: 503,
             message: "Run Local Image is unavailable in fixture mode; no Docker action was performed.")

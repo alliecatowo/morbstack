@@ -645,7 +645,9 @@ final class AppModel {
 
     /// Creates and starts exactly one container from an image already present in this
     /// model's local Engine inventory. The selected immutable image ID—not a mutable
-    /// tag—is the only image input. No pull or image inspect happens here.
+    /// tag—is the only image input. The separately checked request can carry only an
+    /// optional name, literal environment declarations, and ordinary TCP/UDP ports;
+    /// no pull or image inspect happens here.
     ///
     /// A create or start reply can race a client disconnect, and Docker's documented
     /// start statuses include cases such as "already started" that must not be treated
@@ -653,7 +655,7 @@ final class AppModel {
     /// deletes it automatically; the result directs the person to Containers instead.
     func runLocalImage(
         imageID: String,
-        requestedName: String?,
+        request: LocalImageRunRequest,
         progress: (LocalImageRunProgress) -> Void
     ) async throws -> LocalImageRunResult {
         guard engine.isRunning else {
@@ -663,15 +665,12 @@ final class AppModel {
             throw LocalImageRunError.imageIsNoLongerLocal
         }
 
-        let name = requestedName?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalizedName = (name?.isEmpty == false) ? name : nil
-
         progress(.creating)
         let containerID: String
         do {
             containerID = try await client.createLocalImageContainer(
                 imageID: imageID,
-                requestedName: normalizedName)
+                request: request)
         } catch let createError as DockerClientError {
             // A non-2xx response means Docker rejected this create. A transport or
             // reachability failure has no returned ID and may have crossed the socket
@@ -695,7 +694,7 @@ final class AppModel {
         // convenience for the surrounding tables; its independent failure must not
         // change a successful start into a false failure result.
         await refreshAll()
-        return LocalImageRunResult(containerID: containerID, requestedName: normalizedName)
+        return LocalImageRunResult(containerID: containerID, requestedName: request.requestedName)
     }
 
     /// Navigates to a container whose identity was returned by a successful Engine

@@ -1072,21 +1072,20 @@ class DockerClient: @unchecked Sendable {
     // MARK: Container lifecycle
 
     /// Creates one container from the immutable ID of an image that the Images route
-    /// has already listed locally. The JSON has *only* `Image`: Docker therefore uses
-    /// the image's own entrypoint, command, user, working directory, and environment.
-    /// It does not request a pull, mounts, ports, a custom network, privilege, or host
-    /// configuration. An optional user name is carried only in Docker's normal query
-    /// parameter and remains Engine-validated.
-    func createLocalImageContainer(imageID: String, requestedName: String?) async throws -> String {
-        let name = requestedName?.trimmingCharacters(in: .whitespacesAndNewlines)
+    /// has already listed locally. The checked request adds only literal environment
+    /// declarations and fixed TCP/UDP port publications. Docker retains its own
+    /// validation for the name, image, ports, and every other create constraint.
+    /// No pull, mount, custom network, privilege, credential, or generic host config
+    /// field can enter this method.
+    func createLocalImageContainer(imageID: String, request: LocalImageRunRequest) async throws -> String {
         let path: String
-        if let name, !name.isEmpty {
+        if let name = request.requestedName {
             path = "/containers/create?name=\(MinimalHTTP.percentEncodeQueryValue(name))"
         } else {
             path = "/containers/create"
         }
 
-        let body = try JSONEncoder().encode(LocalImageCreateRequest(Image: imageID))
+        let body = try Self.localImageCreateBody(imageID: imageID, request: request)
         let data = try await postJSON(path, body: body)
         let response: LocalImageCreateResponse
         do {
@@ -1098,6 +1097,13 @@ class DockerClient: @unchecked Sendable {
             throw DockerClientError.decoding("Docker created a container without returning its ID")
         }
         return id
+    }
+
+    /// The intentionally narrow v1.43 document used by ``createLocalImageContainer``.
+    /// Keeping the encoder callable from focused unit tests locks down both the fields
+    /// that must be present for a port publication and those that must remain absent.
+    static func localImageCreateBody(imageID: String, request: LocalImageRunRequest) throws -> Data {
+        try JSONEncoder().encode(LocalImageCreateRequest(imageID: imageID, request: request))
     }
 
     /// Creates or returns one named volume using Docker's default `local` driver. The
@@ -1453,10 +1459,53 @@ class DockerClient: @unchecked Sendable {
 }
 
 /// The whole request document for the local-image run flow. Keeping this next to the
-/// client rather than a view makes the authority boundary reviewable: no host config
-/// or user-configurable Docker field can enter the request.
+/// client rather than a view makes the authority boundary reviewable: no generic host
+/// config or user-configurable Docker field can enter the request.
 private struct LocalImageCreateRequest: Encodable {
     let Image: String
+    let Env: [String]?
+    let ExposedPorts: [String: LocalImageEmptyObject]?
+    let HostConfig: LocalImageHostConfig?
+
+    init(imageID: String, request: LocalImageRunRequest) {
+        Image = imageID
+        Env = request.environment.isEmpty ? nil : request.environment.map(\.engineValue)
+
+        guard !request.publishedPorts.isEmpty else {
+            ExposedPorts = nil
+            HostConfig = nil
+            return
+        }
+
+        var exposedPorts: [String: LocalImageEmptyObject] = [:]
+        var portBindings: [String: [LocalImagePortBinding]] = [:]
+        for publication in request.publishedPorts {
+            exposedPorts[publication.containerPortKey] = LocalImageEmptyObject()
+            portBindings[publication.containerPortKey, default: []].append(
+                LocalImagePortBinding(
+                    HostIp: publication.hostIP,
+                    HostPort: String(publication.hostPort)))
+        }
+        ExposedPorts = exposedPorts
+        HostConfig = LocalImageHostConfig(PortBindings: portBindings)
+    }
+}
+
+/// Docker's `ExposedPorts` schema uses an empty object as the value for every
+/// protocol-bearing container-port key.
+private struct LocalImageEmptyObject: Encodable {}
+
+/// The only host configuration this workflow is allowed to send. A new field belongs
+/// in a separately reviewed, typed workflow rather than becoming an optional member
+/// of this payload.
+private struct LocalImageHostConfig: Encodable {
+    let PortBindings: [String: [LocalImagePortBinding]]
+}
+
+/// One ordinary fixed host-port mapping in Docker's container-create schema.
+private struct LocalImagePortBinding: Encodable {
+    let HostIp: String
+    let HostPort: String
 }
 
 /// Docker's successful container-create response contains the new immutable ID.
