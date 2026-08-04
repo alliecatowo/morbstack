@@ -131,6 +131,19 @@ final class MorbstackFixtureUITests: XCTestCase {
         secondCommand.click() // Restore the caller's original sidebar state.
     }
 
+    /// The app has a main operations window and a separate Settings scene, not a
+    /// tabbed-document model. Its View menu must not advertise tab commands that have
+    /// no meaningful destination.
+    func testSingleWindowAppDoesNotAdvertiseWindowTabs() throws {
+        let app = try launchFixture(appearance: .light)
+        let viewMenu = app.menuBars.menuBarItems["View"]
+        XCTAssertTrue(viewMenu.waitForExistence(timeout: 10))
+        viewMenu.click()
+
+        XCTAssertFalse(app.menuItems["Show Tab Bar"].exists)
+        XCTAssertFalse(app.menuItems["Show All Tabs"].exists)
+    }
+
     /// Apple supplies a first-party semantic/accessibility audit in XCUIAutomation.
     /// It is separate from screenshot review so failures identify the offending AX
     /// element rather than being mistaken for a subjective image comparison.

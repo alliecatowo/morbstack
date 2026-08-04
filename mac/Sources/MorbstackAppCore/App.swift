@@ -53,6 +53,12 @@ public struct MorbstackMainApp: App {
     private let options: LaunchOptions
 
     public init() {
+        // Morbstack has separate windows (the main operations window and Settings),
+        // not a tabbed-document model. Letting AppKit synthesize tab commands advertises
+        // actions with no meaningful destination, so opt out before WindowGroup creates
+        // its first window while retaining the normal New Window behavior.
+        NSWindow.allowsAutomaticWindowTabbing = false
+
         let options = LaunchOptions()
         self.options = options
         // `.forLaunch` picks fixture-backed clients under `--tour-fixtures` — see
