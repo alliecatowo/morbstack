@@ -17,6 +17,7 @@
 // only records returned by that explicit, read-only Buildx query; it never infers a
 // build history from cache layers or locally fabricated state.
 
+import AppKit
 import MorbstackKit
 import SwiftUI
 import UniformTypeIdentifiers
@@ -112,6 +113,69 @@ private enum BuildHistoryInspectorTab: Hashable {
     case log
 }
 
+/// Produces a provenance-bearing document from a Buildx log that is already present in
+/// the inspector. Saving must not start another builder command just to obtain more
+/// output: a Buildx record can be arbitrarily verbose and this route retains only the
+/// bounded text the explicit `history logs` request already returned.
+enum BuildHistoryLogExport {
+
+    struct Document: Sendable {
+        let text: String
+        let suggestedFilename: String
+        let panelMessage: String
+
+        var data: Data { Data(text.utf8) }
+    }
+
+    private static let timestampFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    static func document(
+        log: BuildxHistoryLog,
+        record: BuildxHistoryRecord,
+        capturedAt: Date = Date()
+    ) -> Document {
+        let createdDescription = record.createdAt.map { timestampFormatter.string(from: $0) }
+            ?? "Not reported by Buildx"
+        let byteCount = Data(log.output.utf8).count
+        let retentionDescription = log.isTruncated
+            ? "Morbstack retained the first 4 MB of Buildx stdout; later output was dropped."
+            : "Buildx stdout stayed within Morbstack’s 4 MB retained-text limit."
+        let header = [
+            "# Morbstack Buildx history log snapshot",
+            "# Build record: \(record.name) (\(record.id))",
+            "# Record status: \(record.status)",
+            "# Record created: \(createdDescription)",
+            "# Captured: \(timestampFormatter.string(from: capturedAt))",
+            "# Source: already-loaded stdout from docker buildx history logs --progress rawjson for this selected record.",
+            "# Loaded transcript: \(byteCount) UTF-8 bytes retained by Morbstack.",
+            "# Log filter: none; the history-table search does not filter this loaded transcript.",
+            "# Retention: \(retentionDescription)",
+            "# Scope: this is retained output for one Buildx history record, not complete builder, Docker, CI, or build history. Saving did not rerun Buildx or fetch more output.",
+            "#",
+        ].joined(separator: "\n") + "\n"
+        let name = suggestedFilename(record: record, capturedAt: capturedAt)
+        let panelMessage = "Save \(byteCount) bytes of already-loaded Buildx output for \(record.name). The file records selected-record, no-filter, and truncation scope; saving does not rerun Buildx or represent complete build history."
+        return Document(text: header + log.output, suggestedFilename: name, panelMessage: panelMessage)
+    }
+
+    private static func suggestedFilename(record: BuildxHistoryRecord, capturedAt: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd-HHmmss"
+        let source = record.name.isEmpty ? record.id : record.name
+        let safe = source.map { character -> Character in
+            switch character {
+            case "/", ":", "\\": return "-"
+            default: return character
+            }
+        }
+        return "buildx-\(String(safe))-\(formatter.string(from: capturedAt)).log"
+    }
+}
+
 private enum BuildHistorySortKey: String, CaseIterable, Hashable {
     case name, status, createdAt, duration
 }
@@ -197,6 +261,8 @@ struct BuildsRootView: View {
     @State private var isSelectingMorbstackDefaultBuilder = false
     @State private var showsDefaultBuilderConfirmation = false
     @State private var defaultBuilderError: String?
+    @State private var pendingHistoryLogExport: BuildHistoryLogExport.Document?
+    @State private var historyLogExportError: String?
 
     private var records: [BuildCacheRecord] { model.buildCache }
 
@@ -375,6 +441,24 @@ struct BuildsRootView: View {
                 Button("Cancel", role: .cancel) { pruneError = nil }
             } message: {
                 Text(pruneError ?? "")
+            }
+            .alert(
+                "Couldn’t Save Build Log",
+                isPresented: Binding(
+                    get: { historyLogExportError != nil },
+                    set: { if !$0 { historyLogExportError = nil } })
+            ) {
+                Button("Choose Another Location…") {
+                    guard let pendingHistoryLogExport else { return }
+                    historyLogExportError = nil
+                    chooseHistoryLogExportDestination(for: pendingHistoryLogExport)
+                }
+                Button("Cancel", role: .cancel) {
+                    historyLogExportError = nil
+                    pendingHistoryLogExport = nil
+                }
+            } message: {
+                Text(historyLogExportError ?? "")
             }
             .task {
                 if selection == nil { selection = visible.first?.id }
@@ -795,7 +879,7 @@ struct BuildsRootView: View {
                         systemImage: "text.alignleft",
                         value: BuildHistoryInspectorTab.log)
                     {
-                        historyLogPane(for: record.id)
+                        historyLogPane(for: record)
                     }
                 }
             }
@@ -966,7 +1050,7 @@ struct BuildsRootView: View {
     }
 
     @ViewBuilder
-    private func historyLogPane(for recordID: BuildxHistoryRecord.ID) -> some View {
+    private func historyLogPane(for record: BuildxHistoryRecord) -> some View {
         switch historyLogState {
         case .idle:
             ContentUnavailableView {
@@ -975,7 +1059,7 @@ struct BuildsRootView: View {
                 Text("Load the raw output Buildx reports for this completed build.")
             } actions: {
                 Button("Load Logs") {
-                    loadHistoryLogs(for: recordID)
+                    loadHistoryLogs(for: record.id)
                 }
             }
         case .loading:
@@ -995,12 +1079,12 @@ struct BuildsRootView: View {
                 Text(detail)
             } actions: {
                 Button("Load Logs Again") {
-                    loadHistoryLogs(for: recordID)
+                    loadHistoryLogs(for: record.id)
                 }
             }
         case .loaded(let log):
             if log.hasOutput {
-                historyLogViewport(log)
+                historyLogViewport(log, record: record)
             } else {
                 ContentUnavailableView(
                     "No Log Output",
@@ -1010,7 +1094,7 @@ struct BuildsRootView: View {
         }
     }
 
-    private func historyLogViewport(_ log: BuildxHistoryLog) -> some View {
+    private func historyLogViewport(_ log: BuildxHistoryLog, record: BuildxHistoryRecord) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             if log.isTruncated {
                 Text("Showing the first 4 MB returned by Buildx.")
@@ -1028,6 +1112,47 @@ struct BuildsRootView: View {
                     .padding()
             }
             .accessibilityLabel("Build log")
+        }
+        .toolbar {
+            ToolbarItem(id: "builds.history-log.save", placement: .secondaryAction) {
+                Button {
+                    saveHistoryLog(log, for: record)
+                } label: {
+                    Image(systemName: "square.and.arrow.down")
+                }
+                .accessibilityLabel("Save Visible Build Log")
+                .help("Save the already-loaded bounded Buildx log")
+            }
+        }
+    }
+
+    @MainActor
+    private func saveHistoryLog(_ log: BuildxHistoryLog, for record: BuildxHistoryRecord) {
+        guard log.hasOutput else { return }
+        chooseHistoryLogExportDestination(
+            for: BuildHistoryLogExport.document(log: log, record: record))
+    }
+
+    /// The document is constructed from one retained log value before `NSSavePanel`
+    /// opens. That keeps save/retry separate from the explicit Buildx load operation and
+    /// prevents a destination choice from reaching the builder a second time.
+    @MainActor
+    private func chooseHistoryLogExportDestination(for document: BuildHistoryLogExport.Document) {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = document.suggestedFilename
+        panel.allowedContentTypes = [UTType.log, UTType.plainText]
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.message = document.panelMessage
+        panel.prompt = "Save"
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try document.data.write(to: url, options: .atomic)
+            pendingHistoryLogExport = nil
+        } catch {
+            pendingHistoryLogExport = document
+            historyLogExportError = "Morbstack could not save the selected Buildx log to \(url.lastPathComponent): \(error.localizedDescription)"
         }
     }
 

@@ -21,6 +21,13 @@ Morbstack's Builds route has two deliberately separate pieces of Docker state:
   the first 4 MB of each, marking a displayed log prefix as truncated rather than
   claiming it is complete. The implementation does not read attachments or invoke
   history export, import, open, or removal.
+  **Save Visible Build Log…** is available only after that exact selected record’s
+  retained output is loaded. It freezes the already-loaded text before the native save
+  panel opens, writes it atomically, and never re-runs `history logs` while saving. The
+  `.log` preamble records the selected record, capture time, source command, no-log-filter
+  scope, and whether the 4 MB retained prefix was truncated. It states that this is one
+  Buildx record’s retained output—not complete builder, Docker, CI, or build history—and
+  leaves the raw Buildx text unchanged after the preamble.
 - **A new local build** is started only after the person selects a folder containing a
   root `Dockerfile` and confirms the request. The app runs its reviewed bundled
   `docker buildx build --progress=rawjson --load` client against Morbstack's own socket.
@@ -90,6 +97,12 @@ toolbar command opens a document-modal `Form` for scalar builder and node facts,
 an unqueried or failed check uses `ContentUnavailableView` with the next safe action.
 The one state-changing local-default recovery has a native confirmation dialog and a
 standard error/retry alert; simply opening the sheet has no Buildx side effect.
+
+The completed-build Log tab remains a native selectable monospaced transcript. Its
+contextual secondary-toolbar save command uses `NSSavePanel` for destination/replacement
+semantics and a native retry alert only after an actual atomic-write failure; it has no
+custom export dashboard, no save action before output exists, and no save-time builder
+query.
 
 This follows Apple’s [Lists and tables](https://developer.apple.com/design/human-interface-guidelines/lists-and-tables),
 [Toolbars](https://developer.apple.com/design/human-interface-guidelines/toolbars),
