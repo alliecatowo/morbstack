@@ -510,6 +510,83 @@ enum HTTPRequestHeadRewriting {
         return nil
     }
 
+    /// Replaces the request body framing for a body the proxy has rewritten.
+    ///
+    /// A rewritten JSON body cannot retain an incoming chunked wire representation:
+    /// its original chunk sizes describe the old bytes. A fixed-length request keeps
+    /// its one `Content-Length` header with the new length. A chunked request drops
+    /// its one `Transfer-Encoding: chunked` and any `Trailer` declarations, then
+    /// gains `Content-Length` using the original line ending. The old trailer bytes
+    /// belong to the old chunked entity and are not part of the rewritten body; a
+    /// `Trailer` header is invalid with `Content-Length`. Every unrelated line
+    /// remains byte-for-byte intact.
+    ///
+    /// `nil` means the head did not have exactly one valid body-framing header. The
+    /// framer has already rejected ambiguous or unsupported incoming forms, but this
+    /// guard keeps a rewrite from ever manufacturing a second interpretation.
+    static func replacingBodyFraming(in head: Data, bodyLength: Int) -> Data? {
+        guard bodyLength >= 0 else { return nil }
+        let bytes = [UInt8](head)
+        var cursor = 0
+        var foundContentLength = false
+        var foundChunkedTransferEncoding = false
+        var rewritten = Data()
+        var trailerLineRanges: [Range<Int>] = []
+
+        while let (contentEnd, next) = MinimalHTTP.lineBounds(bytes, from: cursor) {
+            let line = String(decoding: bytes[cursor..<contentEnd], as: UTF8.self)
+            if line.isEmpty {
+                guard foundContentLength != foundChunkedTransferEncoding else { return nil }
+                if foundChunkedTransferEncoding {
+                    // Trailers describe the old chunked entity. Removing every
+                    // declaration, regardless of whether it appeared before or
+                    // after Transfer-Encoding, leaves a valid fixed-length request.
+                    for range in trailerLineRanges.reversed() {
+                        rewritten.removeSubrange(range)
+                    }
+                }
+                rewritten.append(contentsOf: bytes[cursor..<next])
+                return rewritten
+            }
+
+            if let colon = line.firstIndex(of: ":") {
+                let name = String(line[..<colon]).trimmingCharacters(in: .whitespaces).lowercased()
+                if name == "content-length" {
+                    guard !foundContentLength else { return nil }
+                    foundContentLength = true
+                    rewritten.append(Data("Content-Length: \(bodyLength)".utf8))
+                    rewritten.append(contentsOf: bytes[contentEnd..<next])
+                    cursor = next
+                    continue
+                }
+                if name == "transfer-encoding" {
+                    let value = String(line[line.index(after: colon)...])
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard value.lowercased() == "chunked", !foundChunkedTransferEncoding else {
+                        return nil
+                    }
+                    foundChunkedTransferEncoding = true
+                    // Keep its place and line ending: this is the narrowest legal
+                    // edit to a head whose accompanying body has new bytes.
+                    rewritten.append(Data("Content-Length: \(bodyLength)".utf8))
+                    rewritten.append(contentsOf: bytes[contentEnd..<next])
+                    cursor = next
+                    continue
+                }
+                if name == "trailer" {
+                    let start = rewritten.count
+                    rewritten.append(contentsOf: bytes[cursor..<next])
+                    trailerLineRanges.append(start..<rewritten.count)
+                    cursor = next
+                    continue
+                }
+            }
+            rewritten.append(contentsOf: bytes[cursor..<next])
+            cursor = next
+        }
+        return nil
+    }
+
     /// Removes every occurrence of `name`, keeping the rest of the head verbatim.
     ///
     /// Used for `Expect: 100-continue`: once the proxy has answered the expectation

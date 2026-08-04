@@ -116,4 +116,25 @@ final class DynamicPortAllocationTests: XCTestCase {
         XCTAssertNil(HTTPRequestHeadRewriting.replacingContentLength(in: duplicate, bodyLength: 1))
         XCTAssertNil(HTTPRequestHeadRewriting.replacingContentLength(in: absent, bodyLength: 1))
     }
+
+    func testBodyFramingRewriteNormalizesChunkedAndRemovesTrailerDeclarations() throws {
+        let original = Data((
+            "POST /v1.47/containers/create HTTP/1.1\r\nX-Trace: preserve-me\r\n"
+                + "Trailer: X-Request-Digest\r\nTransfer-Encoding: chunked\r\n"
+                + "X-After: still-here\r\n\r\n").utf8)
+        let rewritten = try XCTUnwrap(
+            HTTPRequestHeadRewriting.replacingBodyFraming(in: original, bodyLength: 345))
+        XCTAssertEqual(
+            String(decoding: rewritten, as: UTF8.self),
+            "POST /v1.47/containers/create HTTP/1.1\r\nX-Trace: preserve-me\r\n"
+                + "Content-Length: 345\r\nX-After: still-here\r\n\r\n")
+    }
+
+    func testBodyFramingRewriteRefusesAbsentOrAmbiguousFraming() {
+        let absent = Data("POST / HTTP/1.1\r\nX-Test: 1\r\n\r\n".utf8)
+        let combined = Data(
+            "POST / HTTP/1.1\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n".utf8)
+        XCTAssertNil(HTTPRequestHeadRewriting.replacingBodyFraming(in: absent, bodyLength: 1))
+        XCTAssertNil(HTTPRequestHeadRewriting.replacingBodyFraming(in: combined, bodyLength: 1))
+    }
 }

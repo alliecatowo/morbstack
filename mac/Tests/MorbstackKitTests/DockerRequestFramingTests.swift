@@ -1423,6 +1423,147 @@ final class DockerFramedRelayTests: XCTestCase {
         wait(for: [wired.done], timeout: 10)
     }
 
+    /// An ordinary, large JSON create without bind or publication fields still needs
+    /// inspection, but no rewrite. It must reach dockerd with its fixed-length head
+    /// and body completely untouched rather than taking a smaller-body fast path.
+    func testLargeFixedLengthNoPublishCreateStaysByteExactAfterInspection() throws {
+        let labelValue = String(repeating: "x", count: 200_000)
+        let body = "{\"Image\":\"alpine\",\"Labels\":{\"com.example.large\":\"\(labelValue)\"}}"
+        var request = Data((
+            "POST /v1.47/containers/create?name=large-no-publish HTTP/1.1\r\n"
+                + "Host: morbstack\r\nContent-Type: application/json\r\n"
+                + "Content-Length: \(body.utf8.count)\r\n\r\n").utf8)
+        request.append(Data(body.utf8))
+        policy.inspectBodyOf = { $0.target.hasPrefix("/v1.47/containers/create") }
+
+        let wired = try makeRelay()
+        DispatchQueue(label: "test.large-create-writer").async { [client = wired.client] in
+            _ = POSIXSocketSupport.writeAll(client, request)
+        }
+        XCTAssertEqual(
+            readAvailable(wired.guest, atLeast: request.count, timeout: 15),
+            request,
+            "an inspected no-publish create must retain every original request byte")
+        XCTAssertEqual(policy.seen.first?.body, Data(body.utf8))
+        XCTAssertEqual(policy.framingFailures, [])
+
+        wired.relay.cancel()
+        wait(for: [wired.done], timeout: 10)
+    }
+
+    /// A client may wait for `100 Continue` before sending a chunked create body.
+    /// The proxy answers that expectation to inspect the JSON, removes only that
+    /// header, and preserves the original chunk wire bytes when no policy rewrite is
+    /// needed. A following request proves no chunk bytes leaked into the next head.
+    func testExpectContinueChunkedNoPublishCreateRetainsBodyBytesAndReuse() throws {
+        let body = #"{"Image":"alpine","Labels":{"com.example.mode":"chunked"}}"#
+        var chunked = Self.chunked([
+            Data(body.utf8.prefix(19)),
+            Data(body.utf8.dropFirst(19)),
+        ])
+        chunked.removeLast(2)
+        chunked.append(Data("X-Trace-Checksum: original\r\n\r\n".utf8))
+        let head = "POST /v1.47/containers/create?name=chunked-no-publish HTTP/1.1\r\n"
+            + "Host: morbstack\r\nExpect: 100-continue\r\n"
+            + "Transfer-Encoding: chunked\r\nTrailer: X-Trace-Checksum\r\nX-Trace: retain\r\n\r\n"
+        let forwardedHead = "POST /v1.47/containers/create?name=chunked-no-publish HTTP/1.1\r\n"
+            + "Host: morbstack\r\nTransfer-Encoding: chunked\r\nTrailer: X-Trace-Checksum\r\nX-Trace: retain\r\n\r\n"
+        policy.inspectBodyOf = { $0.target.hasPrefix("/v1.47/containers/create") }
+
+        let wired = try makeRelay()
+        write(head, to: wired.client)
+        XCTAssertEqual(
+            readAvailable(wired.client, atLeast: 25),
+            Data("HTTP/1.1 100 Continue\r\n\r\n".utf8))
+        write(chunked, to: wired.client)
+        XCTAssertEqual(
+            readAvailable(wired.guest, atLeast: forwardedHead.utf8.count + chunked.count),
+            Data(forwardedHead.utf8) + chunked,
+            "no-rewrite chunked creates must retain their original chunk framing")
+        XCTAssertEqual(policy.seen.first?.body, Data(body.utf8))
+
+        let created = #"{"Id":"chunked","Warnings":[]}"#
+        let response = "HTTP/1.1 201 Created\r\nContent-Length: \(created.utf8.count)\r\n\r\n\(created)"
+        write(response, to: wired.guest)
+        XCTAssertEqual(readAvailable(wired.client, atLeast: response.utf8.count), Data(response.utf8))
+
+        write(Self.ping, to: wired.client)
+        XCTAssertEqual(readAvailable(wired.guest, atLeast: Self.ping.utf8.count), Data(Self.ping.utf8))
+        XCTAssertEqual(policy.seen.map { $0.head.target }, [
+            "/v1.47/containers/create?name=chunked-no-publish",
+            "/_ping",
+        ])
+        XCTAssertEqual(policy.framingFailures, [])
+
+        wired.relay.cancel()
+        wait(for: [wired.done], timeout: 10)
+    }
+
+    /// A supported dynamic port create rewrites its JSON, so it cannot retain chunk
+    /// sizes that describe the old body. The rewritten head must become a normal
+    /// `Content-Length` request, while the held create still associates its response
+    /// before the client can receive the container identity.
+    func testChunkedDynamicPortCreateNormalizesBodyFramingForTheRewrittenJSON() throws {
+        let originalBody = #"{"Image":"alpine","HostConfig":{"PortBindings":{"80/tcp":[{"HostPort":""}]}}}"#
+        let rewrittenBody = #"{"Image":"alpine","HostConfig":{"PortBindings":{"80/tcp":[{"HostPort":"49152"}]}}}"#
+        var originalChunks = Self.chunked([
+            Data(originalBody.utf8.prefix(37)),
+            Data(originalBody.utf8.dropFirst(37)),
+        ])
+        originalChunks.removeLast(2)
+        originalChunks.append(Data("X-Request-Digest: original\r\n\r\n".utf8))
+        let head = "POST /v1.47/containers/create?name=dynamic HTTP/1.1\r\n"
+            + "Host: morbstack\r\nTransfer-Encoding: chunked\r\nTrailer: X-Request-Digest\r\n"
+            + "X-Trace: dynamic\r\n\r\n"
+        let associated = RelayByteBox()
+        policy.inspectBodyOf = { $0.target.hasPrefix("/v1.47/containers/create") }
+        policy.verdict = { request, inspectedBody in
+            XCTAssertEqual(inspectedBody, Data(originalBody.utf8))
+            guard let rewrittenHead = HTTPRequestHeadRewriting.replacingBodyFraming(
+                in: request.rawHead, bodyLength: rewrittenBody.utf8.count)
+            else {
+                return .reject(
+                    statusCode: 500, reason: "Internal Server Error", message: "test could not normalize framing")
+            }
+            return .forwardRewrittenHoldingCreate(
+                request: rewrittenHead + Data(rewrittenBody.utf8),
+                hold: DockerHeldCreate(
+                    associate: { identifier in
+                        associated.append(Data(identifier.utf8))
+                        return true
+                    },
+                    abandon: { _ in }))
+        }
+
+        let wired = try makeRelay()
+        write(head, to: wired.client)
+        write(originalChunks, to: wired.client)
+        let expectedHead = "POST /v1.47/containers/create?name=dynamic HTTP/1.1\r\n"
+            + "Host: morbstack\r\nContent-Length: \(rewrittenBody.utf8.count)\r\n"
+            + "X-Trace: dynamic\r\n\r\n"
+        XCTAssertEqual(
+            readAvailable(wired.guest, atLeast: expectedHead.utf8.count + rewrittenBody.utf8.count),
+            Data((expectedHead + rewrittenBody).utf8),
+            "a rewritten dynamic create must never send stale chunk sizes to dockerd")
+
+        let created = #"{"Id":"allocated","Warnings":[]}"#
+        let response = "HTTP/1.1 201 Created\r\nContent-Length: \(created.utf8.count)\r\n\r\n\(created)"
+        write(response, to: wired.guest)
+        XCTAssertEqual(readAvailable(wired.client, atLeast: response.utf8.count), Data(response.utf8))
+        XCTAssertEqual(String(decoding: associated.data, as: UTF8.self), "allocated")
+
+        write(Self.ping, to: wired.client)
+        XCTAssertEqual(readAvailable(wired.guest, atLeast: Self.ping.utf8.count), Data(Self.ping.utf8))
+        XCTAssertEqual(policy.seen.map { $0.head.target }, [
+            "/v1.47/containers/create?name=dynamic",
+            "/_ping",
+        ])
+        XCTAssertEqual(policy.framingFailures, [])
+
+        wired.relay.cancel()
+        wait(for: [wired.done], timeout: 10)
+    }
+
     func testPlainRewrittenCreateReachesTheGuestAndKeepsTheConnectionFramed() throws {
         let originalBody = #"{"Image":"alpine","HostConfig":{"Binds":["/etc/hosts:/host"]}}"#
         let rewrittenBody = #"{"Image":"alpine","HostConfig":{"Binds":["/private/etc/hosts:/host"]}}"#

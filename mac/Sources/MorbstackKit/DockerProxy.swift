@@ -436,12 +436,12 @@ extension DockerProxy: DockerRequestAdmissionPolicy {
         let rewrittenHead: Data
         do {
             rewrittenBody = try plan.rewrittenBody(with: reservation.publications)
-            guard let head = HTTPRequestHeadRewriting.replacingContentLength(
+            guard let head = HTTPRequestHeadRewriting.replacingBodyFraming(
                 in: request.rawHead,
                 bodyLength: rewrittenBody.count)
             else {
                 throw MorbError.protocolViolation(
-                    "dynamic published-port create did not have one rewritable Content-Length header")
+                    "dynamic published-port create did not have one rewritable body-framing header")
             }
             rewrittenHead = head
         } catch {
@@ -552,7 +552,7 @@ extension DockerProxy: DockerRequestAdmissionPolicy {
         request: DockerRequestFramer.Request,
         body: Data
     ) -> Data? {
-        guard let rewrittenHead = HTTPRequestHeadRewriting.replacingContentLength(
+        guard let rewrittenHead = HTTPRequestHeadRewriting.replacingBodyFraming(
             in: request.rawHead,
             bodyLength: body.count)
         else { return nil }
