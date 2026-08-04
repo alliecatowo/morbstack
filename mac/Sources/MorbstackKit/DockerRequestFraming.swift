@@ -572,6 +572,11 @@ enum DockerHijackDetection {
             return false
         }
 
+        // The build context is a regular (often chunked) tar request and its output
+        // is a regular JSON response stream. Client disconnect is build cancellation,
+        // so this route must keep HTTP framing even if a stale Upgrade header appears.
+        if head.method.uppercased() == "POST", last == "build" { return false }
+
         if head.headers["upgrade"] != nil { return true }
         if (head.headers["connection"] ?? "").lowercased().contains("upgrade") { return true }
 

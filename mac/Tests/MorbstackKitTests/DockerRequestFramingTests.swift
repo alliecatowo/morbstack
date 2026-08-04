@@ -272,6 +272,8 @@ final class DockerHijackDetectionTests: XCTestCase {
         XCTAssertFalse(DockerHijackDetection.isHijackCandidate(
             head("POST", "/v1.47/images/create?fromImage=alpine", ["connection": "Upgrade"])))
         XCTAssertFalse(DockerHijackDetection.isHijackCandidate(
+            head("POST", "/v1.47/build?t=example%2Fimage", ["connection": "Upgrade"])))
+        XCTAssertFalse(DockerHijackDetection.isHijackCandidate(
             head("GET", "/v1.47/containers/abc/archive?path=/etc")))
         XCTAssertFalse(DockerHijackDetection.isHijackCandidate(
             head("POST", "/v1.47/containers/create")))
@@ -866,6 +868,87 @@ final class DockerFramedRelayTests: XCTestCase {
             POSIXSocketSupport.readSome(wired.guest, into: raw.baseAddress!, count: raw.count)
         }
         XCTAssertEqual(eof, 0, "cancelling docker pull must close the Engine write side")
+
+        shutdown(wired.guest, SHUT_WR)
+        wait(for: [wired.done], timeout: 10)
+    }
+
+    /// Docker sends the build context as a tar stream and consumes an ordinary JSON
+    /// response stream. Both can be chunked. The proxy must retain the raw request
+    /// chunk boundaries and response bytes, then resume framing once build output
+    /// terminates.
+    func testLargeChunkedBuildContextAndJSONOutputStayByteExactOnKeepAlive() throws {
+        let wired = try makeRelay()
+        var context = Data("Dockerfile\u{00}ustar\u{00}".utf8)
+        context.append(Data(repeating: 0xA5, count: 200_000))
+        let body = Self.chunked([
+            Data(context.prefix(71_003)),
+            Data(context.dropFirst(71_003).prefix(92_111)),
+            Data(context.dropFirst(163_114)),
+        ])
+        var build = Data((
+            "POST /v1.47/build?t=registry.example.com%2Fteam%2Fimage%3Av1&dockerfile=Dockerfile&version=2 HTTP/1.1\r\n"
+                + "Host: morbstack\r\nContent-Type: application/x-tar\r\n"
+                + "Transfer-Encoding: chunked\r\n\r\n").utf8)
+        build.append(body)
+
+        DispatchQueue(label: "test.build-context-writer").async { [client = wired.client] in
+            _ = POSIXSocketSupport.writeAll(client, build)
+        }
+        XCTAssertEqual(
+            readAvailable(wired.guest, atLeast: build.count, timeout: 15),
+            build,
+            "a large chunked build context must reach dockerd without buffering or re-chunking")
+
+        let progress = Data(##"{"stream":"#1 [internal] load build definition\n"}"##.utf8) + Data([0x0A])
+        let completed = Data(#"{"aux":{"ID":"sha256:build-result"}}"#.utf8) + Data([0x0A])
+        let response = Data((
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                + "Transfer-Encoding: chunked\r\n\r\n").utf8)
+            + Self.chunked([progress, completed])
+        write(response, to: wired.guest)
+        XCTAssertEqual(
+            readAvailable(wired.client, atLeast: response.count),
+            response,
+            "BuildKit/Moby progress records must remain a byte-exact Engine stream")
+
+        write(Self.ping, to: wired.client)
+        XCTAssertEqual(readAvailable(wired.guest, atLeast: Self.ping.utf8.count), Data(Self.ping.utf8))
+        XCTAssertEqual(policy.seen.map { $0.head.target }, [
+            "/v1.47/build?t=registry.example.com%2Fteam%2Fimage%3Av1&dockerfile=Dockerfile&version=2",
+            "/_ping",
+        ])
+        XCTAssertTrue(policy.seen.allSatisfy { $0.body == nil }, "build contexts must never be inspected")
+        XCTAssertEqual(policy.framingFailures, [])
+
+        wired.relay.cancel()
+        wait(for: [wired.done], timeout: 10)
+    }
+
+    /// The Engine cancels an in-progress build when the client disconnects. After a
+    /// complete context upload, closing the client side must therefore half-close the
+    /// Engine connection without the relay manufacturing a build result or error.
+    func testClientCancellationOfBuildHalfClosesTheEngine() throws {
+        let wired = try makeRelay()
+        let context = Data("Dockerfile\u{00}ustar\u{00}".utf8)
+        var build = Data((
+            "POST /v1.47/build?t=cancelled HTTP/1.1\r\nHost: morbstack\r\n"
+                + "Content-Type: application/x-tar\r\nContent-Length: \(context.count)\r\n\r\n").utf8)
+        build.append(context)
+        write(build, to: wired.client)
+        XCTAssertEqual(readAvailable(wired.guest, atLeast: build.count), build)
+
+        let first = Data("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n".utf8)
+            + Data(##"{"stream":"#1 RUN long-command\n"}"##.utf8) + Data([0x0A])
+        write(first, to: wired.guest)
+        XCTAssertEqual(readAvailable(wired.client, atLeast: first.count), first)
+
+        shutdown(wired.client, SHUT_WR)
+        var buffer = [UInt8](repeating: 0, count: 16)
+        let eof = buffer.withUnsafeMutableBytes { raw -> Int in
+            POSIXSocketSupport.readSome(wired.guest, into: raw.baseAddress!, count: raw.count)
+        }
+        XCTAssertEqual(eof, 0, "cancelling docker build must close the Engine write side")
 
         shutdown(wired.guest, SHUT_WR)
         wait(for: [wired.done], timeout: 10)
