@@ -61,10 +61,17 @@ public enum DockerHostAddress: Hashable, Sendable {
     private static func numericString<T>(family: Int32, value: inout T) -> String {
         var buffer = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
         return buffer.withUnsafeMutableBufferPointer { output in
-            precondition(
-                inet_ntop(family, &value, output.baseAddress, socklen_t(output.count)) != nil,
-                "inet_ntop must format a value inet_pton already accepted")
-            return String(cString: output.baseAddress!)
+            withUnsafeBytes(of: value) { source in
+                precondition(
+                    inet_ntop(
+                        family,
+                        source.baseAddress,
+                        output.baseAddress,
+                        socklen_t(output.count)
+                    ) != nil,
+                    "inet_ntop must format a value inet_pton already accepted")
+                return String(cString: output.baseAddress!)
+            }
         }
     }
 

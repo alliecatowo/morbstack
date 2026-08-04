@@ -97,10 +97,17 @@ public final class UDPListener {
         private static func numericString<T>(family: Int32, value: inout T) -> String? {
             var storage = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
             return storage.withUnsafeMutableBufferPointer { buffer in
-                guard let base = buffer.baseAddress,
-                      let pointer = inet_ntop(family, &value, base, socklen_t(buffer.count))
-                else { return nil }
-                return String(cString: pointer)
+                withUnsafeBytes(of: value) { source in
+                    guard let base = buffer.baseAddress,
+                          let pointer = inet_ntop(
+                              family,
+                              source.baseAddress,
+                              base,
+                              socklen_t(buffer.count)
+                          )
+                    else { return nil }
+                    return String(cString: pointer)
+                }
             }
         }
     }
