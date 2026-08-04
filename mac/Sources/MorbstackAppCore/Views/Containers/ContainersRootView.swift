@@ -153,6 +153,10 @@ struct ContainersRootView: View {
                 Button { showsInspector.toggle() } label: {
                     Image(systemName: "sidebar.right")
                 }
+                // Identifiers follow docs/design/ACCESSIBILITY-IDENTIFIERS.md: a toolbar
+                // control reuses its `ToolbarItem(id:)` string verbatim, and the label —
+                // never the identifier — carries the user-facing state.
+                .accessibilityIdentifier("containers.inspector")
                 .accessibilityLabel(showsInspector ? "Hide inspector" : "Show inspector")
                 .help(showsInspector ? "Hide inspector" : "Show inspector")
             }
@@ -163,11 +167,15 @@ struct ContainersRootView: View {
                 if busy.contains(selected.id) {
                     ProgressView()
                         .controlSize(.small)
+                        .accessibilityIdentifier("containers.primaryLifecycle")
                         .accessibilityLabel("Updating \(selected.displayName)")
                 } else if let action = primaryLifecycleAction(for: selected) {
                     Button { perform(action, on: selected.id) } label: {
                         Image(systemName: action.symbol)
                     }
+                    // The identifier stays constant while start/stop/unpause swap; the
+                    // label names the actual state-dependent action.
+                    .accessibilityIdentifier("containers.primaryLifecycle")
                     .accessibilityLabel("\(action.title) \(selected.displayName)")
                     .help("\(action.title) \(selected.displayName)")
                 }
@@ -180,6 +188,7 @@ struct ContainersRootView: View {
                 Button("Run Command…", systemImage: "terminal") {
                     commandTarget = selected
                 }
+                .accessibilityIdentifier("containers.runCommand")
                 .accessibilityLabel("Run command in \(selected.displayName)")
                 .help("Run a noninteractive command in \(selected.displayName)")
             }
@@ -212,6 +221,7 @@ struct ContainersRootView: View {
             } label: {
                 Label("Container options", systemImage: "slider.horizontal.3")
             }
+            .accessibilityIdentifier("containers.options")
             .accessibilityLabel("Container options")
             .help("Show, refresh, and cleanup options")
         }
@@ -243,6 +253,7 @@ struct ContainersRootView: View {
                 } description: {
                     Text("No containers match the Running scope.")
                 }
+                .accessibilityIdentifier("containers.empty.noRunning")
             } else {
                 ContentUnavailableView.search(text: search)
             }
@@ -279,6 +290,9 @@ struct ContainersRootView: View {
                     }
                 }
                 .tag(container.id)
+                // Row identity is the engine-facing reference — the unique Docker
+                // container name — per docs/design/ACCESSIBILITY-IDENTIFIERS.md.
+                .accessibilityIdentifier("containers.row.\(container.displayName)")
                 .help(container.statusDisplay())
                 .contextMenu {
                     contextMenu(for: container)
@@ -295,6 +309,7 @@ struct ContainersRootView: View {
         .onDeleteCommand {
             if let selected { removalTarget = selected }
         }
+        .accessibilityIdentifier("containers.list")
     }
 
     @ViewBuilder
@@ -368,8 +383,10 @@ struct ContainersRootView: View {
             Button("Start Engine") {
                 Task { await model.engineAction(.start) }
             }
+            .accessibilityIdentifier("containers.empty.engine.start")
             .disabled(model.engine.isTransitional)
         }
+        .accessibilityIdentifier("containers.empty.engine")
     }
 
     private var noContainersEmptyState: some View {
@@ -381,11 +398,14 @@ struct ContainersRootView: View {
             Button("Refresh") {
                 Task { await model.refreshAll() }
             }
+            .accessibilityIdentifier("containers.empty.noContainers.refresh")
             Button("Copy Example Run Command") {
                 MorbPasteboard.copy(
                     "docker --host unix://\(MorbPaths.dockerSocket.path) run --rm -it alpine sh")
             }
+            .accessibilityIdentifier("containers.empty.noContainers.copyRunCommand")
         }
+        .accessibilityIdentifier("containers.empty.noContainers")
     }
 
     private func stateSymbol(for container: ContainerSummary) -> String {

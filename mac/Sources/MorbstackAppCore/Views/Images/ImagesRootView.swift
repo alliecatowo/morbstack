@@ -481,6 +481,10 @@ struct ImagesRootView: View {
             } label: {
                 Image(systemName: "plus")
             }
+            // Identifiers follow docs/design/ACCESSIBILITY-IDENTIFIERS.md: a toolbar
+            // control reuses its `ToolbarItem(id:)` string verbatim, and the label —
+            // never the identifier — carries the user-facing state.
+            .accessibilityIdentifier("images.pull")
             .accessibilityLabel("Pull an image")
             .help("Pull an image")
         }
@@ -493,6 +497,7 @@ struct ImagesRootView: View {
             } label: {
                 Image(systemName: "magnifyingglass")
             }
+            .accessibilityIdentifier("images.explorePublic")
             .accessibilityLabel("Explore public images")
             .help("Search public Docker Hub repositories")
         }
@@ -515,6 +520,7 @@ struct ImagesRootView: View {
             } label: {
                 Image(systemName: "archivebox")
             }
+            .accessibilityIdentifier("images.archive")
             .accessibilityLabel("Image archive actions")
             .help(imageArchiveMenuHelp)
         }
@@ -524,6 +530,7 @@ struct ImagesRootView: View {
             } label: {
                 Image(systemName: "play")
             }
+            .accessibilityIdentifier("images.runLocal")
             .accessibilityLabel("Run selected local image")
             .help(
                 runLocalImageAction == nil
@@ -538,6 +545,7 @@ struct ImagesRootView: View {
                 } label: {
                     Image(systemName: "sidebar.right")
                 }
+                .accessibilityIdentifier("images.inspector")
                 .accessibilityLabel(showsInspector ? "Hide inspector" : "Show inspector")
                 .help(showsInspector ? "Hide the inspector" : "Show the inspector")
             }
@@ -561,6 +569,7 @@ struct ImagesRootView: View {
         } label: {
             Image(systemName: "trash")
         }
+        .accessibilityIdentifier("images.pruneDangling")
         .accessibilityLabel("Prune dangling layers")
         .disabled(reclaimableDanglingCount == 0 || busy)
         .help(
@@ -584,6 +593,7 @@ struct ImagesRootView: View {
                         .disabled(isPulling || !pullState.allowsPull)
                         .focused($pullReferenceIsFocused)
                         .onSubmit { Task { await pull() } }
+                        .accessibilityIdentifier("images.pullSheet.reference")
                 }
 
                 pullStateSection
@@ -622,6 +632,7 @@ struct ImagesRootView: View {
                 Button(pullState == .ready ? "Cancel" : "Done") {
                     showingPull = false
                 }
+                .accessibilityIdentifier("images.pullSheet.cancel")
             }
         }
 
@@ -631,6 +642,7 @@ struct ImagesRootView: View {
                     Task { await pull() }
                 }
                 .disabled(pullReferenceToSubmit == nil)
+                .accessibilityIdentifier("images.pullSheet.pull")
             }
         }
     }
@@ -717,10 +729,13 @@ struct ImagesRootView: View {
                 Button("Pull an Image") {
                     presentPull()
                 }
+                .accessibilityIdentifier("images.empty.noImages.pull")
                 Button("Refresh") {
                     Task { await model.refreshAll() }
                 }
+                .accessibilityIdentifier("images.empty.noImages.refresh")
             }
+            .accessibilityIdentifier("images.empty.noImages")
         } else if split.tagged.isEmpty && split.dangling.isEmpty {
             ContentUnavailableView.search(text: query)
         } else {
@@ -801,9 +816,17 @@ struct ImagesRootView: View {
         // repeated rounded empty-row bands seen in the current automatic appearance.
         // It requires current-bundle Computer Use review before visual acceptance.
         .tableStyle(.bordered)
+        .accessibilityIdentifier("images.table")
         .contextMenu(forSelectionType: ImageSummary.ID.self) { ids in
             contextMenu(for: ids)
         }
+    }
+
+    /// The engine-facing reference for a row, per
+    /// docs/design/ACCESSIBILITY-IDENTIFIERS.md: the `repo:tag` a `docker` command
+    /// would accept, or the short image ID for an untagged (dangling) layer.
+    private func rowReference(for image: ImageSummary) -> String {
+        image.isDangling ? image.shortID : (image.repoTags.first ?? image.shortID)
     }
 
     private func repositoryCell(_ image: ImageSummary) -> some View {
@@ -825,6 +848,10 @@ struct ImagesRootView: View {
             }
             architectureLabel(image)
         }
+        // Row identity per docs/design/ACCESSIBILITY-IDENTIFIERS.md. `Table` has no
+        // row-level accessibility-identifier modifier (unlike `List`), so the
+        // identifier is carried by the primary (Repository) column's cell.
+        .accessibilityIdentifier("images.row.\(rowReference(for: image))")
     }
 
     /// The architecture, sitting inline in the repository column.

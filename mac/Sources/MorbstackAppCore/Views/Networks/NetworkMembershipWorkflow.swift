@@ -255,6 +255,7 @@ struct NetworkConnectSheet: View {
                     }
                     .focused($focusedField, equals: .container)
                     .disabled(!isEditingEnabled)
+                    .accessibilityIdentifier("networks.connectSheet.container")
                     .accessibilityHint("Choose a running container to connect to \(network.name).")
 
                     if let selectedCandidate {
@@ -276,6 +277,7 @@ struct NetworkConnectSheet: View {
                     TextField("Aliases (optional)", text: $aliasesInput)
                         .focused($focusedField, equals: .aliases)
                         .disabled(!isEditingEnabled)
+                        .accessibilityIdentifier("networks.connectSheet.aliases")
                         .accessibilityLabel("Network aliases")
                         .accessibilityHint("Optionally enter comma-separated aliases for the selected container on \(network.name).")
                     Text("Separate aliases with commas. Docker validates each alias for this network.")
@@ -310,6 +312,7 @@ struct NetworkConnectSheet: View {
                         Button("Try Again") {
                             submit()
                         }
+                        .accessibilityIdentifier("networks.connectSheet.tryAgain")
                     }
                 }
             }
@@ -321,15 +324,18 @@ struct NetworkConnectSheet: View {
                         dismiss()
                     }
                     .disabled(state.isConnecting)
+                    .accessibilityIdentifier("networks.connectSheet.cancel")
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     if state.isSuccessful {
                         Button("Done") { dismiss() }
+                            .accessibilityIdentifier("networks.connectSheet.connect")
                     } else {
                         Button("Connect") {
                             submit()
                         }
                         .disabled(selectedCandidate == nil || state.isConnecting)
+                        .accessibilityIdentifier("networks.connectSheet.connect")
                         .accessibilityLabel("Connect selected container to \(network.name)")
                         .help(
                             selectedCandidate == nil

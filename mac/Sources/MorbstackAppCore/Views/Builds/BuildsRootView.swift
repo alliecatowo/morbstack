@@ -567,6 +567,7 @@ struct BuildsRootView: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
+            .accessibilityIdentifier("builds.scope")
             .accessibilityLabel("Build data")
             .help(
                 externalBuildOperationsAreAvailable
@@ -580,6 +581,7 @@ struct BuildsRootView: View {
                 } label: {
                     Image(systemName: "plus")
                 }
+                .accessibilityIdentifier("builds.start")
                 .accessibilityLabel("Build an image")
                 .help(
                     externalBuildOperationsAreAvailable
@@ -618,6 +620,7 @@ struct BuildsRootView: View {
                     Label("Build options", systemImage: "slider.horizontal.3")
                 }
             }
+            .accessibilityIdentifier("builds.options")
             .accessibilityLabel("Build options")
             .help("Refresh, builder, and cleanup options")
         }
@@ -629,6 +632,7 @@ struct BuildsRootView: View {
                 } label: {
                     Image(systemName: "sidebar.right")
                 }
+                .accessibilityIdentifier("builds.inspector")
                 .accessibilityLabel(showsInspector ? "Hide inspector" : "Show inspector")
                 .help(showsInspector ? "Hide the inspector" : "Show the inspector")
             }
@@ -654,6 +658,7 @@ struct BuildsRootView: View {
         } description: {
             Text(fixtureBuildOperationMessage)
         }
+        .accessibilityIdentifier("builds.empty.historyFixtureUnavailable")
     }
 
     @ViewBuilder
@@ -669,6 +674,7 @@ struct BuildsRootView: View {
                 } label: {
                     Label("Build Image", systemImage: "plus")
                 }
+                .accessibilityIdentifier("builds.empty.noCache.build")
                 .disabled(!externalBuildOperationsAreAvailable)
                 .help(
                     externalBuildOperationsAreAvailable
@@ -679,8 +685,10 @@ struct BuildsRootView: View {
                 } label: {
                     Label(isRefreshing ? "Refreshing" : "Refresh", systemImage: "arrow.clockwise")
                 }
+                .accessibilityIdentifier("builds.empty.noCache.refresh")
                 .disabled(isRefreshing)
             }
+            .accessibilityIdentifier("builds.empty.noCache")
         } else if visible.isEmpty {
             ContentUnavailableView.search(text: query)
         } else {
@@ -731,6 +739,7 @@ struct BuildsRootView: View {
                 Button("Copy Record ID") { MorbPasteboard.copy(record.id) }
             }
         }
+        .accessibilityIdentifier("builds.table")
     }
 
     @ViewBuilder
@@ -747,7 +756,9 @@ struct BuildsRootView: View {
                 } label: {
                     Label("Load Build History", systemImage: "arrow.clockwise")
                 }
+                .accessibilityIdentifier("builds.empty.historyIdle.load")
             }
+            .accessibilityIdentifier("builds.empty.historyIdle")
         case .loading:
             ContentUnavailableView {
                 Label("Loading Build History", systemImage: "clock.arrow.circlepath")
@@ -759,6 +770,7 @@ struct BuildsRootView: View {
                 ProgressView()
                     .controlSize(.small)
             }
+            .accessibilityIdentifier("builds.empty.historyLoading")
         case .unavailable(let detail):
             ContentUnavailableView {
                 Label("Build History Unavailable", systemImage: "exclamationmark.triangle")
@@ -770,8 +782,10 @@ struct BuildsRootView: View {
                 } label: {
                     Label("Retry", systemImage: "arrow.clockwise")
                 }
+                .accessibilityIdentifier("builds.empty.historyUnavailable.retry")
                 .disabled(isHistoryRefreshing)
             }
+            .accessibilityIdentifier("builds.empty.historyUnavailable")
         case .loaded:
             if model.buildHistory.isEmpty {
                 ContentUnavailableView {
@@ -784,8 +798,10 @@ struct BuildsRootView: View {
                     } label: {
                         Label("Refresh", systemImage: "arrow.clockwise")
                     }
+                    .accessibilityIdentifier("builds.empty.noCompletedBuilds.refresh")
                     .disabled(isHistoryRefreshing)
                 }
+                .accessibilityIdentifier("builds.empty.noCompletedBuilds")
             } else if visibleHistory.isEmpty {
                 ContentUnavailableView.search(text: query)
             } else {
@@ -806,6 +822,9 @@ struct BuildsRootView: View {
             .font(.system(.callout, design: .monospaced))
             .lineLimit(1)
             .truncationMode(.tail)
+            // Row identity is the engine-facing cache record ID, per
+            // docs/design/ACCESSIBILITY-IDENTIFIERS.md.
+            .accessibilityIdentifier("builds.row.\(record.id)")
     }
 
     private func statusCell(_ record: BuildCacheRecord) -> some View {
@@ -821,6 +840,9 @@ struct BuildsRootView: View {
                 Text(record.name)
                     .lineLimit(1)
                     .truncationMode(.tail)
+                    // Row identity is the engine-facing Buildx history record ID, per
+                    // docs/design/ACCESSIBILITY-IDENTIFIERS.md.
+                    .accessibilityIdentifier("builds.historyRow.\(record.id)")
             }
             TableColumn("Status", sortUsing: BuildHistoryComparator(key: .status)) { record in
                 Text(record.status)
@@ -849,6 +871,7 @@ struct BuildsRootView: View {
                 Button("Copy Build ID") { MorbPasteboard.copy(record.id) }
             }
         }
+        .accessibilityIdentifier("builds.historyTable")
     }
 
     // MARK: Detail pane
@@ -1452,6 +1475,7 @@ struct BuildsRootView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Done") { showsBuilderSheet = false }
+                        .accessibilityIdentifier("builds.builderSheet.done")
                         .disabled(isSelectingMorbstackDefaultBuilder)
                 }
             }
@@ -1632,10 +1656,14 @@ struct BuildsRootView: View {
             .navigationTitle("Build Image")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
+                    // One identifier across the Cancel Build/Done title swap, matching
+                    // ContainerExecSheet's close-button convention.
                     if case .running = buildPhase {
                         Button("Cancel Build") { buildTask?.cancel() }
+                            .accessibilityIdentifier("builds.buildSheet.close")
                     } else {
                         Button("Done") { showsBuildSheet = false }
+                            .accessibilityIdentifier("builds.buildSheet.close")
                     }
                 }
             }

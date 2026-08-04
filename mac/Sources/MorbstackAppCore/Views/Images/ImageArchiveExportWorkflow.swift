@@ -175,6 +175,7 @@ struct ImageArchiveExportSheet: View {
                         cancel()
                     }
                     .disabled(operation.isCancellationRequested)
+                    .accessibilityIdentifier("images.exportSheet.cancel")
                 }
             }
         }

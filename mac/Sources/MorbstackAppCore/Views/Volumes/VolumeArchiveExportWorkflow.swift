@@ -79,12 +79,14 @@ struct VolumeArchiveExportReviewSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
+                        .accessibilityIdentifier("volumes.exportReviewSheet.cancel")
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Export") {
                         dismiss()
                         export()
                     }
+                    .accessibilityIdentifier("volumes.exportReviewSheet.export")
                 }
             }
         }
@@ -243,6 +245,7 @@ struct VolumeArchiveExportSheet: View {
                     cancel()
                 }
                 .disabled(operation.isCancellationRequested)
+                .accessibilityIdentifier("volumes.exportSheet.cancel")
 
                 Text("Cancelling discards the private archive. Morbstack attempts to remove its temporary helper before reporting the result; no archive is saved.")
                     .foregroundStyle(.secondary)

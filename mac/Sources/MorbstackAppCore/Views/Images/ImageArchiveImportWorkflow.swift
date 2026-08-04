@@ -175,9 +175,11 @@ struct ImageArchiveImportReviewSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
+                        .accessibilityIdentifier("images.importReviewSheet.cancel")
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Load Archive…") { showsConfirmation = true }
+                        .accessibilityIdentifier("images.importReviewSheet.load")
                 }
             }
             .confirmationDialog(
@@ -258,6 +260,7 @@ struct ImageArchiveImportSheet: View {
                     cancel()
                 }
                 .disabled(!operation.canCancel)
+                .accessibilityIdentifier("images.importSheet.cancel")
             }
         }
     }

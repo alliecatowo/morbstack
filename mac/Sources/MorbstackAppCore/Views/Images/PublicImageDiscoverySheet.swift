@@ -63,6 +63,7 @@ struct PublicImageDiscoverySheet: View {
                         cancelSearch(resetPresentation: false)
                         dismiss()
                     }
+                    .accessibilityIdentifier("images.discoverySheet.done")
                 }
             }
         }
@@ -83,14 +84,17 @@ struct PublicImageDiscoverySheet: View {
                     .focused($searchFieldIsFocused)
                     .disabled(isSearching)
                     .onSubmit { submitSearch() }
+                    .accessibilityIdentifier("images.discoverySheet.search")
 
                 if isSearching {
                     Button("Cancel Search", role: .cancel) {
                         cancelSearch(resetPresentation: false)
                     }
+                    .accessibilityIdentifier("images.discoverySheet.cancelSearch")
                 } else {
                     Button("Search Docker Hub", action: submitSearch)
                         .disabled(!canSearch)
+                        .accessibilityIdentifier("images.discoverySheet.submit")
                 }
             }
 
@@ -137,6 +141,7 @@ struct PublicImageDiscoverySheet: View {
             } actions: {
                 Button("Try Again", action: submitSearch)
                     .disabled(!canSearch)
+                    .accessibilityIdentifier("images.discoverySheet.submit")
             }
         }
     }
@@ -146,6 +151,9 @@ struct PublicImageDiscoverySheet: View {
             List(page.results, selection: $selection) { result in
                 PublicImageDiscoveryResultRow(result: result)
                     .tag(result.id)
+                    // Row identity is the engine-facing reference — the repository name
+                    // a pull would use — per docs/design/ACCESSIBILITY-IDENTIFIERS.md.
+                    .accessibilityIdentifier("images.discoverySheet.row.\(result.repository)")
             }
             .accessibilityLabel("Public Docker Hub repositories")
             .navigationSplitViewColumnWidth(min: 280, ideal: 340, max: 420)
@@ -310,11 +318,13 @@ private struct PublicImageDiscoveryResultDetail: View {
                 Button("Prepare Pull…", systemImage: "arrow.down.circle") {
                     onPreparePull(result.repository)
                 }
+                .accessibilityIdentifier("images.discoverySheet.preparePull")
                 .accessibilityLabel("Prepare pull of \(result.repository)")
                 .help("Open Pull Image with \(result.repository)")
                 Button("Copy Repository", systemImage: "doc.on.doc") {
                     MorbPasteboard.copy(result.repository)
                 }
+                .accessibilityIdentifier("images.discoverySheet.copyRepository")
                 Text("Preparing a pull opens Pull Image with this repository. Morbstack does not download it until you choose Pull.")
                     .foregroundStyle(.secondary)
             }

@@ -206,6 +206,7 @@ struct NetworkCreateSheet: View {
                         .font(.system(.body, design: .monospaced))
                         .focused($nameIsFocused)
                         .disabled(!isEditingEnabled)
+                        .accessibilityIdentifier("networks.createSheet.name")
                         .accessibilityLabel("Network name")
                         .accessibilityHint("Docker validates the exact network name when you create it.")
 
@@ -213,6 +214,7 @@ struct NetworkCreateSheet: View {
                     LabeledContent("IPv4 Addressing", value: NetworkCreateIPv4Mode.dockerDefault.displayName)
                     Toggle("Enable IPv6", isOn: $enableIPv6)
                         .disabled(!isEditingEnabled)
+                        .accessibilityIdentifier("networks.createSheet.enableIPv6")
 
                     Text(
                         "Docker selects a non-overlapping address pool. This form does not configure custom IPAM, subnets, gateways, or address ranges.")
@@ -285,6 +287,7 @@ struct NetworkCreateSheet: View {
         ToolbarItem(placement: .cancellationAction) {
             Button(state.isTerminalSuccess ? "Done" : "Cancel") { dismiss() }
                 .disabled(state.isCreating)
+                .accessibilityIdentifier("networks.createSheet.cancel")
         }
         if isEditingEnabled {
             ToolbarItem(placement: .confirmationAction) {
@@ -292,6 +295,7 @@ struct NetworkCreateSheet: View {
                     requestForConfirmation = requestedNetwork
                 }
                 .disabled(requestedNetwork == nil)
+                .accessibilityIdentifier("networks.createSheet.create")
                 .accessibilityLabel(
                     createButtonTitle == "Create" ? "Review network creation" : "Review network creation again")
                 .help("Review the exact network configuration before Docker receives the create request")

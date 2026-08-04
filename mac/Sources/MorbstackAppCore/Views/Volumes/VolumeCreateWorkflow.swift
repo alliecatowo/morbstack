@@ -54,6 +54,7 @@ struct VolumeCreateSheet: View {
                 Section("New Volume") {
                     TextField("Name", text: $name)
                         .disabled(isCreating)
+                        .accessibilityIdentifier("volumes.createSheet.name")
                         .accessibilityHint("Docker validates the exact name when you create the volume.")
 
                     Text("Morbstack sends the name to Docker unchanged.")
@@ -88,12 +89,14 @@ struct VolumeCreateSheet: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
                         .disabled(isCreating)
+                        .accessibilityIdentifier("volumes.createSheet.cancel")
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Create") {
                         requestForConfirmation = requestedVolume
                     }
                     .disabled(requestedVolume == nil || isCreating)
+                    .accessibilityIdentifier("volumes.createSheet.create")
                 }
             }
         }

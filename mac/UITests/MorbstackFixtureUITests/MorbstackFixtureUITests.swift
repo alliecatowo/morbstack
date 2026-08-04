@@ -89,25 +89,32 @@ final class MorbstackFixtureUITests: XCTestCase {
         try selectSidebarRoute("Containers", in: app)
         try assertFixtureMarker("shopfront-api-1", in: app)
 
-        // Clicking a table row is the ordinary selection path; it should select the
-        // record and make the standard inspector describe it.
-        let rowText = app.staticTexts["shopfront-api-1"]
-        XCTAssertTrue(rowText.waitForExistence(timeout: 10))
-        rowText.click()
+        // Clicking a list row is the ordinary selection path; the row is addressed by
+        // its engine-facing reference identifier so this cannot accidentally click the
+        // same name rendered in the inspector or a log line.
+        let row = automationElement("containers.row.shopfront-api-1", in: app)
+        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        row.click()
         XCTAssertTrue(
             app.buttons["Overview"].waitForExistence(timeout: 10),
             "Selecting a container must expose its inspector content.")
 
-        let hideInspector = app.buttons["Hide inspector"]
+        // One control, one identifier, two spoken states: `containers.inspector`
+        // addresses the toggle across both states, and the label assertions prove the
+        // user-facing wording actually flips.
+        let inspectorToggle = app.buttons["containers.inspector"]
         XCTAssertTrue(
-            hideInspector.waitForExistence(timeout: 10),
+            inspectorToggle.waitForExistence(timeout: 10),
             "A populated record screen must expose the system inspector toggle.")
-        hideInspector.click()
-
-        let showInspector = app.buttons["Show inspector"]
-        XCTAssertTrue(showInspector.waitForExistence(timeout: 10))
-        showInspector.click()
-        XCTAssertTrue(hideInspector.waitForExistence(timeout: 10))
+        XCTAssertTrue(
+            waitForLabel("Hide inspector", on: inspectorToggle),
+            "With the inspector visible, the toggle must speak as Hide inspector.")
+        inspectorToggle.click()
+        XCTAssertTrue(
+            waitForLabel("Show inspector", on: inspectorToggle),
+            "Hiding the inspector must relabel the toggle, not merely swap a glyph.")
+        inspectorToggle.click()
+        XCTAssertTrue(waitForLabel("Hide inspector", on: inspectorToggle))
         attachWindowEvidence(named: "light-containers-selection-and-inspector", from: app)
     }
 
@@ -117,12 +124,30 @@ final class MorbstackFixtureUITests: XCTestCase {
         let app = try launchFixture(appearance: .light)
         try assertFixtureMarker("shopfront-api-1", in: app)
 
+        // The menu command title is the system's word; the sidebar row identifier is
+        // how this test proves the command actually moved the sidebar rather than
+        // only relabelling itself.
+        let sidebarRow = automationElement("app.sidebar.containers", in: app)
+        XCTAssertTrue(
+            sidebarRow.waitForExistence(timeout: 10),
+            "Every launch starts with the sidebar visible; its rows must be addressable.")
+
         let firstCommand = try sidebarMenuCommand(in: app)
         let originalTitle = firstCommand.label
         XCTAssertTrue(
             ["Hide Sidebar", "Show Sidebar"].contains(originalTitle),
             "The View menu must expose the standard sidebar command.")
         firstCommand.click()
+
+        if originalTitle == "Hide Sidebar" {
+            XCTAssertTrue(
+                sidebarRow.waitForNonExistence(timeout: 10),
+                "Hide Sidebar must actually remove the sidebar's rows from the window.")
+        } else {
+            XCTAssertTrue(
+                sidebarRow.waitForExistence(timeout: 10),
+                "Show Sidebar must actually restore the sidebar's rows.")
+        }
 
         let expectedNextTitle = originalTitle == "Hide Sidebar" ? "Show Sidebar" : "Hide Sidebar"
         let secondCommand = try sidebarMenuCommand(in: app)
@@ -139,7 +164,7 @@ final class MorbstackFixtureUITests: XCTestCase {
         try selectSidebarRoute("Containers", in: app)
         try assertFixtureMarker("shopfront-api-1", in: app)
 
-        let row = app.staticTexts["shopfront-api-1"]
+        let row = automationElement("containers.row.shopfront-api-1", in: app)
         XCTAssertTrue(row.waitForExistence(timeout: 10))
         row.click()
 
@@ -177,10 +202,58 @@ final class MorbstackFixtureUITests: XCTestCase {
     /// element rather than being mistaken for a subjective image comparison.
     func testFixtureAccessibilityAudit() throws {
         let app = try launchFixture(appearance: .light)
+
+        // Containers is the toolbar-heaviest route and Images carries the pull/tag/run
+        // control set. Each audit runs inside a named activity so a failure identifies
+        // the route as well as the offending AX element. Identifiers are invisible to
+        // this audit by design — only labels can satisfy it.
+        try assertFixtureMarker("shopfront-api-1", in: app)
+        try XCTContext.runActivity(named: "audit-containers") { _ in
+            attachWindowEvidence(named: "light-containers-before-accessibility-audit", from: app)
+            try app.performAccessibilityAudit()
+        }
+
         try selectSidebarRoute("Images", in: app)
         try assertFixtureMarker("postgres", in: app)
-        attachWindowEvidence(named: "light-images-before-accessibility-audit", from: app)
-        try app.performAccessibilityAudit()
+        try XCTContext.runActivity(named: "audit-images") { _ in
+            attachWindowEvidence(named: "light-images-before-accessibility-audit", from: app)
+            try app.performAccessibilityAudit()
+        }
+    }
+
+    /// The load-bearing case for the SP-8 identifier convention: Networks and Volumes
+    /// both present a symbol-only destructive trash can. Without identifiers the two
+    /// are indistinguishable to automation; with route-scoped identifiers each is
+    /// addressable while its spoken label stays distinct product vocabulary.
+    func testRouteScopedIdentifiersDisambiguateIdenticalTrashCans() throws {
+        let app = try launchFixture(appearance: .light)
+
+        try selectSidebarRoute("Networks", in: app)
+        try assertFixtureMarker("morb-ingress", in: app)
+        let removeNetworks = app.buttons["networks.removeUnused"]
+        XCTAssertTrue(
+            removeNetworks.waitForExistence(timeout: 10),
+            "The Networks trash can must be addressable by its route-scoped identifier.")
+        XCTAssertEqual(
+            removeNetworks.label, "Remove unused networks",
+            "The identifier addresses the control; the label must keep speaking for it.")
+
+        try selectSidebarRoute("Volumes", in: app)
+        try assertFixtureMarker("shopfront_pgdata", in: app)
+        let removeVolumes = app.buttons["volumes.removeUnused"]
+        XCTAssertTrue(
+            removeVolumes.waitForExistence(timeout: 10),
+            "The Volumes trash can must be addressable by its route-scoped identifier.")
+        XCTAssertEqual(
+            removeVolumes.label, "Remove unused volumes",
+            "Two identical glyphs must never share a spoken meaning.")
+        XCTAssertFalse(
+            removeNetworks.exists,
+            "Route toolbars must not leak controls into one another's windows.")
+
+        // Cross-route chrome uses the app. scope: the provenance banner is addressable
+        // without hard-coding its full sentence.
+        XCTAssertTrue(automationElement("app.fixtureBanner", in: app).exists)
     }
 
     /// Reviews Image pull and run boundaries without making a network request. Fixture
@@ -296,17 +369,21 @@ final class MorbstackFixtureUITests: XCTestCase {
         let app = try launchFixture(appearance: .light)
         try assertFixtureMarker("shopfront-api-1", in: app)
 
-        let container = app.staticTexts["shopfront-api-1"]
+        let container = automationElement("containers.row.shopfront-api-1", in: app)
         XCTAssertTrue(container.waitForExistence(timeout: 10))
         container.click()
-        let runCommand = app.buttons["Run command in shopfront-api-1"]
+        // Addressed by identifier because the spoken label embeds the selected
+        // record's name; the label is then asserted as the user-facing contract.
+        let runCommand = app.buttons["containers.runCommand"]
         XCTAssertTrue(runCommand.waitForExistence(timeout: 10))
+        XCTAssertTrue(waitForLabel("Run command in shopfront-api-1", on: runCommand))
         runCommand.click()
         try assertStaticText("Run Command", in: app)
-        let program = app.textFields["Program"]
+        let program = app.textFields["containers.execSheet.program"]
         XCTAssertTrue(program.waitForExistence(timeout: 10))
+        program.click()
         program.typeText("true")
-        app.buttons["Run Command"].click()
+        app.buttons["containers.execSheet.run"].click()
         try assertStaticText("Couldn’t Run Command", in: app)
         try assertStaticText("Run Command is unavailable in fixture mode; no Docker command was performed.", in: app)
         try dismissPresentedSheet(in: app, button: "Done")
@@ -413,15 +490,43 @@ final class MorbstackFixtureUITests: XCTestCase {
         file: StaticString = #filePath,
         line: UInt = #line
     ) throws {
-        // NavigationSplitView's sidebar is exposed as standard static text by SwiftUI
-        // on current macOS.  The visible title is deliberate product vocabulary; no
-        // hidden testing-only identifier is introduced into the shipping UI.
-        let route = app.staticTexts[title]
+        // Sidebar rows are addressed by their route-scoped automation identifier
+        // (`app.sidebar.<route>`, docs/design/ACCESSIBILITY-IDENTIFIERS.md) rather than
+        // by visible title: the detail column's navigation title is often the same
+        // word, so `staticTexts["Containers"]` could match outside the sidebar. The
+        // user-facing vocabulary stays verified by the fixture marker that must follow
+        // every selection.
+        let route = automationElement("app.sidebar.\(title.lowercased())", in: app)
         guard route.waitForExistence(timeout: 10) else {
-            XCTFail("Could not find sidebar route \(title).", file: file, line: line)
+            XCTFail(
+                "Sidebar route \(title) is not addressable as app.sidebar.\(title.lowercased()).",
+                file: file,
+                line: line)
             throw HarnessError(message: "Missing sidebar route \(title).")
         }
         route.click()
+    }
+
+    /// Exact-match identifier lookup, deliberately type-agnostic: which element type
+    /// SwiftUI's AX bridge surfaces an identifier on is an implementation detail,
+    /// while the identifier itself is the app's automation contract
+    /// (docs/design/ACCESSIBILITY-IDENTIFIERS.md).
+    private func automationElement(_ identifier: String, in app: XCUIApplication) -> XCUIElement {
+        app.descendants(matching: .any)[identifier].firstMatch
+    }
+
+    /// Waits for an element's spoken label. Identifier addresses the control; the
+    /// label assertion is what proves the user-facing semantics — see the convention's
+    /// rule that tests find by identifier and assert by label.
+    private func waitForLabel(
+        _ label: String,
+        on element: XCUIElement,
+        timeout: TimeInterval = 10
+    ) -> Bool {
+        let expectation = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", label),
+            object: element)
+        return XCTWaiter().wait(for: [expectation], timeout: timeout) == .completed
     }
 
     private func assertFixtureMarker(

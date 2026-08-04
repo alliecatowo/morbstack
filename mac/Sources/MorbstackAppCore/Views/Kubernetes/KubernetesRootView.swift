@@ -79,6 +79,9 @@ private struct KubernetesDiagnosisSheet: View {
                         performAction(diagnosis.recommendedAction)
                         dismiss()
                     }
+                    // The title names the recommended action and changes with the
+                    // diagnosis; the identifier stays constant for this one sheet slot.
+                    .accessibilityIdentifier("kubernetes.diagnosisSheet.recommendedAction")
                 }
             }
         }
@@ -88,6 +91,7 @@ private struct KubernetesDiagnosisSheet: View {
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
                 Button("Done") { dismiss() }
+                    .accessibilityIdentifier("kubernetes.diagnosisSheet.done")
             }
         }
     }
@@ -414,6 +418,7 @@ struct KubernetesRootView: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
+                .accessibilityIdentifier("kubernetes.resources")
                 .accessibilityLabel("Kubernetes resource")
             }
         }
@@ -424,6 +429,7 @@ struct KubernetesRootView: View {
             } label: {
                 Image(systemName: "arrow.clockwise")
             }
+            .accessibilityIdentifier("kubernetes.refresh")
             .accessibilityLabel("Refresh Kubernetes resources")
             .help("Refresh Kubernetes resources")
             .disabled(!model.engine.isRunning)
@@ -458,6 +464,7 @@ struct KubernetesRootView: View {
                 // the glyph no longer swaps to a checkmark after a kubeconfig copy.
                 Image(systemName: "ellipsis.circle")
             }
+            .accessibilityIdentifier("kubernetes.actions")
             .accessibilityLabel("Kubernetes actions")
             .help("Kubernetes actions")
             // The request-in-flight unavailable state already owns lifecycle feedback.
@@ -476,6 +483,7 @@ struct KubernetesRootView: View {
                 } label: {
                     Image(systemName: "sidebar.right")
                 }
+                .accessibilityIdentifier("kubernetes.inspector")
                 .accessibilityLabel(showsInspector ? "Hide inspector" : "Show inspector")
                 .help(showsInspector ? "Hide inspector" : "Show inspector")
             }
@@ -776,8 +784,10 @@ struct KubernetesRootView: View {
                 Button("Start Engine") {
                     Task { await model.engineAction(.start) }
                 }
+                .accessibilityIdentifier("kubernetes.empty.engineNotRunning.start")
                 .disabled(model.isEngineBusy)
             }
+            .accessibilityIdentifier("kubernetes.empty.engineNotRunning")
         } else if lifecycleInFlight != nil {
             lifecycleProgressState
         } else if let clusterError {
@@ -787,7 +797,9 @@ struct KubernetesRootView: View {
                 Text(clusterError)
             } actions: {
                 Button("Refresh") { Task { await refreshCluster() } }
+                    .accessibilityIdentifier("kubernetes.empty.clusterError.refresh")
             }
+            .accessibilityIdentifier("kubernetes.empty.clusterError")
         } else {
             switch status.phase {
             case .notInstalled, .stopped:
@@ -816,6 +828,7 @@ struct KubernetesRootView: View {
             ProgressView()
                 .controlSize(.small)
         }
+        .accessibilityIdentifier("kubernetes.empty.lifecycleProgress")
     }
 
     private var kubernetesOffState: some View {
@@ -827,7 +840,9 @@ struct KubernetesRootView: View {
             Button("Enable Kubernetes") {
                 lifecycleRequest = .enable
             }
+            .accessibilityIdentifier("kubernetes.empty.off.enable")
         }
+        .accessibilityIdentifier("kubernetes.empty.off")
     }
 
     private var startingState: some View {
@@ -839,7 +854,9 @@ struct KubernetesRootView: View {
             ProgressView()
                 .controlSize(.small)
             Button("View Recovery Guidance") { Task { await presentRecoveryGuidance() } }
+                .accessibilityIdentifier("kubernetes.empty.starting.viewRecovery")
         }
+        .accessibilityIdentifier("kubernetes.empty.starting")
     }
 
     @ViewBuilder
@@ -851,11 +868,16 @@ struct KubernetesRootView: View {
                 Text(resourceError)
             } actions: {
                 Button("Refresh") { Task { await refreshCluster() } }
+                    .accessibilityIdentifier("kubernetes.empty.resourcesUnavailable.refresh")
                 Button(resourceNeedsKubeconfig ? "Generate Kubeconfig" : "Generate New Kubeconfig") {
                     Task { await generateKubeconfig() }
                 }
+                // The title reflects whether a kubeconfig has been generated before;
+                // the identifier stays constant for this one action slot.
+                .accessibilityIdentifier("kubernetes.empty.resourcesUnavailable.generateKubeconfig")
                 .disabled(isGeneratingKubeconfig)
             }
+            .accessibilityIdentifier("kubernetes.empty.resourcesUnavailable")
         } else {
             switch resource {
         case .pods:
@@ -883,7 +905,9 @@ struct KubernetesRootView: View {
                 Text("No pods are currently reported by this cluster.")
             } actions: {
                 Button("Refresh") { Task { await refreshCluster() } }
+                    .accessibilityIdentifier("kubernetes.empty.noPods.refresh")
             }
+            .accessibilityIdentifier("kubernetes.empty.noPods")
         } else {
             ContentUnavailableView.search(text: query)
         }
@@ -898,7 +922,9 @@ struct KubernetesRootView: View {
                 Text("No nodes are currently reported by this cluster.")
             } actions: {
                 Button("Refresh") { Task { await refreshCluster() } }
+                    .accessibilityIdentifier("kubernetes.empty.noNodes.refresh")
             }
+            .accessibilityIdentifier("kubernetes.empty.noNodes")
         } else {
             ContentUnavailableView.search(text: query)
         }
@@ -912,6 +938,9 @@ struct KubernetesRootView: View {
                 Text(pod.name)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                    // Row identity is namespace/name, the reference `kubectl` accepts
+                    // to address this pod, per docs/design/ACCESSIBILITY-IDENTIFIERS.md.
+                    .accessibilityIdentifier("kubernetes.row.\(pod.namespace)/\(pod.name)")
             }
             .width(min: 220, ideal: 280, max: 480)
             TableColumn("Namespace", sortUsing: KubernetesPodComparator(key: .namespace)) { pod in

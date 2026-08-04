@@ -426,12 +426,14 @@ struct ComposeFileEditorSheet: View {
                                 Button("Review Environment Declarations…") {
                                     declarationReview = review
                                 }
+                                .accessibilityIdentifier("stacks.composeEditor.reviewDeclarations")
                                 .help("Review source declaration names without reading environment values")
                             }
                         } else if let review = ComposeSourceDeclarationReview(editor: editor) {
                             Button("Review Environment and Secrets…") {
                                 declarationReview = review
                             }
+                            .accessibilityIdentifier("stacks.composeEditor.reviewDeclarations")
                             .help("Review source declarations without reading environment or secret values")
                         }
                     }
@@ -448,12 +450,15 @@ struct ComposeFileEditorSheet: View {
                         Button("Reveal Source and Edit") {
                             environmentValuesAreRevealed = true
                         }
+                        .accessibilityIdentifier("stacks.composeEditor.revealSourceAndEdit")
                     }
+                    .accessibilityIdentifier("stacks.composeEditor.redacted")
                     .accessibilityLabel("Environment source values redacted")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     TextEditor(text: $editor.text)
                         .font(.system(.body, design: .monospaced))
+                        .accessibilityIdentifier("stacks.composeEditor.source")
                         .accessibilityLabel(
                             editor.sourceKind?.editorAccessibilityLabel ?? "Source file")
                         .padding(.horizontal, 12)
@@ -479,6 +484,7 @@ struct ComposeFileEditorSheet: View {
                     Button("Cancel") { editor.requestClose() }
                         .help("Close this source file")
                         .disabled(validation.isRunning || projectOperations.isRunning)
+                        .accessibilityIdentifier("stacks.composeEditor.cancel")
                 }
                 if editor.isEnvironmentFile {
                     ToolbarItem(placement: .secondaryAction) {
@@ -487,6 +493,7 @@ struct ComposeFileEditorSheet: View {
                         } label: {
                             Image(systemName: environmentValuesAreRevealed ? "eye.slash" : "eye")
                         }
+                        .accessibilityIdentifier("stacks.composeEditor.revealValues")
                         .accessibilityLabel(
                             environmentValuesAreRevealed ? "Hide environment values" : "Reveal environment values")
                         .help(
@@ -502,29 +509,36 @@ struct ComposeFileEditorSheet: View {
                                     isProjectOperationPresented: projectOperations.isPresented)
                             }
                             .disabled(!validation.canRequestValidation || editor.isDirty || projectOperations.isPresented)
+                            .accessibilityIdentifier("stacks.composeEditor.validate")
 
                             Divider()
 
                             Button("Build Project Images…") {
                                 projectOperations.request(.build, using: editor)
                             }
+                            .accessibilityIdentifier("stacks.composeEditor.build")
                             Button("Bring Up Project…") {
                                 projectOperations.request(.up, using: editor)
                             }
+                            .accessibilityIdentifier("stacks.composeEditor.up")
                             Divider()
                             Button("Start Existing Services…") {
                                 projectOperations.request(.start, using: editor)
                             }
+                            .accessibilityIdentifier("stacks.composeEditor.start")
                             Button("Stop Running Services…") {
                                 projectOperations.request(.stop, using: editor)
                             }
+                            .accessibilityIdentifier("stacks.composeEditor.stop")
                             Button("Restart Project Services…") {
                                 projectOperations.request(.restart, using: editor)
                             }
+                            .accessibilityIdentifier("stacks.composeEditor.restart")
                             Divider()
                             Button("Stop and Remove Project…", role: .destructive) {
                                 projectOperations.request(.down, using: editor)
                             }
+                            .accessibilityIdentifier("stacks.composeEditor.down")
                         } label: {
                             Label("Project commands", systemImage: "play.square.stack")
                         }
@@ -532,6 +546,7 @@ struct ComposeFileEditorSheet: View {
                             !projectOperations.canRequestOperation
                                 || editor.isDirty
                                 || validation.isPresented)
+                        .accessibilityIdentifier("stacks.composeEditor.projectCommands")
                         .accessibilityLabel("Compose project commands")
                         .help(
                             editor.isDirty
@@ -544,12 +559,14 @@ struct ComposeFileEditorSheet: View {
                         Image(systemName: "arrow.uturn.backward")
                     }
                     .disabled(!editor.isDirty)
+                    .accessibilityIdentifier("stacks.composeEditor.discard")
                     .accessibilityLabel("Discard source changes")
                     .help("Discard unsaved source changes")
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") { editor.requestSave() }
                         .disabled(!editor.isDirty)
+                        .accessibilityIdentifier("stacks.composeEditor.save")
                         .help("Review and save this source file")
                 }
             }

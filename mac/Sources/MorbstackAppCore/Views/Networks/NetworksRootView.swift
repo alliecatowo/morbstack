@@ -197,6 +197,7 @@ private struct UnusedNetworkRemovalReview: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
+                        .accessibilityIdentifier("networks.removeUnusedSheet.cancel")
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Remove \(plan.countLabel)", role: .destructive) {
@@ -204,6 +205,7 @@ private struct UnusedNetworkRemovalReview: View {
                         onConfirm(plan.targets)
                     }
                     .disabled(plan.targets.isEmpty)
+                    .accessibilityIdentifier("networks.removeUnusedSheet.remove")
                 }
             }
         }
@@ -402,6 +404,7 @@ struct NetworksRootView: View {
                 Image(systemName: "plus")
             }
             .disabled(isPerformingNetworkOperation)
+            .accessibilityIdentifier("networks.create")
             .accessibilityLabel("Create network")
             .help(
                 isPerformingNetworkOperation
@@ -412,6 +415,7 @@ struct NetworksRootView: View {
             if busy {
                 ProgressView()
                     .controlSize(.small)
+                    .accessibilityIdentifier("networks.removeUnused")
                     .accessibilityLabel("Removing networks")
             } else {
                 Button(role: .destructive) {
@@ -420,6 +424,7 @@ struct NetworksRootView: View {
                     Image(systemName: "trash")
                 }
                 .disabled(unusedCount == 0 || isPerformingNetworkOperation)
+                .accessibilityIdentifier("networks.removeUnused")
                 .accessibilityLabel("Remove unused networks")
                 .help(
                     unusedCount == 0
@@ -431,6 +436,7 @@ struct NetworksRootView: View {
             ToolbarItem(id: "networks.membershipProgress", placement: .secondaryAction) {
                 ProgressView()
                     .controlSize(.small)
+                    .accessibilityIdentifier("networks.membershipProgress")
                     .accessibilityLabel("Updating network membership")
             }
         }
@@ -443,6 +449,7 @@ struct NetworksRootView: View {
                 } label: {
                     Image(systemName: "sidebar.right")
                 }
+                .accessibilityIdentifier("networks.inspector")
                 .accessibilityLabel(showsInspector ? "Hide inspector" : "Show inspector")
                 .help(showsInspector ? "Hide the inspector" : "Show the inspector")
             }
@@ -465,12 +472,15 @@ struct NetworksRootView: View {
                     Label("Create Network", systemImage: "plus")
                 }
                 .disabled(isPerformingNetworkOperation)
+                .accessibilityIdentifier("networks.empty.noNetworks.create")
                 Button {
                     Task { await model.refreshAll() }
                 } label: {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
+                .accessibilityIdentifier("networks.empty.noNetworks.refresh")
             }
+            .accessibilityIdentifier("networks.empty.noNetworks")
         } else if visibleNetworks.isEmpty {
             ContentUnavailableView.search(text: query)
         } else {
@@ -514,12 +524,17 @@ struct NetworksRootView: View {
         .contextMenu(forSelectionType: NetworkSummary.ID.self) { ids in
             contextMenu(for: ids)
         }
+        .accessibilityIdentifier("networks.table")
     }
 
     private func nameCell(_ network: NetworkSummary) -> some View {
+        // `Table` exposes no row-level accessibility modifier, so the row's identity —
+        // the engine-facing network name, per docs/design/ACCESSIBILITY-IDENTIFIERS.md —
+        // is carried by its Name column cell.
         Text(network.name)
             .lineLimit(1)
             .truncationMode(.middle)
+            .accessibilityIdentifier("networks.row.\(network.name)")
     }
 
     @ViewBuilder

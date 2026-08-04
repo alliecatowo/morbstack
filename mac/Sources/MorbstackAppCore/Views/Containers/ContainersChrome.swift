@@ -118,9 +118,13 @@ struct DocumentSearchField: View {
     var width: CGFloat = 220
     /// Optional trailing caption, e.g. a match count.
     var caption: String?
+    /// The automation identifier for the embedded `NSSearchField`, per
+    /// docs/design/ACCESSIBILITY-IDENTIFIERS.md. `nil` leaves the field unset rather
+    /// than clobbering it with an empty string.
+    var identifier: String? = nil
     var body: some View {
         HStack(spacing: 8) {
-            NativeSearchField(text: $text, prompt: prompt)
+            NativeSearchField(text: $text, prompt: prompt, identifier: identifier)
                 .frame(width: width)
             if let caption, !text.isEmpty {
                 Text(caption)
@@ -133,6 +137,7 @@ struct DocumentSearchField: View {
     private struct NativeSearchField: NSViewRepresentable {
         @Binding var text: String
         let prompt: String
+        let identifier: String?
 
         func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -141,12 +146,14 @@ struct DocumentSearchField: View {
             field.placeholderString = prompt
             field.sendsSearchStringImmediately = true
             field.delegate = context.coordinator
+            if let identifier { field.setAccessibilityIdentifier(identifier) }
             return field
         }
 
         func updateNSView(_ field: NSSearchField, context: Context) {
             if field.stringValue != text { field.stringValue = text }
             if field.placeholderString != prompt { field.placeholderString = prompt }
+            if let identifier { field.setAccessibilityIdentifier(identifier) }
         }
 
         static func dismantleNSView(_ field: NSSearchField, coordinator: Coordinator) {

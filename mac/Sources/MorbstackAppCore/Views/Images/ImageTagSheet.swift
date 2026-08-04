@@ -71,11 +71,13 @@ struct ImageTagSheet: View {
                         .font(.system(.body, design: .monospaced))
                         .disabled(isTagging)
                         .focused($repositoryIsFocused)
+                        .accessibilityIdentifier("images.tagSheet.repository")
 
                     TextField("Tag", text: $tag, prompt: Text("latest"))
                         .font(.system(.body, design: .monospaced))
                         .disabled(isTagging)
                         .onSubmit { beginTagging() }
+                        .accessibilityIdentifier("images.tagSheet.tag")
 
                     if let request {
                         LabeledContent("Creates") {
@@ -114,6 +116,7 @@ struct ImageTagSheet: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
                         .disabled(isTagging)
+                        .accessibilityIdentifier("images.tagSheet.cancel")
                 }
                 if !isTagging {
                     ToolbarItem(placement: .confirmationAction) {
@@ -121,6 +124,7 @@ struct ImageTagSheet: View {
                             beginTagging()
                         }
                         .disabled(request == nil)
+                        .accessibilityIdentifier("images.tagSheet.confirm")
                     }
                 }
             }

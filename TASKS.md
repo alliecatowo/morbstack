@@ -127,10 +127,15 @@ from. Six overlapping docs currently disagree in both directions; the fix is not
 "stop hand-maintaining them".
 **Rewrites:** DOC-2.
 
-### SP-8 · Accessibility identifier scheme · `open`
+### SP-8 · Accessibility identifier scheme · `done`
 **Deliverable:** a naming convention, before anyone adds hundreds of them. The codebase currently has
 **zero** `accessibilityIdentifier`. Decide route-scoped vs global, and how identifiers relate to the
 XCUITest queries that currently rely on system semantics alone.
+**Ruling:** `docs/design/ACCESSIBILITY-IDENTIFIERS.md` — route-scoped dotted names
+(`<route>.<element>[.<qualifier>]`, `app.` for cross-route chrome); toolbar controls reuse their
+existing `ToolbarItem(id:)` string verbatim; rows carry the engine-facing reference
+(`containers.row.shopfront-api-1`); identifiers only on what tests act on or assert about; system-owned
+chrome keeps semantic queries; identifiers are never labels and never localized.
 **Rewrites:** UI-13, UI-6.
 
 ### SP-9 · Signing and notarization identity · `open`

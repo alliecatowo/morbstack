@@ -129,12 +129,14 @@ struct ContainerExecSheet: View {
                 .font(.system(.body, design: .monospaced))
                 .focused($programIsFocused)
                 .disabled(state.isExecuting || !isContainerRunning)
+                .accessibilityIdentifier("containers.execSheet.program")
                 .accessibilityHint("Enter one executable path or program name.")
 
             TextEditor(text: $argumentLines)
                 .font(.system(.body, design: .monospaced))
                 .frame(minHeight: 72)
                 .disabled(state.isExecuting || !isContainerRunning)
+                .accessibilityIdentifier("containers.execSheet.arguments")
                 .accessibilityLabel("Command arguments")
                 .accessibilityHint("Enter one literal argument per line. Spaces within a line are passed unchanged.")
         } header: {
@@ -225,15 +227,20 @@ struct ContainerExecSheet: View {
             // named consequence that must never happen silently from a keypress.
             ToolbarItem(placement: .destructiveAction) {
                 Button("Stop Reading Output") { stopReadingOutput() }
+                    .accessibilityIdentifier("containers.execSheet.stopReading")
             }
         } else {
             ToolbarItem(placement: .cancellationAction) {
+                // One identifier across the Cancel/Done title swap: the identifier
+                // names the role; the visible title carries the state.
                 Button(closeTitle) { dismiss() }
+                    .accessibilityIdentifier("containers.execSheet.close")
             }
         }
         if !state.isExecuting {
             ToolbarItem(placement: .confirmationAction) {
                 Button("Run Command") { runCommand() }
+                    .accessibilityIdentifier("containers.execSheet.run")
                     .disabled(command == nil || !isContainerRunning)
             }
         }

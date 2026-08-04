@@ -85,6 +85,13 @@ private struct StackOutlineRow: Identifiable, Hashable {
         return service
     }
 
+    /// The Compose project's engine-facing reference — the value
+    /// `com.docker.compose.project` carries — for a project row.
+    var projectName: String? {
+        guard case .project(let stack) = kind else { return nil }
+        return stack.project
+    }
+
     var displayName: String {
         switch kind {
         case .project(let stack): stack.title
@@ -343,6 +350,7 @@ struct StacksRootView: View {
             } label: {
                 Label("Stack options", systemImage: "slider.horizontal.3")
             }
+            .accessibilityIdentifier("stacks.options")
             .accessibilityLabel("Stack options")
             .help("Refresh and Compose file options")
         }
@@ -352,6 +360,7 @@ struct StacksRootView: View {
                 Button { showsInspector.toggle() } label: {
                     Image(systemName: "sidebar.right")
                 }
+                .accessibilityIdentifier("stacks.inspector")
                 .accessibilityLabel(showsInspector ? "Hide inspector" : "Show inspector")
                 .help(showsInspector ? "Hide inspector" : "Show inspector")
             }
@@ -364,6 +373,7 @@ struct StacksRootView: View {
                 ToolbarItem(id: "stacks.primaryLifecycle", placement: .primaryAction) {
                     ProgressView()
                         .controlSize(.small)
+                        .accessibilityIdentifier("stacks.primaryLifecycle")
                         .accessibilityLabel("Updating \(service.composeService ?? service.displayName)")
                         .help("Updating \(service.composeService ?? service.displayName)")
                 }
@@ -373,6 +383,7 @@ struct StacksRootView: View {
                         Button { perform(action, on: service) } label: {
                             Image(systemName: action.symbol)
                         }
+                        .accessibilityIdentifier("stacks.primaryLifecycle")
                         .accessibilityLabel(action.title)
                         .help("\(action.title) \(service.composeService ?? service.displayName)")
                     }
@@ -384,6 +395,7 @@ struct StacksRootView: View {
                 ToolbarItem(id: "stacks.project-progress", placement: .secondaryAction) {
                     ProgressView()
                         .controlSize(.small)
+                        .accessibilityIdentifier("stacks.project-progress")
                         .accessibilityLabel("Updating \(stack.title)")
                         .help("Updating \(stack.title)")
                 }
@@ -467,6 +479,7 @@ struct StacksRootView: View {
         } label: {
             Image(systemName: "ellipsis")
         }
+        .accessibilityIdentifier("stacks.actions")
         .accessibilityLabel("Actions for \(service.composeService ?? service.displayName)")
         .help("Actions for \(service.composeService ?? service.displayName)")
     }
@@ -477,6 +490,7 @@ struct StacksRootView: View {
         } label: {
             Image(systemName: "ellipsis")
         }
+        .accessibilityIdentifier("stacks.project-actions")
         .accessibilityLabel("Actions for \(stack.title)")
         .help("Actions for \(stack.title)")
     }
@@ -508,6 +522,11 @@ struct StacksRootView: View {
                     systemImage: row.service.map { stateSymbol(for: $0) } ?? "square.stack.3d.up")
                     .tag(row.id)
                     .help(row.service.map { $0.status.isEmpty ? $0.state : $0.status } ?? "Compose project")
+                    // Row identity is the engine-facing reference, per
+                    // docs/design/ACCESSIBILITY-IDENTIFIERS.md: a project's Compose
+                    // project name, or a service's unique Docker container name.
+                    .accessibilityIdentifier(
+                        "stacks.row.\(row.service?.displayName ?? row.projectName ?? row.displayName)")
             }
         }
         .contextMenu(forSelectionType: StackOutlineID.self) { ids in
@@ -522,6 +541,7 @@ struct StacksRootView: View {
                 removalTarget = selectedService
             }
         }
+        .accessibilityIdentifier("stacks.list")
     }
 
     // MARK: Inspector
@@ -793,10 +813,12 @@ struct StacksRootView: View {
                 Task { await model.engineAction(.start) }
             }
             .disabled(!externalStackOperationsAreAvailable || model.engine.isTransitional)
+            .accessibilityIdentifier("stacks.empty.engine.start")
             .help(externalStackOperationsAreAvailable
                 ? "Start Morbstack engine"
                 : fixtureStackOperationMessage)
         }
+        .accessibilityIdentifier("stacks.empty.engine")
     }
 
     private var noStacksEmptyState: some View {
@@ -808,6 +830,7 @@ struct StacksRootView: View {
             Button("Refresh") {
                 Task { await model.refreshAll() }
             }
+            .accessibilityIdentifier("stacks.empty.noStacks.refresh")
             Menu("Source and Context") {
                 Button("Choose Compose File…") {
                     chooseComposeFile()
@@ -832,7 +855,9 @@ struct StacksRootView: View {
                     ? "Copy Docker context command"
                     : fixtureStackOperationMessage)
             }
+            .accessibilityIdentifier("stacks.empty.noStacks.sourceAndContext")
         }
+        .accessibilityIdentifier("stacks.empty.noStacks")
     }
 
     // MARK: Actions

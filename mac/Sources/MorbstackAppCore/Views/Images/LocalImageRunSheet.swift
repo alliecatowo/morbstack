@@ -119,11 +119,13 @@ struct LocalImageRunSheet: View {
         ToolbarItem(placement: .cancellationAction) {
             Button(closeTitle) { dismiss() }
                 .disabled(state.isWorking)
+                .accessibilityIdentifier("images.runSheet.close")
         }
         if isEditingEnabled {
             ToolbarItem(placement: .confirmationAction) {
                 Button(runButtonTitle) { requestForConfirmation = requestedRun }
                     .disabled(requestedRun == nil)
+                    .accessibilityIdentifier("images.runSheet.run")
             }
         }
     }
@@ -184,6 +186,7 @@ struct LocalImageRunSheet: View {
                 .font(.system(.body, design: .monospaced))
                 .focused($nameIsFocused)
                 .disabled(!isEditingEnabled)
+                .accessibilityIdentifier("images.runSheet.name")
         } header: {
             Text("Container")
         } footer: {
@@ -206,6 +209,7 @@ struct LocalImageRunSheet: View {
                     environment.append(LocalImageEnvironmentEntry())
                 }
                 .disabled(!isEditingEnabled)
+                .accessibilityIdentifier("images.runSheet.addEnvironment")
             }
         } header: {
             Text("Environment")
@@ -253,6 +257,7 @@ struct LocalImageRunSheet: View {
                     publishedPorts.append(LocalImagePortMappingEntry())
                 }
                 .disabled(!isEditingEnabled)
+                .accessibilityIdentifier("images.runSheet.addPublishedPort")
             }
         } header: {
             Text("Published Ports")
@@ -374,6 +379,7 @@ struct LocalImageRunSheet: View {
                     model.showContainer(id: result.containerID)
                     dismiss()
                 }
+                .accessibilityIdentifier("images.runSheet.showInContainers")
             }
         case .failed(let message, let containerID):
             Section("Couldn’t Run Image") {
@@ -384,6 +390,7 @@ struct LocalImageRunSheet: View {
                         model.showContainer(id: containerID)
                         dismiss()
                     }
+                    .accessibilityIdentifier("images.runSheet.showInContainers")
                 }
             }
         }

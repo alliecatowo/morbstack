@@ -309,6 +309,7 @@ private struct VolumeUnusedRemovalReview: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
+                        .accessibilityIdentifier("volumes.removeUnusedSheet.cancel")
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Remove \(plan.countLabel)", role: .destructive) {
@@ -316,6 +317,7 @@ private struct VolumeUnusedRemovalReview: View {
                         onConfirm(plan.items.map(\.id))
                     }
                     .disabled(plan.items.isEmpty)
+                    .accessibilityIdentifier("volumes.removeUnusedSheet.remove")
                 }
             }
         }
@@ -548,6 +550,7 @@ struct VolumesRootView: View {
                 Image(systemName: "plus")
             }
             .disabled(isPerformingVolumeOperation)
+            .accessibilityIdentifier("volumes.create")
             .accessibilityLabel("Create volume")
             .help(
                 isPerformingVolumeOperation
@@ -558,6 +561,7 @@ struct VolumesRootView: View {
             if let removalProgress {
                 ProgressView()
                     .controlSize(.small)
+                    .accessibilityIdentifier("volumes.removeUnused")
                     .accessibilityLabel(removalProgress)
             } else {
                 Button(role: .destructive) {
@@ -566,6 +570,7 @@ struct VolumesRootView: View {
                     Image(systemName: "trash")
                 }
                 .disabled(unusedCount == 0 || isPerformingVolumeOperation)
+                .accessibilityIdentifier("volumes.removeUnused")
                 .accessibilityLabel("Remove unused volumes")
                 .help(
                     unusedCount == 0
@@ -580,6 +585,7 @@ struct VolumesRootView: View {
                 // SF Symbol convention: up = export/share, down = import/save.
                 Image(systemName: "square.and.arrow.up")
             }
+            .accessibilityIdentifier("volumes.export")
             .accessibilityLabel("Export selected volume")
             .help(volumeArchiveExportHelp)
             .disabled(!canExportSelectedVolume)
@@ -594,6 +600,7 @@ struct VolumesRootView: View {
                 } label: {
                     Image(systemName: "sidebar.right")
                 }
+                .accessibilityIdentifier("volumes.inspector")
                 .accessibilityLabel(showsInspector ? "Hide inspector" : "Show inspector")
                 .help(showsInspector ? "Hide the inspector" : "Show the inspector")
             }
@@ -616,12 +623,15 @@ struct VolumesRootView: View {
                     Label("Create Volume", systemImage: "plus")
                 }
                 .disabled(isPerformingVolumeOperation)
+                .accessibilityIdentifier("volumes.empty.noVolumes.create")
                 Button {
                     Task { await model.refreshAll() }
                 } label: {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
+                .accessibilityIdentifier("volumes.empty.noVolumes.refresh")
             }
+            .accessibilityIdentifier("volumes.empty.noVolumes")
         } else if visible.isEmpty {
             ContentUnavailableView.search(text: query)
         } else {
@@ -659,12 +669,17 @@ struct VolumesRootView: View {
         .contextMenu(forSelectionType: VolumeSummary.ID.self) { ids in
             contextMenu(for: ids)
         }
+        .accessibilityIdentifier("volumes.table")
     }
 
     private func nameCell(_ volume: VolumeSummary) -> some View {
+        // `Table` exposes no row-level accessibility modifier, so the row's identity —
+        // the engine-facing volume name, per docs/design/ACCESSIBILITY-IDENTIFIERS.md —
+        // is carried by its Name column cell.
         Text(TrackCDiskMath.volumeDisplayName(volume.name))
             .lineLimit(1)
             .truncationMode(.middle)
+            .accessibilityIdentifier("volumes.row.\(volume.name)")
     }
 
     @ViewBuilder

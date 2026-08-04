@@ -204,12 +204,14 @@ private struct DiskPruneConfirmation: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
+                        .accessibilityIdentifier("disk.pruneSheet.cancel")
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Prune \(preview.countLabel)", role: .destructive) {
                         dismiss()
                         onConfirm()
                     }
+                    .accessibilityIdentifier("disk.pruneSheet.confirm")
                     .disabled(preview.items.isEmpty)
                 }
             }
@@ -387,9 +389,11 @@ struct DiskRootView: View {
                         Button("Calculate Disk Usage", systemImage: "arrow.triangle.2.circlepath") {
                             Task { await refreshDiskUsage() }
                         }
+                        .accessibilityIdentifier("disk.empty.usageUnavailable.calculate")
                     }
                     diskGrowthActionControl
                 })
+            .accessibilityIdentifier("disk.empty.usageUnavailable")
         } else if model.disk == nil {
             ContentUnavailableView(
                 label: {
@@ -405,9 +409,11 @@ struct DiskRootView: View {
                         Button("Start Engine", systemImage: "play.fill") {
                             Task { await startEngine() }
                         }
+                        .accessibilityIdentifier("disk.empty.engineNotRunning.start")
                     }
                     diskGrowthActionControl
                 })
+            .accessibilityIdentifier("disk.empty.engineNotRunning")
         } else {
             diskTable
                 // The table's four semantic columns need a readable leading-content
@@ -439,6 +445,7 @@ struct DiskRootView: View {
             } label: {
                 Image(systemName: "arrow.triangle.2.circlepath")
             }
+            .accessibilityIdentifier("disk.recalculate")
             .accessibilityLabel("Recalculate disk usage")
             .disabled(isPerformingDiskOperation)
             .help("Recalculate disk usage — the engine walks every layer, so this is not instant")
@@ -453,6 +460,7 @@ struct DiskRootView: View {
                 } label: {
                     Image(systemName: "sidebar.right")
                 }
+                .accessibilityIdentifier("disk.inspector")
                 .accessibilityLabel(showsInspector ? "Hide inspector" : "Show inspector")
                 .help(showsInspector ? "Hide the inspector" : "Show the inspector")
             }
@@ -489,6 +497,9 @@ struct DiskRootView: View {
                 Label(row.title, systemImage: row.symbol)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                    // Row identity is the category/resource id, per
+                    // docs/design/ACCESSIBILITY-IDENTIFIERS.md.
+                    .accessibilityIdentifier("disk.row.\(row.id)")
             }
             .width(min: 150, ideal: 210)
 
@@ -525,6 +536,7 @@ struct DiskRootView: View {
         } primaryAction: { ids in
             if let id = ids.first { selection = id }
         }
+        .accessibilityIdentifier("disk.table")
     }
 
     @ViewBuilder
@@ -622,6 +634,9 @@ struct DiskRootView: View {
                         Button("Prune \(category.title)…", role: .destructive) {
                             pruning = target
                         }
+                        // The title names the selected category and changes with it;
+                        // the identifier stays constant for this one inspector slot.
+                        .accessibilityIdentifier("disk.inspector.prune")
                         .disabled(isPerformingDiskOperation || !canPrune(target))
                         .help(category.pruneSummary)
                     } footer: {
@@ -787,11 +802,13 @@ struct DiskRootView: View {
             Button("Refresh VM Disk Readiness", systemImage: "arrow.clockwise") {
                 Task { await loadDiskGrowthFacts() }
             }
+            .accessibilityIdentifier("disk.diskGrowth.refreshReadiness")
             .disabled(isPerformingDiskOperation)
         case .stopEngine:
             Button("Stop Engine", systemImage: "stop.fill") {
                 Task { await stopEngineForDiskGrowth() }
             }
+            .accessibilityIdentifier("disk.diskGrowth.stopEngine")
             .disabled(model.isEngineBusy || isGrowingDisk)
             .help("The VM must stop completely before Morbstack can grow its data disk")
         case .reviewGrowth:
@@ -799,6 +816,7 @@ struct DiskRootView: View {
                 diskGrowthError = nil
                 showsDiskGrowthConfirmation = true
             }
+            .accessibilityIdentifier("disk.diskGrowth.reviewGrowth")
             .disabled(isGrowingDisk || diskGrowthTargetGiB == nil)
             .help("Review the grow-only VM disk transaction")
         case .reviewRecovery:
@@ -806,6 +824,7 @@ struct DiskRootView: View {
                 diskGrowthError = nil
                 showsDiskGrowthConfirmation = true
             }
+            .accessibilityIdentifier("disk.diskGrowth.reviewRecovery")
             .disabled(isGrowingDisk || diskGrowthTargetGiB == nil)
             .help("Retry the exact saved disk-growth target and verify the guest filesystem")
         }

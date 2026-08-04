@@ -65,7 +65,7 @@ struct ContainerLogsTab: View {
 
     private var filterBar: some View {
         HStack(spacing: 8) {
-            DocumentSearchField(text: $store.query, prompt: "Filter lines")
+            DocumentSearchField(text: $store.query, prompt: "Filter lines", identifier: "containers.logs.search")
             Text(lineCount)
                 .font(.caption)
                 .monospacedDigit()

@@ -53,7 +53,7 @@ struct ContainerInspectTab: View {
             // them in the window toolbar made the toolbar churn on every inspector
             // tab switch, which defeats motor memory for the whole route.
             HStack(spacing: 8) {
-                DocumentSearchField(text: $query, prompt: "Search JSON")
+                DocumentSearchField(text: $query, prompt: "Search JSON", identifier: "containers.inspect.search")
                 if !query.isEmpty {
                     Text(matchCaption)
                         .font(.caption)

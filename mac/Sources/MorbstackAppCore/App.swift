@@ -457,6 +457,7 @@ private struct FixtureDataBanner: View {
             .frame(maxWidth: .infinity)
             .background(.yellow.opacity(0.22))
             .overlay(alignment: .bottom) { Divider() }
+            .accessibilityIdentifier("app.fixtureBanner")
             .accessibilityLabel(provenance.accessibilityLabel)
     }
 }
@@ -511,6 +512,9 @@ struct Sidebar: View {
                         Label(nav.title, systemImage: nav.symbol)
                             .badge(badge(for: nav))
                             .tag(nav)
+                            // Automation handle per docs/design/ACCESSIBILITY-IDENTIFIERS.md;
+                            // the visible title remains the VoiceOver-facing name.
+                            .accessibilityIdentifier("app.sidebar.\(nav.rawValue)")
                             .help("\(nav.title) (⌘\(nav.shortcutIndex))")
                     }
                 }
