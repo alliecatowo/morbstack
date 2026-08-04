@@ -264,6 +264,22 @@ final class PortMappingTests: XCTestCase {
             "80/tcp")
     }
 
+    /// Ports are identifiers, not quantities. The Overview inspector receives these
+    /// String values directly, avoiding `LocalizedStringKey`'s grouped Int rendering.
+    func testPortDisplaysNeverGroupDigits() {
+        let port = PortMapping(
+            hostIP: "0.0.0.0",
+            hostPort: 18_099,
+            containerPort: 18_080,
+            proto: "tcp")
+
+        XCTAssertEqual(port.hostDisplay, "0.0.0.0:18099")
+        XCTAssertEqual(port.containerDisplay, "18080/TCP")
+        XCTAssertEqual(port.label, "18099 → 18080/tcp")
+        XCTAssertFalse(port.hostDisplay?.contains(",") == true)
+        XCTAssertFalse(port.containerDisplay.contains(","))
+    }
+
     /// Docker reports one entry per binding, so a container published on both IPv4 and
     /// IPv6 arrives with every port twice.
     func testDeduplicatesDoubleBoundPortsOnTheWayIn() {

@@ -217,9 +217,15 @@ struct PortMapping: Hashable, Sendable, Identifiable {
     /// `8080 → 80/tcp`, or `80/tcp` when unpublished.
     var label: String {
         if let hostPort {
-            return "\(hostPort) → \(containerPort)/\(proto)"
+            return "\(Formatters.identifier(hostPort)) → \(Formatters.identifier(containerPort))/\(proto)"
         }
-        return "\(containerPort)/\(proto)"
+        return "\(Formatters.identifier(containerPort))/\(proto)"
+    }
+
+    /// `80/TCP`. This is a `String`, rather than a `LocalizedStringKey`, because a
+    /// port is an identifier and must never acquire locale grouping.
+    var containerDisplay: String {
+        "\(Formatters.identifier(containerPort))/\(proto.uppercased())"
     }
 
     /// `0.0.0.0:18099`, or `nil` when unpublished.
@@ -229,7 +235,7 @@ struct PortMapping: Hashable, Sendable, Identifiable {
     /// locale grouping — which is how a port once rendered as `18,099`. A port is an
     /// identifier, not a quantity; it is never grouped.
     var hostDisplay: String? {
-        hostPort.map { "\(hostIP ?? "0.0.0.0"):\($0)" }
+        hostPort.map { "\(hostIP ?? "0.0.0.0"):\(Formatters.identifier($0))" }
     }
 }
 

@@ -140,9 +140,9 @@ struct ContainerOverviewTab: View {
     private var portsSection: some View {
         Section("Ports") {
             ForEach(container.ports) { port in
-                LabeledContent("\(port.containerPort)/\(port.proto.uppercased())") {
+                LabeledContent(port.containerDisplay) {
                     HStack(spacing: 8) {
-                        Text(port.hostPort.map { "\(port.hostIP ?? "0.0.0.0"):\($0)" } ?? "Not Published")
+                        Text(port.hostDisplay ?? "Not Published")
                             .font(.system(.body, design: .monospaced))
                             .foregroundStyle(port.hostPort == nil ? .secondary : .primary)
                         if let url = port.url {
