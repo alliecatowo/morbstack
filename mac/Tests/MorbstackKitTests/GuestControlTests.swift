@@ -187,6 +187,46 @@ final class GuestControlTests: XCTestCase {
         XCTAssertNil(legacy.diskResize)
     }
 
+    func testDiskResizeSuccessReplyUsesTheStrictProofSchema() throws {
+        let proof = try GuestControl.decodeDiskResizeReply(Data(#"""
+            {"type":"disk_resize","device":"/dev/vda","mount_point":"/var/lib/docker",
+             "filesystem":"ext4","device_bytes":137438953472,
+             "before_filesystem_bytes":68719476736,"after_filesystem_bytes":137438953472,
+             "resized":true,"previously_proved":false}
+            """#.utf8))
+
+        XCTAssertEqual(proof.device, "/dev/vda")
+        XCTAssertEqual(proof.mountPoint, "/var/lib/docker")
+        XCTAssertEqual(proof.deviceBytes, 137_438_953_472)
+        XCTAssertTrue(proof.resized)
+        XCTAssertFalse(proof.previouslyProved)
+    }
+
+    func testDiskResizeErrorReplyIsNotDecodedAsAPartialProof() {
+        XCTAssertThrowsError(try GuestControl.decodeDiskResizeReply(
+            Data(#"{"type":"error","message":"/var/lib/docker is not mounted"}"#.utf8)
+        )) { error in
+            XCTAssertTrue("\(error)".contains("guest reported: /var/lib/docker is not mounted"))
+            XCTAssertFalse("\(error)".contains("Key 'device'"))
+        }
+    }
+
+    func testDiskResizeErrorReplyRequiresItsMessage() {
+        XCTAssertThrowsError(try GuestControl.decodeDiskResizeReply(
+            Data(#"{"type":"error"}"#.utf8)
+        )) { error in
+            XCTAssertTrue("\(error)".contains("without a message"))
+        }
+    }
+
+    func testDiskResizeSuccessReplyRejectsMissingProofFields() {
+        XCTAssertThrowsError(try GuestControl.decodeDiskResizeReply(
+            Data(#"{"type":"disk_resize","device":"/dev/vda"}"#.utf8)
+        )) { error in
+            XCTAssertTrue("\(error)".contains("malformed disk_resize proof"))
+        }
+    }
+
     /// A well-formed exchange leaves the channel usable, and closing is idempotent.
     func testASuccessfulExchangeKeepsTheChannelUsable() throws {
         let control = try makeChannel()

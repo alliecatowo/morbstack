@@ -10,18 +10,18 @@ import Foundation
 ///
 /// A larger host file is not a larger guest filesystem. This diagnostic is therefore
 /// deliberately separate from ``MorbDiskCapacity``: it consumes capacity and lifecycle
-/// facts but never opens, truncates, attaches, starts, or stops a disk. A future
-/// mutator requires ``GuestCapability/ready``, a stopped VM, a retained journal of
-/// the prior capacity, an explicit grow request, guest-side resize, and post-resize
-/// verification before it can alter the image.
+/// facts but never opens, truncates, attaches, starts, or stops a disk. The mutator
+/// requires ``GuestCapability/ready``, a stopped VM, a retained journal of the prior
+/// capacity, an explicit grow request, guest-side resize, and post-resize verification
+/// before it can alter the image.
 public enum MorbDiskResize {
 
     /// The additive capability carried by the guest's `info` reply.
     ///
     /// `unknown` is intentionally distinct from `unavailable`: it means an older or
-    /// stopped guest did not make a statement. `ready` is reserved for a future guest
-    /// that can accept an explicit target, resize the identified filesystem, and prove
-    /// the result; a package containing `resize2fs` or `btrfs` alone is not enough.
+    /// stopped guest did not make a statement. `ready` means the guest can accept an
+    /// explicit target, resize the identified filesystem, and prove the result; a
+    /// package containing `resize2fs` or `btrfs` alone is not enough.
     public enum GuestCapability: String, Codable, Equatable, Sendable {
         case unknown
         case unavailable

@@ -1322,10 +1322,14 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
                 case .willCreate:
                     // No filesystem exists yet. The normal first boot will create a
                     // sparse image at this capacity, so do not boot merely to resize.
+                    // Persist only after the stopped-state guard above accepted this
+                    // request; a refused running grow must not change configuration.
+                    try persistConfiguredDiskSizeGiB(targetGiB)
                     setConfiguredDiskSizeGiB(targetGiB)
                     done.fire(.success(()))
                     return
                 case .matchesConfiguration:
+                    try persistConfiguredDiskSizeGiB(targetGiB)
                     setConfiguredDiskSizeGiB(targetGiB)
                     done.fire(.success(()))
                     return
@@ -1380,7 +1384,7 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
                 guard let self else {
                     return done.fire(.failure(CompletionOnce.managerGone))
                 }
-                let result = self.obtainDiskGrowthProof(journal: journal)
+                let result = self.obtainDiskGrowthProof(journal: journal, targetGiB: targetGiB)
                 self.queue.async { [weak self] in
                     self?.finishDiskGrowth(result, targetGiB: targetGiB, done: done)
                 }
@@ -1391,7 +1395,10 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
     /// A missing control server is expected while a guest is booting. A guest that
     /// answers but lacks the protocol, or rejects its grow tool, fails immediately and
     /// leaves the journal as the only recovery authority.
-    private func obtainDiskGrowthProof(journal: MorbDiskGrowth.Journal) -> Result<Void, Error> {
+    private func obtainDiskGrowthProof(
+        journal: MorbDiskGrowth.Journal,
+        targetGiB: Int
+    ) -> Result<Void, Error> {
         let deadline = Date().addingTimeInterval(VMManager.controlReadyTimeout)
         var lastError: Error = MorbError.timeout("guest control did not answer")
         while Date() < deadline {
@@ -1440,6 +1447,11 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
                     completed.phase = .guestProved
                     completed.proof = journalProof
                     try MorbDiskGrowth.storeJournal(completed)
+                    // The physical image and guest filesystem are now proven. Commit
+                    // the user-visible target before dropping the recovery journal:
+                    // if this preserving write fails, retry re-verifies the guest and
+                    // can finish the config commit without ever shrinking the image.
+                    try persistConfiguredDiskSizeGiB(targetGiB)
                     try MorbDiskGrowth.removeJournal()
                     return .success(())
                 } catch let error as MorbError {
@@ -1484,6 +1496,20 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
         diskCapacityLock.lock()
         configuredDiskSizeGiB = max(1, value)
         diskCapacityLock.unlock()
+    }
+
+    /// Commits the next-boot capacity only at a transaction point that already passed
+    /// the VM lifecycle guard. This owns the last durable step for the transaction,
+    /// so a CLI/direct request cannot leave `disk_size_gib` ahead of a refused or
+    /// unproved host image.
+    private func persistConfiguredDiskSizeGiB(_ targetGiB: Int) throws {
+        let saved = try MorbConfig.load()
+        var requested = saved
+        requested.diskSizeGiB = targetGiB
+        let changed = MorbConfig.changedKeys(from: saved, to: requested)
+        if !changed.isEmpty {
+            _ = try requested.savePreservingFile(expected: saved, changing: changed)
+        }
     }
 
     private var effectiveDiskSizeGiB: Int {

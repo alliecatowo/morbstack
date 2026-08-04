@@ -137,15 +137,7 @@ public enum MorbDiskGrowth {
     public static func loadJournal(url: URL = MorbPaths.diskGrowJournal) throws -> Journal? {
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         do {
-            let journal = try JSONDecoder().decode(Journal.self, from: Data(contentsOf: url))
-            guard journal.version == journalVersion else {
-                throw MorbError.protocolViolation(
-                    "unsupported disk-grow journal version \(journal.version); refusing to alter the disk")
-            }
-            guard journal.originalBytes > 0, journal.targetBytes > journal.originalBytes else {
-                throw MorbError.protocolViolation("disk-grow journal has an invalid capacity range")
-            }
-            return journal
+            return try decodeJournal(Data(contentsOf: url))
         } catch let error as MorbError {
             throw error
         } catch {
@@ -158,9 +150,7 @@ public enum MorbDiskGrowth {
     /// directory. The durable ordering is the safety contract: a crash cannot leave
     /// `ftruncate` as the only evidence of a planned filesystem resize.
     public static func storeJournal(_ journal: Journal, url: URL = MorbPaths.diskGrowJournal) throws {
-        guard journal.version == journalVersion else {
-            throw MorbError.protocolViolation("refusing to write an unknown disk-grow journal version")
-        }
+        try validateJournal(journal)
         let data: Data
         do {
             let encoder = JSONEncoder()
@@ -190,6 +180,58 @@ public enum MorbDiskGrowth {
         }
         try syncDirectory(containing: url)
         completed = true
+    }
+
+    /// Decodes the recoverable host journal without touching a disk or the
+    /// filesystem. This is deliberately internal rather than file-backed so the
+    /// schema and recovery invariants have hermetic coverage.
+    static func decodeJournal(_ data: Data) throws -> Journal {
+        let journal: Journal
+        do {
+            journal = try JSONDecoder().decode(Journal.self, from: data)
+        } catch {
+            throw MorbError.protocolViolation(
+                "could not decode disk-grow journal: \(error.localizedDescription)")
+        }
+        try validateJournal(journal)
+        return journal
+    }
+
+    /// Rejects a structurally contradictory journal before it can become recovery
+    /// authority. The image identity is checked separately against the opened file;
+    /// this method is intentionally pure so it can validate an interrupted state
+    /// before any mutation is considered.
+    static func validateJournal(_ journal: Journal) throws {
+        guard journal.version == journalVersion else {
+            throw MorbError.protocolViolation(
+                "unsupported disk-grow journal version \(journal.version); refusing to alter the disk")
+        }
+        guard !journal.imagePath.isEmpty,
+              journal.originalBytes > 0,
+              journal.targetBytes > journal.originalBytes
+        else {
+            throw MorbError.protocolViolation("disk-grow journal has an invalid identity or capacity range")
+        }
+
+        switch journal.phase {
+        case .prepared, .hostGrown:
+            guard journal.proof == nil else {
+                throw MorbError.protocolViolation(
+                    "disk-grow journal carries a guest proof before the guest-proved phase")
+            }
+        case .guestProved:
+            guard let proof = journal.proof else {
+                throw MorbError.protocolViolation(
+                    "disk-grow journal reached guest-proved without a guest proof")
+            }
+            // A terminal journal may be replayed after a crash, but its stored proof
+            // must still satisfy the same evidence threshold that applied before the
+            // phase was advanced. Temporarily remove the terminal allowance so a
+            // forged `resized: false` proof cannot enter recovery.
+            var unproven = journal
+            unproven.phase = .hostGrown
+            try validateGuestProof(proof, journal: unproven)
+        }
     }
 
     /// Removes a fully proved journal and syncs its parent. No caller may invoke this

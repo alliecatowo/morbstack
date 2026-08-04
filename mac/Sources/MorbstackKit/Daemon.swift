@@ -712,8 +712,8 @@ public final class Daemon {
             let forwards = forwarder.activeForwards
             let failedForwards = forwarder.failedForwards
             let liveShareBridge = liveShareBridgeDiagnostic()
-            // `disk-grow` is explicitly preceded by a preserving config write from
-            // the app or CLI. Reload this one field for status so the daemon never
+            // A successful disk-growth transaction commits `disk_size_gib` before it
+            // clears its recovery journal. Reload this one field so the daemon never
             // reports its startup snapshot after a successful transaction.
             let configuredDiskGiB = (try? MorbConfig.load())?.diskSizeGiB ?? config.diskSizeGiB
             let diskCapacity = MorbDiskCapacity.inspect(configuredGiB: configuredDiskGiB)
@@ -803,24 +803,14 @@ public final class Daemon {
             return awaitVMOperation("start") { self.vm.start(completion: $0) }
 
         case "disk-grow":
-            // The target must agree with the latest preserving config write. That
-            // keeps one source of truth for the next daemon start and prevents a
-            // caller from mutating the image to an unrecorded capacity.
             guard let rawTarget = request.args?["target_gib"],
                   let targetGiB = Int(rawTarget), targetGiB > 0
             else {
                 return .failure("disk-grow requires a positive target_gib argument")
             }
-            do {
-                let saved = try MorbConfig.load()
-                guard saved.diskSizeGiB == targetGiB else {
-                    return .failure(
-                        "disk-grow target \(targetGiB) GiB does not match disk_size_gib "
-                            + "(\(saved.diskSizeGiB) GiB); save the requested capacity first")
-                }
-            } catch {
-                return .failure("could not read disk_size_gib before growing the disk: \(error)")
-            }
+            // VMManager owns both the stopped-state proof and the final preserving
+            // config write. Saving first made a running/refused CLI request describe a
+            // larger disk that was never grown.
             // The proxy stays closed through both host mutation and the guest proof;
             // queued Docker clients are released by VMManager only after completion.
             proxy.beginOrderlyShutdown()

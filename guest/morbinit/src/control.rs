@@ -484,29 +484,38 @@ fn handle_disk_resize(fields: &std::collections::HashMap<String, Value>) -> Vec<
     };
 
     match crate::disk::grow_mounted_data(target_bytes) {
-        Ok(proof) => jsonlite::emit(&[
-            ("type", Value::Str("disk_resize".to_string())),
-            ("device", Value::Str(proof.device)),
-            ("mount_point", Value::Str(proof.mount_point)),
-            ("filesystem", Value::Str(proof.filesystem)),
-            ("device_bytes", Value::Int(proof.device_bytes)),
-            (
-                "before_filesystem_bytes",
-                Value::Int(proof.before_filesystem_bytes),
-            ),
-            (
-                "after_filesystem_bytes",
-                Value::Int(proof.after_filesystem_bytes),
-            ),
-            ("resized", Value::Bool(proof.resized)),
-            ("previously_proved", Value::Bool(proof.previously_proved)),
-        ])
-        .into_bytes(),
+        Ok(proof) => disk_resize_success_response(proof),
         Err(error) => {
             log::log(&format!("disk_resize refused: {}", error));
             error_response(&error)
         }
     }
+}
+
+/// The successful half of the MRB0 `disk_resize` reply schema.
+///
+/// Keep this separate from `error_response`: a refusal is intentionally the compact
+/// `{type,message}` schema, while a success must carry every proof field the
+/// host validates against its durable journal.
+fn disk_resize_success_response(proof: crate::disk::ResizeProof) -> Vec<u8> {
+    jsonlite::emit(&[
+        ("type", Value::Str("disk_resize".to_string())),
+        ("device", Value::Str(proof.device)),
+        ("mount_point", Value::Str(proof.mount_point)),
+        ("filesystem", Value::Str(proof.filesystem)),
+        ("device_bytes", Value::Int(proof.device_bytes)),
+        (
+            "before_filesystem_bytes",
+            Value::Int(proof.before_filesystem_bytes),
+        ),
+        (
+            "after_filesystem_bytes",
+            Value::Int(proof.after_filesystem_bytes),
+        ),
+        ("resized", Value::Bool(proof.resized)),
+        ("previously_proved", Value::Bool(proof.previously_proved)),
+    ])
+    .into_bytes()
 }
 
 /// The `k8s` message family: `{"type":"k8s","action":"..."}`.
@@ -1051,6 +1060,64 @@ mod tests {
             second_fields.get("type"),
             Some(&Value::Str("ok".to_string()))
         );
+    }
+
+    #[test]
+    fn disk_resize_success_reply_has_every_host_proof_field() {
+        let response = disk_resize_success_response(crate::disk::ResizeProof {
+            device: "/dev/vda".to_string(),
+            mount_point: "/var/lib/docker".to_string(),
+            filesystem: "ext4".to_string(),
+            device_bytes: 137_438_953_472,
+            before_filesystem_bytes: 68_719_476_736,
+            after_filesystem_bytes: 137_438_953_472,
+            resized: true,
+            previously_proved: false,
+        });
+        let fields = jsonlite::parse(std::str::from_utf8(&response).unwrap()).unwrap();
+
+        assert_eq!(
+            fields.get("type"),
+            Some(&Value::Str("disk_resize".to_string()))
+        );
+        assert_eq!(
+            fields.get("device"),
+            Some(&Value::Str("/dev/vda".to_string()))
+        );
+        assert_eq!(
+            fields.get("mount_point"),
+            Some(&Value::Str("/var/lib/docker".to_string()))
+        );
+        assert_eq!(
+            fields.get("filesystem"),
+            Some(&Value::Str("ext4".to_string()))
+        );
+        assert_eq!(
+            fields.get("device_bytes"),
+            Some(&Value::Int(137_438_953_472))
+        );
+        assert_eq!(
+            fields.get("before_filesystem_bytes"),
+            Some(&Value::Int(68_719_476_736))
+        );
+        assert_eq!(
+            fields.get("after_filesystem_bytes"),
+            Some(&Value::Int(137_438_953_472))
+        );
+        assert_eq!(fields.get("resized"), Some(&Value::Bool(true)));
+        assert_eq!(fields.get("previously_proved"), Some(&Value::Bool(false)));
+    }
+
+    #[test]
+    fn disk_resize_rejection_uses_the_compact_error_schema() {
+        let fields = std::collections::HashMap::new();
+        let response = handle_disk_resize(&fields);
+        let reply = jsonlite::parse(std::str::from_utf8(&response).unwrap()).unwrap();
+
+        assert_eq!(reply.get("type"), Some(&Value::Str("error".to_string())));
+        assert!(matches!(reply.get("message"), Some(Value::Str(_))));
+        assert!(!reply.contains_key("device"));
+        assert!(!reply.contains_key("mount_point"));
     }
 
     // ---- the shutdown handshake -------------------------------------------

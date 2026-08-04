@@ -248,6 +248,16 @@ public struct GuestDiskResizeProof: Codable, Equatable, Sendable {
     }
 }
 
+/// The discriminant shared by the two legal replies to `disk_resize`.
+///
+/// A refusal deliberately has only `type` and `message`; it is not a partial
+/// success proof. Decode this envelope before the strict success schema so an
+/// honest guest refusal cannot be misreported as a missing `device` field.
+private struct GuestDiskResizeReplyEnvelope: Decodable {
+    let type: String
+    let message: String?
+}
+
 /// A synchronous request/response client for the guest control channel.
 ///
 /// The caller supplies a connected vsock file descriptor (see
@@ -359,14 +369,44 @@ public final class GuestControl {
         let payload = try JSONEncoder().encode(
             GuestRequest(type: "disk_resize", targetBytes: targetBytes))
         let reply = try sendRaw(payload: payload, describing: "disk_resize", timeout: timeout)
-        let proof = try JSONDecoder().decode(GuestDiskResizeProof.self, from: reply)
-        if proof.type == "error" {
-            throw MorbError.protocolViolation("guest reported: \(proof.message ?? "disk resize failed")")
+        return try Self.decodeDiskResizeReply(reply)
+    }
+
+    /// Decodes the exact two-variant MRB0 `disk_resize` reply schema.
+    ///
+    /// Kept separately testable from a live vsock exchange so the host remains
+    /// compatible with the guest's intentional, compact error response:
+    /// `{"type":"error","message":"…"}`. A successful response remains strict
+    /// and must carry every field in ``GuestDiskResizeProof``.
+    static func decodeDiskResizeReply(_ payload: Data) throws -> GuestDiskResizeProof {
+        let decoder = JSONDecoder()
+        let envelope: GuestDiskResizeReplyEnvelope
+        do {
+            envelope = try decoder.decode(GuestDiskResizeReplyEnvelope.self, from: payload)
+        } catch {
+            throw MorbError.protocolViolation(
+                "guest returned a malformed disk_resize reply: \(error.localizedDescription)")
         }
-        guard proof.type == "disk_resize" else {
-            throw MorbError.protocolViolation("expected `disk_resize` reply, got `\(proof.type)`")
+
+        if envelope.type == "error" {
+            guard let message = envelope.message?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !message.isEmpty
+            else {
+                throw MorbError.protocolViolation(
+                    "guest returned a malformed disk_resize error without a message")
+            }
+            throw MorbError.protocolViolation("guest reported: \(message)")
         }
-        return proof
+        guard envelope.type == "disk_resize" else {
+            throw MorbError.protocolViolation("expected `disk_resize` reply, got `\(envelope.type)`")
+        }
+
+        do {
+            return try decoder.decode(GuestDiskResizeProof.self, from: payload)
+        } catch {
+            throw MorbError.protocolViolation(
+                "guest returned a malformed disk_resize proof: \(error.localizedDescription)")
+        }
     }
 
     // MARK: - Framing

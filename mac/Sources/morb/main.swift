@@ -431,17 +431,13 @@ case "disk":
                 }
             }
 
-            let loaded = try MorbConfig.load()
-            var requested = loaded
-            requested.diskSizeGiB = targetGiB
-            let changed = MorbConfig.changedKeys(from: loaded, to: requested)
-            if !changed.isEmpty {
-                try requested.savePreservingFile(expected: loaded, changing: changed)
-            }
         } catch {
             fail((error as? MorbError)?.description ?? error.localizedDescription, code: 2)
         }
 
+        // VMManager commits disk_size_gib only after the stopped-state guard and the
+        // complete host/guest proof transaction. In particular, a running VM refusal
+        // must leave the configured capacity unchanged.
         let response = callDaemon(
             DaemonRequest(cmd: "disk-grow", args: ["target_gib": String(targetGiB)]), timeout: 120)
         finish(response) { data in
