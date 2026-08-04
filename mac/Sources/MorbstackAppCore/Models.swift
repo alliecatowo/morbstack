@@ -262,6 +262,10 @@ struct ContainerSummary: Identifiable, Sendable, Hashable {
     /// container is running. `nil` means the app has not received that fact and must
     /// retain Docker's original status prose instead of estimating a start time.
     var startedAt: Date? = nil
+    /// Named volumes listed by Docker as mounts on this container. This is a compact
+    /// relationship index for the Volumes inspector, not a substitute for the
+    /// container's full inspect document.
+    var volumeNames: [String] = []
 
     var isRunning: Bool { state == "running" }
 
@@ -373,6 +377,9 @@ struct VolumeSummary: Identifiable, Sendable, Hashable {
     var size: Int64?
     /// Containers holding a reference; `nil` when unknown.
     var refCount: Int?
+    /// Docker-managed labels reported by the volume list endpoint. An empty map means
+    /// no labels were reported, not that labels were intentionally hidden.
+    var labels: [String: String] = [:]
 
     var id: String { name }
 
@@ -396,6 +403,144 @@ struct NetworkSummary: Identifiable, Sendable, Hashable {
 
     /// Docker's three built-ins, which cannot be removed.
     var isBuiltIn: Bool { ["bridge", "host", "none"].contains(name) }
+}
+
+/// The selected network's complete inspect document, normalized into facts that can be
+/// shown in a native inspector. This stays separate from ``NetworkSummary`` so the
+/// inventory does not issue an expensive inspection for every row merely to fill a
+/// detail column that may never be opened.
+struct NetworkInspection: Identifiable, Sendable, Hashable {
+
+    struct KeyValue: Identifiable, Sendable, Hashable {
+        let key: String
+        let value: String
+
+        var id: String { key }
+    }
+
+    struct IPAMConfiguration: Identifiable, Sendable, Hashable {
+        let subnet: String?
+        let gateway: String?
+        let ipRange: String?
+        let auxiliaryAddresses: [KeyValue]
+
+        var id: String {
+            [subnet, gateway, ipRange].compactMap { $0 }.joined(separator: "|")
+        }
+    }
+
+    struct Member: Identifiable, Sendable, Hashable {
+        let id: String
+        let name: String
+        let endpointID: String?
+        let macAddress: String?
+        let ipv4Address: String?
+        let ipv6Address: String?
+        /// Docker does not normally include aliases in a network inspection, but keep
+        /// an explicitly returned field instead of inventing aliases from a container
+        /// name when an Engine implementation does supply one.
+        let aliases: [String]
+    }
+
+    let id: String
+    let name: String
+    let driver: String
+    let scope: String
+    let enableIPv6: Bool?
+    let isInternal: Bool?
+    let isAttachable: Bool?
+    let isIngress: Bool?
+    let isConfigOnly: Bool?
+    let configFrom: String?
+    let ipamDriver: String?
+    let ipamConfigurations: [IPAMConfiguration]
+    let options: [KeyValue]
+    let labels: [KeyValue]
+    let members: [Member]
+
+    init(
+        id: String,
+        name: String,
+        driver: String,
+        scope: String,
+        enableIPv6: Bool?,
+        isInternal: Bool?,
+        isAttachable: Bool?,
+        isIngress: Bool?,
+        isConfigOnly: Bool?,
+        configFrom: String?,
+        ipamDriver: String?,
+        ipamConfigurations: [IPAMConfiguration],
+        options: [KeyValue],
+        labels: [KeyValue],
+        members: [Member]
+    ) {
+        self.id = id
+        self.name = name
+        self.driver = driver
+        self.scope = scope
+        self.enableIPv6 = enableIPv6
+        self.isInternal = isInternal
+        self.isAttachable = isAttachable
+        self.isIngress = isIngress
+        self.isConfigOnly = isConfigOnly
+        self.configFrom = configFrom
+        self.ipamDriver = ipamDriver
+        self.ipamConfigurations = ipamConfigurations
+        self.options = options
+        self.labels = labels
+        self.members = members
+    }
+
+    init(_ wire: Wire.Network) {
+        id = wire.Id
+        name = wire.Name
+        driver = wire.Driver ?? "bridge"
+        scope = wire.Scope ?? "local"
+        enableIPv6 = wire.EnableIPv6
+        isInternal = wire.Internal
+        isAttachable = wire.Attachable
+        isIngress = wire.Ingress
+        isConfigOnly = wire.ConfigOnly
+        configFrom = wire.ConfigFrom?.Network.flatMap { $0.isEmpty ? nil : $0 }
+        ipamDriver = wire.IPAM?.Driver.flatMap { $0.isEmpty ? nil : $0 }
+        ipamConfigurations = (wire.IPAM?.Config ?? []).map(IPAMConfiguration.init)
+        options = Self.keyValues(wire.Options)
+        labels = Self.keyValues(wire.Labels)
+        members = (wire.Containers ?? [:])
+            .map { id, member in Member(id: id, member) }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
+    private static func keyValues(_ values: [String: String]?) -> [KeyValue] {
+        (values ?? [:])
+            .map { KeyValue(key: $0.key, value: $0.value) }
+            .sorted { $0.key.localizedStandardCompare($1.key) == .orderedAscending }
+    }
+}
+
+extension NetworkInspection.IPAMConfiguration {
+    init(_ wire: Wire.Network.IPAM.Configuration) {
+        subnet = wire.Subnet.flatMap { $0.isEmpty ? nil : $0 }
+        gateway = wire.Gateway.flatMap { $0.isEmpty ? nil : $0 }
+        ipRange = wire.IPRange.flatMap { $0.isEmpty ? nil : $0 }
+        auxiliaryAddresses = (wire.AuxAddress ?? [:])
+            .map { NetworkInspection.KeyValue(key: $0.key, value: $0.value) }
+            .sorted { $0.key.localizedStandardCompare($1.key) == .orderedAscending }
+    }
+}
+
+extension NetworkInspection.Member {
+    init(id: String, _ wire: Wire.Network.Container) {
+        self.id = id
+        name = wire.Name?.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            .flatMap { $0.isEmpty ? nil : $0 } ?? String(id.prefix(12))
+        endpointID = wire.EndpointID.flatMap { $0.isEmpty ? nil : $0 }
+        macAddress = wire.MacAddress.flatMap { $0.isEmpty ? nil : $0 }
+        ipv4Address = wire.IPv4Address.flatMap { $0.isEmpty ? nil : $0 }
+        ipv6Address = wire.IPv6Address.flatMap { $0.isEmpty ? nil : $0 }
+        aliases = (wire.Aliases ?? []).filter { !$0.isEmpty }.sorted()
+    }
 }
 
 // MARK: - Disk
@@ -460,6 +605,70 @@ struct BuildxHistoryRecord: Identifiable, Sendable, Equatable, Hashable {
 
 /// Loading state for the independent, read-only Buildx history collection.
 enum BuildxHistoryLoadState: Equatable {
+    case idle
+    case loading
+    case loaded
+    case unavailable(String)
+}
+
+/// The current Buildx builder as reported by `docker buildx inspect`.
+///
+/// History records are scoped to this builder, but the Docker Engine API cannot
+/// identify it. Keeping the builder's own reported node status separate from history
+/// means the Builds route never tries to infer a healthy builder from a nonempty
+/// cache or a previously completed build.
+struct BuildxCurrentBuilder: Sendable, Equatable {
+    struct Node: Sendable, Equatable, Identifiable {
+        var name: String
+        var endpoint: String?
+        var status: String?
+        var buildKitVersion: String?
+        var platforms: String?
+        var error: String?
+
+        var id: String { name }
+
+        /// Fields observed for this exact node, in Buildx's own vocabulary. Missing
+        /// fields remain absent; the inspector does not infer that a node is healthy.
+        var reportedFacts: String? {
+            let values = [status, buildKitVersion, platforms, error].compactMap { $0 }
+            return values.isEmpty ? nil : values.joined(separator: " · ")
+        }
+    }
+
+    var name: String
+    var driver: String?
+    var lastActivity: String?
+    var nodes: [Node]
+
+    /// The status tokens that Buildx reported for the builder's nodes. This remains
+    /// deliberately literal: the UI does not convert a missing or mixed node status
+    /// into an invented overall health claim.
+    var reportedNodeStatus: String? {
+        let statuses = orderedUnique(nodes.compactMap(\.status))
+        return statuses.isEmpty ? nil : statuses.joined(separator: ", ")
+    }
+
+    var reportedBuildKitVersions: String? {
+        let versions = orderedUnique(nodes.compactMap(\.buildKitVersion))
+        return versions.isEmpty ? nil : versions.joined(separator: ", ")
+    }
+
+    var reportedPlatforms: String? {
+        let platforms = orderedUnique(nodes.compactMap(\.platforms))
+        return platforms.isEmpty ? nil : platforms.joined(separator: ", ")
+    }
+
+    private func orderedUnique(_ values: [String]) -> [String] {
+        var seen: Set<String> = []
+        return values.filter { seen.insert($0).inserted }
+    }
+}
+
+/// Loading state for the independent current-builder read. A history list can still
+/// succeed when an older Buildx cannot report builder inspection details, so this must
+/// not be folded into `BuildxHistoryLoadState`.
+enum BuildxCurrentBuilderLoadState: Equatable {
     case idle
     case loading
     case loaded
@@ -607,6 +816,20 @@ enum Wire {
         var Created: Double?
         var Ports: [Port]?
         var Labels: [String: String]?
+        var Mounts: [ContainerMount]?
+    }
+
+    /// The small mount projection the container list endpoint includes. The complete
+    /// mount contract stays in `TrackBInspectDetails`; this just lets Volumes name the
+    /// containers currently known to mount a selected named volume.
+    struct ContainerMount: Codable, Sendable {
+        var Name: String?
+        var type: String?
+
+        enum CodingKeys: String, CodingKey {
+            case Name
+            case type = "Type"
+        }
     }
 
     /// An OCI platform block, as it appears inside `Descriptor` and at the top level of
@@ -656,6 +879,7 @@ enum Wire {
         var Name: String
         var Driver: String?
         var Mountpoint: String?
+        var Labels: [String: String]?
         var UsageData: VolumeUsage?
     }
 
@@ -668,13 +892,40 @@ enum Wire {
         var Name: String
         var Driver: String?
         var Scope: String?
-        var Containers: [String: AnyEmpty]?
+        var EnableIPv6: Bool?
+        var Internal: Bool?
+        var Attachable: Bool?
+        var Ingress: Bool?
+        var ConfigOnly: Bool?
+        var ConfigFrom: ConfigFrom?
+        var IPAM: IPAM?
+        var Options: [String: String]?
+        var Labels: [String: String]?
+        var Containers: [String: Container]?
 
-        /// The container map's values are large and entirely unused; this decodes them
-        /// away without dragging in the endpoint schema.
-        struct AnyEmpty: Codable, Sendable {
-            init(from decoder: Decoder) throws { _ = decoder }
-            func encode(to encoder: Encoder) throws { _ = encoder }
+        struct ConfigFrom: Codable, Sendable {
+            var Network: String?
+        }
+
+        struct IPAM: Codable, Sendable {
+            var Driver: String?
+            var Config: [Configuration]?
+
+            struct Configuration: Codable, Sendable {
+                var Subnet: String?
+                var Gateway: String?
+                var IPRange: String?
+                var AuxAddress: [String: String]?
+            }
+        }
+
+        struct Container: Codable, Sendable {
+            var Name: String?
+            var EndpointID: String?
+            var MacAddress: String?
+            var IPv4Address: String?
+            var IPv6Address: String?
+            var Aliases: [String]?
         }
     }
 
@@ -806,6 +1057,14 @@ extension ContainerSummary {
         }
         ports.sort { ($0.hostPort ?? Int.max, $0.containerPort) < ($1.hostPort ?? Int.max, $1.containerPort) }
 
+        let volumeNames = Array(Set((wire.Mounts ?? []).compactMap { mount -> String? in
+            guard mount.type?.lowercased() == "volume",
+                  let name = mount.Name,
+                  !name.isEmpty
+            else { return nil }
+            return name
+        })).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+
         self.init(
             id: wire.Id,
             names: names,
@@ -816,7 +1075,8 @@ extension ContainerSummary {
             composeProject: labels["com.docker.compose.project"],
             composeService: labels["com.docker.compose.service"],
             ports: ports,
-            createdAt: Date(timeIntervalSince1970: wire.Created ?? 0))
+            createdAt: Date(timeIntervalSince1970: wire.Created ?? 0),
+            volumeNames: volumeNames)
     }
 }
 
@@ -857,7 +1117,8 @@ extension VolumeSummary {
             driver: wire.Driver ?? "local",
             mountpoint: wire.Mountpoint ?? "",
             size: wire.UsageData?.Size.flatMap { $0 < 0 ? nil : $0 },
-            refCount: wire.UsageData?.RefCount.flatMap { $0 < 0 ? nil : $0 })
+            refCount: wire.UsageData?.RefCount.flatMap { $0 < 0 ? nil : $0 },
+            labels: wire.Labels ?? [:])
     }
 }
 

@@ -47,6 +47,13 @@ final class ShotDockerClient: DockerClient, @unchecked Sendable {
         return ShotFixtures.inspectJSON(for: container)
     }
 
+    override func inspectNetwork(id: String) async throws -> NetworkInspection {
+        guard let inspection = ShotFixtures.networkInspection(id: id) else {
+            throw DockerClientError.http(status: 404, message: "no such network: \(id)")
+        }
+        return inspection
+    }
+
     /// Resolve architecture deterministically. `shopfront/api` deliberately answers
     /// `amd64`; the remaining fixture images answer the host architecture. That gives
     /// the real Images feature an honest foreign-architecture branch to exercise.

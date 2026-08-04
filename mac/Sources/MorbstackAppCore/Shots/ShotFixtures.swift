@@ -311,6 +311,58 @@ enum ShotFixtures {
             containers: containers)
     }
 
+    static func networkInspection(id: String) -> NetworkInspection? {
+        guard let network = networks.first(where: { $0.id == id }) else { return nil }
+        let members = containers.prefix(network.containers).map { container in
+            NetworkInspection.Member(
+                id: container.id,
+                name: container.displayName,
+                endpointID: hex(seed: "endpoint-\(network.id)-\(container.id)", length: 64),
+                macAddress: nil,
+                ipv4Address: nil,
+                ipv6Address: nil,
+                aliases: [])
+        }
+        // Only the two Compose-default fixtures have Compose metadata. Giving the
+        // Docker-managed `bridge` network a made-up `com.docker.compose.project=bridge`
+        // label would defeat fixture mode's purpose: it must exercise the actual inspect
+        // shape without inventing a plausible story around it.
+        let defaultSuffix = "_default"
+        let composeProject = network.name.hasSuffix(defaultSuffix)
+            ? String(network.name.dropLast(defaultSuffix.count))
+            : nil
+        let labels: [NetworkInspection.KeyValue] = composeProject.map {
+            [
+                .init(key: "com.docker.compose.network", value: "default"),
+                .init(key: "com.docker.compose.project", value: $0),
+            ]
+        } ?? []
+        return NetworkInspection(
+            id: network.id,
+            name: network.name,
+            driver: network.driver,
+            scope: network.scope,
+            enableIPv6: false,
+            isInternal: network.name.contains("internal"),
+            isAttachable: false,
+            isIngress: false,
+            isConfigOnly: false,
+            configFrom: nil,
+            ipamDriver: network.driver == "bridge" ? "default" : nil,
+            ipamConfigurations: network.driver == "bridge"
+                ? [.init(
+                    subnet: "172.28.0.0/16",
+                    gateway: "172.28.0.1",
+                    ipRange: nil,
+                    auxiliaryAddresses: [])]
+                : [],
+            options: network.driver == "bridge"
+                ? [.init(key: "com.docker.network.bridge.enable_icc", value: "true")]
+                : [],
+            labels: labels,
+            members: members)
+    }
+
     // MARK: - Disk
 
     /// Derived from the lists above rather than typed out beside them.

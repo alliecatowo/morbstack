@@ -455,4 +455,83 @@ final class TrackCResourceListTests: XCTestCase {
         XCTAssertTrue(TrackCNetworkList.matches(subject, query: "net-my_app"))
         XCTAssertFalse(TrackCNetworkList.matches(subject, query: "overlay"))
     }
+
+    func testNetworkInspectionKeepsDockerConfigurationAndMembersSeparateAndSortable() throws {
+        let payload = """
+        {
+          "Id": "network-id",
+          "Name": "project_default",
+          "Driver": "bridge",
+          "Scope": "local",
+          "EnableIPv6": true,
+          "Internal": false,
+          "Attachable": true,
+          "Ingress": false,
+          "ConfigOnly": false,
+          "ConfigFrom": { "Network": "template-network" },
+          "IPAM": {
+            "Driver": "default",
+            "Config": [{
+              "Subnet": "172.28.0.0/16",
+              "Gateway": "172.28.0.1",
+              "IPRange": "172.28.0.0/24",
+              "AuxAddress": {
+                "database": "172.28.0.10",
+                "router": "172.28.0.2"
+              }
+            }]
+          },
+          "Options": {
+            "com.docker.network.bridge.mtu": "1500",
+            "com.docker.network.bridge.name": "br0"
+          },
+          "Labels": {
+            "com.docker.compose.project": "project",
+            "com.docker.compose.network": "default"
+          },
+          "Containers": {
+            "container-worker": {
+              "Name": "/worker",
+              "EndpointID": "endpoint-worker",
+              "MacAddress": "02:42:ac:1c:00:03",
+              "IPv4Address": "172.28.0.3/16",
+              "IPv6Address": "fd00::3/64"
+            },
+            "container-api": {
+              "Name": "/api",
+              "EndpointID": "endpoint-api",
+              "IPv4Address": "172.28.0.2/16",
+              "Aliases": ["project-api", "api"]
+            }
+          }
+        }
+        """
+
+        let wire = try JSONDecoder().decode(Wire.Network.self, from: Data(payload.utf8))
+        let inspection = NetworkInspection(wire)
+
+        XCTAssertEqual(inspection.configFrom, "template-network")
+        XCTAssertEqual(inspection.ipamDriver, "default")
+        XCTAssertEqual(inspection.ipamConfigurations.count, 1)
+        XCTAssertEqual(inspection.ipamConfigurations[0].subnet, "172.28.0.0/16")
+        XCTAssertEqual(
+            inspection.ipamConfigurations[0].auxiliaryAddresses.map(\.key),
+            ["database", "router"])
+        XCTAssertEqual(inspection.options.map(\.key), [
+            "com.docker.network.bridge.mtu", "com.docker.network.bridge.name",
+        ])
+        XCTAssertEqual(inspection.labels.map(\.key), [
+            "com.docker.compose.network", "com.docker.compose.project",
+        ])
+
+        // The endpoint map is keyed by opaque ID. The inspector must present its
+        // human names in a stable order and keep addresses/aliases associated with
+        // their exact member rather than flattening them into generic network facts.
+        XCTAssertEqual(inspection.members.map(\.name), ["api", "worker"])
+        XCTAssertEqual(inspection.members[0].id, "container-api")
+        XCTAssertEqual(inspection.members[0].ipv4Address, "172.28.0.2/16")
+        XCTAssertEqual(inspection.members[0].aliases, ["api", "project-api"])
+        XCTAssertEqual(inspection.members[1].macAddress, "02:42:ac:1c:00:03")
+        XCTAssertEqual(inspection.members[1].ipv6Address, "fd00::3/64")
+    }
 }

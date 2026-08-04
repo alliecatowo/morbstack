@@ -39,6 +39,10 @@ enum TrackCVolumeList {
         return volume.name.localizedCaseInsensitiveContains(needle)
             || volume.driver.localizedCaseInsensitiveContains(needle)
             || volume.mountpoint.localizedCaseInsensitiveContains(needle)
+            || volume.labels.contains { key, value in
+                key.localizedCaseInsensitiveContains(needle)
+                    || value.localizedCaseInsensitiveContains(needle)
+            }
     }
 
     /// Orders volumes by one column.
@@ -128,6 +132,97 @@ struct TrackCVolumeComparator: SortComparator {
                 lhs.refCount.map(Int64.init), rhs.refCount.map(Int64.init))
         }
         return order == .forward ? result : result.reversed
+    }
+}
+
+/// One volume label, sorted once for the selected-record inspector rather than relying
+/// on the dictionary's intentionally unspecified iteration order.
+struct TrackCVolumeLabel: Identifiable, Equatable, Sendable {
+    let key: String
+    let value: String
+
+    var id: String { key }
+}
+
+/// A container currently listed by Docker as mounting a selected named volume.
+/// `VolumeSummary.refCount` remains the Engine's authoritative count; this is the
+/// human-readable relationship projection that the current container inventory can
+/// support without an inspect request per row.
+struct TrackCVolumeContainerReference: Identifiable, Equatable, Sendable {
+    let id: String
+    let name: String
+    let state: String
+    let image: String
+}
+
+/// Whether the names in the current container inventory agree with Docker's volume
+/// usage count. Neither an absent count nor a missing name is turned into a confident
+/// "unused" result.
+enum TrackCVolumeUsageEvidence: Equatable {
+    case unreported
+    case unused
+    case matches
+    case incomplete(reported: Int, listed: Int)
+    case inconsistent(reported: Int, listed: Int)
+}
+
+/// Pure selected-volume presentation decisions. Keeping this small makes the route's
+/// truthfulness rules testable without a Docker daemon or a hosted SwiftUI view.
+enum TrackCVolumeInspector {
+
+    static func labels(for volume: VolumeSummary) -> [TrackCVolumeLabel] {
+        volume.labels
+            .map { TrackCVolumeLabel(key: $0.key, value: $0.value) }
+            .sorted { $0.key.localizedStandardCompare($1.key) == .orderedAscending }
+    }
+
+    static func referencedContainers(
+        for volume: VolumeSummary,
+        in containers: [ContainerSummary]
+    ) -> [TrackCVolumeContainerReference] {
+        containers
+            .filter { $0.volumeNames.contains(volume.name) }
+            .map {
+                TrackCVolumeContainerReference(
+                    id: $0.id,
+                    name: $0.displayName,
+                    state: $0.state,
+                    image: $0.image)
+            }
+            .sorted { lhs, rhs in
+                let comparison = lhs.name.localizedStandardCompare(rhs.name)
+                return comparison == .orderedSame ? lhs.id < rhs.id : comparison == .orderedAscending
+            }
+    }
+
+    static func usageEvidence(
+        reportedReferenceCount: Int?,
+        listedReferences: Int
+    ) -> TrackCVolumeUsageEvidence {
+        guard let reportedReferenceCount else { return .unreported }
+        if reportedReferenceCount == 0 {
+            return listedReferences == 0 ? .unused : .inconsistent(
+                reported: reportedReferenceCount, listed: listedReferences)
+        }
+        if listedReferences == reportedReferenceCount { return .matches }
+        if listedReferences < reportedReferenceCount {
+            return .incomplete(reported: reportedReferenceCount, listed: listedReferences)
+        }
+        return .inconsistent(reported: reportedReferenceCount, listed: listedReferences)
+    }
+
+    static func removalConsequence(for volume: VolumeSummary) -> String {
+        switch volume.refCount {
+        case 0:
+            return "Removing permanently deletes this volume’s contents. Docker reports no container references."
+        case let count?:
+            let referenceDescription = count == 1
+                ? "1 container references"
+                : "\(count) containers reference"
+            return "Removing permanently deletes this volume’s contents. Docker will refuse while \(referenceDescription) it."
+        case nil:
+            return "Removing permanently deletes this volume’s contents. Docker did not report current usage and will refuse if the volume is attached."
+        }
     }
 }
 
@@ -240,11 +335,13 @@ struct VolumesRootView: View {
 
     @State private var unusedRemovalPlan: VolumeUnusedRemovalPlan?
     @State private var removal: VolumeSummary?
-    @State private var busy = false
+    @State private var removalProgress: String?
     @State private var operationAlert: VolumeOperationAlert?
     @State private var volumeArchiveExport: VolumeArchiveExportOperation?
     @State private var volumeArchiveExportCancellation: VolumeArchiveExportCancellation?
     @State private var volumeArchiveExportNotice: VolumeArchiveExportNotice?
+    @State private var areLabelsExpanded = false
+    @State private var areContainerReferencesExpanded = false
     /// Whether the trailing inspector column is open. SwiftUI restores this across
     /// launches for a trailing-column inspector, so it is not persisted here.
     @State private var showsInspector = true
@@ -271,21 +368,28 @@ struct VolumesRootView: View {
     }
 
     private var isPerformingVolumeOperation: Bool {
-        busy || volumeArchiveExport != nil
+        removalProgress != nil || volumeArchiveExport != nil
     }
 
     private var canExportSelectedVolume: Bool {
-        guard let selectedVolume else { return false }
-        return selectedVolume.driver == "local" && !isPerformingVolumeOperation
+        selectedVolume.map { canExport($0) } ?? false
+    }
+
+    private func canExport(_ volume: VolumeSummary) -> Bool {
+        volume.driver == "local" && !isPerformingVolumeOperation
     }
 
     private var volumeArchiveExportHelp: String {
         guard let selectedVolume else { return "Select a local volume to export" }
-        guard selectedVolume.driver == "local" else {
+        return volumeArchiveExportHelp(for: selectedVolume)
+    }
+
+    private func volumeArchiveExportHelp(for volume: VolumeSummary) -> String {
+        guard volume.driver == "local" else {
             return "Only Docker local-driver volumes can be exported"
         }
         if volumeArchiveExport != nil { return "A volume archive export is already in progress" }
-        if busy { return "Wait for the current volume operation to finish" }
+        if removalProgress != nil { return "Wait for the current volume removal to finish" }
         return "Export the selected volume as a tar archive"
     }
 
@@ -297,7 +401,7 @@ struct VolumesRootView: View {
         content
             .navigationTitle("Volumes")
             .navigationSubtitle(subtitle)
-            .searchable(text: $query, placement: .toolbar, prompt: "Name, driver, mount point")
+            .searchable(text: $query, placement: .toolbar, prompt: "Name, driver, label, or mount point")
             .toolbar { toolbarContent }
             .sheet(item: $unusedRemovalPlan) { plan in
                 VolumeUnusedRemovalReview(plan: plan) { names in
@@ -342,16 +446,7 @@ struct VolumesRootView: View {
                 Button("Cancel", role: .cancel) {}
                 Button("Remove", role: .destructive) { Task { await remove(volume) } }
             } message: { volume in
-                if volume.isUnused {
-                    Text("Everything stored in this volume is deleted permanently.")
-                } else if volume.refCount == nil {
-                    Text(
-                        "Docker did not report whether containers use this volume. The engine will refuse removal if it is still attached.")
-                } else {
-                    Text(
-                        "\(volume.refCount ?? 0) container\((volume.refCount ?? 0) == 1 ? "" : "s") "
-                        + "still use this volume. The engine will refuse unless they are removed first.")
-                }
+                Text(TrackCVolumeInspector.removalConsequence(for: volume))
             }
     }
 
@@ -398,6 +493,10 @@ struct VolumesRootView: View {
                     self.selection = visible.first?.id
                 }
             }
+            .onChange(of: selection) { _, _ in
+                areLabelsExpanded = false
+                areContainerReferencesExpanded = false
+            }
             // Selects the first row so the inspector opens with something to show —
             // the same "select the first item" convention Mail and Finder use, and the
             // fix for a resource screen that otherwise reads as half its window empty.
@@ -411,10 +510,10 @@ struct VolumesRootView: View {
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(id: "volumes.removeUnused", placement: .secondaryAction) {
-            if busy {
+            if let removalProgress {
                 ProgressView()
                     .controlSize(.small)
-                    .accessibilityLabel("Removing volumes")
+                    .accessibilityLabel(removalProgress)
             } else {
                 Button(role: .destructive) {
                     reviewUnusedVolumes()
@@ -554,37 +653,30 @@ struct VolumesRootView: View {
 
     // MARK: Detail pane
 
-    /// The inspector's contents: a native `Form`, not a stack of hand-drawn cards.
-    ///
-    /// `Form` + `LabeledContent` gives the system ownership of labels, row spacing, and
-    /// the inspector surface. Status and size stay as separate values instead of a
-    /// custom badge, keeping this dense like a native macOS inspector.
+    /// The inspector keeps selected-volume identity, real Docker usage evidence, and
+    /// consequential commands in one native `Form`. It deliberately does not imply
+    /// that a guest mount point can open in Finder or that a missing usage count means
+    /// a volume is safe to delete.
     @ViewBuilder
     private var detailPane: some View {
         if let volume = selectedVolume {
+            let labels = TrackCVolumeInspector.labels(for: volume)
+            let references = TrackCVolumeInspector.referencedContainers(
+                for: volume, in: model.containers)
+            let usageEvidence = TrackCVolumeInspector.usageEvidence(
+                reportedReferenceCount: volume.refCount,
+                listedReferences: references.count)
+
             Form {
-                Section("Volume") {
-                    LabeledContent("Name") {
+                Section("Identity") {
+                    LabeledContent("Docker Name") {
                         Text(TrackCDiskMath.volumeDisplayName(volume.name))
+                            .font(.system(.body, design: .monospaced))
                             .textSelection(.enabled)
                             .lineLimit(2)
                             .truncationMode(.middle)
                     }
-                    LabeledContent("Status", value: volume.usageStatus)
-                    LabeledContent("Size", value: volume.size.map(Formatters.bytesString) ?? "Unreported")
                     LabeledContent("Driver", value: volume.driver)
-                    LabeledContent("Guest Mount Point") {
-                        Text(volume.mountpoint.isEmpty ? "unknown" : volume.mountpoint)
-                            .font(.system(.callout, design: .monospaced))
-                            .textSelection(.enabled)
-                    }
-                    LabeledContent(
-                        "In use by",
-                        value: volume.refCount.map { "\($0) container\($0 == 1 ? "" : "s")" }
-                            ?? "unreported")
-                }
-
-                Section("Kind") {
                     LabeledContent(
                         "Volume",
                         value: TrackCDiskMath.isAnonymousVolumeName(volume.name) ? "Anonymous" : "Named")
@@ -593,6 +685,105 @@ struct VolumesRootView: View {
                         value: TrackCDiskMath.isAnonymousVolumeName(volume.name) ? "Eligible" : "Retained")
                 }
 
+                if !labels.isEmpty {
+                    DisclosureGroup(
+                        "Labels (\(labels.count))",
+                        isExpanded: $areLabelsExpanded
+                    ) {
+                        ForEach(labels) { label in
+                            LabeledContent {
+                                Text(label.value.isEmpty ? "Empty" : label.value)
+                                    .textSelection(.enabled)
+                                    .lineLimit(2)
+                                    .truncationMode(.middle)
+                            } label: {
+                                Text(label.key)
+                                    .font(.system(.body, design: .monospaced))
+                                    .textSelection(.enabled)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                        }
+                    }
+                }
+
+                Section("Storage and Use") {
+                    LabeledContent("Size", value: volume.size.map(Formatters.bytesString) ?? "Not reported")
+                    LabeledContent("Docker Usage", value: volume.usageStatus)
+                    LabeledContent("Docker References") {
+                        Text(volume.refCount.map { "\($0) container\($0 == 1 ? "" : "s")" } ?? "Not reported")
+                            .monospacedDigit()
+                    }
+                    LabeledContent("Guest Mount Point") {
+                        Text(volume.mountpoint.isEmpty ? "Not reported" : volume.mountpoint)
+                            .font(.system(.callout, design: .monospaced))
+                            .textSelection(.enabled)
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                    }
+
+                    if volume.size == nil {
+                        Text("Docker did not report this volume’s disk usage.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    usageEvidenceText(usageEvidence)
+                }
+
+                if !references.isEmpty {
+                    DisclosureGroup(
+                        "Containers in Current Inventory (\(references.count))",
+                        isExpanded: $areContainerReferencesExpanded
+                    ) {
+                        ForEach(references) { reference in
+                            LabeledContent {
+                                VStack(alignment: .trailing, spacing: 2) {
+                                    Text(reference.state.capitalized)
+                                    Text(reference.image)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                }
+                            } label: {
+                                Text(reference.name)
+                                    .font(.system(.body, design: .monospaced))
+                                    .textSelection(.enabled)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                        }
+                    }
+                }
+
+                if let removalProgress {
+                    Section("Operation") {
+                        ProgressView(removalProgress)
+                            .controlSize(.small)
+                    }
+                }
+
+                Section("Actions") {
+                    Button("Export Archive…") {
+                        chooseVolumeArchiveDestination(for: volume)
+                    }
+                    .disabled(!canExport(volume))
+                    .help(volumeArchiveExportHelp(for: volume))
+
+                    Button("Remove…", role: .destructive) {
+                        removal = volume
+                    }
+                    .disabled(isPerformingVolumeOperation)
+                    .help(
+                        isPerformingVolumeOperation
+                            ? "Wait for the current volume operation to finish"
+                            : TrackCVolumeInspector.removalConsequence(for: volume))
+
+                    Text(TrackCVolumeInspector.removalConsequence(for: volume))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
             .formStyle(.columns)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -601,6 +792,32 @@ struct VolumesRootView: View {
                 "No Volume Selected",
                 systemImage: "externaldrive",
                 description: Text("Pick a volume to see its guest mount point and what is using it."))
+        }
+    }
+
+    @ViewBuilder
+    private func usageEvidenceText(_ evidence: TrackCVolumeUsageEvidence) -> some View {
+        switch evidence {
+        case .unreported:
+            Text("Docker did not report a usage count. This volume is not treated as unused.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .unused:
+            Text("Docker reports that no containers reference this volume.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .matches:
+            EmptyView()
+        case .incomplete(let reported, let listed):
+            Text(
+                "Docker reports \(reported) container \(reported == 1 ? "reference" : "references"), but \(listed) name\(listed == 1 ? " is" : "s are") in the current inventory.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .inconsistent(let reported, let listed):
+            Text(
+                "The current container inventory lists \(listed) mounts, while Docker reports \(reported) references. Refresh before removing this volume.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -708,8 +925,8 @@ struct VolumesRootView: View {
     @MainActor
     private func remove(_ volume: VolumeSummary) async {
         guard !isPerformingVolumeOperation else { return }
-        busy = true
-        defer { busy = false }
+        removalProgress = "Removing \(TrackCDiskMath.volumeDisplayName(volume.name))…"
+        defer { removalProgress = nil }
         do {
             try await model.client.removeVolume(name: volume.name)
             if selection == volume.id { selection = nil }
@@ -725,13 +942,14 @@ struct VolumesRootView: View {
     @MainActor
     private func removeUnused(_ names: [String]) async {
         guard !names.isEmpty, !isPerformingVolumeOperation else { return }
-        busy = true
-        defer { busy = false }
+        removalProgress = "Removing 0 of \(names.count) volumes…"
+        defer { removalProgress = nil }
 
         var removed = 0
         var failures: [String] = []
 
-        for name in names {
+        for (index, name) in names.enumerated() {
+            removalProgress = "Removing \(index + 1) of \(names.count) volumes…"
             do {
                 try await model.client.removeVolume(name: name)
                 removed += 1

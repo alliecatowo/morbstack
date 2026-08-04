@@ -772,6 +772,14 @@ class DockerClient: @unchecked Sendable {
         }
     }
 
+    /// Inspects one explicitly selected network. Docker omits IPAM, options, labels,
+    /// endpoint addresses, and attached-member identities from its list response, so
+    /// this request belongs to the selected-record inspector rather than inventory
+    /// refresh.
+    func inspectNetwork(id: String) async throws -> NetworkInspection {
+        NetworkInspection(try await get(Wire.Network.self, "/networks/\(id)"))
+    }
+
     /// How many containers are attached to each of `ids`, by inspecting them.
     ///
     /// Bounded concurrency rather than one task per network: a machine with forty

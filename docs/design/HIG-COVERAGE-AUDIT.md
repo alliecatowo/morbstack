@@ -525,6 +525,49 @@ For each route, record a compact review card before calling it complete:
   keyboard/VoiceOver, reduced-transparency/contrast, and real Engine verification
   remain required before visual or runtime acceptance.
 
+### Volumes route handoff: selected-record identity and relationship evidence — 2026-08-03
+
+- **User task:** select one Docker volume to establish its identity, storage/use
+  facts, labels, known container relationships, and the consequences of export or
+  deletion. This is a record-inspection and safe-command task, not a dashboard.
+- **HIG/API read:** [Designing for macOS](https://developer.apple.com/design/human-interface-guidelines/designing-for-macos/),
+  [Lists and tables](https://developer.apple.com/design/human-interface-guidelines/lists-and-tables),
+  [Alerts](https://developer.apple.com/design/human-interface-guidelines/alerts),
+  [Sheets](https://developer.apple.com/design/human-interface-guidelines/sheets),
+  [Progress indicators](https://developer.apple.com/design/human-interface-guidelines/progress-indicators),
+  SwiftUI [Form](https://developer.apple.com/documentation/swiftui/form),
+  [ContentUnavailableView](https://developer.apple.com/documentation/swiftui/contentunavailableview),
+  and [View.inspector](https://developer.apple.com/documentation/swiftui/view/inspector(ispresented:content:)).
+- **Native choice:** the existing sortable system `Table` remains the comparison
+  surface. The selected record uses the trailing system `.inspector` with a
+  `Form`/`LabeledContent`; Docker labels and current known container relationships
+  are count-labelled system `DisclosureGroup`s, collapsed when selection changes.
+  The route adds no custom material, cards, pills, manual property grid, or custom
+  glass. Tahoe continues to own its table, toolbar, inspector, sheet, and alert
+  treatment.
+- **Data/action behavior:** volume-list labels are retained and searchable. The
+  current `/containers/json` mount projection indexes only named `volume` mounts,
+  so the inspector can list the containers currently known to mount the selected
+  name without sending an inspect request for every row. Docker's `UsageData.RefCount`
+  stays authoritative: missing counts display as **Not reported**, a smaller current
+  inventory is named as incomplete, and a disagreement tells the person to refresh;
+  none of these states is treated as unused. Disk size and guest mount point use the
+  same non-invented **Not reported** wording. The mount point remains copyable guest
+  metadata, never a Finder target. Export remains local-driver-only and routes through
+  the existing `NSSavePanel`/read-only archive flow. Remove stays a destructive
+  confirmation with its permanent-data-loss and non-forcing Docker consequence stated
+  both before and in the alert; removal uses a real indeterminate `ProgressView` with
+  an exact selected/count label while the Engine operation is in flight.
+- **Evidence:** source-only change with focused pure `VolumeInspectorTests`; no build,
+  Docker/daemon, app launch, XCUITest, or Computer Use operation ran in this parallel
+  lane. Before acceptance, an evidence owner must review an actual bundle in light and
+  dark at normal/minimum/expanded inspector widths, narrow table/toolbar overflow,
+  labels and long mount/container text, keyboard/VoiceOver disclosure order, reduced
+  transparency/increased contrast, empty/search/unreported/inconsistent states, and
+  the opened-then-cancelled archive/removal sheets. Real Engine evidence must include
+  a labeled volume and containers mounting it, plus an intentionally unreported or
+  changed-inventory case; no destructive/export action is approved by this source note.
+
 ## Required evidence at handoff
 
 ### Live evidence — 2026-08-03
