@@ -165,6 +165,7 @@ struct MorbCommands: Commands {
     @Binding var isCLISetupPresented: Bool
     @FocusedValue(\.routeRefreshAction) private var routeRefreshAction
     @FocusedValue(\.imageArchiveExportAction) private var imageArchiveExportAction
+    @FocusedValue(\.imageArchiveImportAction) private var imageArchiveImportAction
     @FocusedValue(\.runLocalImageAction) private var runLocalImageAction
     @FocusedValue(\.composeFileEditorCommandActions) private var composeFileEditorCommandActions
     @FocusedValue(\.composeSourceValidationCommandActions) private var composeSourceValidationCommandActions
@@ -240,6 +241,11 @@ struct MorbCommands: Commands {
         }
 
         CommandMenu("Image") {
+            Button("Load Image Archive…") {
+                imageArchiveImportAction?()
+            }
+            .disabled(imageArchiveImportAction == nil)
+
             Button("Run Selected Local Image…") {
                 runLocalImageAction?()
             }

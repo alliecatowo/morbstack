@@ -52,7 +52,7 @@ public struct EngineResponse: Sendable {
 /// Errors this client raises. Distinct from ``MorbError`` so callers can tell an
 /// engine-said-no (which has a status code and a message the user should see) from a
 /// socket-level failure (which usually means the VM is not running).
-public enum EngineError: Error, CustomStringConvertible {
+public enum EngineError: Error, CustomStringConvertible, LocalizedError {
     /// The socket could not be reached at all.
     case unreachable(String)
     /// A transport-level failure mid-request.
@@ -73,6 +73,8 @@ public enum EngineError: Error, CustomStringConvertible {
         case .timedOut(let m): return "timed out talking to the docker engine: \(m)"
         }
     }
+
+    public var errorDescription: String? { description }
 }
 
 /// A blocking Docker Engine API client speaking HTTP/1.1 over a unix socket.
@@ -367,14 +369,24 @@ public final class EngineClient: @unchecked Sendable {
         from fileURL: URL,
         contentType: String = "application/x-tar",
         timeout: TimeInterval = 600,
-        onProgress: ((Int64) -> Void)? = nil
+        onProgress: ((Int64) -> Void)? = nil,
+        shouldContinue: (() -> Bool)? = nil,
+        onUploadComplete: (() -> Void)? = nil
     ) throws -> EngineResponse {
-        let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
-        guard let size = (attributes[.size] as? NSNumber)?.int64Value else {
-            throw EngineError.transport("could not size \(fileURL.path)")
-        }
         let handle = try FileHandle(forReadingFrom: fileURL)
         defer { try? handle.close() }
+
+        // Size the already-open descriptor rather than resolving the path once for a
+        // size and then opening it again. That keeps Content-Length attached to the
+        // actual file descriptor supplying the upload bytes.
+        var sourceStat = stat()
+        guard Darwin.fstat(handle.fileDescriptor, &sourceStat) == 0 else {
+            throw EngineError.transport("could not stat the opened upload source")
+        }
+        guard (sourceStat.st_mode & S_IFMT) == S_IFREG else {
+            throw EngineError.transport("upload source is not a regular file")
+        }
+        let size = Int64(sourceStat.st_size)
 
         let fd = try openSocket(timeout: timeout)
         defer { Darwin.close(fd) }
@@ -391,7 +403,18 @@ public final class EngineClient: @unchecked Sendable {
 
         var sent: Int64 = 0
         while sent < size {
-            let chunk = handle.readData(ofLength: 1 << 20)
+            guard shouldContinue?() ?? true else {
+                // Closing this one-request connection tells Docker that the promised
+                // Content-Length will not arrive. The caller still has to treat a
+                // cancelled load as an unknown engine outcome, because Docker may
+                // have consumed a prefix before EOF reached it.
+                throw EngineError.transport("upload cancelled after \(sent) bytes")
+            }
+            // Keep every read inside the original descriptor size. If another writer
+            // grows this file after `fstat`, the request still never sends more bytes
+            // than its Content-Length promised to Docker.
+            let remaining = size - sent
+            let chunk = handle.readData(ofLength: min(1 << 20, Int(remaining)))
             if chunk.isEmpty { break }
             try writeAll(fd: fd, chunk)
             sent += Int64(chunk.count)
@@ -403,6 +426,10 @@ public final class EngineClient: @unchecked Sendable {
             throw EngineError.transport("sent \(sent) of \(size) bytes from \(fileURL.lastPathComponent)")
         }
 
+        // The complete source is now in Docker's hands, but image unpacking and tag
+        // registration can still be in progress while `readResponse` waits. A UI can
+        // use this boundary to stop offering a misleading cancellable progress bar.
+        onUploadComplete?()
         return try readResponse(fd: fd, timeout: timeout, label: "\(method) \(path)")
     }
 

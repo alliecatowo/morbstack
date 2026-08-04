@@ -110,6 +110,11 @@ struct ImagesRootView: View {
     @State private var imageArchiveExport: ImageArchiveExportOperation?
     @State private var imageArchiveExportCancellation: ImageArchiveExportCancellation?
     @State private var imageArchiveExportNotice: ImageArchiveExportNotice?
+    @State private var imageArchiveImportReview: ImageArchiveImportRequest?
+    @State private var pendingImageArchiveImport: ImageArchiveImportRequest?
+    @State private var imageArchiveImport: ImageArchiveImportOperation?
+    @State private var imageArchiveImportCancellation: ImageArchiveImportCancellation?
+    @State private var imageArchiveImportNotice: ImageArchiveImportNotice?
     /// The selected local image snapshot for the one bounded create/start flow.
     @State private var localImageRun: ImageSummary?
 
@@ -143,7 +148,7 @@ struct ImagesRootView: View {
     /// useful to inspect while the engine is stopped, but it must not expose commands
     /// that cannot reach their only backing implementation.
     private var canMutateImages: Bool {
-        model.fixtureProvenance == nil && model.engine.isRunning && !busy
+        model.fixtureProvenance == nil && model.engine.isRunning && !busy && !imageArchiveTransferIsActive
     }
 
     /// Export reads a potentially large archive through Morbstack's current local
@@ -151,11 +156,30 @@ struct ImagesRootView: View {
     /// must never be allowed to fall through to the real archive exporter. Unlike a
     /// fixture-aware `DockerClient` command, that service opens its own stream.
     private var canExportImages: Bool {
-        model.fixtureProvenance == nil && model.engine.isRunning && imageArchiveExport == nil
+        model.fixtureProvenance == nil
+            && model.engine.isRunning
+            && imageArchiveExport == nil
+            && imageArchiveImport == nil
+            && imageArchiveImportReview == nil
     }
 
     private var canExportSelectedImage: Bool {
         selectedImage != nil && canExportImages
+    }
+
+    /// Import, like export, opens its own Engine stream rather than using the
+    /// fixture-aware app client. Fixture documents therefore must never reach a live
+    /// local Engine through this document workflow.
+    private var canImportImages: Bool {
+        model.fixtureProvenance == nil
+            && model.engine.isRunning
+            && imageArchiveExport == nil
+            && imageArchiveImport == nil
+            && imageArchiveImportReview == nil
+    }
+
+    private var imageArchiveTransferIsActive: Bool {
+        imageArchiveExport != nil || imageArchiveImport != nil
     }
 
     private func imageMutationHelp(_ availableAction: String) -> String {
@@ -174,8 +198,21 @@ struct ImagesRootView: View {
         if !model.engine.isRunning {
             return "Start the Engine to export an image archive"
         }
-        if imageArchiveExport != nil {
-            return "An image archive export is already in progress"
+        if imageArchiveExport != nil || imageArchiveImport != nil {
+            return "An image archive transfer is already in progress"
+        }
+        return availableAction
+    }
+
+    private func imageImportHelp(_ availableAction: String) -> String {
+        if model.fixtureProvenance != nil {
+            return "Image archive loading is unavailable in developer fixture data"
+        }
+        if !model.engine.isRunning {
+            return "Start the Engine to load an image archive"
+        }
+        if imageArchiveTransferIsActive {
+            return "An image archive transfer is already in progress"
         }
         return availableAction
     }
@@ -211,7 +248,7 @@ struct ImagesRootView: View {
     }
 
     private var pruneConfirmationScreen: some View {
-        imageArchiveNoticeScreen
+        imageArchiveImportNoticeScreen
             .confirmationDialog(
                 "Remove dangling images?",
                 isPresented: $showsPruneConfirmation,
@@ -236,6 +273,19 @@ struct ImagesRootView: View {
                 imageArchiveExportNotice?.title ?? "",
                 isPresented: imageArchiveExportNoticePresented,
                 presenting: imageArchiveExportNotice
+            ) { _ in
+                Button("OK", role: .cancel) {}
+            } message: { notice in
+                Text(notice.message)
+            }
+    }
+
+    private var imageArchiveImportNoticeScreen: some View {
+        imageArchiveNoticeScreen
+            .alert(
+                imageArchiveImportNotice?.title ?? "",
+                isPresented: imageArchiveImportNoticePresented,
+                presenting: imageArchiveImportNotice
             ) { _ in
                 Button("OK", role: .cancel) {}
             } message: { notice in
@@ -298,6 +348,16 @@ struct ImagesRootView: View {
                 ImageArchiveExportSheet(operation: operation, cancel: cancelImageArchiveExport)
                     .interactiveDismissDisabled()
             }
+            .sheet(item: $imageArchiveImportReview, onDismiss: beginPendingImageArchiveImport) { request in
+                ImageArchiveImportReviewSheet(request: request) {
+                    pendingImageArchiveImport = request
+                    imageArchiveImportReview = nil
+                }
+            }
+            .sheet(item: $imageArchiveImport) { operation in
+                ImageArchiveImportSheet(operation: operation, cancel: cancelImageArchiveImport)
+                    .interactiveDismissDisabled()
+            }
     }
 
     private var baseScreen: some View {
@@ -310,6 +370,9 @@ struct ImagesRootView: View {
                 \.imageArchiveExportAction,
                 imageArchiveExportAction)
             .focusedSceneValue(
+                \.imageArchiveImportAction,
+                imageArchiveImportAction)
+            .focusedSceneValue(
                 \.runLocalImageAction,
                 runLocalImageAction)
     }
@@ -319,8 +382,13 @@ struct ImagesRootView: View {
         return chooseImageArchiveDestination
     }
 
+    private var imageArchiveImportAction: (() -> Void)? {
+        guard canImportImages else { return nil }
+        return chooseImageArchiveForLoading
+    }
+
     private var runLocalImageAction: (() -> Void)? {
-        guard let selectedImage, model.engine.isRunning, imageArchiveExport == nil, localImageRun == nil else {
+        guard let selectedImage, model.engine.isRunning, !imageArchiveTransferIsActive, localImageRun == nil else {
             return nil
         }
         return { localImageRun = selectedImage }
@@ -364,6 +432,17 @@ struct ImagesRootView: View {
         imageArchiveExportNotice = nil
     }
 
+    private var imageArchiveImportNoticePresented: Binding<Bool> {
+        Binding(
+            get: { imageArchiveImportNotice != nil },
+            set: dismissImageArchiveImportNotice)
+    }
+
+    private func dismissImageArchiveImportNotice(_ isPresented: Bool) {
+        guard !isPresented else { return }
+        imageArchiveImportNotice = nil
+    }
+
     private func stageSelectedImageForRemoval() {
         guard canMutateImages else { return }
         guard let selectedID = selection else { return }
@@ -394,18 +473,27 @@ struct ImagesRootView: View {
             .accessibilityLabel("Explore public images")
             .help("Search public Docker Hub repositories")
         }
-        ToolbarItem(id: "images.export", placement: .secondaryAction) {
-            Button {
-                chooseImageArchiveDestination()
+        // Import and export are two document operations in one small, native Menu.
+        // Grouping them keeps the toolbar from accumulating unrelated one-off glyphs;
+        // the full commands remain discoverable in the Image menu and inspector.
+        ToolbarItem(id: "images.archive", placement: .secondaryAction) {
+            Menu {
+                Button("Load Image Archive…") {
+                    chooseImageArchiveForLoading()
+                }
+                .disabled(!canImportImages)
+
+                Divider()
+
+                Button("Export Selected Image…") {
+                    chooseImageArchiveDestination()
+                }
+                .disabled(!canExportSelectedImage)
             } label: {
-                Image(systemName: "square.and.arrow.down")
+                Image(systemName: "archivebox")
             }
-            .accessibilityLabel("Export selected image")
-            .help(
-                selectedImage == nil
-                    ? "Select an image to export"
-                    : imageExportHelp("Export selected image as a Docker archive"))
-            .disabled(!canExportSelectedImage)
+            .accessibilityLabel("Image archive actions")
+            .help(imageArchiveMenuHelp)
         }
         ToolbarItem(id: "images.runLocal", placement: .secondaryAction) {
             Button {
@@ -431,6 +519,16 @@ struct ImagesRootView: View {
                 .help(showsInspector ? "Hide the inspector" : "Show the inspector")
             }
         }
+    }
+
+    private var imageArchiveMenuHelp: String {
+        if canImportImages {
+            return "Load a Docker image archive or export the selected image"
+        }
+        if selectedImage == nil, model.engine.isRunning, model.fixtureProvenance == nil {
+            return "Load a Docker image archive"
+        }
+        return imageImportHelp("Load or export a Docker image archive")
     }
 
     @ViewBuilder
@@ -754,7 +852,7 @@ struct ImagesRootView: View {
             Button("Run Local Image…") {
                 localImageRun = image
             }
-            .disabled(!model.engine.isRunning || imageArchiveExport != nil)
+            .disabled(runLocalImageAction == nil)
             Divider()
             Button("Export Image Archive…") {
                 chooseImageArchiveDestination(for: image)
@@ -812,6 +910,14 @@ struct ImagesRootView: View {
                 compatibilitySection(for: image)
 
                 Section("Archive") {
+                    Button {
+                        chooseImageArchiveForLoading()
+                    } label: {
+                        Label("Load Image Archive…", systemImage: "square.and.arrow.up")
+                    }
+                    .disabled(!canImportImages)
+                    .help(imageImportHelp("Load a local Docker image archive"))
+
                     Button {
                         chooseImageArchiveDestination(for: image)
                     } label: {
@@ -1036,6 +1142,115 @@ struct ImagesRootView: View {
                 await self.finishImageArchiveExport(.success(result), for: operationID)
             } catch {
                 await self.finishImageArchiveExport(.failure(error), for: operationID)
+            }
+        }
+    }
+
+    /// Begins with the system-owned document chooser rather than a text field or an
+    /// inferred default path. The review sheet is a separate explicit boundary before
+    /// any bytes reach Docker. `NSOpenPanel` narrows the UI to tar archives; the typed
+    /// service deliberately does not inspect the selected archive's contents.
+    @MainActor
+    private func chooseImageArchiveForLoading() {
+        guard canImportImages else { return }
+
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.tarArchive]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.resolvesAliases = true
+        panel.message = "Choose a local Docker image archive (.tar) to load into Morbstack."
+        panel.prompt = "Choose"
+
+        guard panel.runModal() == .OK, let archiveURL = panel.url else { return }
+        do {
+            imageArchiveImportReview = try ImageArchiveImportRequest(archiveURL: archiveURL)
+        } catch {
+            imageArchiveImportNotice = .failure(error)
+        }
+    }
+
+    /// The review sheet dismisses before this begins so the system never stacks two
+    /// independent document sheets. A source is validated again by the importer just
+    /// before opening the Engine request, which catches a changed file after review.
+    @MainActor
+    private func beginPendingImageArchiveImport() {
+        guard let request = pendingImageArchiveImport else { return }
+        pendingImageArchiveImport = nil
+        guard canImportImages else { return }
+
+        let cancellation = ImageArchiveImportCancellation()
+        let operation = ImageArchiveImportOperation(request: request)
+        imageArchiveImport = operation
+        imageArchiveImportCancellation = cancellation
+
+        let operationID = operation.id
+        let progressRelay = ImageArchiveImportProgressRelay { progress in
+            self.recordImageArchiveImportProgress(progress, for: operationID)
+        }
+        Task.detached(priority: .userInitiated) {
+            do {
+                let result = try ImageArchiveImporter.load(
+                    request,
+                    onProgress: { progress in
+                        switch progress {
+                        case .uploading:
+                            progressRelay.send(progress)
+                        case .waitingForDocker:
+                            progressRelay.sendImmediately(progress)
+                        }
+                    },
+                    isCancelled: { cancellation.isRequested })
+                await self.finishImageArchiveImport(.success(result), for: operationID)
+            } catch {
+                await self.finishImageArchiveImport(.failure(error), for: operationID)
+            }
+        }
+    }
+
+    @MainActor
+    private func cancelImageArchiveImport() {
+        guard var operation = imageArchiveImport, operation.canCancel else { return }
+        operation.isCancellationRequested = true
+        imageArchiveImport = operation
+        imageArchiveImportCancellation?.request()
+    }
+
+    @MainActor
+    private func recordImageArchiveImportProgress(
+        _ progress: ImageArchiveImportProgress,
+        for operationID: UUID
+    ) {
+        guard var operation = imageArchiveImport, operation.id == operationID else { return }
+        operation.record(progress)
+        imageArchiveImport = operation
+    }
+
+    @MainActor
+    private func finishImageArchiveImport(
+        _ result: Result<ImageArchiveImportResult, Error>,
+        for operationID: UUID
+    ) async {
+        guard imageArchiveImport?.id == operationID else { return }
+        imageArchiveImport = nil
+        imageArchiveImportCancellation = nil
+
+        // Any socket failure or cancellation can arrive after Docker consumed a prefix
+        // of the tar. Refreshing is safe and gives the next view the Engine's current
+        // inventory without treating that refresh as proof of a particular tag.
+        await model.refreshAll()
+
+        switch result {
+        case .success(let imported):
+            imageArchiveImportNotice = .success(result: imported)
+        case .failure(let error):
+            if let importError = error as? ImageArchiveImportError,
+               case .cancelled(let bytesSent, let totalBytes) = importError
+            {
+                imageArchiveImportNotice = .cancelled(bytesSent: bytesSent, totalBytes: totalBytes)
+            } else {
+                imageArchiveImportNotice = .failure(error)
             }
         }
     }
