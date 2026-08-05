@@ -76,8 +76,17 @@ struct PreambleReadPolicy {
 fn read_preamble_raw<R: Read>(r: &mut R, policy: &PreambleReadPolicy) -> io::Result<Vec<u8>> {
     let mut buf = Vec::with_capacity(16);
     let mut byte = [0u8; 1];
+    // `buf.len()` counts only *kept* bytes, so under `drop_cr` a peer that
+    // streams bare `\r` forever would never trip the line cap — the reader
+    // would consume unbounded input without ever completing a line (SEC-1).
+    // Bound the total bytes consumed independently of the line length. Twice
+    // the line cap is generous slack for any legitimate CRLF traffic (a real
+    // line has at most one `\r` per `\n`) while still making an all-`\r`
+    // stream fail after a few hundred bytes instead of never.
+    let max_consumed = policy.max.saturating_mul(2).saturating_add(2);
+    let mut consumed: usize = 0;
     loop {
-        if buf.len() >= policy.max {
+        if buf.len() >= policy.max || consumed >= max_consumed {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 (policy.too_long)(policy.max),
@@ -86,6 +95,7 @@ fn read_preamble_raw<R: Read>(r: &mut R, policy: &PreambleReadPolicy) -> io::Res
         match r.read(&mut byte) {
             Ok(0) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, policy.eof)),
             Ok(_) => {
+                consumed += 1;
                 if byte[0] == b'\n' {
                     if policy.keep_terminator {
                         buf.push(byte[0]);
@@ -150,20 +160,18 @@ pub fn read_preamble_line<R: Read>(r: &mut R, max: usize) -> io::Result<String> 
 ///     immediately rather than retried.
 ///   * Every `\r` byte is dropped as it is read, wherever it appears in the
 ///     line — not just a trailing one — and does **not** count toward `max`.
-///     This means a peer that sends an unbounded run of bare `\r` bytes
-///     before ever completing a line is read from forever by this function
-///     alone; nothing here bounds that case. (It looks like an oversight
-///     rather than intent, and is called out in the refactor report that
-///     introduced this module — not fixed here, since fixing it would be a
-///     behavior change on infrastructure this ticket is required to leave
-///     alone.)
+///     Dropped bytes DO count toward the reader's independent total-consumed
+///     bound (`2 * max + 2`), so a peer that streams bare `\r` without ever
+///     completing a line is cut off after a few hundred bytes rather than
+///     read from forever. (The unbounded all-`\r` case was SEC-1 in the
+///     input-validation review; the total bound is its fix.)
 ///   * The trailing `\n` is not included in the returned string.
 ///   * The line is decoded with `String::from_utf8_lossy`: invalid UTF-8 is
 ///     replaced rather than rejected, so one garbled byte cannot abort an
 ///     otherwise-valid file install request.
 ///
-/// `max` bounds the number of *kept* (non-`\r`) bytes; see above for what
-/// that means for an all-`\r` input.
+/// `max` bounds the number of *kept* (non-`\r`) bytes; the total bytes
+/// consumed off the stream are separately bounded at `2 * max + 2`.
 pub fn read_install_preamble_line<R: Read>(r: &mut R, max: usize) -> io::Result<String> {
     let policy = PreambleReadPolicy {
         max,
@@ -446,6 +454,48 @@ mod tests {
         let mut conn = Cursor::new(vec![b'A'; 256 * 4]);
         let err = read_install_preamble_line(&mut conn, 256).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn install_preamble_bounds_a_bare_cr_flood_instead_of_reading_forever() {
+        // SEC-1: dropped `\r` bytes are neither buffered nor counted toward
+        // the line cap, so before the total-consumed bound existed a peer
+        // sending nothing but `\r` was read from forever. The reader must
+        // give up after a bounded number of consumed bytes.
+        let cap = 256usize;
+        let mut conn = Cursor::new(vec![b'\r'; 1024 * 1024]);
+        let err = read_install_preamble_line(&mut conn, cap).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            (conn.position() as usize) <= 2 * cap + 2,
+            "consumed {} bytes; the total bound is {}",
+            conn.position(),
+            2 * cap + 2
+        );
+    }
+
+    #[test]
+    fn install_preamble_still_tolerates_moderate_cr_noise_within_the_total_bound() {
+        // The fix must not break what CR-dropping is for: a line with CR
+        // noise that stays inside the total-consumed budget still parses.
+        let mut input = vec![b'\r'; 100];
+        input.extend_from_slice(b"PUT k3s 10 abc\r\n");
+        let mut conn = Cursor::new(input);
+        let line = read_install_preamble_line(&mut conn, 256).unwrap();
+        assert_eq!(line, "PUT k3s 10 abc");
+    }
+
+    #[test]
+    fn preamble_line_total_bound_does_not_shorten_ordinary_lines() {
+        // `read_preamble_line` keeps every byte, so its line cap always
+        // trips first and the total-consumed bound must be unobservable: a
+        // line of exactly `max` bytes including the newline still parses.
+        let mut input = vec![b'A'; 63];
+        input.push(b'\n');
+        let mut conn = Cursor::new(input);
+        let line = read_preamble_line(&mut conn, 64).unwrap();
+        assert_eq!(line.len(), 64);
+        assert!(line.ends_with('\n'));
     }
 
     // ---- err_line -------------------------------------------------------

@@ -249,8 +249,7 @@ mod imp {
             let line = read_line(&mut connection, MAX_LINE_BYTES)?;
             let body = strip_line_end(&line)?;
             if body.starts_with("CLOSE ") {
-                let fields: Vec<_> = body.split(' ').collect();
-                if fields.len() != 3 || !verify_hmac(&hello.capability, fields[1], fields[2]) {
+                if !close_is_authentic(&hello.capability, body) {
                     return Err(protocol_error("invalid live-share close"));
                 }
                 write_line(&mut connection, "STOPPED")?;
@@ -372,6 +371,22 @@ mod imp {
             read_only,
             epoch,
         })
+    }
+
+    /// Verify a `CLOSE <sequence> <hmac-hex>` line.
+    ///
+    /// The HMAC covers `"CLOSE <sequence>"` — verb included — which is
+    /// exactly the string the host signs (`MorbLiveShareTransport.close()`
+    /// builds `body = "CLOSE \(nextSequence)"` and appends
+    /// `hmacHex(key:message: body)`). Verifying anything narrower both
+    /// rejects every authentic host close and leaves the verb outside the
+    /// authenticated bytes; a previous version of this check covered only
+    /// the sequence field and failed every graceful close.
+    fn close_is_authentic(capability: &[u8; live_share::CAPABILITY_BYTES], body: &str) -> bool {
+        let fields: Vec<_> = body.split(' ').collect();
+        fields.len() == 3
+            && fields[0] == "CLOSE"
+            && verify_hmac(capability, &fields[..2].join(" "), fields[2])
     }
 
     fn apply_event(
@@ -699,6 +714,30 @@ mod imp {
             assert!(
                 parse_root("ROOT root_project morbshare0 /Users/me/project /Users 0 0").is_err()
             );
+        }
+
+        #[test]
+        fn close_is_verified_over_the_exact_string_the_host_signs() {
+            // The host signs "CLOSE <sequence>" — verb included (see
+            // MorbLiveShareTransport.close()). The regression this pins: the
+            // receiver used to verify the HMAC over the bare sequence digits,
+            // which rejected every authentic close and left the verb outside
+            // the authenticated bytes.
+            let key = capability();
+            let host_line = format!("CLOSE 7 {}", hmac_hex(&key, b"CLOSE 7"));
+            assert!(close_is_authentic(&key, &host_line));
+
+            // A tag over only the digits (the old, wrong coverage) must fail.
+            let bare_digits = format!("CLOSE 7 {}", hmac_hex(&key, b"7"));
+            assert!(!close_is_authentic(&key, &bare_digits));
+
+            // Wrong shape, wrong sequence, or a foreign key all fail closed.
+            assert!(!close_is_authentic(&key, "CLOSE 7"));
+            let other_key = [0xa5; live_share::CAPABILITY_BYTES];
+            let foreign = format!("CLOSE 7 {}", hmac_hex(&other_key, b"CLOSE 7"));
+            assert!(!close_is_authentic(&key, &foreign));
+            let resequenced = format!("CLOSE 8 {}", hmac_hex(&key, b"CLOSE 7"));
+            assert!(!close_is_authentic(&key, &resequenced));
         }
 
         #[test]

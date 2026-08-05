@@ -927,21 +927,51 @@ fn receive_payload<R: Read>(
     std::fs::create_dir_all(bin_dir())?;
     let final_path = binary_path(name);
     let temp_path = bin_dir().join(format!(".{}.incoming", name));
+    stream_verify_rename(reader, &temp_path, &final_path, length, want_digest)
+}
+
+/// The path-parameterized body of `receive_payload`, so the truncation,
+/// digest-mismatch, and cleanup behavior unit test against a scratch
+/// directory on the macOS dev host.
+///
+/// Every failure removes the staging file: the next attempt removes it anyway,
+/// but a failed 512 MB transfer must not squat on the persistent disk until
+/// then, and an I/O error mid-write must not leave unverified bytes lying at a
+/// predictable path.
+fn stream_verify_rename<R: Read>(
+    reader: &mut R,
+    temp_path: &Path,
+    final_path: &Path,
+    length: u64,
+    want_digest: &str,
+) -> io::Result<()> {
     // A leftover from an interrupted earlier attempt is not evidence of
     // anything; truncating is what `File::create` does anyway, but removing it
     // first means a stale file with awkward permissions cannot fail the open.
-    let _ = std::fs::remove_file(&temp_path);
+    let _ = std::fs::remove_file(temp_path);
+    let result = stream_verify_rename_inner(reader, temp_path, final_path, length, want_digest);
+    if result.is_err() {
+        let _ = std::fs::remove_file(temp_path);
+    }
+    result
+}
 
+fn stream_verify_rename_inner<R: Read>(
+    reader: &mut R,
+    temp_path: &Path,
+    final_path: &Path,
+    length: u64,
+    want_digest: &str,
+) -> io::Result<()> {
     let mut hasher = sha256::Sha256::new();
     let mut written: u64 = 0;
     {
-        let mut file = std::fs::File::create(&temp_path)?;
+        let mut file = std::fs::File::create(temp_path)?;
         let mut buffer = vec![0u8; TRANSFER_CHUNK];
         while written < length {
             let want = ((length - written) as usize).min(buffer.len());
             let n = reader.read(&mut buffer[..want])?;
             if n == 0 {
-                let _ = std::fs::remove_file(&temp_path);
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     format!(
@@ -964,7 +994,6 @@ fn receive_payload<R: Read>(
 
     let got = sha256::hex(&hasher.finalize());
     if got != want_digest {
-        let _ = std::fs::remove_file(&temp_path);
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
@@ -977,9 +1006,9 @@ fn receive_payload<R: Read>(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(0o755))?;
+        std::fs::set_permissions(temp_path, std::fs::Permissions::from_mode(0o755))?;
     }
-    std::fs::rename(&temp_path, &final_path)?;
+    std::fs::rename(temp_path, final_path)?;
     sync_now();
     Ok(())
 }
@@ -1147,6 +1176,82 @@ default       broken                          0/1   CrashLoopBackOff   6   4m
     fn a_preamble_with_no_newline_is_bounded() {
         let mut input = std::io::Cursor::new(vec![b'A'; MAX_PREAMBLE_LEN * 4]);
         assert!(crate::wire::read_install_preamble_line(&mut input, MAX_PREAMBLE_LEN).is_err());
+    }
+
+    // ---- payload streaming: write-verify-rename -----------------------------
+
+    #[test]
+    fn a_verified_payload_is_renamed_into_place_and_the_staging_file_is_gone() {
+        let scratch = Scratch::new("put-ok");
+        let temp = scratch.0.join(".k3s.incoming");
+        let dest = scratch.0.join("k3s");
+        let payload = b"#!/bin/sh\nexit 0\n";
+        let digest = sha256::hex_of(payload);
+
+        stream_verify_rename(
+            &mut std::io::Cursor::new(payload.to_vec()),
+            &temp,
+            &dest,
+            payload.len() as u64,
+            &digest,
+        )
+        .expect("a byte-exact payload must install");
+
+        assert_eq!(std::fs::read(&dest).unwrap(), payload);
+        assert!(!temp.exists(), "staging file must not survive success");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&dest).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o755);
+        }
+    }
+
+    #[test]
+    fn a_truncated_stream_is_a_clean_error_and_leaves_no_partial_file() {
+        // The host claims 1000 bytes but hangs up after 10. Nothing may be
+        // reachable at the final path, and the staging file must be cleaned
+        // up rather than squatting on the persistent disk until the retry.
+        let scratch = Scratch::new("put-truncated");
+        let temp = scratch.0.join(".k3s.incoming");
+        let dest = scratch.0.join("k3s");
+
+        let err = stream_verify_rename(
+            &mut std::io::Cursor::new(vec![0xab; 10]),
+            &temp,
+            &dest,
+            1000,
+            DIGEST,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+        assert!(!dest.exists(), "no partial binary may become reachable");
+        assert!(!temp.exists(), "staging file must be removed on failure");
+    }
+
+    #[test]
+    fn a_digest_mismatch_never_leaves_the_payload_reachable() {
+        // Right length, wrong bytes: the exact case write-verify-rename
+        // exists for. The binary must not appear at a path the supervisor is
+        // willing to exec, and the staging copy must be removed.
+        let scratch = Scratch::new("put-mismatch");
+        let temp = scratch.0.join(".k3s.incoming");
+        let dest = scratch.0.join("k3s");
+        let payload = vec![0x5a_u8; 64];
+
+        let err = stream_verify_rename(
+            &mut std::io::Cursor::new(payload.clone()),
+            &temp,
+            &dest,
+            payload.len() as u64,
+            DIGEST, // digest of the empty string; cannot match 64 bytes
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(!dest.exists());
+        assert!(!temp.exists());
     }
 
     // ---- enable-state persistence -----------------------------------------

@@ -783,6 +783,180 @@ mod tests {
     }
 
     #[test]
+    fn relative_paths_are_rejected_for_every_lexical_escape_shape() {
+        for bad in [
+            "",               // empty
+            "/etc/passwd",    // absolute
+            "src/",           // trailing slash
+            "src//main.rs",   // empty component
+            ".",              // dot segment
+            "src/./main.rs",  // interior dot segment
+            "..",             // parent traversal
+            "src/../main.rs", // interior parent traversal
+            "src/\u{0}name",  // NUL byte
+        ] {
+            assert!(
+                validate_relative_path(bad).is_err(),
+                "{:?} must be rejected",
+                bad
+            );
+        }
+        // Oversized total path and oversized single component.
+        let long_path = "a/".repeat(MAX_PATH_BYTES / 2 + 1) + "b";
+        assert!(validate_relative_path(&long_path).is_err());
+        let long_component = "a".repeat(256);
+        assert!(validate_relative_path(&long_component).is_err());
+        // The boundary cases stay valid: 255-byte component, ordinary depth.
+        assert!(validate_relative_path(&"a".repeat(255)).is_ok());
+        assert!(validate_relative_path("src/deep/tree/main.rs").is_ok());
+    }
+
+    #[test]
+    fn absolute_path_validation_rejects_root_traversal_and_unnormalized_forms() {
+        for bad in [
+            "/",               // the filesystem root is never a claimable path
+            "",                // not absolute
+            "relative/path",   // not absolute
+            "/Users/",         // trailing slash
+            "/Users//me",      // empty component
+            "/Users/../etc",   // parent traversal
+            "/Users/./me",     // dot segment
+            "/Users/me\u{0}x", // NUL byte
+        ] {
+            let mut claim = root("root_project", "/Users/me/project");
+            claim.guest_path = bad.to_string();
+            assert!(
+                validate_hello(hello(vec![claim]), &mounted(false)).is_err(),
+                "guest path {:?} must be rejected",
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn a_sibling_with_a_shared_name_prefix_is_not_a_descendant() {
+        // String-prefix containment without the '/'-boundary check would let
+        // "/Users/me-evil" claim to live inside "/Users/me". The comparison
+        // must be component-wise, not byte-wise.
+        assert!(!is_strict_descendant("/Users/me-evil", "/Users/me"));
+        assert!(!is_strict_descendant("/Users/me", "/Users/me"));
+        assert!(is_strict_descendant("/Users/me/project", "/Users/me"));
+        // And through the public API: a root that only shares a name prefix
+        // with the mounted share is not inside it.
+        let mut claim = root("root_project", "/Usersx/project");
+        claim.backing_share_path = "/Users".to_string();
+        let error = match validate_hello(hello(vec![claim]), &mounted(false)) {
+            Ok(_) => panic!("a shared name prefix must never become containment"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            ValidationError::RootNotStrictlyInsideBackingShare { .. }
+        ));
+    }
+
+    #[test]
+    fn structural_hello_limits_fail_closed() {
+        // Wrong contract version.
+        let mut wrong_version = hello(vec![root("root_project", "/Users/me/project")]);
+        wrong_version.contract_version = CONTRACT_VERSION + 1;
+        assert!(matches!(
+            validate_hello(wrong_version, &mounted(false)),
+            Err(ValidationError::UnsupportedContractVersion { .. })
+        ));
+
+        // All-zero session identity fields.
+        let mut zero_session = hello(vec![root("root_project", "/Users/me/project")]);
+        zero_session.session_id = [0; SESSION_ID_BYTES];
+        assert!(matches!(
+            validate_hello(zero_session, &mounted(false)),
+            Err(ValidationError::ZeroSessionField(_))
+        ));
+
+        // Zero roots and too many roots are both structural rejections.
+        assert!(validate_hello(hello(Vec::new()), &mounted(false)).is_err());
+        let crowd: Vec<RootClaim> = (0..MAX_ROOTS + 1)
+            .map(|index| root(&format!("root_{}", index), "/Users/me/project"))
+            .collect();
+        assert!(matches!(
+            validate_hello(hello(crowd), &mounted(false)),
+            Err(ValidationError::TooManyRoots { .. })
+        ));
+
+        // Duplicate root identifiers.
+        let duplicated = vec![
+            root("root_project", "/Users/me/project"),
+            root("root_project", "/Users/me/other"),
+        ];
+        assert!(matches!(
+            validate_hello(hello(duplicated), &mounted(false)),
+            Err(ValidationError::DuplicateRootID(_))
+        ));
+
+        // A backing share tag nothing actually mounted.
+        let mut orphan = root("root_project", "/Users/me/project");
+        orphan.backing_share_tag = "morbshare9".to_string();
+        assert!(matches!(
+            validate_hello(hello(vec![orphan]), &mounted(false)),
+            Err(ValidationError::MissingOrChangedBackingShare { .. })
+        ));
+
+        // Root identifiers and share tags with separators or spaces.
+        for bad_id in ["", "has space", "has/slash", "has\nnewline"] {
+            let mut claim = root("root_project", "/Users/me/project");
+            claim.root_id = bad_id.to_string();
+            assert!(
+                validate_hello(hello(vec![claim]), &mounted(false)).is_err(),
+                "root id {:?} must be rejected",
+                bad_id
+            );
+        }
+    }
+
+    #[test]
+    fn events_for_a_different_session_boot_or_epoch_are_rejected() {
+        let session = validate_hello(
+            hello(vec![root("root_project", "/Users/me/project")]),
+            &mounted(false),
+        )
+        .unwrap();
+        let mut cursor = SequenceCursor::default();
+
+        let mut wrong_session = header(1);
+        wrong_session.session_id = [9; SESSION_ID_BYTES];
+        assert_eq!(
+            session.validate_next_inbound_header(&mut cursor, &wrong_session),
+            Err(ValidationError::WrongSession)
+        );
+
+        let mut wrong_boot = header(1);
+        wrong_boot.guest_boot_id = [9; GUEST_BOOT_ID_BYTES];
+        assert_eq!(
+            session.validate_next_inbound_header(&mut cursor, &wrong_boot),
+            Err(ValidationError::WrongGuestBoot)
+        );
+
+        let mut wrong_epoch = header(1);
+        wrong_epoch.epoch = 40;
+        assert!(matches!(
+            session.validate_next_inbound_header(&mut cursor, &wrong_epoch),
+            Err(ValidationError::WrongEpoch { .. })
+        ));
+
+        let mut unknown_root = header(1);
+        unknown_root.root_id = "root_other".to_string();
+        assert!(matches!(
+            session.validate_next_inbound_header(&mut cursor, &unknown_root),
+            Err(ValidationError::UnknownRoot(_))
+        ));
+
+        // None of the rejections advanced the cursor.
+        session
+            .validate_next_inbound_header(&mut cursor, &header(1))
+            .expect("sequence 1 must still be the expected next record");
+    }
+
+    #[test]
     fn read_only_claim_remains_visible_to_the_receiver() {
         let mut read_only_root = root("root_project", "/Users/me/project");
         read_only_root.read_only = true;
