@@ -37,6 +37,13 @@ node_modules/
 integrations/vscode/out/
 *.vsix
 
+# `artifacts/` above is the working set for reviews -- dozens of captures per
+# pass, regenerated every time, no reason to version them. `docs/gallery/` is
+# the opposite: a small curated set that the README and the gallery page link
+# to, so it IS tracked. Keep that distinction; it is what stops the repo
+# re-accumulating the 22 MB of screenshots just deleted from it.
+!docs/gallery/
+
 .mise.local.toml
 
 # Signed/packaged output. dist/* above already covers the normal locations, but
