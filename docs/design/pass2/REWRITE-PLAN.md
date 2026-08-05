@@ -1,5 +1,13 @@
 # REWRITE-PLAN — archived second-pass execution plan
 
+> **Image note (2026-08-05):** the screenshots this document referenced lived in
+> `mac/dist/shots/`, `docs/img/` or `artifacts/visual/` and have been removed. The
+> first was offscreen `MorbShots` output, which `docs/design/DECISIONS.md` §6 retired
+> as *not* visual evidence — it cannot composite the toolbar, inspector or glass. The
+> others were dated captures of superseded builds. The findings stand as written; the
+> images are recoverable from git history if a specific one is ever needed.
+
+
 > **Archived — do not execute.** This plan assigned agents to build the custom
 > Theme/`Design/**`/`Morb*` system and synthetic screenshot process that the native-macOS
 > migration has retired. Its parallel-work lessons are historical only; its component,

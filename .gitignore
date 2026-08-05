@@ -21,6 +21,15 @@ dist/*/*
 !dist/*/PROVENANCE.txt
 !dist/*/TOOLCHAIN.plist
 
+# The rules above are anchored to the repository root, so they never matched
+# `mac/dist/` — which is how 21 MB of offscreen MorbShots renders got committed
+# and stayed there. Those renders are also explicitly NOT visual evidence
+# (docs/design/DECISIONS.md §6): an offscreen window cannot composite the
+# toolbar, inspector or Liquid Glass, and screenshots from it have misled this
+# project more than once. Nothing generated should be tracked from either path.
+**/dist/
+artifacts/
+
 .mise.local.toml
 
 # Signed/packaged output. dist/* above already covers the normal locations, but
