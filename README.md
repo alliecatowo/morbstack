@@ -165,10 +165,11 @@ mise run test                 # runs the Swift and Rust test suites
 See "Running" below for the full walkthrough from there to a working
 `docker run`.
 
-**A DMG and a Homebrew cask are not available yet.** Packaging and
-signed releases are tracked separately — see
-[`docs/RELEASING.md`](docs/RELEASING.md) once it exists. Nothing on this
-page should be read as "download a build"; there isn't one yet.
+**A DMG and a Homebrew cask are not available yet.** Packaging and signed
+releases are tracked as REL-1 through REL-5 in [`TASKS.md`](TASKS.md); the
+blocker is notarization, and an unnotarized DMG is Gatekeeper-blocked for
+everyone except whoever built it. Nothing on this page should be read as
+"download a build"; there isn't one yet.
 
 ## Running
 

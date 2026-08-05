@@ -30,6 +30,13 @@ dist/*/*
 **/dist/
 artifacts/
 
+# The VS Code extension's dependencies: 146 MB, restorable with `npm ci`, and
+# untracked today only by luck — nothing was stopping a `git add -A` from
+# swallowing the lot.
+node_modules/
+integrations/vscode/out/
+*.vsix
+
 .mise.local.toml
 
 # Signed/packaged output. dist/* above already covers the normal locations, but
