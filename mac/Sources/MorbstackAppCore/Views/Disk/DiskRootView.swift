@@ -425,6 +425,10 @@ struct DiskRootView: View {
                 .inspector(isPresented: $showsInspector) {
                     inspector
                         .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
+                        // See the note on `VolumesRootView`: the trailing commands
+                        // ride the inspector's toolbar region and remain present
+                        // while the inspector is closed.
+                        .toolbar { trailingCommandItems }
                 }
                 .onChange(of: model.disk) { _, disk in
                     if disk != nil { selectFirstRowIfNeeded() }
@@ -437,8 +441,11 @@ struct DiskRootView: View {
 
     // MARK: Toolbar
 
+    /// See the note on `VolumesRootView.trailingCommandItems`: mounted on the
+    /// inspector content when the table is on screen, and in the window toolbar on
+    /// the inspector-less empty screens.
     @ToolbarContentBuilder
-    private var toolbarContent: some ToolbarContent {
+    private var trailingCommandItems: some ToolbarContent {
         ToolbarItem(id: "disk.recalculate", placement: .primaryAction) {
             Button {
                 Task { await refresh() }
@@ -464,6 +471,13 @@ struct DiskRootView: View {
                 .accessibilityLabel(showsInspector ? "Hide inspector" : "Show inspector")
                 .help(showsInspector ? "Hide the inspector" : "Show the inspector")
             }
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        if model.disk == nil {
+            trailingCommandItems
         }
     }
 
@@ -531,6 +545,9 @@ struct DiskRootView: View {
             }
         }
         .tableStyle(.automatic)
+        // See the striping note on `VolumesRootView.table`: system striping past the
+        // last record reads as broken placeholder rows at this route's density.
+        .alternatingRowBackgrounds(.disabled)
         .contextMenu(forSelectionType: TrackCDiskRow.ID.self) { ids in
             contextMenu(for: ids)
         } primaryAction: { ids in
@@ -657,9 +674,10 @@ struct DiskRootView: View {
                 diskImageFacts
                 diskGrowthFacts
             }
-            // Keep selected storage facts in the system inspector's aligned form
-            // columns. The Form remains responsible for all spacing and appearance.
-            .formStyle(.columns)
+            // Automatic system Form — see the clipping note on
+            // `VolumesRootView.detailPane`: `.formStyle(.columns)` overflows and
+            // clips a 340–460pt inspector when any value is wide, which this pane's
+            // monospaced disk-image path reliably is.
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         } else {
             ContentUnavailableView(

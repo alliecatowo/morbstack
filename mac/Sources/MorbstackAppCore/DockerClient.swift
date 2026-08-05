@@ -718,16 +718,23 @@ class DockerClient: @unchecked Sendable {
     /// count explicit. Callers pass only internally-defined request documents, never
     /// an arbitrary HTTP editor from the UI.
     private static func jsonRequest(method: String, path: String, body: Data) -> Data {
-        let head = """
-            \(method) \(path) HTTP/1.1\r
-            Host: morbstack\r
-            Accept: application/json\r
-            Content-Type: application/json\r
-            Content-Length: \(body.count)\r
-            User-Agent: morbstack/\(MorbVersion.string)\r
-            Connection: close\r
-            \r
-            """
+        // Joined explicitly, NOT written as a `"""` block. A multi-line literal joins its
+        // content lines with `\n` and emits nothing for the line holding the closing
+        // delimiter — so a final `\r` line produced `…Connection: close\r\n\r` with the
+        // terminating `\n` missing entirely. The header block was never terminated, and
+        // the body ran on directly after a bare CR. Every POST with a body in this client
+        // was malformed on the wire.
+        let head =
+            [
+                "\(method) \(path) HTTP/1.1",
+                "Host: morbstack",
+                "Accept: application/json",
+                "Content-Type: application/json",
+                "Content-Length: \(body.count)",
+                "User-Agent: morbstack/\(MorbVersion.string)",
+                "Connection: close",
+                "", "",
+            ].joined(separator: "\r\n")
         return Data(head.utf8) + body
     }
 

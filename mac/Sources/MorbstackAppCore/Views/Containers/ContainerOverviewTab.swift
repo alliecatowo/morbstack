@@ -75,13 +75,12 @@ struct ContainerOverviewTab: View {
             mountsSection(details)
             labelsSection(details)
         }
-        // The overview is an inspector, not a compact settings pane.  At the
-        // inspector's supported minimum width, the column form keeps the label/value
-        // relationship legible across the trailing column instead of centering an
-        // intrinsic-size fact cluster.  The frame only gives the system form its
-        // inspector canvas; `Form`, `Section`, and `LabeledContent` continue to own
-        // all row metrics, focus, accessibility, and Tahoe appearance.
-        .formStyle(.columns)
+        // Automatic system Form — see the clipping note on
+        // `VolumesRootView.detailPane`. A previous comment here claimed the columns
+        // style kept the label/value relationship legible at inspector widths; real
+        // window captures showed the opposite — the columns grid takes its natural
+        // width and clips both edges when a monospaced ID or path is wide. The
+        // automatic style is what the accepted Images inspector uses.
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 

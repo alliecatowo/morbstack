@@ -15,10 +15,10 @@ usage() {
 usage: scripts/ecosystem-acceptance.sh <suite> -- <locked probe command...>
 
 suites:
-  testcontainers-node    Direct DOCKER_HOST + in-guest Ryuk socket override
-    testcontainers-python  Direct DOCKER_HOST + in-guest Ryuk socket override
-  testcontainers-java    Direct DOCKER_HOST + in-guest Ryuk socket override
-  testcontainers-go      Direct DOCKER_HOST + in-guest Ryuk socket override
+  testcontainers-node    Direct DOCKER_HOST, no Ryuk socket override
+  testcontainers-python  Direct DOCKER_HOST, no Ryuk socket override
+  testcontainers-java    Direct DOCKER_HOST, no Ryuk socket override
+  testcontainers-go      Direct DOCKER_HOST, no Ryuk socket override
   devcontainers-cli      Isolated Docker context, no Docker host override
 
 required environment:
@@ -97,20 +97,24 @@ case "$SUITE" in
     testcontainers-node|testcontainers-java|testcontainers-go)
         # These clients do not reliably read Docker CLI contexts. Keep the
         # context preflight above as provenance evidence, then use their documented
-        # direct endpoint. The override is the guest path Ryuk/DinD must mount,
-        # not the Mac-side Morbstack socket path.
-        unset DOCKER_CONTEXT
+        # direct endpoint.
+        #
+        # TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE is deliberately NOT set (and is
+        # unset below): the engine now rewrites a bind mount of its own Mac-side
+        # socket to the guest's /var/run/docker.sock (DockerBindMountPreflight),
+        # so Ryuk works with no override. Setting it here would hide a
+        # regression in exactly the path this suite exists to prove.
+        unset DOCKER_CONTEXT TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE
         export DOCKER_HOST="$EXPECTED_HOST"
-        export TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock
         ;;
     testcontainers-python)
         # Testcontainers Python delegates client construction to docker-py's
         # `from_env`, which reads DOCKER_HOST rather than Docker CLI contexts.
         # Keep the context preflight as evidence that the bundled CLI reaches
-        # this engine, then exercise Python's actual discovery path.
-        unset DOCKER_CONTEXT
+        # this engine, then exercise Python's actual discovery path. As above,
+        # no Ryuk socket override: the engine's socket rewrite makes it moot.
+        unset DOCKER_CONTEXT TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE
         export DOCKER_HOST="$EXPECTED_HOST"
-        export TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock
         ;;
     devcontainers-cli)
         # The Dev Containers CLI shells out to Docker. Prove context discovery,

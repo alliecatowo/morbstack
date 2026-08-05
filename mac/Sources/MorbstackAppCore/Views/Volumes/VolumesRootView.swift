@@ -416,7 +416,6 @@ struct VolumesRootView: View {
                     title: "Remove Unused Volumes…",
                     isEnabled: unusedCount > 0 && !isPerformingVolumeOperation && removalProgress == nil,
                     perform: { reviewUnusedVolumes() }))
-            .searchable(text: $query, placement: .toolbar, prompt: "Name, driver, label, or mount point")
             .toolbar { toolbarContent }
             .sheet(item: $unusedRemovalPlan) { plan in
                 VolumeUnusedRemovalReview(plan: plan) { names in
@@ -541,8 +540,15 @@ struct VolumesRootView: View {
 
     // MARK: Toolbar
 
+    /// The trailing commands — create, and the inspector toggle — declared once and
+    /// mounted in one of two places. While the inspector is open they are declared on
+    /// its content, which puts them in the inspector's own toolbar section so the
+    /// system slides them in and out *with* the inspector — the same absorb behavior
+    /// the sidebar toggle gets on the leading edge. When the inspector is closed they
+    /// return to the window toolbar's trailing region so both commands stay reachable.
+    /// Identifiers are identical in both mounts.
     @ToolbarContentBuilder
-    private var toolbarContent: some ToolbarContent {
+    private var trailingCommandItems: some ToolbarContent {
         ToolbarItem(id: "volumes.create", placement: .primaryAction) {
             Button {
                 presentVolumeCreateSheet()
@@ -556,6 +562,30 @@ struct VolumesRootView: View {
                 isPerformingVolumeOperation
                     ? "Wait for the current volume operation to finish"
                     : "Create a named local Docker volume")
+        }
+        if !model.volumes.isEmpty {
+            // The inspector changes the window's navigation layout; it is not the
+            // primary task on a volume inventory screen.  Let the system place it
+            // with other view controls instead of promoting it above record actions.
+            ToolbarItem(id: "volumes.inspector", placement: .automatic) {
+                Button {
+                    showsInspector.toggle()
+                } label: {
+                    Image(systemName: "sidebar.right")
+                }
+                .accessibilityIdentifier("volumes.inspector")
+                .accessibilityLabel(showsInspector ? "Hide inspector" : "Show inspector")
+                .help(showsInspector ? "Hide the inspector" : "Show the inspector")
+            }
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        if model.volumes.isEmpty {
+            // The inspector is not mounted on the no-volumes screen, so the trailing
+            // commands need their ordinary window-toolbar home here.
+            trailingCommandItems
         }
         ToolbarItem(id: "volumes.removeUnused", placement: .secondaryAction) {
             if let removalProgress {
@@ -590,21 +620,6 @@ struct VolumesRootView: View {
             .help(volumeArchiveExportHelp)
             .disabled(!canExportSelectedVolume)
         }
-        if !model.volumes.isEmpty {
-            // The inspector changes the window's navigation layout; it is not the
-            // primary task on a volume inventory screen.  Let the system place it
-            // with other view controls instead of promoting it above record actions.
-            ToolbarItem(id: "volumes.inspector", placement: .automatic) {
-                Button {
-                    showsInspector.toggle()
-                } label: {
-                    Image(systemName: "sidebar.right")
-                }
-                .accessibilityIdentifier("volumes.inspector")
-                .accessibilityLabel(showsInspector ? "Hide inspector" : "Show inspector")
-                .help(showsInspector ? "Hide the inspector" : "Show the inspector")
-            }
-        }
     }
 
     // MARK: Content
@@ -632,14 +647,34 @@ struct VolumesRootView: View {
                 .accessibilityIdentifier("volumes.empty.noVolumes.refresh")
             }
             .accessibilityIdentifier("volumes.empty.noVolumes")
-        } else if visible.isEmpty {
-            ContentUnavailableView.search(text: query)
         } else {
-            table
-                .inspector(isPresented: $showsInspector) {
-                    detailPane
-                        .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
+            Group {
+                if visible.isEmpty {
+                    // The inspector stays mounted behind the no-results state so the
+                    // search field — declared on the inspector content below — remains
+                    // on screen to clear or edit the query.
+                    ContentUnavailableView.search(text: query)
+                } else {
+                    table
                 }
+            }
+            .inspector(isPresented: $showsInspector) {
+                detailPane
+                    .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
+                    // Mounting the trailing commands and search on the inspector
+                    // content hands them to the inspector's region of the unified
+                    // toolbar: at rest they sit against the inspector's edge instead
+                    // of hovering detached above it, and while the inspector slides
+                    // they travel with its divider — the trailing mirror of the
+                    // sidebar absorbing its own toggle. Verified against the real
+                    // window: they remain present and clickable while the inspector
+                    // is closed.
+                    .toolbar { trailingCommandItems }
+                    .searchable(
+                        text: $query,
+                        placement: .toolbar,
+                        prompt: "Name, driver, label, or mount point")
+            }
         }
     }
 
@@ -669,6 +704,11 @@ struct VolumesRootView: View {
         .contextMenu(forSelectionType: VolumeSummary.ID.self) { ids in
             contextMenu(for: ids)
         }
+        // Without this, Tahoe's automatic table striping continues past the last
+        // record and a four-row inventory reads as twenty broken placeholder rows.
+        // Disabling the system striping makes the table visibly end at its data;
+        // selection and hover remain system-drawn.
+        .alternatingRowBackgrounds(.disabled)
         .accessibilityIdentifier("volumes.table")
     }
 
@@ -850,7 +890,13 @@ struct VolumesRootView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            .formStyle(.columns)
+            // The automatic system Form, exactly as the Images inspector uses it.
+            // `.formStyle(.columns)` is a defect in a 340–460pt inspector: the
+            // two-column grid takes its own natural width, and any wide value —
+            // a monospaced mount point, a caption sentence — pushes the grid past
+            // the column and clips *both* edges ("Docker Name" rendered as
+            // "ocker Name"). The automatic style lays labels at the leading edge
+            // and truncates values inside the available width.
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         } else {
             ContentUnavailableView(

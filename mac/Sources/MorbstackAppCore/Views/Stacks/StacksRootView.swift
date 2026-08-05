@@ -240,7 +240,6 @@ struct StacksRootView: View {
         content
             .navigationTitle("Stacks")
             .navigationSubtitle(subtitle)
-            .searchable(text: $query, placement: .toolbar, prompt: "Project, service, image")
             .toolbar { toolbarContent }
             .confirmationDialog(
                 removalTarget.map { "Remove \($0.composeService ?? $0.displayName)?" } ?? "Remove service?",
@@ -355,15 +354,8 @@ struct StacksRootView: View {
             .help("Refresh and Compose file options")
         }
 
-        if !services.isEmpty {
-            ToolbarItem(id: "stacks.inspector", placement: .automatic) {
-                Button { showsInspector.toggle() } label: {
-                    Image(systemName: "sidebar.right")
-                }
-                .accessibilityIdentifier("stacks.inspector")
-                .accessibilityLabel(showsInspector ? "Hide inspector" : "Show inspector")
-                .help(showsInspector ? "Hide inspector" : "Show inspector")
-            }
+        if services.isEmpty {
+            trailingCommandItems
         }
 
         if let stack = selectedStack {
@@ -403,6 +395,23 @@ struct StacksRootView: View {
                 ToolbarItem(id: "stacks.project-actions", placement: .secondaryAction) {
                     projectActionsMenu(for: stack)
                 }
+            }
+        }
+    }
+
+    /// See the note on `VolumesRootView.trailingCommandItems`: mounted on the
+    /// inspector content while the outline is on screen, and in the window toolbar
+    /// on the inspector-less empty screens.
+    @ToolbarContentBuilder
+    private var trailingCommandItems: some ToolbarContent {
+        if !services.isEmpty {
+            ToolbarItem(id: "stacks.inspector", placement: .automatic) {
+                Button { showsInspector.toggle() } label: {
+                    Image(systemName: "sidebar.right")
+                }
+                .accessibilityIdentifier("stacks.inspector")
+                .accessibilityLabel(showsInspector ? "Hide inspector" : "Show inspector")
+                .help(showsInspector ? "Hide inspector" : "Show inspector")
             }
         }
     }
@@ -503,14 +512,26 @@ struct StacksRootView: View {
             engineEmptyState
         } else if services.isEmpty {
             noStacksEmptyState
-        } else if visibleRows.isEmpty {
-            ContentUnavailableView.search(text: query)
         } else {
-            outline
-                .inspector(isPresented: $showsInspector) {
-                    inspector
-                        .inspectorColumnWidth(min: 340, ideal: 400, max: 520)
+            Group {
+                if visibleRows.isEmpty {
+                    // The inspector stays mounted behind the no-results state so the
+                    // search field — declared on the inspector content below —
+                    // remains on screen to clear or edit the query.
+                    ContentUnavailableView.search(text: query)
+                } else {
+                    outline
                 }
+            }
+            .inspector(isPresented: $showsInspector) {
+                inspector
+                    .inspectorColumnWidth(min: 340, ideal: 400, max: 520)
+                    // See the note on `VolumesRootView`: the trailing commands and
+                    // search ride the inspector's toolbar region and remain present
+                    // while the inspector is closed.
+                    .toolbar { trailingCommandItems }
+                    .searchable(text: $query, placement: .toolbar, prompt: "Project, service, image")
+            }
         }
     }
 
@@ -606,9 +627,9 @@ struct StacksRootView: View {
                 }
             }
         }
-        // A selected record uses the system inspector's aligned macOS form columns,
-        // not grouped mini-panels or a custom detail surface.
-        .formStyle(.columns)
+        // Automatic system Form — see the clipping note on
+        // `VolumesRootView.detailPane`: `.formStyle(.columns)` overflows and clips
+        // a 340pt-class inspector when any value is wide.
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .task(id: stack.id) {
             metadata.load(project: project, containerID: service.id, client: model.client)
@@ -627,7 +648,6 @@ struct StacksRootView: View {
 
             fixtureOperationAvailabilitySection
         }
-        .formStyle(.columns)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .task(id: stack.id) {
             if let service = stack.containers.first {

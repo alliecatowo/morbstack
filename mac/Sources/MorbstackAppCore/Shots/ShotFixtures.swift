@@ -179,6 +179,30 @@ enum ShotFixtures {
                 port(host: 50_000, container: 50_000),
             ],
             created: ago(days: 9.3)),
+        // Kubernetes' own dockershim containers, named exactly the way a kubelet
+        // names them. They exist so the Containers route's collapsed
+        // Kubernetes-Managed group is a fixture-visible surface: any machine with
+        // the bundled cluster enabled has rows like these.
+        make(
+            name: "k8s_coredns_coredns-7f9c69d9d8-4wqxr_kube-system_1c1c86b5-90a4-4e6f-a2d8-6a70428f6a9f_0",
+            image: "rancher/mirrored-coredns-coredns:1.11.1",
+            state: "running",
+            status: "Up 2 days",
+            project: nil,
+            service: nil,
+            ports: [],
+            created: ago(days: 2.1),
+            kubernetesManaged: true),
+        make(
+            name: "k8s_POD_coredns-7f9c69d9d8-4wqxr_kube-system_1c1c86b5-90a4-4e6f-a2d8-6a70428f6a9f_0",
+            image: "registry.k8s.io/pause:3.10",
+            state: "running",
+            status: "Up 2 days",
+            project: nil,
+            service: nil,
+            ports: [],
+            created: ago(days: 2.1),
+            kubernetesManaged: true),
     ]
 
     private static func make(
@@ -189,7 +213,8 @@ enum ShotFixtures {
         project: String?,
         service: String?,
         ports: [PortMapping],
-        created: Date
+        created: Date,
+        kubernetesManaged: Bool = false
     ) -> ContainerSummary {
         ContainerSummary(
             id: containerID(name),
@@ -201,7 +226,8 @@ enum ShotFixtures {
             composeProject: project,
             composeService: service,
             ports: ports,
-            createdAt: created)
+            createdAt: created,
+            isKubernetesManaged: kubernetesManaged)
     }
 
     private static func port(host: Int?, container: Int, proto: String = "tcp") -> PortMapping {
@@ -246,6 +272,10 @@ enum ShotFixtures {
         image("alpine:3.20", size: 8_413_184, created: ago(days: 34), using: 0),
         image("busybox:1.36", size: 4_509_696, created: ago(days: 61), using: 0),
         image("hello-world:latest", size: 20_480, created: ago(days: 112), using: 0),
+        // Referenced by the kubelet-managed fixture containers; the fixture
+        // diagnostics require every referenced image to have a tagged record.
+        image("rancher/mirrored-coredns-coredns:1.11.1", size: 71_303_168, created: ago(days: 57), using: 1),
+        image("registry.k8s.io/pause:3.10", size: 514_048, created: ago(days: 57), using: 1),
         image(nil, size: 1_121_976_320, created: ago(days: 2), using: 0, seed: "dangling-a"),
         image(nil, size: 779_845_632, created: ago(hours: 20), using: 0, seed: "dangling-b"),
     ]

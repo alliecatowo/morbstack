@@ -434,6 +434,54 @@ final class MorbstackFixtureUITests: XCTestCase {
         try cancelPresentedConfirmation(in: app)
     }
 
+    /// TEMPORARY PROBE — remove after the trailing-toolbar review.
+    /// Toggles the Volumes inspector and writes real-window frames to a scratch
+    /// directory so the animation can be reviewed outside the xcresult bundle.
+    func testProbeVolumesTrailingCommandsRideTheInspector() throws {
+        let app = try launchFixture(appearance: .dark)
+        try selectSidebarRoute("Volumes", in: app)
+        try assertFixtureMarker("shopfront_pgdata", in: app)
+
+        let toggle = app.buttons["volumes.inspector"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["volumes.create"].exists)
+        probeShot(app, "open")
+        toggle.click()
+        probeBurst(app, "closing")
+        XCTAssertTrue(waitForLabel("Show inspector", on: toggle))
+        XCTAssertTrue(
+            app.buttons["volumes.create"].exists,
+            "Create must stay reachable while the inspector is closed.")
+        XCTAssertTrue(
+            app.searchFields.firstMatch.exists,
+            "The search field must stay reachable while the inspector is closed.")
+        probeShot(app, "closed")
+        toggle.click()
+        probeBurst(app, "opening")
+        XCTAssertTrue(waitForLabel("Hide inspector", on: toggle))
+        probeShot(app, "reopened")
+    }
+
+    private var probeDirectory: URL {
+        URL(fileURLWithPath: ProcessInfo.processInfo.environment["MORB_PROBE_DIR"] ?? NSTemporaryDirectory())
+    }
+
+    private func probeShot(_ app: XCUIApplication, _ name: String) {
+        try? FileManager.default.createDirectory(at: probeDirectory, withIntermediateDirectories: true)
+        let shot = app.windows.firstMatch.screenshot()
+        try? shot.pngRepresentation.write(to: probeDirectory.appendingPathComponent("probe-\(name).png"))
+        let attachment = XCTAttachment(screenshot: shot)
+        attachment.name = "probe-\(name)"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    private func probeBurst(_ app: XCUIApplication, _ name: String) {
+        for index in 0..<3 {
+            probeShot(app, "\(name)-\(index)")
+        }
+    }
+
     // MARK: - Fixture launch and route assertions
 
     private func launchFixture(appearance: Appearance) throws -> XCUIApplication {

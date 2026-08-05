@@ -390,7 +390,6 @@ struct BuildsRootView: View {
                         content
                             .navigationTitle("Builds")
                             .navigationSubtitle(subtitle)
-                            .searchable(text: $query, placement: .toolbar, prompt: searchPrompt)
                             .toolbar { toolbarContent }
                             // The menu-bar mirror of the options menu's prune command,
                             // so it stays reachable when the toolbar overflows.
@@ -574,21 +573,11 @@ struct BuildsRootView: View {
                     ? "Choose BuildKit cache or Buildx history"
                     : "Buildx history is unavailable in developer fixture data")
         }
-        if scope == .cache {
-            ToolbarItem(id: "builds.start", placement: .primaryAction) {
-                Button {
-                    showsBuildSheet = true
-                } label: {
-                    Image(systemName: "plus")
-                }
-                .accessibilityIdentifier("builds.start")
-                .accessibilityLabel("Build an image")
-                .help(
-                    externalBuildOperationsAreAvailable
-                        ? "Build an image from a local Dockerfile"
-                        : fixtureBuildOperationMessage)
-                .disabled(!externalBuildOperationsAreAvailable || isPruning)
-            }
+        if !inspectorIsMounted {
+            // The inspector-less empty screens still need the trailing commands in
+            // the window toolbar; when a table is on screen they ride the inspector
+            // content instead — see `VolumesRootView.trailingCommandItems`.
+            trailingCommandItems
         }
         // One semantic options menu instead of three loose glyphs — refresh, the
         // builder sheet, and the infrequent destructive prune stay together and the
@@ -623,6 +612,37 @@ struct BuildsRootView: View {
             .accessibilityIdentifier("builds.options")
             .accessibilityLabel("Build options")
             .help("Refresh, builder, and cleanup options")
+        }
+    }
+
+    /// Whether the current scope's content branch mounts the system inspector —
+    /// the exact complement of the states where `toolbarContent` must supply the
+    /// trailing commands itself.
+    private var inspectorIsMounted: Bool {
+        if !externalBuildOperationsAreAvailable, scope == .history { return false }
+        if scope == .cache { return !records.isEmpty }
+        if case .loaded = model.buildHistoryState { return !model.buildHistory.isEmpty }
+        return false
+    }
+
+    /// See the note on `VolumesRootView.trailingCommandItems`.
+    @ToolbarContentBuilder
+    private var trailingCommandItems: some ToolbarContent {
+        if scope == .cache {
+            ToolbarItem(id: "builds.start", placement: .primaryAction) {
+                Button {
+                    showsBuildSheet = true
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .accessibilityIdentifier("builds.start")
+                .accessibilityLabel("Build an image")
+                .help(
+                    externalBuildOperationsAreAvailable
+                        ? "Build an image from a local Dockerfile"
+                        : fixtureBuildOperationMessage)
+                .disabled(!externalBuildOperationsAreAvailable || isPruning)
+            }
         }
         if scope == .cache ? !records.isEmpty : !model.buildHistory.isEmpty {
             // `.automatic`, matching every other route's inspector toggle placement.
@@ -689,17 +709,26 @@ struct BuildsRootView: View {
                 .disabled(isRefreshing)
             }
             .accessibilityIdentifier("builds.empty.noCache")
-        } else if visible.isEmpty {
-            ContentUnavailableView.search(text: query)
         } else {
-            table
-                .inspector(isPresented: $showsInspector) {
-                    detailPane
-                        .inspectorColumnWidth(
-                            min: 340,
-                            ideal: 400,
-                            max: 460)
+            Group {
+                if visible.isEmpty {
+                    // The inspector stays mounted behind the no-results state so the
+                    // search field — declared on the inspector content below —
+                    // remains on screen to clear or edit the query.
+                    ContentUnavailableView.search(text: query)
+                } else {
+                    table
                 }
+            }
+            .inspector(isPresented: $showsInspector) {
+                detailPane
+                    .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
+                    // See the note on `VolumesRootView`: the trailing commands and
+                    // search ride the inspector's toolbar region and remain present
+                    // while the inspector is closed.
+                    .toolbar { trailingCommandItems }
+                    .searchable(text: $query, placement: .toolbar, prompt: searchPrompt)
+            }
         }
     }
 
@@ -733,6 +762,9 @@ struct BuildsRootView: View {
             .width(min: 72, ideal: 88, max: 120)
         }
         .tableStyle(.automatic)
+        // See the striping note on `VolumesRootView.table`: system striping past the
+        // last record reads as broken placeholder rows at this route's density.
+        .alternatingRowBackgrounds(.disabled)
         .contextMenu(forSelectionType: BuildCacheRecord.ID.self) { ids in
             if let id = ids.first, let record = records.first(where: { $0.id == id }) {
                 Button("Copy Description") { MorbPasteboard.copy(record.description) }
@@ -802,17 +834,21 @@ struct BuildsRootView: View {
                     .disabled(isHistoryRefreshing)
                 }
                 .accessibilityIdentifier("builds.empty.noCompletedBuilds")
-            } else if visibleHistory.isEmpty {
-                ContentUnavailableView.search(text: query)
             } else {
-                historyTable
-                    .inspector(isPresented: $showsInspector) {
-                        historyDetailPane
-                            .inspectorColumnWidth(
-                                min: 340,
-                                ideal: 400,
-                                max: 460)
+                Group {
+                    if visibleHistory.isEmpty {
+                        ContentUnavailableView.search(text: query)
+                    } else {
+                        historyTable
                     }
+                }
+                .inspector(isPresented: $showsInspector) {
+                    historyDetailPane
+                        .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
+                        // See the note on `VolumesRootView`.
+                        .toolbar { trailingCommandItems }
+                        .searchable(text: $query, placement: .toolbar, prompt: searchPrompt)
+                }
             }
         }
     }
@@ -866,6 +902,8 @@ struct BuildsRootView: View {
             .width(min: 88, ideal: 104, max: 132)
         }
         .tableStyle(.automatic)
+        // See the striping note on `VolumesRootView.table`.
+        .alternatingRowBackgrounds(.disabled)
         .contextMenu(forSelectionType: BuildxHistoryRecord.ID.self) { ids in
             if let id = ids.first, let record = model.buildHistory.first(where: { $0.id == id }) {
                 Button("Copy Build ID") { MorbPasteboard.copy(record.id) }
@@ -923,7 +961,10 @@ struct BuildsRootView: View {
                             : "Included in deduplicated total")
                 }
             }
-            .formStyle(.columns)
+            // Automatic system Form — see the clipping note on
+            // `VolumesRootView.detailPane`. This pane happened to fit at 400pt, but
+            // it carried the same `.formStyle(.columns)` overflow defect for any
+            // wider cache description.
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         } else {
             ContentUnavailableView(
@@ -1150,7 +1191,9 @@ struct BuildsRootView: View {
                 }
             }
         }
-        .formStyle(.columns)
+        // Automatic system Form — see the clipping note on
+        // `VolumesRootView.detailPane`; digests here are exactly the wide
+        // monospaced values that overflow a columns-style grid.
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 

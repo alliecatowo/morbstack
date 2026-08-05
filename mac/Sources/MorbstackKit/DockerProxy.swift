@@ -353,7 +353,8 @@ extension DockerProxy: DockerRequestAdmissionPolicy {
             body: body,
             shares: shareSnapshot.shares,
             guestShareStates: shareSnapshot.guestShareStates,
-            guestTmpAliasMounted: shareSnapshot.guestTmpAliasMounted)
+            guestTmpAliasMounted: shareSnapshot.guestTmpAliasMounted,
+            hostDockerSocketPath: server.path)
 
         let admittedBody: Data
         let bindSourcesWereRewritten: Bool

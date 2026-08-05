@@ -275,7 +275,6 @@ struct NetworksRootView: View {
                     content
                         .navigationTitle("Networks")
                         .navigationSubtitle(subtitle)
-                        .searchable(text: $query, placement: .toolbar, prompt: "Name, driver, ID")
                         .toolbar { toolbarContent }
                         // The menu-bar mirror of the toolbar's remove-unused command,
                         // so it stays reachable when the toolbar overflows.
@@ -395,8 +394,12 @@ struct NetworksRootView: View {
 
     // MARK: Toolbar
 
+    /// The trailing commands, mounted on the inspector content while the inspector
+    /// is available so the system carries them with the inspector's edge, and in the
+    /// window toolbar only on the inspector-less empty screen — see the note on
+    /// `VolumesRootView.trailingCommandItems`.
     @ToolbarContentBuilder
-    private var toolbarContent: some ToolbarContent {
+    private var trailingCommandItems: some ToolbarContent {
         ToolbarItem(id: "networks.create", placement: .primaryAction) {
             Button {
                 isShowingNetworkCreate = true
@@ -410,6 +413,27 @@ struct NetworksRootView: View {
                 isPerformingNetworkOperation
                     ? "Wait for the current network operation to finish"
                     : "Create a bridge network")
+        }
+        if !model.networks.isEmpty {
+            // Creating is the primary task; the inspector still changes navigation
+            // layout and remains system-placed with the other view controls.
+            ToolbarItem(id: "networks.inspector", placement: .automatic) {
+                Button {
+                    showsInspector.toggle()
+                } label: {
+                    Image(systemName: "sidebar.right")
+                }
+                .accessibilityIdentifier("networks.inspector")
+                .accessibilityLabel(showsInspector ? "Hide inspector" : "Show inspector")
+                .help(showsInspector ? "Hide the inspector" : "Show the inspector")
+            }
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        if model.networks.isEmpty {
+            trailingCommandItems
         }
         ToolbarItem(id: "networks.removeUnused", placement: .secondaryAction) {
             if busy {
@@ -440,20 +464,6 @@ struct NetworksRootView: View {
                     .accessibilityLabel("Updating network membership")
             }
         }
-        if !model.networks.isEmpty {
-            // Creating is the primary task; the inspector still changes navigation
-            // layout and remains system-placed with the other view controls.
-            ToolbarItem(id: "networks.inspector", placement: .automatic) {
-                Button {
-                    showsInspector.toggle()
-                } label: {
-                    Image(systemName: "sidebar.right")
-                }
-                .accessibilityIdentifier("networks.inspector")
-                .accessibilityLabel(showsInspector ? "Hide inspector" : "Show inspector")
-                .help(showsInspector ? "Hide the inspector" : "Show the inspector")
-            }
-        }
     }
 
     // MARK: Content
@@ -481,14 +491,26 @@ struct NetworksRootView: View {
                 .accessibilityIdentifier("networks.empty.noNetworks.refresh")
             }
             .accessibilityIdentifier("networks.empty.noNetworks")
-        } else if visibleNetworks.isEmpty {
-            ContentUnavailableView.search(text: query)
         } else {
-            table
-                .inspector(isPresented: $showsInspector) {
-                    detailPane
-                        .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
+            Group {
+                if visibleNetworks.isEmpty {
+                    // The inspector stays mounted behind the no-results state so the
+                    // search field — declared on the inspector content below — remains
+                    // on screen to clear or edit the query.
+                    ContentUnavailableView.search(text: query)
+                } else {
+                    table
                 }
+            }
+            .inspector(isPresented: $showsInspector) {
+                detailPane
+                    .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
+                    // See the note on `VolumesRootView`: the trailing commands and
+                    // search ride the inspector's toolbar region and remain present
+                    // while the inspector is closed.
+                    .toolbar { trailingCommandItems }
+                    .searchable(text: $query, placement: .toolbar, prompt: "Name, driver, ID")
+            }
         }
     }
 
@@ -524,6 +546,9 @@ struct NetworksRootView: View {
         .contextMenu(forSelectionType: NetworkSummary.ID.self) { ids in
             contextMenu(for: ids)
         }
+        // See the striping note on `VolumesRootView.table`: system striping past the
+        // last record reads as broken placeholder rows at this route's density.
+        .alternatingRowBackgrounds(.disabled)
         .accessibilityIdentifier("networks.table")
     }
 
@@ -670,7 +695,9 @@ struct NetworksRootView: View {
             networkMembers(inspection)
             networkActions(inspection, summary: summary)
         }
-        .formStyle(.columns)
+        // Automatic system Form — see the clipping note on
+        // `VolumesRootView.detailPane`: `.formStyle(.columns)` overflows and clips
+        // a 340–460pt inspector when any value is wide.
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 

@@ -1364,6 +1364,24 @@ case "install-cli":
             out("[!!] CLI links were installed, but Docker context setup failed: \(contextError)")
         }
 
+        // A correct install that silently defers to another engine is the same
+        // failure class as the silent wrong-daemon it exists to prevent (ECO-1).
+        // Each deferral above is deliberate and each printed its own [--] line,
+        // but a person skimming for green marks deserves the consequence stated
+        // once, plainly: nothing on this machine will discover Morbstack yet.
+        let postInstallContext = MorbDockerContext.status()
+        if !postInstallContext.isCurrent, !result.directSocket.isManaged, result.contextError == nil {
+            out("")
+            out("[!!] Morbstack is installed, but it is NOT what Docker tools on this")
+            out("     machine will discover: another engine holds both the current Docker")
+            out("     context (`\(postInstallContext.currentContext)`) and the conventional per-user socket.")
+            out("     Builds and tests keep using that other engine until you either")
+            out("       - run `docker context use morbstack` (context-aware tools), or")
+            out("       - quit or uninstall the other engine, then re-run `morb install-cli`, or")
+            out("       - point one shell at Morbstack: export DOCKER_HOST=unix://\(MorbPaths.dockerSocket.path)")
+            out("     `morb context status` reports this state at any time.")
+        }
+
         // A completion claim without a read-back is not useful to a clean-machine
         // user. This report re-reads the host integrations and observes only an
         // already-running daemon; it never goes through `callDaemon`, so it cannot

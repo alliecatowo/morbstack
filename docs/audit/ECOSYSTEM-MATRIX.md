@@ -39,6 +39,14 @@ none of that: discovery, the reaper, and the socket bind mount are the point.
 against the wrong daemon. On a machine that has (or once had) Docker Desktop,
 that is silent misdirection of a user's entire test run.
 
+> **Update, 2026-08-04 (later the same day):** ECO-1/ECO-2 landed. The
+> zero-config column above records the pre-fix state; see
+> [Zero-config rerun](#zero-config-rerun-2026-08-04-after-eco-1--eco-2) for
+> the post-fix evidence: Node, Go, Java, and Python all green against
+> **29.7.1** with no environment variables at all, Ryuk included, no
+> `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE`. Design and coexistence rules:
+> [`../design/ZERO-CONFIG-DISCOVERY.md`](../design/ZERO-CONFIG-DISCOVERY.md).
+
 ## Testcontainers Node — exact commands and output
 
 ```
@@ -295,3 +303,64 @@ ran.)
 4. **Dev Containers work end-to-end today** — lifecycle, bind-mounted
    workspace (two-way), postCreateCommand, exec, and features (including a
    real derived-image build) — with nothing but a docker context.
+
+## Zero-config rerun (2026-08-04, after ECO-1 / ECO-2)
+
+What changed since the table above:
+
+1. **ECO-2 (engine):** `DockerBindMountPreflight` now rewrites a bind source
+   that is — by exact, symlink-resolved identity — the daemon's own Mac-side
+   socket into `/var/run/docker.sock`, the guest's spelling of the same
+   resource. Ryuk's socket mount therefore works with **no**
+   `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE`, from every discovery flavour.
+   `scripts/ecosystem-acceptance.sh` no longer sets the override.
+2. **ECO-1 (install):** `morb install-cli` already created the per-user
+   conventional socket link `~/.docker/run/docker.sock -> ~/.morbstack/run/docker.sock`
+   (only when that path is free) and registered/selected the `morbstack`
+   context (only when the current context is Docker's plain default). That
+   link is exactly the rootless path Testcontainers Node, Go, and Java probe.
+   On this dev machine it is occupied by Docker Desktop's live socket, so the
+   original run above never saw it; on the target machine — no Docker at all —
+   it is what makes Morbstack discoverable with zero configuration.
+
+Method: the same locked probes as above (real Postgres round trip + Ryuk
+verification), run with `env -i` — **no `DOCKER_*`, no `TESTCONTAINERS_*`,
+nothing** — and `HOME=/tmp/mb-zcfg`, a scratch home containing only what
+`morb install-cli` produces on a free machine: the discovery symlink (Node,
+Go, Java) and the selected `morbstack` context written by the real
+`morb context create` + `docker context use morbstack` (Python). The engine
+under test is the rebuilt dev daemon (server **29.7.1**); Docker Desktop
+27.4.0 remained installed and untouched throughout, which is the
+wrong-daemon tripwire: any 27.4.0 in the output is an instant FAIL.
+
+| Suite | Discovery input (filesystem only) | Result |
+| --- | --- | --- |
+| Node 12.1.0 | `~/.docker/run/docker.sock` link | **PASS** — `serverVersion=29.7.1 os=Alpine Linux v3.24`, ryuk 0.14.0 running, `NODE PROBE PASS`, 2.1 s |
+| Go v0.43.0 | `~/.docker/run/docker.sock` link | **PASS** — `server_version=29.7.1 platform=Docker Engine - Community`, ryuk found, `GO PROBE PASS`, 1.5 s |
+| Java 1.21.4 | `~/.docker/run/docker.sock` link (`Found Docker environment with Docker accessed via Unix socket (/tmp/mb-zcfg/.docker/run/docker.sock)`) | **PASS** — `Docker server version: 29.7.1 (API 1.55)`, ryuk 0.12.0, `JAVA PROBE PASS`, 4.4 s |
+| Python 4.15.0 | selected `morbstack` context | **PASS** — `version=29.7.1`, ryuk 0.8.1, `PYTHON PROBE PASS`, 1.8 s |
+
+Bind-rewrite proof as dockerd recorded it (both the discovery-link spelling
+and the direct `DOCKER_HOST` socket path):
+
+```
+$ docker create -v /tmp/mb-zcfg/.docker/run/docker.sock:/var/run/docker.sock:ro alpine:3.20 true
+$ docker inspect --format '{{json .HostConfig.Binds}}' <id>
+["/var/run/docker.sock:/var/run/docker.sock:ro"]
+```
+
+The explicit-config harness suites (Node/Go/Java through
+`scripts/ecosystem-acceptance.sh` with `DOCKER_HOST` set and
+`testcontainers-socket=<not set>`) also pass post-change, so the override's
+removal from the harness is load-bearing, not cosmetic.
+
+Caveats that remain true:
+
+- On a machine where Docker Desktop's socket is live at
+  `~/.docker/run/docker.sock`, context-blind clients still find Docker
+  Desktop first. That is deliberate deferral, now loud instead of silent:
+  `morb install-cli` ends with an explicit `[!!] ... NOT what Docker tools
+  will discover` block, and `morb doctor`'s `docker-discovery` check warns
+  about competing conventional sockets.
+- testcontainers-java ≤1.20.x still fails against any engine-29 daemon (API
+  floor, documented above); zero-config discovery does not change that.

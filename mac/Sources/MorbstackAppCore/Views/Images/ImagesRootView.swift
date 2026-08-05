@@ -387,7 +387,6 @@ struct ImagesRootView: View {
                     title: "Prune Dangling Layers…",
                     isEnabled: reclaimableDanglingCount > 0 && !busy,
                     perform: { showsPruneConfirmation = true }))
-            .searchable(text: $query, placement: .toolbar, prompt: "Repository, tag, digest")
             .toolbar { toolbarContent }
             .focusedSceneValue(
                 \.imageArchiveExportAction,
@@ -473,8 +472,11 @@ struct ImagesRootView: View {
         removal = ImageRemovalConfirmation(image: image)
     }
 
+    /// See the note on `VolumesRootView.trailingCommandItems`: mounted on the
+    /// inspector content while a table is on screen, and in the window toolbar on
+    /// the inspector-less empty screen.
     @ToolbarContentBuilder
-    private var toolbarContent: some ToolbarContent {
+    private var trailingCommandItems: some ToolbarContent {
         ToolbarItem(id: "images.pull", placement: .primaryAction) {
             Button {
                 presentPull()
@@ -487,6 +489,25 @@ struct ImagesRootView: View {
             .accessibilityIdentifier("images.pull")
             .accessibilityLabel("Pull an image")
             .help("Pull an image")
+        }
+        if !model.images.isEmpty {
+            ToolbarItem(id: "images.inspector", placement: .automatic) {
+                Button {
+                    showsInspector.toggle()
+                } label: {
+                    Image(systemName: "sidebar.right")
+                }
+                .accessibilityIdentifier("images.inspector")
+                .accessibilityLabel(showsInspector ? "Hide inspector" : "Show inspector")
+                .help(showsInspector ? "Hide the inspector" : "Show the inspector")
+            }
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        if model.images.isEmpty {
+            trailingCommandItems
         }
         ToolbarItem(id: "images.pruneDangling", placement: .secondaryAction) {
             pruneDanglingButton
@@ -537,18 +558,6 @@ struct ImagesRootView: View {
                     ? "Select a local image while the engine is running"
                     : "Create and start one container using the selected local image")
             .disabled(runLocalImageAction == nil)
-        }
-        if !model.images.isEmpty {
-            ToolbarItem(id: "images.inspector", placement: .automatic) {
-                Button {
-                    showsInspector.toggle()
-                } label: {
-                    Image(systemName: "sidebar.right")
-                }
-                .accessibilityIdentifier("images.inspector")
-                .accessibilityLabel(showsInspector ? "Hide inspector" : "Show inspector")
-                .help(showsInspector ? "Hide the inspector" : "Show the inspector")
-            }
         }
     }
 
@@ -736,17 +745,26 @@ struct ImagesRootView: View {
                 .accessibilityIdentifier("images.empty.noImages.refresh")
             }
             .accessibilityIdentifier("images.empty.noImages")
-        } else if split.tagged.isEmpty && split.dangling.isEmpty {
-            ContentUnavailableView.search(text: query)
         } else {
-            table(split)
-                .inspector(isPresented: $showsInspector) {
-                    detailPane
-                        .inspectorColumnWidth(
-                            min: 340,
-                            ideal: 400,
-                            max: 460)
+            Group {
+                if split.tagged.isEmpty && split.dangling.isEmpty {
+                    // The inspector stays mounted behind the no-results state so the
+                    // search field — declared on the inspector content below —
+                    // remains on screen to clear or edit the query.
+                    ContentUnavailableView.search(text: query)
+                } else {
+                    table(split)
                 }
+            }
+            .inspector(isPresented: $showsInspector) {
+                detailPane
+                    .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
+                    // See the note on `VolumesRootView`: the trailing commands and
+                    // search ride the inspector's toolbar region and remain present
+                    // while the inspector is closed.
+                    .toolbar { trailingCommandItems }
+                    .searchable(text: $query, placement: .toolbar, prompt: "Repository, tag, digest")
+            }
         }
     }
 
@@ -812,10 +830,13 @@ struct ImagesRootView: View {
                 }
             }
         }
-        // Native `BorderedTableStyle` is the narrow system-style hypothesis for the
-        // repeated rounded empty-row bands seen in the current automatic appearance.
-        // It requires current-bundle Computer Use review before visual acceptance.
+        // Native `BorderedTableStyle` was adopted for the repeated rounded empty-row
+        // bands in the automatic appearance and reviewed as correct. Its own subtler
+        // edge-to-edge striping still continued past the last record, so the striping
+        // is disabled here like every other record table — the table visibly ends at
+        // its data (see the note on `VolumesRootView.table`).
         .tableStyle(.bordered)
+        .alternatingRowBackgrounds(.disabled)
         .accessibilityIdentifier("images.table")
         .contextMenu(forSelectionType: ImageSummary.ID.self) { ids in
             contextMenu(for: ids)

@@ -45,6 +45,12 @@ public enum DockerBindMountPreflight {
     ///   - guestTmpAliasMounted: Whether the guest confirmed its literal `/tmp`
     ///     alias to the live `/private/tmp` share. `nil` is an older guest that
     ///     cannot prove the alias; it is not treated as a successful alias.
+    ///   - hostDockerSocketPath: The Mac-side Unix socket this daemon publishes the
+    ///     Docker API at (``MorbPaths/dockerSocket`` in the running daemon). A bind
+    ///     source that names it — directly, or through a symlink such as the
+    ///     `~/.docker/run/docker.sock` discovery link — is the same resource the
+    ///     guest owns at `/var/run/docker.sock`, and is rewritten to that guest
+    ///     spelling. `nil` disables the rewrite.
     ///   - sourceExists: Injected for deterministic tests. It is used for explicit
     ///     `Mounts` bind sources, which Docker itself requires to exist, and for
     ///     `/etc` or `/var` aliases before Morbstack can safely rewrite them.
@@ -56,6 +62,7 @@ public enum DockerBindMountPreflight {
         shares: [MorbDirectoryShare],
         guestShareStates: [String: MorbShares.GuestMountState],
         guestTmpAliasMounted: Bool? = nil,
+        hostDockerSocketPath: String? = nil,
         sourceExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
         sourcePathResolving: ((String) -> String)? = nil
     ) -> Verdict {
@@ -64,6 +71,7 @@ public enum DockerBindMountPreflight {
             shares: shares,
             guestShareStates: guestShareStates,
             guestTmpAliasMounted: guestTmpAliasMounted,
+            hostDockerSocketPath: hostDockerSocketPath,
             sourceExists: sourceExists,
             sourcePathResolving: sourcePathResolving)
         {
@@ -89,6 +97,7 @@ public enum DockerBindMountPreflight {
         shares: [MorbDirectoryShare],
         guestShareStates: [String: MorbShares.GuestMountState],
         guestTmpAliasMounted: Bool? = nil,
+        hostDockerSocketPath: String? = nil,
         sourceExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
         sourcePathResolving: ((String) -> String)? = nil
     ) -> Preparation {
@@ -96,6 +105,13 @@ public enum DockerBindMountPreflight {
             return .allowed(body: body, wasRewritten: false)
         }
         let sourcePathResolving = sourcePathResolving ?? resolveSourcePathThroughExistingAncestor
+        // The daemon socket's own canonical identity, resolved through the same
+        // machinery as bind sources so a `MORBSTACK_HOME` under `/tmp` (a macOS
+        // `/private` alias) or a symlinked home compares equal to what a client
+        // derived from `DOCKER_HOST` or a discovery link.
+        let canonicalHostDockerSocket = hostDockerSocketPath.map {
+            MorbShares.canonicalHostPath(sourcePathResolving($0))
+        }
 
         var bindSources: [BindSource] = []
         if let hostConfig = object["HostConfig"] as? [String: Any],
@@ -137,6 +153,25 @@ public enum DockerBindMountPreflight {
             // the Mac. Every other `/var` source remains below the explicit alias
             // rejection, so this does not create a general guest-system escape hatch.
             if isGuestDockerSocket(bindSource.path) {
+                continue
+            }
+
+            // Testcontainers-style clients derive "the Docker socket" from their
+            // discovery result — `DOCKER_HOST`, or the per-user
+            // `~/.docker/run/docker.sock` link — and bind that Mac-side path into
+            // helper containers (Ryuk, docker-outside-of-docker). That path names
+            // this daemon's own API socket, a resource the guest already owns at
+            // `/var/run/docker.sock`; a VirtioFS share could never carry the live
+            // socket inode across. Rewrite the source to the guest spelling of the
+            // same endpoint. The match is an exact, symlink-resolved identity with
+            // the daemon's published socket, so an unrelated engine's socket (for
+            // example a live Docker Desktop `~/.docker/run/docker.sock`) is never
+            // silently redirected to Morbstack.
+            if let canonicalHostDockerSocket,
+               MorbShares.canonicalHostPath(sourcePathResolving(bindSource.path))
+                   == canonicalHostDockerSocket
+            {
+                aliasRewrites[bindSource.path] = "/var/run/docker.sock"
                 continue
             }
 

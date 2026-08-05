@@ -512,6 +512,11 @@ struct ContainerSummary: Identifiable, Sendable, Hashable {
     /// relationship index for the Volumes inspector, not a substitute for the
     /// container's full inspect document.
     var volumeNames: [String] = []
+    /// `true` when the kubelet created and manages this container. A dockershim-mode
+    /// kubelet stamps every container it creates — pod sandboxes and pod containers
+    /// alike — with `io.kubernetes.docker.type`, so this is a label fact from
+    /// `/containers/json`, not a name-prefix guess.
+    var isKubernetesManaged: Bool = false
 
     var isRunning: Bool { state == "running" }
 
@@ -1340,7 +1345,8 @@ extension ContainerSummary {
             composeService: labels["com.docker.compose.service"],
             ports: ports,
             createdAt: Date(timeIntervalSince1970: wire.Created ?? 0),
-            volumeNames: volumeNames)
+            volumeNames: volumeNames,
+            isKubernetesManaged: labels["io.kubernetes.docker.type"] != nil)
     }
 }
 

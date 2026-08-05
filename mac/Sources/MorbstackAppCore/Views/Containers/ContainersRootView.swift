@@ -7,10 +7,65 @@
 // One state-appropriate lifecycle command remains in the window toolbar. The complete
 // record command set lives in the native contextual menu rather than becoming controls
 // embedded in every row or a hand-made toolbar overflow.
+//
+// The list groups rows by what Docker itself reports about them, in three tiers:
+// plain `docker run` containers stay loose at the top, each Compose project becomes a
+// native `Section` named by its `com.docker.compose.project` label, and
+// kubelet-created containers collapse into one `DisclosureGroup`. The Kubernetes tier
+// exists because a single enabled cluster adds nine-plus machine-named rows
+// (`k8s_POD_…`) that bury the containers a person started deliberately. Collapsed is
+// not hidden: the group row states its true count, expands on click, and expands
+// itself whenever a search is active so a match can never be concealed. Stacks remains
+// the route that *manages* Compose projects; the section header here is only the
+// grouping fact, the same way Docker Desktop and OrbStack present it.
 
 import Foundation
 import MorbstackKit
 import SwiftUI
+
+// MARK: - Grouping
+
+/// Splits the visible containers into the three presentation tiers. Pure and
+/// order-preserving so the split is testable without a daemon: rows keep the caller's
+/// order inside each tier, and Compose projects sort by name for a stable section
+/// order across refreshes.
+enum TrackBContainerGrouping {
+
+    struct ComposeProject: Equatable {
+        let name: String
+        let containers: [ContainerSummary]
+    }
+
+    struct Groups: Equatable {
+        var standalone: [ContainerSummary] = []
+        var projects: [ComposeProject] = []
+        var kubernetes: [ContainerSummary] = []
+    }
+
+    static func groups(of containers: [ContainerSummary]) -> Groups {
+        var result = Groups()
+        var projectOrder: [String] = []
+        var projectMembers: [String: [ContainerSummary]] = [:]
+
+        for container in containers {
+            if container.isKubernetesManaged {
+                // The kubelet fact wins: a Kubernetes-managed container never files
+                // under a Compose project even if labels carried both.
+                result.kubernetes.append(container)
+            } else if let project = container.composeProject, !project.isEmpty {
+                if projectMembers[project] == nil { projectOrder.append(project) }
+                projectMembers[project, default: []].append(container)
+            } else {
+                result.standalone.append(container)
+            }
+        }
+
+        result.projects = projectOrder
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+            .map { ComposeProject(name: $0, containers: projectMembers[$0] ?? []) }
+        return result
+    }
+}
 
 // MARK: - Root
 
@@ -42,6 +97,10 @@ struct ContainersRootView: View {
     @State private var commandTarget: ContainerSummary?
     @State private var showsInspector = true
     @State private var pruneError: String?
+    /// Rest state for the Kubernetes-managed disclosure. Collapsed by default —
+    /// the group row still names its count, so nothing is silently hidden — and
+    /// forced open while a search is active so a matching row can always be seen.
+    @State private var isKubernetesGroupExpanded = false
 
     private var stoppedCount: Int {
         model.containers.filter { !$0.isRunning }.count
@@ -92,7 +151,6 @@ struct ContainersRootView: View {
                     title: "Remove Stopped Containers…",
                     isEnabled: stoppedCount > 0 && !isPruning,
                     perform: { isShowingPruneConfirmation = true }))
-            .searchable(text: $search, placement: .toolbar, prompt: "Name, image, or project")
             .toolbar { toolbarContent }
             .confirmationDialog(
                 removalTarget.map { "Remove “\($0.displayName)”?" } ?? "Remove container?",
@@ -146,8 +204,11 @@ struct ContainersRootView: View {
 
     // MARK: Toolbar
 
+    /// See the note on `VolumesRootView.trailingCommandItems`: mounted on the
+    /// inspector content while the list is on screen, and in the window toolbar on
+    /// the inspector-less empty screens.
     @ToolbarContentBuilder
-    private var toolbarContent: some ToolbarContent {
+    private var trailingCommandItems: some ToolbarContent {
         if !model.containers.isEmpty {
             ToolbarItem(id: "containers.inspector", placement: .automatic) {
                 Button { showsInspector.toggle() } label: {
@@ -160,6 +221,13 @@ struct ContainersRootView: View {
                 .accessibilityLabel(showsInspector ? "Hide inspector" : "Show inspector")
                 .help(showsInspector ? "Hide inspector" : "Show inspector")
             }
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        if model.containers.isEmpty {
+            trailingCommandItems
         }
 
         if let selected {
@@ -246,70 +314,127 @@ struct ContainersRootView: View {
             engineEmptyState
         } else if model.containers.isEmpty {
             noContainersEmptyState
-        } else if filtered.isEmpty {
-            if search.isEmpty {
-                ContentUnavailableView {
-                    Label("No Running Containers", systemImage: "play.circle")
-                } description: {
-                    Text("No containers match the Running scope.")
-                }
-                .accessibilityIdentifier("containers.empty.noRunning")
-            } else {
-                ContentUnavailableView.search(text: search)
-            }
         } else {
-            containerList
-                .inspector(isPresented: $showsInspector) {
-                    inspector
-                        .inspectorColumnWidth(min: 340, ideal: 400, max: 520)
+            Group {
+                if filtered.isEmpty {
+                    // The inspector stays mounted behind these states so the search
+                    // field — declared on the inspector content below — remains on
+                    // screen to clear or edit the query or scope.
+                    if search.isEmpty {
+                        ContentUnavailableView {
+                            Label("No Running Containers", systemImage: "play.circle")
+                        } description: {
+                            Text("No containers match the Running scope.")
+                        }
+                        .accessibilityIdentifier("containers.empty.noRunning")
+                    } else {
+                        ContentUnavailableView.search(text: search)
+                    }
+                } else {
+                    containerList
                 }
+            }
+            .inspector(isPresented: $showsInspector) {
+                inspector
+                    .inspectorColumnWidth(min: 340, ideal: 400, max: 520)
+                    // See the note on `VolumesRootView`: the trailing commands and
+                    // search ride the inspector's toolbar region and remain present
+                    // while the inspector is closed.
+                    .toolbar { trailingCommandItems }
+                    .searchable(text: $search, placement: .toolbar, prompt: "Name, image, or project")
+            }
         }
     }
 
     private var containerList: some View {
-        List(selection: selectionBinding) {
-            ForEach(filtered) { container in
-                HStack {
-                    Label {
-                        Text(container.displayName)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    } icon: {
-                        Image(systemName: stateSymbol(for: container))
-                            .foregroundStyle(stateColor(for: container))
-                            .accessibilityHidden(true)
+        let grouped = TrackBContainerGrouping.groups(of: filtered)
+        return List(selection: selectionBinding) {
+            ForEach(grouped.standalone) { container in
+                containerRow(container)
+            }
+
+            ForEach(grouped.projects, id: \.name) { project in
+                Section(project.name) {
+                    ForEach(project.containers) { container in
+                        containerRow(container)
                     }
+                }
+            }
 
-                    Spacer(minLength: 12)
-
-                    TimelineView(.periodic(from: .now, by: 1)) { context in
-                        Text(container.statusDisplay(at: context.date))
+            if !grouped.kubernetes.isEmpty {
+                DisclosureGroup(isExpanded: kubernetesGroupExpansion) {
+                    ForEach(grouped.kubernetes) { container in
+                        containerRow(container)
+                    }
+                } label: {
+                    HStack {
+                        // The same symbol the sidebar's Kubernetes destination uses,
+                        // so the group visibly points at that screen.
+                        Label("Kubernetes-Managed", systemImage: "helm")
+                        Spacer(minLength: 12)
+                        Text("\(grouped.kubernetes.count) container\(grouped.kubernetes.count == 1 ? "" : "s")")
                             .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
+                            .monospacedDigit()
                     }
+                    .help("Containers the Kubernetes kubelet created and manages. Their pods appear on the Kubernetes screen.")
                 }
-                .tag(container.id)
-                // Row identity is the engine-facing reference — the unique Docker
-                // container name — per docs/design/ACCESSIBILITY-IDENTIFIERS.md.
-                .accessibilityIdentifier("containers.row.\(container.displayName)")
-                .help(container.statusDisplay())
-                .contextMenu {
-                    contextMenu(for: container)
-                }
-                // `List` has no `Table.primaryAction` equivalent. Preserve the former
-                // double-click behavior with the standard macOS primary gesture while
-                // leaving single-click selection and keyboard focus system-owned.
-                .onTapGesture(count: 2) {
-                    model.selectedContainerID = container.id
-                    showsInspector = true
-                }
+                .accessibilityIdentifier("containers.kubernetesGroup")
             }
         }
         .onDeleteCommand {
             if let selected { removalTarget = selected }
         }
+        // Keep a selection reachable: if the app selected a kubelet-managed container
+        // (deep link, restored state), the group opens rather than hiding the
+        // selected record behind its own disclosure.
+        .task(id: model.selectedContainerID) {
+            if selected?.isKubernetesManaged == true { isKubernetesGroupExpanded = true }
+        }
         .accessibilityIdentifier("containers.list")
+    }
+
+    /// Forced open while searching; the person's own expand/collapse otherwise.
+    private var kubernetesGroupExpansion: Binding<Bool> {
+        search.isEmpty ? $isKubernetesGroupExpanded : .constant(true)
+    }
+
+    private func containerRow(_ container: ContainerSummary) -> some View {
+        HStack {
+            Label {
+                Text(container.displayName)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            } icon: {
+                Image(systemName: stateSymbol(for: container))
+                    .foregroundStyle(stateColor(for: container))
+                    .accessibilityHidden(true)
+            }
+
+            Spacer(minLength: 12)
+
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                Text(container.statusDisplay(at: context.date))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+        }
+        .tag(container.id)
+        // Row identity is the engine-facing reference — the unique Docker
+        // container name — per docs/design/ACCESSIBILITY-IDENTIFIERS.md. It does not
+        // change when a row moves into a group.
+        .accessibilityIdentifier("containers.row.\(container.displayName)")
+        .help(container.statusDisplay())
+        .contextMenu {
+            contextMenu(for: container)
+        }
+        // `List` has no `Table.primaryAction` equivalent. Preserve the former
+        // double-click behavior with the standard macOS primary gesture while
+        // leaving single-click selection and keyboard focus system-owned.
+        .onTapGesture(count: 2) {
+            model.selectedContainerID = container.id
+            showsInspector = true
+        }
     }
 
     @ViewBuilder

@@ -389,18 +389,13 @@ struct KubernetesRootView: View {
             }
     }
 
-    /// Search is a scoped control for the active ready-cluster table. Do not leave a
-    /// disabled-looking search field or resource picker above an unavailable state.
+    /// Search is a scoped control for the active ready-cluster table; it is declared
+    /// on the inspector content in `content` below, which exists in exactly the
+    /// ready-cluster states, so no disabled-looking search field ever sits above an
+    /// unavailable state.
     @ViewBuilder
     private var contentWithAvailableResourceControls: some View {
-        if resourceControlsAreAvailable {
-            content.searchable(
-                text: $query,
-                placement: .toolbar,
-                prompt: "Search \(resource.rawValue.lowercased())")
-        } else {
-            content
-        }
+        content
     }
 
     // MARK: - System toolbar commands
@@ -473,6 +468,13 @@ struct KubernetesRootView: View {
             .disabled(!model.engine.isRunning || lifecycleInFlight != nil)
         }
 
+    }
+
+    /// See the note on `VolumesRootView.trailingCommandItems`. The toggle exists
+    /// only in ready-cluster states, which are exactly the states where the
+    /// inspector content that mounts it is on screen.
+    @ToolbarContentBuilder
+    private var trailingCommandItems: some ToolbarContent {
         if resourceControlsAreAvailable {
             // `.automatic`, like every other route's inspector toggle: the toggle is
             // chrome, not this screen's primary action, and placement consistency is
@@ -811,6 +813,15 @@ struct KubernetesRootView: View {
                     .inspector(isPresented: $showsInspector) {
                         inspector
                             .inspectorColumnWidth(min: 280, ideal: 340, max: 460)
+                            // See the note on `VolumesRootView`: the trailing
+                            // commands and search ride the inspector's toolbar
+                            // region and remain present while the inspector is
+                            // closed.
+                            .toolbar { trailingCommandItems }
+                            .searchable(
+                                text: $query,
+                                placement: .toolbar,
+                                prompt: "Search \(resource.rawValue.lowercased())")
                     }
             }
         }
@@ -1000,6 +1011,9 @@ struct KubernetesRootView: View {
                 showsInspector = true
             }
         }
+        // See the striping note on `VolumesRootView.table`: system striping past the
+        // last record reads as broken placeholder rows at this route's density.
+        .alternatingRowBackgrounds(.disabled)
         // Pods and nodes are two mutually exclusive presentations of the same
         // resource table slot, so they share one identifier.
         .accessibilityIdentifier("kubernetes.table")
@@ -1067,6 +1081,8 @@ struct KubernetesRootView: View {
                 showsInspector = true
             }
         }
+        // See the striping note on `VolumesRootView.table`.
+        .alternatingRowBackgrounds(.disabled)
         // Pods and nodes are two mutually exclusive presentations of the same
         // resource table slot, so they share one identifier.
         .accessibilityIdentifier("kubernetes.table")
@@ -1111,7 +1127,9 @@ struct KubernetesRootView: View {
                     Button("Copy Namespace") { MorbPasteboard.copy(pod.namespace) }
                 }
             }
-            .formStyle(.columns)
+            // Automatic system Form — see the clipping note on
+            // `VolumesRootView.detailPane`: `.formStyle(.columns)` overflows and
+            // clips a 340pt-class inspector when any value is wide.
         } else if let node = selectedNode {
             Form {
                 Section("Node") {
@@ -1135,7 +1153,6 @@ struct KubernetesRootView: View {
                     Button("Copy Node Name") { MorbPasteboard.copy(node.name) }
                 }
             }
-            .formStyle(.columns)
         } else {
             ContentUnavailableView {
                 Label("No Row Selected", systemImage: "sidebar.right")

@@ -95,17 +95,23 @@ output, and timings in [`audit/ECOSYSTEM-MATRIX.md`](audit/ECOSYSTEM-MATRIX.md):
 
 - **Testcontainers Node 12.1.0, Python 4.15.0, Go v0.43.0, Java 1.21.4:
   PASS** with a real Postgres round-trip each, Ryuk enabled and self-reaping,
-  warm-start totals of 1.7–5.9 s — but only with
-  `DOCKER_HOST=unix://$HOME/.morbstack/run/docker.sock` **and**
-  `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock`. Without the
-  override, Ryuk's socket bind mount fails with an HTTP 500 in every
-  language (the `DOCKER_HOST` Mac-side path does not exist in the guest).
-- **Zero-config discovery**: only Testcontainers **Python** (via docker-py's
-  context awareness) and the **Dev Containers CLI** (docker context) find
-  Morbstack without `DOCKER_HOST`. Node, Go, and Java walk their hardcoded
-  socket lists and, on this machine, **silently ran green against the stale
-  Docker Desktop 27.4.0 socket** — the wrong-daemon footgun, reconfirmed
-  live in three languages.
+  warm-start totals of 1.7–5.9 s. At the original run this required
+  `DOCKER_HOST` **and** `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE`; **since
+  ECO-2 (2026-08-04, same day) the override is unnecessary in every
+  language** — the engine rewrites a bind of its own Mac-side socket to the
+  guest's `/var/run/docker.sock` (`DockerBindMountPreflight`), and the
+  harness no longer sets it.
+- **Zero-config discovery** (originally the biggest gap, closed by ECO-1 the
+  same day): at first only Testcontainers **Python** (docker-py context
+  awareness) and the **Dev Containers CLI** (docker context) found Morbstack
+  unaided, while Node, Go, and Java walked their hardcoded socket lists and
+  **silently ran green against the stale Docker Desktop 27.4.0 socket**.
+  Post-fix, on a home containing only what `morb install-cli` creates (the
+  `~/.docker/run/docker.sock` link and the selected `morbstack` context),
+  all four languages ran the same Postgres suites against **29.7.1 with no
+  environment variables at all** — evidence in the matrix's "Zero-config
+  rerun" section; design and Docker Desktop coexistence rules in
+  [`design/ZERO-CONFIG-DISCOVERY.md`](design/ZERO-CONFIG-DISCOVERY.md).
 - **testcontainers-java ≤1.20.x fails against any engine-29 daemon**:
   docker-java ≤3.4.0 probes `GET /v1.32/info`, upstream moby 29's default
   `MinAPIVersion` is 1.40 (verified: not a Morbstack modification), the 400

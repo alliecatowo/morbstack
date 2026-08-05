@@ -213,6 +213,18 @@ struct MigrationRootView: View {
             .disabled(isInspecting || model.launchOptions.tourFixtures)
         }
 
+        if inspection == nil || model.launchOptions.tourFixtures {
+            // The inspector is not mounted on the fixture and still-inspecting
+            // screens, so the toggle needs its window-toolbar home there.
+            trailingCommandItems
+        }
+    }
+
+    /// See the note on `VolumesRootView.trailingCommandItems`: mounted on the
+    /// inspector content while the table is on screen, and in the window toolbar on
+    /// the inspector-less screens.
+    @ToolbarContentBuilder
+    private var trailingCommandItems: some ToolbarContent {
         if !runtimes.isEmpty {
             // `.automatic`, matching every other route's inspector toggle placement.
             ToolbarItem(id: "migration.inspector", placement: .automatic) {
@@ -269,12 +281,19 @@ struct MigrationRootView: View {
                 .width(min: 92, ideal: 112, max: 144)
             }
             .tableStyle(.automatic)
+            // See the striping note on `VolumesRootView.table`: system striping past
+            // the last record reads as broken placeholder rows at this density.
+            .alternatingRowBackgrounds(.disabled)
             .accessibilityIdentifier("migration.table")
             .accessibilityLabel("Local container runtimes")
             .accessibilityHint("Select a runtime to review migration readiness")
             .inspector(isPresented: $showsInspector) {
                 detailPane
                     .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
+                    // See the note on `VolumesRootView`: the trailing commands ride
+                    // the inspector's toolbar region and remain present while the
+                    // inspector is closed.
+                    .toolbar { trailingCommandItems }
             }
         }
     }
@@ -319,7 +338,10 @@ struct MigrationRootView: View {
                 latestVolumeMigrationSection
                 dockerConfigurationSection(inspection.dockerConfiguration)
             }
-            .formStyle(.columns)
+            // Automatic system Form — see the clipping note on
+            // `VolumesRootView.detailPane`: `.formStyle(.columns)` overflows and
+            // clips a 340–460pt inspector when any value is wide, which install
+            // and socket paths reliably are.
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         } else {
             ContentUnavailableView(

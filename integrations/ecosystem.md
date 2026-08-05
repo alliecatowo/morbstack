@@ -15,6 +15,22 @@ here — usually because the tool, a runtime it needs, or Go itself wasn't
 installed in this environment). Nothing below is asserted from memory
 alone without one of those two tags.
 
+> **Update, 2026-08-04 (ECO-1 / ECO-2):** two findings below have since
+> been fixed and re-verified live; the analysis is kept as the record of
+> *why* the fixes take the shape they do.
+> `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE` is **no longer required in any
+> language** — the engine rewrites a bind mount of its own Mac-side
+> socket (by exact symlink-resolved identity) to the guest's
+> `/var/run/docker.sock`, and `integrations/env/morbstack-env.sh` no
+> longer emits the override. And zero-config discovery now works on a
+> machine without another Docker: `morb install-cli` creates the
+> conventional per-user `~/.docker/run/docker.sock` link (when free) and
+> selects the `morbstack` context (when current was `default`), which
+> Node/Go/Java/Python all found with no environment variables at all,
+> against server 29.7.1. Evidence:
+> `docs/audit/ECOSYSTEM-MATRIX.md` ("Zero-config rerun"); design:
+> `docs/design/ZERO-CONFIG-DISCOVERY.md`.
+
 ## The one root cause
 
 Morbstack's Engine API lives at `~/.morbstack/run/docker.sock`. That is
@@ -195,6 +211,10 @@ context-awareness as a side effect (see below) — Node has no such
 dependency and is genuinely blind to contexts.
 
 ### The subtle bug: `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE`
+
+> **Fixed 2026-08-04 (ECO-2):** the engine now performs this mapping
+> itself — see the update note at the top. The reproduction below is the
+> pre-fix record.
 
 **VERIFIED, reproduced end-to-end in both Node and Python.** Once
 Testcontainers picks a Docker host (say, `DOCKER_HOST` pointing at

@@ -34,18 +34,15 @@ else
     echo "# morbstack-env: WARNING: no socket at $sock — is the Morbstack engine running? (morb start)" >&2
 fi
 
-# Testcontainers (all languages) computes the socket path it bind-mounts
-# into Ryuk/DinD-style helper containers from DOCKER_HOST unless this is
-# set. Since DOCKER_HOST above is a Mac-side path that does not exist
-# inside the guest VM's filesystem, that bind mount fails (HTTP 500,
-# "operation not supported") without this override. The guest's own
-# dockerd always listens on /var/run/docker.sock inside the guest — that
-# is the correct value here, not a Morbstack-specific path. See
-# ecosystem.md, Testcontainers section, for the verified repro/fix.
-if [ -S "$sock" ]; then
-    echo "export TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock"
-    echo "# morbstack-env: TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE -> /var/run/docker.sock (in-guest path, see ecosystem.md)" >&2
-fi
+# TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE is intentionally no longer emitted
+# (since ECO-2, 2026-08-04). Testcontainers bind-mounts the Mac-side
+# DOCKER_HOST path into Ryuk/DinD helper containers, and the Morbstack
+# engine now rewrites that exact daemon-socket source to the guest's
+# /var/run/docker.sock itself (DockerBindMountPreflight), so the override
+# is unnecessary against any current Morbstack. Exporting it anyway would
+# be harmless against Morbstack but can misdirect the socket mount when
+# the same shell later talks to a different engine. See
+# docs/design/ZERO-CONFIG-DISCOVERY.md and ecosystem.md.
 
 if [ -f "$kubeconfig" ]; then
     echo "export KUBECONFIG=$kubeconfig"

@@ -57,16 +57,21 @@ then selects the discovery mechanism the client actually supports:
 
 | Suite | Probe discovery | Additional required setting |
 | --- | --- | --- |
-| `testcontainers-node` | direct `DOCKER_HOST` | `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock` |
-| `testcontainers-python` | direct `DOCKER_HOST` | `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock` |
-| `testcontainers-java` | direct `DOCKER_HOST` | `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock` |
-| `testcontainers-go` | direct `DOCKER_HOST` | `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock` |
+| `testcontainers-node` | direct `DOCKER_HOST` | none |
+| `testcontainers-python` | direct `DOCKER_HOST` | none |
+| `testcontainers-java` | direct `DOCKER_HOST` | none |
+| `testcontainers-go` | direct `DOCKER_HOST` | none |
 
-The socket override is deliberately the **guest** dockerd socket. A
-Testcontainers process talks to the Mac-side `DOCKER_HOST`, but Ryuk and
-Docker-in-Docker-style helpers bind-mount a path resolved by dockerd inside the
-Linux VM. Pointing that mount at `$MORBSTACK_HOME/run/docker.sock` is wrong and
-must be treated as a failing probe, not worked around by disabling Ryuk.
+`TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE` is deliberately **unset** by the
+harness (since ECO-2, 2026-08-04). Ryuk and Docker-in-Docker-style helpers
+bind-mount the Mac-side socket path the client discovered; the engine's
+`DockerBindMountPreflight` rewrites that exact daemon-socket source to the
+guest's `/var/run/docker.sock`, so the override is unnecessary — and setting
+it here would hide a regression in the very path these suites exist to prove.
+A probe that fails on Ryuk's socket mount is a failing probe, not something to
+work around by disabling Ryuk or reintroducing the override
+(`docs/design/ZERO-CONFIG-DISCOVERY.md` records the decision and the trust
+grant it implies).
 
 Run each pre-locked language probe through the corresponding suite. For example:
 
