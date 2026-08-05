@@ -14,11 +14,14 @@ import MorbFeatures
 enum ArgError: Error, CustomStringConvertible {
     case missing(String)
     case wrongType(String, expected: String)
+    /// Right JSON type, wrong contents — see Identifiers.swift.
+    case invalid(String, reason: String)
 
     var description: String {
         switch self {
         case .missing(let field): return "missing required argument `\(field)`"
         case .wrongType(let field, let expected): return "argument `\(field)` must be \(expected)"
+        case .invalid(let field, let reason): return "argument `\(field)` \(reason)"
         }
     }
 }
@@ -34,6 +37,17 @@ enum Args {
 
     static func optionalString(_ arguments: [String: Any], _ field: String) -> String? {
         JSONRead.string(arguments, field)
+    }
+
+    /// A required container id or name, checked against Docker's own grammar
+    /// before it can be interpolated into an Engine API path.
+    static func requireContainerID(_ arguments: [String: Any], _ field: String = "id") throws -> String {
+        try Identifier.container(try requireString(arguments, field), field: field)
+    }
+
+    /// A required image reference (`name`, `name:tag`, `host/org/name@sha256:…`).
+    static func requireImageReference(_ arguments: [String: Any], _ field: String) throws -> String {
+        try Identifier.imageReference(try requireString(arguments, field), field: field)
     }
 
     static func requireStringArray(_ arguments: [String: Any], _ field: String) throws -> [String] {

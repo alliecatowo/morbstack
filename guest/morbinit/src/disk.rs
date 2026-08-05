@@ -819,10 +819,17 @@ fn decode_mount_field(input: &str) -> Option<String> {
         {
             return None;
         }
-        let value = (bytes[index + 1] - b'0') * 64
-            + (bytes[index + 2] - b'0') * 8
-            + (bytes[index + 3] - b'0');
-        out.push(value as char);
+        // Widened deliberately: three octal digits reach 0o777 = 511, which does
+        // not fit in a `u8`. The kernel only ever emits `\040`, `\011`, `\012`
+        // and `\134`, so this is unreachable from a real `/proc/mounts` — but the
+        // arithmetic would wrap in the shipped release build (overflow checks
+        // off) and abort PID 1 in a checked one, and neither is an acceptable
+        // response to a byte sequence this function's whole job is to survive.
+        let value = u16::from(bytes[index + 1] - b'0') * 64
+            + u16::from(bytes[index + 2] - b'0') * 8
+            + u16::from(bytes[index + 3] - b'0');
+        let byte = u8::try_from(value).ok()?;
+        out.push(byte as char);
         index += 4;
     }
     Some(out)
@@ -1199,6 +1206,22 @@ mod tests {
             Some("host share".to_string())
         );
         assert_eq!(decode_mount_field("bad\\0x0"), None);
+    }
+
+    #[test]
+    fn an_octal_escape_above_one_byte_is_refused_rather_than_wrapped() {
+        // 0o400..=0o777 do not fit in a byte. The kernel never emits them, but
+        // the decoder must not wrap (silently decoding `\400` to NUL in a release
+        // build) or overflow (aborting PID 1 in a checked one) if one appears.
+        assert_eq!(decode_mount_field("a\\400b"), None);
+        assert_eq!(decode_mount_field("a\\777b"), None);
+        // The whole in-range span still decodes, including the boundary.
+        assert_eq!(decode_mount_field("\\000"), Some("\u{0}".to_string()));
+        assert_eq!(decode_mount_field("\\377"), Some("\u{ff}".to_string()));
+        assert_eq!(decode_mount_field("\\134"), Some("\\".to_string()));
+        // A truncated escape at end-of-string is still a refusal, not a panic.
+        assert_eq!(decode_mount_field("a\\04"), None);
+        assert_eq!(decode_mount_field("\\"), None);
     }
 
     #[test]

@@ -108,10 +108,28 @@ public final class EngineClient: @unchecked Sendable {
 
     // MARK: - Path construction
 
-    /// Builds `/v1.43/<path>?<query>` with values percent-encoded.
+    /// Builds `/v1.43/<path>?<query>` with both the path and the query values
+    /// percent-encoded.
+    ///
+    /// The path is encoded, not merely the query, because every caller builds it
+    /// by interpolating a name the caller did not choose — a container id from an
+    /// MCP tool call, an image reference from a migration plan, a volume name from
+    /// a compose file. ``writeRequest(fd:method:path:query:body:contentType:)``
+    /// then splices the result straight into an HTTP request line, so a raw `CR`
+    /// or `LF` in one of those names would end the request line and let the rest of
+    /// the name be read by the engine as headers or as a second, pipelined request.
+    /// A raw `?` would likewise start a query string of the caller's choosing,
+    /// ahead of the parameters this function was asked to send — and Go's
+    /// `url.Values.Get` returns the *first* occurrence, so an injected parameter
+    /// wins over the real one.
+    ///
+    /// `/` is deliberately left literal: it is the path's own structure, and image
+    /// references legitimately contain it. Callers that interpolate an identifier
+    /// which must not contain a separator are responsible for saying so — see
+    /// `MorbMCP/Identifiers.swift`.
     public static func path(_ path: String, query: [(String, String)] = []) -> String {
         let base = path.hasPrefix("/") ? path : "/" + path
-        var full = "/\(apiVersion)\(base)"
+        var full = "/\(apiVersion)\(percentEncodePath(base))"
         if !query.isEmpty {
             let encoded = query.map { key, value in
                 "\(MinimalHTTP.percentEncodeQueryValue(key))=\(MinimalHTTP.percentEncodeQueryValue(value))"
@@ -119,6 +137,34 @@ public final class EngineClient: @unchecked Sendable {
             full += "?" + encoded.joined(separator: "&")
         }
         return full
+    }
+
+    /// Percent-encodes every byte of a request path that is not safe to send
+    /// literally, keeping `/` (structure) and the characters Docker's own
+    /// identifier and image-reference grammars use (`A-Z a-z 0-9 - . _ ~ : @ +`).
+    ///
+    /// Everything else — control characters, space, `?`, `#`, `%`, brackets — is
+    /// escaped. Escaping rather than rejecting keeps this total and lossless: the
+    /// engine percent-decodes the path before matching a route, so a name that
+    /// genuinely contains an odd byte still reaches the right handler, while a name
+    /// crafted to end the request line no longer can.
+    static func percentEncodePath(_ path: String) -> String {
+        var out = ""
+        out.reserveCapacity(path.utf8.count)
+        for byte in Array(path.utf8) {
+            let isSafe =
+                (byte >= 0x41 && byte <= 0x5A)  // A-Z
+                || (byte >= 0x61 && byte <= 0x7A)  // a-z
+                || (byte >= 0x30 && byte <= 0x39)  // 0-9
+                || byte == 0x2D || byte == 0x2E || byte == 0x5F || byte == 0x7E  // - . _ ~
+                || byte == 0x2F || byte == 0x3A || byte == 0x40 || byte == 0x2B  // / : @ +
+            if isSafe {
+                out.append(Character(UnicodeScalar(byte)))
+            } else {
+                out += String(format: "%%%02X", byte)
+            }
+        }
+        return out
     }
 
     // MARK: - Requests

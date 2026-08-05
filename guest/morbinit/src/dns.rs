@@ -355,7 +355,19 @@ mod imp {
             return;
         }
         let upstream_addr = SocketAddrV4::new(upstream, DNS_PORT);
-        if let Err(e) = sock.send_to(query, upstream_addr) {
+        // Connect before sending so the kernel drops datagrams from anyone other
+        // than the upstream we asked. An unconnected socket would relay whatever
+        // reached its ephemeral port first, which any container sharing the guest
+        // network could race the real upstream to supply — a forged answer for a
+        // name this stub does not itself handle.
+        if let Err(e) = sock.connect(upstream_addr) {
+            log::log(&format!(
+                "split DNS could not bind a forwarding socket to upstream {}: {}",
+                upstream_addr, e
+            ));
+            return;
+        }
+        if let Err(e) = sock.send(query) {
             log::log(&format!(
                 "split DNS could not reach upstream {}: {}",
                 upstream_addr, e
@@ -363,8 +375,8 @@ mod imp {
             return;
         }
         let mut reply = [0u8; MAX_MESSAGE];
-        match sock.recv_from(&mut reply) {
-            Ok((n, _)) => {
+        match sock.recv(&mut reply) {
+            Ok(n) => {
                 if let Err(e) = main.send_to(&reply[..n], from) {
                     log::log(&format!(
                         "split DNS could not relay upstream's reply to {}: {}",

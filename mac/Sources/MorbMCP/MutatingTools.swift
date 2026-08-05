@@ -33,7 +33,7 @@ enum MutatingTools {
         readOnly: false, destructive: false, group: .containersWrite
     ) { context, arguments in
         do {
-            let id = try Args.requireString(arguments, "id")
+            let id = try Args.requireContainerID(arguments)
             let response = try context.engine.request("POST", "/containers/\(id)/start", timeout: 30)
             return lifecycleResult(id: id, action: "start", response: response, noOpStatus: 304)
         } catch let error as ArgError {
@@ -55,7 +55,7 @@ enum MutatingTools {
         readOnly: false, destructive: false, group: .containersWrite
     ) { context, arguments in
         do {
-            let id = try Args.requireString(arguments, "id")
+            let id = try Args.requireContainerID(arguments)
             let graceSeconds = Args.boundedInt(arguments, "timeout_seconds", default: 10, minimum: 0, maximum: 120)
             let response = try context.engine.request(
                 "POST", "/containers/\(id)/stop", query: [("t", String(graceSeconds))],
@@ -81,7 +81,7 @@ enum MutatingTools {
         readOnly: false, destructive: false, group: .containersWrite
     ) { context, arguments in
         do {
-            let id = try Args.requireString(arguments, "id")
+            let id = try Args.requireContainerID(arguments)
             let graceSeconds = Args.boundedInt(arguments, "timeout_seconds", default: 10, minimum: 0, maximum: 120)
             let response = try context.engine.request(
                 "POST", "/containers/\(id)/restart", query: [("t", String(graceSeconds))],
@@ -117,7 +117,7 @@ enum MutatingTools {
         ]
     ) { context, arguments in
         do {
-            let id = try Args.requireString(arguments, "id")
+            let id = try Args.requireContainerID(arguments)
             let force = Args.optionalBool(arguments, "force", default: false)
             let removeVolumes = Args.optionalBool(arguments, "remove_volumes", default: false)
             let response = try context.engine.request(
@@ -162,7 +162,7 @@ enum MutatingTools {
         readOnly: false, destructive: false, group: .exec
     ) { context, arguments in
         do {
-            let id = try Args.requireString(arguments, "id")
+            let id = try Args.requireContainerID(arguments)
             let cmd = try Args.requireStringArray(arguments, "cmd")
             let workdir = Args.optionalString(arguments, "workdir")
             let user = Args.optionalString(arguments, "user")
@@ -306,7 +306,7 @@ enum MutatingTools {
         readOnly: false, destructive: false, group: .imagesWrite
     ) { context, arguments in
         do {
-            let reference = try Args.requireString(arguments, "reference")
+            let reference = try Args.requireImageReference(arguments, "reference")
             let (fromImage, tagOrDigest) = splitImageReference(reference)
             var query: [(String, String)] = [("fromImage", fromImage)]
             if let tagOrDigest { query.append(("tag", tagOrDigest)) }
@@ -349,7 +349,7 @@ enum MutatingTools {
         readOnly: false, destructive: true, group: .imagesWrite
     ) { context, arguments in
         do {
-            let id = try Args.requireString(arguments, "id")
+            let id = try Args.requireImageReference(arguments, "id")
             let force = Args.optionalBool(arguments, "force", default: false)
             let response = try context.engine.request(
                 "DELETE", "/images/\(id)", query: [("force", force ? "1" : "0")], timeout: 30)

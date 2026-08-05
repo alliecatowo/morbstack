@@ -21,6 +21,7 @@ final class DockerBindMountPreflightTests: XCTestCase {
         shares: [MorbDirectoryShare]? = nil,
         states: [String: MorbShares.GuestMountState]? = nil,
         tmpAliasMounted: Bool? = true,
+        hostDockerSocketPath: String? = nil,
         sourceExists: @escaping (String) -> Bool = { _ in true },
         sourcePathResolving: @escaping (String) -> String = { $0 }
     ) -> DockerBindMountPreflight.Verdict {
@@ -30,6 +31,7 @@ final class DockerBindMountPreflightTests: XCTestCase {
             shares: activeShares,
             guestShareStates: states ?? mountedStates(for: activeShares),
             guestTmpAliasMounted: tmpAliasMounted,
+            hostDockerSocketPath: hostDockerSocketPath,
             sourceExists: sourceExists,
             sourcePathResolving: sourcePathResolving)
     }
@@ -39,6 +41,7 @@ final class DockerBindMountPreflightTests: XCTestCase {
         shares: [MorbDirectoryShare]? = nil,
         states: [String: MorbShares.GuestMountState]? = nil,
         tmpAliasMounted: Bool? = true,
+        hostDockerSocketPath: String? = nil,
         sourceExists: @escaping (String) -> Bool = { _ in true },
         sourcePathResolving: @escaping (String) -> String = { $0 }
     ) -> DockerBindMountPreflight.Preparation {
@@ -48,6 +51,7 @@ final class DockerBindMountPreflightTests: XCTestCase {
             shares: activeShares,
             guestShareStates: states ?? mountedStates(for: activeShares),
             guestTmpAliasMounted: tmpAliasMounted,
+            hostDockerSocketPath: hostDockerSocketPath,
             sourceExists: sourceExists,
             sourcePathResolving: sourcePathResolving)
     }
@@ -167,6 +171,75 @@ final class DockerBindMountPreflightTests: XCTestCase {
         let topMounts = try XCTUnwrap(object["Mounts"] as? [[String: Any]])
         XCTAssertEqual(hostMounts.first?["Source"] as? String, "/private/etc/hosts")
         XCTAssertEqual(topMounts.first?["Source"] as? String, "/private/var/db/config")
+    }
+
+    func testHostDaemonSocketLegacyBindIsRewrittenToTheGuestSocket() throws {
+        let result = prepare(
+            #"{"HostConfig":{"Binds":["/Users/allie/.morbstack/run/docker.sock:/var/run/docker.sock:ro"]}}"#,
+            hostDockerSocketPath: "/Users/allie/.morbstack/run/docker.sock")
+        guard case .allowed(let body, let wasRewritten) = result else {
+            return XCTFail("expected the daemon's own socket bind to be admitted")
+        }
+        XCTAssertTrue(wasRewritten)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let hostConfig = try XCTUnwrap(object["HostConfig"] as? [String: Any])
+        XCTAssertEqual(
+            hostConfig["Binds"] as? [String],
+            ["/var/run/docker.sock:/var/run/docker.sock:ro"])
+    }
+
+    func testHostDaemonSocketDiscoveryLinkMountIsRewrittenThroughSymlinkResolution() throws {
+        // `~/.docker/run/docker.sock` is the per-user discovery link `morb
+        // install-cli` creates; a Testcontainers client mounts that spelling, and
+        // only symlink resolution proves it is this daemon's socket.
+        let result = prepare(
+            #"{"HostConfig":{"Mounts":[{"Type":"bind","Source":"/Users/allie/.docker/run/docker.sock","Target":"/var/run/docker.sock"}]}}"#,
+            hostDockerSocketPath: "/Users/allie/.morbstack/run/docker.sock",
+            sourcePathResolving: { source in
+                source == "/Users/allie/.docker/run/docker.sock"
+                    ? "/Users/allie/.morbstack/run/docker.sock" : source
+            })
+        guard case .allowed(let body, let wasRewritten) = result else {
+            return XCTFail("expected the discovery-link socket mount to be admitted")
+        }
+        XCTAssertTrue(wasRewritten)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let hostConfig = try XCTUnwrap(object["HostConfig"] as? [String: Any])
+        let mounts = try XCTUnwrap(hostConfig["Mounts"] as? [[String: Any]])
+        XCTAssertEqual(mounts.first?["Source"] as? String, "/var/run/docker.sock")
+    }
+
+    func testHostDaemonSocketUnderTmpComparesThroughTheMacPrivateAlias() throws {
+        // A dedicated engine home under `/tmp` publishes its socket through macOS's
+        // `/private` alias; both spellings are one identity.
+        let result = prepare(
+            #"{"HostConfig":{"Binds":["/private/tmp/mb-eco/run/docker.sock:/var/run/docker.sock"]}}"#,
+            shares: [tmpShare],
+            hostDockerSocketPath: "/tmp/mb-eco/run/docker.sock")
+        guard case .allowed(let body, let wasRewritten) = result else {
+            return XCTFail("expected the /private/tmp-spelled daemon socket to be admitted")
+        }
+        XCTAssertTrue(wasRewritten)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let hostConfig = try XCTUnwrap(object["HostConfig"] as? [String: Any])
+        XCTAssertEqual(
+            hostConfig["Binds"] as? [String],
+            ["/var/run/docker.sock:/var/run/docker.sock"])
+    }
+
+    func testAForeignEngineSocketIsNeverRedirectedToTheGuestSocket() throws {
+        // A live Docker Desktop socket at the conventional per-user path resolves to
+        // itself, not to this daemon; it must keep ordinary share semantics rather
+        // than silently becoming Morbstack's own API.
+        let result = prepare(
+            #"{"HostConfig":{"Mounts":[{"Type":"bind","Source":"/Users/allie/.docker/run/docker.sock","Target":"/var/run/docker.sock"}]}}"#,
+            hostDockerSocketPath: "/Users/allie/.morbstack/run/docker.sock")
+        guard case .allowed(let body, let wasRewritten) = result else {
+            return XCTFail("expected a shared foreign socket path to pass through untouched")
+        }
+        XCTAssertFalse(wasRewritten)
+        XCTAssertEqual(
+            body, Data(#"{"HostConfig":{"Mounts":[{"Type":"bind","Source":"/Users/allie/.docker/run/docker.sock","Target":"/var/run/docker.sock"}]}}"#.utf8))
     }
 
     func testGuestDockerSocketBindIsAllowedWithoutAMacShare() {

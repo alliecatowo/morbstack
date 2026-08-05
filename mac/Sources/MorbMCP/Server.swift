@@ -45,8 +45,20 @@ final class MCPServer {
         }
 
         guard hasInitialized else {
-            return error(request, code: JSONRPCErrorCode.invalidRequest,
-                         message: "send `initialize` before calling MCP methods")
+            let message = "send `initialize` before calling MCP methods"
+            // A `tools/call` rejected for arriving before the handshake is still an
+            // attempt to run a tool, and the audit log's whole claim is that every
+            // attempt reaches it — including the ones this server refused. Leaving
+            // this one out would make "no record" mean either "never asked" or
+            // "asked out of order", which is exactly the ambiguity an audit log
+            // exists to remove.
+            if request.method == "tools/call" {
+                auditProtocolFailure(
+                    tool: request.params?["name"] as? String ?? "<missing name>",
+                    arguments: request.params?["arguments"] as? [String: Any] ?? [:],
+                    message: message)
+            }
+            return error(request, code: JSONRPCErrorCode.invalidRequest, message: message)
         }
 
         switch request.method {

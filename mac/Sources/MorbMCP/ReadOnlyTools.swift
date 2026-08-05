@@ -66,7 +66,7 @@ enum ReadOnlyTools {
         ]
     ) { context, arguments in
         do {
-            let id = try Args.requireString(arguments, "id")
+            let id = try Args.requireContainerID(arguments)
             let revealRequested = Args.optionalBool(arguments, "reveal_secrets", default: false)
             let details = try context.engine.jsonObject("GET", "/containers/\(id)/json")
             // The permission gate for `reveal_secrets` runs centrally in
@@ -99,7 +99,7 @@ enum ReadOnlyTools {
         readOnly: true, destructive: false, group: nil
     ) { context, arguments in
         do {
-            let id = try Args.requireString(arguments, "id")
+            let id = try Args.requireContainerID(arguments)
             let tail = Args.boundedInt(arguments, "tail", default: 200, minimum: 1, maximum: 10_000)
             let timestamps = Args.optionalBool(arguments, "timestamps", default: false)
 
