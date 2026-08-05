@@ -61,6 +61,55 @@ public struct HTTPRequestHead: Equatable, Sendable {
 /// servers vary on: bare `LF` line endings, chunk extensions, and absent trailers.
 public enum MinimalHTTP {
 
+    /// Percent-encodes the path portion of a request target, keeping `/` (structure)
+    /// and the characters Docker's own identifier and image-reference grammars use
+    /// (`A-Z a-z 0-9 - . _ ~ : @ +`). Everything else — control characters, space,
+    /// `#`, `%`, brackets — is escaped.
+    ///
+    /// Escaping rather than rejecting keeps this total and lossless: the engine
+    /// percent-decodes the path before matching a route, so a name that genuinely
+    /// contains an odd byte still reaches the right handler, while a name crafted to
+    /// end the request line no longer can.
+    ///
+    /// **A query string is preserved verbatim.** Callers here hand in targets that
+    /// already carry one (`/containers/create?name=…`), whose values are separately
+    /// encoded at the point they are interpolated. Encoding the whole target would
+    /// escape the `?`, `&` and `=` that give it structure and turn every query into
+    /// one long literal path segment. So this splits at the first `?` and encodes
+    /// only what precedes it — which is exactly the half an identifier lands in.
+    ///
+    /// This exists because MCP-1 (see `docs/mcp.md`) proved the consequence is not
+    /// theoretical: an unencoded identifier reaching an HTTP request line lets a
+    /// CRLF terminate that line early and smuggle a second, arbitrary request.
+    public static func percentEncodePath(_ target: String) -> String {
+        let path: Substring
+        let query: Substring
+        if let separator = target.firstIndex(of: "?") {
+            path = target[target.startIndex..<separator]
+            query = target[separator...]
+        } else {
+            path = target[...]
+            query = ""
+        }
+
+        var out = ""
+        out.reserveCapacity(path.utf8.count)
+        for byte in Array(path.utf8) {
+            let isSafe =
+                (byte >= 0x41 && byte <= 0x5A)  // A-Z
+                || (byte >= 0x61 && byte <= 0x7A)  // a-z
+                || (byte >= 0x30 && byte <= 0x39)  // 0-9
+                || byte == 0x2D || byte == 0x2E || byte == 0x5F || byte == 0x7E  // - . _ ~
+                || byte == 0x2F || byte == 0x3A || byte == 0x40 || byte == 0x2B  // / : @ +
+            if isSafe {
+                out.append(Character(UnicodeScalar(byte)))
+            } else {
+                out += String(format: "%%%02X", byte)
+            }
+        }
+        return out + query
+    }
+
     /// Builds a request. `Host` is required by HTTP/1.1 even though the guest ignores it.
     ///
     /// - Parameter closeWhenDone: sends `Connection: close`, which turns "read the

@@ -697,7 +697,21 @@ class DockerClient: @unchecked Sendable {
         try await run { try self.send(method: "DELETE", path: self.url(path), timeout: timeout) }
     }
 
-    private func url(_ path: String) -> String { "/\(Self.apiVersion)\(path)" }
+    /// The single choke point every Engine request target crosses, and therefore the
+    /// only place path encoding has to be right.
+    ///
+    /// ~20 call sites interpolate an id straight into a path (`"/containers/\(id)/json"`),
+    /// and that string becomes an HTTP request line. Encoding here rather than at each
+    /// site is deliberate: a per-site rule is one a new call site can forget, and this
+    /// project's worst bug to date was a guard that was correct, unit-tested, and never
+    /// ran because the common path went around it.
+    ///
+    /// The app's ids come from the engine or from the user's own typing rather than
+    /// from an agent, so this is hardening, not a live hole — but it is the same shape
+    /// as MCP-1, where it *was* one. See `docs/mcp.md`.
+    private func url(_ path: String) -> String {
+        "/\(Self.apiVersion)\(MinimalHTTP.percentEncodePath(path))"
+    }
 
     /// `MinimalHTTP` owns the shared bodyless request vocabulary; keeping this
     /// complete-body shape here makes a typed JSON request's content type and byte
@@ -1475,6 +1489,92 @@ class DockerClient: @unchecked Sendable {
         if afterColon.isEmpty { return (String(trimmed[trimmed.startIndex..<colon]), "latest") }
         return (String(trimmed[trimmed.startIndex..<colon]), String(afterColon))
     }
+}
+
+// MARK: Interactive exec
+
+/// The endpoints behind an interactive/piped `docker exec` terminal
+/// (`DockerExecPTYSession`), which owns its own hijacked connection and therefore only
+/// needs this class for the ordinary, non-hijacked calls around it: creating the exec
+/// instance, resizing it, and reading back how it ended.
+extension DockerClient {
+
+    /// Creates one exec instance for an interactive or piped terminal. Distinct from
+    /// ``executeContainerCommand(id:command:)``: that workflow is deliberately
+    /// noninteractive (stdin closed, no TTY), while a terminal needs both, so this is a
+    /// separate, wider create call rather than a flag added to the narrower one.
+    func createExec(containerID: String, command: [String], tty: Bool, attachStdin: Bool) async throws -> String {
+        guard !command.isEmpty else {
+            throw DockerClientError.decoding("a terminal command needs an executable")
+        }
+        let body = try JSONEncoder().encode(
+            DockerExecCreateRequest(
+                AttachStdin: attachStdin,
+                AttachStdout: true,
+                AttachStderr: true,
+                Tty: tty,
+                Cmd: command))
+        let data = try await postJSON("/containers/\(containerID)/exec", body: body)
+        let created: DockerExecCreateResponse
+        do {
+            created = try Self.decoder.decode(DockerExecCreateResponse.self, from: data)
+        } catch {
+            throw DockerClientError.decoding("could not decode Docker's exec response: \(error)")
+        }
+        guard let execID = created.Id, !execID.isEmpty else {
+            throw DockerClientError.decoding("Docker created an exec instance without returning its ID")
+        }
+        return execID
+    }
+
+    /// `POST /exec/{id}/resize`. Only meaningful once the exec has actually been
+    /// started — Docker has nothing to resize before the process is attached — which is
+    /// why every caller of this is expected to have already confirmed the hijack.
+    func resizeExec(id: String, columns: Int, rows: Int) async throws {
+        try await post("/exec/\(id)/resize?h=\(rows)&w=\(columns)")
+    }
+
+    /// `GET /exec/{id}/json`, trimmed to what a live terminal needs to decide why its
+    /// stream ended: whether the process is still going, and if not, its exit code.
+    func inspectExec(id: String) async throws -> DockerExecStatus {
+        let data = try await run { try self.send(method: "GET", path: self.url("/exec/\(id)/json")) }
+        do {
+            let decoded = try Self.decoder.decode(DockerExecInspectStatusResponse.self, from: data)
+            return DockerExecStatus(running: decoded.Running ?? false, exitCode: decoded.ExitCode)
+        } catch {
+            throw DockerClientError.decoding("could not decode Docker's exec inspection: \(error)")
+        }
+    }
+
+    /// Whether the container itself is still running, used only to word a terminal's
+    /// closing message: "the process exited" versus "the container stopped out from
+    /// under it". Never throws — a failed inspect here should make that message less
+    /// specific, not crash the terminal that is already in the middle of closing.
+    func containerIsRunning(id: String) async -> Bool? {
+        guard let data = try? await run({ try self.send(method: "GET", path: self.url("/containers/\(id)/json")) }),
+              let inspected = try? Self.decoder.decode(DockerContainerRunningState.self, from: data)
+        else { return nil }
+        return inspected.State?.Running
+    }
+}
+
+/// The subset of `GET /exec/{id}/json` a live terminal needs.
+struct DockerExecStatus: Sendable, Equatable {
+    let running: Bool
+    let exitCode: Int?
+}
+
+/// A dedicated decode target rather than adding `Running` to `DockerExecInspectResponse`
+/// above: that type is `executeContainerCommand`'s, and giving the terminal path its own
+/// copy keeps the two exec workflows independently reviewable.
+private struct DockerExecInspectStatusResponse: Decodable {
+    let Running: Bool?
+    let ExitCode: Int?
+}
+
+private struct DockerContainerRunningState: Decodable {
+    struct State: Decodable { let Running: Bool? }
+    let State: State?
 }
 
 /// The whole request document for the local-image run flow. Keeping this next to the
