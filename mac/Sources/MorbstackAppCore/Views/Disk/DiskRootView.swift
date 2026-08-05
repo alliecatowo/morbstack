@@ -416,12 +416,14 @@ struct DiskRootView: View {
             .accessibilityIdentifier("disk.empty.engineNotRunning")
         } else {
             diskTable
-                // The table's four semantic columns need a readable leading-content
-                // width when the system presents its trailing inspector. Keeping that
-                // constraint on the system Table lets the inspector collapse through
-                // its own native adaptation instead of allowing either surface to
-                // encroach on the other at narrow window widths.
-                .frame(minWidth: 520)
+                // No hard `.frame(minWidth:)` here. The columns below carry their own
+                // minimums, exactly as ImagesRootView does. A previous hard 520pt frame
+                // on this Table over-constrained the split at narrow window widths: the
+                // system honoured the frame, laid the inspector out at its ideal width
+                // anyway, and pushed the inspector's trailing ~50pt off the window edge
+                // (verified live at 1100×700 — values rendered as "Storage cate…",
+                // "77.3…"). With only column minimums the system Table and the system
+                // inspector negotiate the same window without clipping either surface.
                 .inspector(isPresented: $showsInspector) {
                     inspector
                         .inspectorColumnWidth(min: 340, ideal: 400, max: 460)

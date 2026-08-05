@@ -291,6 +291,216 @@ final class TrackBLogFilterTests: XCTestCase {
     }
 }
 
+// MARK: - Find: match spans
+
+final class TrackBMatchSpanTests: XCTestCase {
+
+    func testFindsEveryCaseInsensitiveOccurrence() {
+        let spans = TrackBLogFilter.matchSpans(of: "error", in: "Error at start, then ERROR again")
+        XCTAssertEqual(spans, [
+            TrackBMatchSpan(offset: 0, length: 5),
+            TrackBMatchSpan(offset: 21, length: 5),
+        ])
+    }
+
+    func testEmptyNeedleOrTextFindsNothing() {
+        XCTAssertEqual(TrackBLogFilter.matchSpans(of: "", in: "text"), [])
+        XCTAssertEqual(TrackBLogFilter.matchSpans(of: "x", in: ""), [])
+        XCTAssertEqual(TrackBLogFilter.matchSpans(of: "zz", in: "no hit"), [])
+    }
+
+    func testAdjacentMatchesDoNotOverlapOrSkip() {
+        let spans = TrackBLogFilter.matchSpans(of: "aa", in: "aaaa")
+        XCTAssertEqual(spans, [
+            TrackBMatchSpan(offset: 0, length: 2),
+            TrackBMatchSpan(offset: 2, length: 2),
+        ])
+    }
+
+    /// Offsets are character offsets into the *original* string, so a multi-scalar
+    /// emoji before the match must count as one character, not several bytes.
+    func testOffsetsAreCharacterOffsetsPastUnicode() {
+        let spans = TrackBLogFilter.matchSpans(of: "boom", in: "🎉👍 boom")
+        XCTAssertEqual(spans, [TrackBMatchSpan(offset: 3, length: 4)])
+    }
+}
+
+// MARK: - Find: stepping
+
+final class TrackBMatchNavigatorTests: XCTestCase {
+
+    private let matches = [3, 7, 20, 41]
+
+    func testNoMatchesGoesNowhere() {
+        XCTAssertNil(TrackBMatchNavigator.step(from: nil, in: [], forward: true))
+        XCTAssertNil(TrackBMatchNavigator.step(from: 5, in: [], forward: false))
+    }
+
+    func testFirstStepEntersAtTheNearEnd() {
+        XCTAssertEqual(TrackBMatchNavigator.step(from: nil, in: matches, forward: true), 3)
+        XCTAssertEqual(TrackBMatchNavigator.step(from: nil, in: matches, forward: false), 41)
+    }
+
+    func testSteppingWrapsAtBothEnds() {
+        XCTAssertEqual(TrackBMatchNavigator.step(from: 7, in: matches, forward: true), 20)
+        XCTAssertEqual(TrackBMatchNavigator.step(from: 41, in: matches, forward: true), 3)
+        XCTAssertEqual(TrackBMatchNavigator.step(from: 7, in: matches, forward: false), 3)
+        XCTAssertEqual(TrackBMatchNavigator.step(from: 3, in: matches, forward: false), 41)
+    }
+
+    /// The scrollback can evict the current line, or an edit can drop it from the
+    /// match list; navigation resumes from the nearest match in the travel direction.
+    func testEvictedCurrentResumesFromTheNearestMatch() {
+        XCTAssertEqual(TrackBMatchNavigator.step(from: 10, in: matches, forward: true), 20)
+        XCTAssertEqual(TrackBMatchNavigator.step(from: 10, in: matches, forward: false), 7)
+        XCTAssertEqual(TrackBMatchNavigator.step(from: 99, in: matches, forward: true), 3)
+        XCTAssertEqual(TrackBMatchNavigator.step(from: 1, in: matches, forward: false), 41)
+    }
+
+    func testPositionIsOneBasedAndHonest() {
+        XCTAssertEqual(TrackBMatchNavigator.position(of: 3, in: matches), 1)
+        XCTAssertEqual(TrackBMatchNavigator.position(of: 41, in: matches), 4)
+        XCTAssertNil(TrackBMatchNavigator.position(of: 10, in: matches))
+    }
+
+    func testMembership() {
+        XCTAssertTrue(TrackBMatchNavigator.contains(20, in: matches))
+        XCTAssertFalse(TrackBMatchNavigator.contains(21, in: matches))
+        XCTAssertFalse(TrackBMatchNavigator.contains(3, in: []))
+    }
+}
+
+// MARK: - Highlight mapping over real corpus
+
+@MainActor
+final class TrackBHighlightMappingTests: XCTestCase {
+
+    /// Replays the row highlighter's exact index arithmetic over the full fixture log
+    /// corpus (ANSI colours, emoji, box drawing, tracebacks) for several needles.
+    /// A single out-of-bounds character offset here is a crash in the real window.
+    func testFixtureCorpusHighlightMappingStaysInBounds() {
+        let lines = ShotLogs.apiLog(now: Date(timeIntervalSince1970: 1_772_000_000))
+            .map(TrackBRenderedLine.init)
+        for needle in ["e", "er", "error", "READY", "🎉", "stripe refused"] {
+            for line in lines {
+                let spans = TrackBLogFilter.matchSpans(of: needle, in: line.plain)
+                var text = line.attributed
+                let characterCount = text.characters.count
+                XCTAssertEqual(
+                    characterCount, line.plain.count,
+                    "attributed and plain must agree on character count for \(line.plain.debugDescription)")
+                for span in spans {
+                    XCTAssertLessThanOrEqual(
+                        span.offset + span.length, characterCount,
+                        "span out of bounds for needle '\(needle)' in \(line.plain.debugDescription)")
+                    let start = text.index(text.startIndex, offsetByCharacters: span.offset)
+                    let end = text.index(start, offsetByCharacters: span.length)
+                    text[start..<end].backgroundColor = .yellow
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Find and filter as store modes
+
+@MainActor
+final class TrackBLogStoreQueryModeTests: XCTestCase {
+
+    private func seededStore() -> TrackBLogStore {
+        let store = TrackBLogStore()
+        store.seed(
+            [
+                LogLine(id: 0, text: "Starting server", stream: .stdout, timestamp: nil),
+                LogLine(id: 1, text: "ERROR: boom", stream: .stderr, timestamp: nil),
+                LogLine(id: 2, text: "recovered", stream: .stdout, timestamp: nil),
+                LogLine(id: 3, text: "error again", stream: .stderr, timestamp: nil),
+            ],
+            isStreaming: false)
+        return store
+    }
+
+    /// The core of UX-1: a find query must not hide anything.
+    func testFindKeepsEveryLineVisibleAndCountsMatches() {
+        let store = seededStore()
+        XCTAssertEqual(store.mode, .find, "find is the default; the destructive mode is opt-in")
+        store.query = "error"
+        XCTAssertEqual(store.visibleLines.count, 4, "context is the point of a log")
+        XCTAssertEqual(store.matchIDs, [1, 3])
+        XCTAssertEqual(store.matchCount, 2)
+        XCTAssertTrue(store.isFinding)
+        XCTAssertFalse(store.isFiltering)
+        XCTAssertEqual(store.matchPositionText, "2 matches")
+    }
+
+    func testFilterStillHidesNonMatchingLines() {
+        let store = seededStore()
+        store.mode = .filter
+        store.query = "error"
+        XCTAssertEqual(store.visibleLines.map(\.id), [1, 3])
+        XCTAssertEqual(store.matchCount, 2)
+        XCTAssertTrue(store.isFiltering)
+        XCTAssertNil(store.matchPositionText, "stepping has no meaning when non-matches are hidden")
+    }
+
+    func testSteppingReportsPositionAndWraps() {
+        let store = seededStore()
+        store.query = "error"
+        XCTAssertEqual(store.stepMatch(forward: true), 1)
+        XCTAssertEqual(store.matchPositionText, "1 of 2")
+        XCTAssertEqual(store.stepMatch(forward: true), 3)
+        XCTAssertEqual(store.matchPositionText, "2 of 2")
+        XCTAssertEqual(store.stepMatch(forward: true), 1, "wraps like the system find bar")
+        XCTAssertEqual(store.stepMatch(forward: false), 3)
+    }
+
+    func testSwitchingModesKeepsTheQueryAndResetsTheParkedMatch() {
+        let store = seededStore()
+        store.query = "error"
+        store.stepMatch(forward: true)
+        XCTAssertNotNil(store.currentMatchID)
+
+        store.mode = .filter
+        XCTAssertEqual(store.query, "error", "the query is the person's; the mode is presentation")
+        XCTAssertEqual(store.visibleLines.map(\.id), [1, 3])
+        XCTAssertNil(store.currentMatchID)
+
+        store.mode = .find
+        XCTAssertEqual(store.visibleLines.count, 4)
+        XCTAssertEqual(store.matchIDs, [1, 3])
+    }
+
+    func testEditingTheQueryResetsTheParkedMatch() {
+        let store = seededStore()
+        store.query = "error"
+        store.stepMatch(forward: true)
+        store.query = "server"
+        XCTAssertNil(store.currentMatchID)
+        XCTAssertEqual(store.matchIDs, [0])
+        XCTAssertEqual(store.matchPositionText, "1 match")
+    }
+
+    func testNoMatchesIsStatedNotSilent() {
+        let store = seededStore()
+        store.query = "zebra"
+        XCTAssertEqual(store.matchPositionText, "No matches")
+        XCTAssertNil(store.stepMatch(forward: true))
+        XCTAssertEqual(store.visibleLines.count, 4, "an unmatched find never blanks the log")
+    }
+
+    func testClearingTheQueryLeavesFindStateEmpty() {
+        let store = seededStore()
+        store.query = "error"
+        store.stepMatch(forward: true)
+        store.query = ""
+        XCTAssertFalse(store.isFinding)
+        XCTAssertEqual(store.matchIDs, [])
+        XCTAssertNil(store.currentMatchID)
+        XCTAssertNil(store.matchPositionText)
+        XCTAssertEqual(store.matchCount, 0)
+    }
+}
+
 // MARK: - Transcript source semantics
 
 final class TrackBLogTranscriptSemanticsTests: XCTestCase {

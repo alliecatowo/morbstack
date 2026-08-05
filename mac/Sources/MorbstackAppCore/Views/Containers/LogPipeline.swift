@@ -144,7 +144,42 @@ struct TrackBTailTracker: Equatable, Sendable {
     }
 }
 
+// MARK: - Query modes
+
+/// What the log bar's one query field does with its text.
+///
+/// Two modes, both legitimate, and deliberately explicit rather than merged:
+///
+///   * `.find` — every line stays on screen; matches are highlighted in place and
+///     Enter/Shift+Enter step between them. This is the reading mode: a match means
+///     nothing without the lines around it.
+///   * `.filter` — only matching lines are shown. This is the triage mode:
+///     "show me only the errors".
+///
+/// Shipping only the second and calling it search is a documented competitor defect
+/// (OrbStack #2178, fixed in their v2.2.0); `.find` is the default here for that reason.
+enum TrackBLogQueryMode: String, CaseIterable, Identifiable, Sendable {
+    case find, filter
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .find: return "Find"
+        case .filter: return "Filter"
+        }
+    }
+}
+
 // MARK: - Filtering
+
+/// One case-insensitive hit inside a line, measured in `Character` offsets so a view
+/// can translate it into any string representation whose characters match the plain
+/// text it was computed from (an `AttributedString` built from the same spans).
+struct TrackBMatchSpan: Equatable, Sendable {
+    var offset: Int
+    var length: Int
+}
 
 /// Case-insensitive substring filtering, factored out so the match count and the
 /// visible rows can never disagree — they are computed from the same predicate.
@@ -177,6 +212,84 @@ enum TrackBLogFilter {
         return items.reduce(into: 0) { count, item in
             if matches(lowered(item), needle: needle) { count += 1 }
         }
+    }
+
+    /// Every case-insensitive occurrence of `needle` inside `text`, as character
+    /// offsets into `text` itself.
+    ///
+    /// Ranges are found on the *original* string with `.caseInsensitive` rather than on
+    /// a lowercased copy, because Unicode case folding can change a string's length
+    /// ("İ" lowercases to two scalars) and offsets computed on a folded copy would
+    /// paint the highlight one character adrift on such lines.
+    static func matchSpans(of needle: String, in text: String) -> [TrackBMatchSpan] {
+        guard !needle.isEmpty, !text.isEmpty else { return [] }
+        var spans: [TrackBMatchSpan] = []
+        var searchStart = text.startIndex
+        var offset = 0
+        while searchStart < text.endIndex,
+            let range = text.range(
+                of: needle, options: [.caseInsensitive], range: searchStart..<text.endIndex)
+        {
+            offset += text.distance(from: searchStart, to: range.lowerBound)
+            let length = text.distance(from: range.lowerBound, to: range.upperBound)
+            spans.append(TrackBMatchSpan(offset: offset, length: length))
+            offset += length
+            searchStart = range.upperBound
+        }
+        return spans
+    }
+}
+
+// MARK: - Match stepping
+
+/// Pure Enter/Shift+Enter navigation over the ascending line IDs that match a find
+/// query. Factored out of the store because the wrap-around and evicted-current edge
+/// cases are exactly the kind of logic a screenshot cannot audit.
+enum TrackBMatchNavigator {
+
+    /// The line to visit next.
+    ///
+    /// * No current line: forward starts at the first match, backward at the last.
+    /// * Current line still matching: step one, wrapping at either end.
+    /// * Current line gone (scrollback eviction or a query edit): resume from the
+    ///   nearest match in the direction of travel rather than yanking back to an edge.
+    static func step(from current: Int?, in matchIDs: [Int], forward: Bool) -> Int? {
+        guard !matchIDs.isEmpty else { return nil }
+        guard let current else { return forward ? matchIDs.first : matchIDs.last }
+
+        if let index = binarySearch(matchIDs, for: current) {
+            let next = forward ? index + 1 : index - 1
+            return matchIDs[(next + matchIDs.count) % matchIDs.count]
+        }
+
+        if forward {
+            return matchIDs.first(where: { $0 > current }) ?? matchIDs.first
+        }
+        return matchIDs.last(where: { $0 < current }) ?? matchIDs.last
+    }
+
+    /// 1-based rank of `id` among the matches, for a "3 of 47" readout. `nil` when the
+    /// line is not (or is no longer) a match.
+    static func position(of id: Int, in matchIDs: [Int]) -> Int? {
+        binarySearch(matchIDs, for: id).map { $0 + 1 }
+    }
+
+    /// Whether `id` is one of the matches. `matchIDs` is ascending by construction —
+    /// lines are appended in ID order — so membership is a binary search, not a scan
+    /// of ten thousand elements per visible row.
+    static func contains(_ id: Int, in matchIDs: [Int]) -> Bool {
+        binarySearch(matchIDs, for: id) != nil
+    }
+
+    private static func binarySearch(_ sorted: [Int], for value: Int) -> Int? {
+        var low = 0
+        var high = sorted.count - 1
+        while low <= high {
+            let mid = (low + high) / 2
+            if sorted[mid] == value { return mid }
+            if sorted[mid] < value { low = mid + 1 } else { high = mid - 1 }
+        }
+        return nil
     }
 }
 

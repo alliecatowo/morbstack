@@ -399,6 +399,104 @@ final class MorbstackFixtureUITests: XCTestCase {
         XCTAssertTrue(saveTranscript.isEnabled)
     }
 
+    /// UX-1: a log search must not hide the log. Find highlights in place with a
+    /// "3 of 47" position and Enter/Shift+Enter stepping; Filter remains an explicit
+    /// second mode that hides non-matching lines and says so in the line count.
+    /// (Hiding everything but the matching line is OrbStack issue #2178 — a shipped
+    /// competitor defect this test exists to keep out.)
+    func testLogFindHighlightsInPlaceAndFilterStaysExplicit() throws {
+        let app = try launchFixture(appearance: .dark)
+        try assertFixtureMarker("shopfront-api-1", in: app)
+
+        let container = automationElement("containers.row.shopfront-api-1", in: app)
+        XCTAssertTrue(container.waitForExistence(timeout: 10))
+        // Synthesized clicks on the row's static text do not reliably land as a List
+        // selection on this macOS build (the standing UI-029/UI-032 observation, which
+        // also fails the pre-existing exec test). The row cell and the keyboard are
+        // tried in turn; the selected-container toolbar command is the proof that the
+        // detail pane actually opened.
+        let runCommand = app.buttons["containers.runCommand"]
+        let cell = app.cells
+            .containing(.staticText, identifier: "containers.row.shopfront-api-1")
+            .firstMatch
+        for _ in 0..<3 where !runCommand.exists {
+            if cell.exists { cell.click() } else { container.click() }
+            if runCommand.waitForExistence(timeout: 3) { break }
+            // The list carries keyboard focus at launch; arrow keys drive the system
+            // List selection directly.
+            app.typeKey(XCUIKeyboardKey.downArrow, modifierFlags: [])
+            _ = runCommand.waitForExistence(timeout: 3)
+        }
+        XCTAssertTrue(
+            runCommand.exists,
+            "Selecting the fixture container never opened its detail pane.")
+
+        let logsTab = automationElement("containers.detail.tab.logs", in: app)
+        XCTAssertTrue(logsTab.waitForExistence(timeout: 10))
+        logsTab.click()
+
+        // The fixture scrollback is deterministic: 412 lines, none dropped.
+        // SwiftUI Text reaches accessibility as a static text VALUE (the label is
+        // empty), so these waits are value-based, unlike the control label waits.
+        let lineCount = automationElement("containers.logs.lineCount", in: app)
+        XCTAssertTrue(lineCount.waitForExistence(timeout: 10))
+        XCTAssertTrue(
+            waitForValue("412 lines", on: lineCount),
+            "The fixture log should present all 412 lines before any query.")
+
+        let search = automationElement("containers.logs.search", in: app)
+        XCTAssertTrue(search.waitForExistence(timeout: 10))
+        search.click()
+        search.typeText("error")
+
+        // Find mode is the default. The query must not hide a single line…
+        XCTAssertTrue(
+            waitForValue("412 lines", on: lineCount),
+            "A find query hid lines. Context preservation is the whole point of find mode.")
+
+        // …while the position readout reports how many lines match. The element's
+        // AX value is its spoken form ("5 matching lines", then "Match 1 of 5").
+        let position = automationElement("containers.logs.match.position", in: app)
+        XCTAssertTrue(position.waitForExistence(timeout: 10))
+        let summary = (position.value as? String) ?? ""
+        let matchTotal = Int(summary.split(separator: " ").first ?? "") ?? 0
+        XCTAssertTrue(
+            matchTotal > 0 && summary.hasSuffix(matchTotal == 1 ? "matching line" : "matching lines"),
+            "Expected a '<n> matching lines' summary before stepping; got '\(summary)'.")
+        probeShot(app, "logs-find-highlight")
+
+        // Enter steps to the first match and the readout becomes positional.
+        app.typeKey(XCUIKeyboardKey.return, modifierFlags: [])
+        XCTAssertTrue(waitForValue("Match 1 of \(matchTotal)", on: position))
+        if matchTotal > 1 {
+            app.typeKey(XCUIKeyboardKey.return, modifierFlags: [])
+            XCTAssertTrue(waitForValue("Match 2 of \(matchTotal)", on: position))
+            app.typeKey(XCUIKeyboardKey.return, modifierFlags: [.shift])
+            XCTAssertTrue(
+                waitForValue("Match 1 of \(matchTotal)", on: position),
+                "Shift+Enter must step back to the previous match.")
+        }
+        probeShot(app, "logs-find-stepped")
+
+        // Filter is the explicit second mode: same predicate, so the same count,
+        // and the line count states the reduction honestly.
+        let modePicker = automationElement("containers.logs.searchMode", in: app)
+        XCTAssertTrue(modePicker.waitForExistence(timeout: 10))
+        modePicker.radioButtons["Filter"].click()
+        XCTAssertTrue(
+            waitForValue("\(matchTotal) of 412 lines", on: lineCount),
+            "Filter mode must show exactly the lines the find query matched.")
+        XCTAssertFalse(
+            position.exists,
+            "Stepping has no meaning while non-matching lines are hidden.")
+        probeShot(app, "logs-filter-mode")
+
+        // Switching back restores every line without losing the query.
+        modePicker.radioButtons["Find"].click()
+        XCTAssertTrue(waitForValue("412 lines", on: lineCount))
+        XCTAssertTrue(position.waitForExistence(timeout: 10))
+    }
+
     /// VM capacity comes from local Morbstack state, not fixture Docker data. Its
     /// potentially destructive growth controls must therefore remain absent while the
     /// developer fixture banner is active.
@@ -435,31 +533,48 @@ final class MorbstackFixtureUITests: XCTestCase {
     }
 
     /// TEMPORARY PROBE — remove after the trailing-toolbar review.
-    /// Toggles the Volumes inspector and writes real-window frames to a scratch
-    /// directory so the animation can be reviewed outside the xcresult bundle.
+    /// Drives the Volumes inspector toggle and the system sidebar command with rest
+    /// pauses between transitions, so an external window-scoped frame recorder can
+    /// bracket each animation unambiguously. XCUIScreenshot is far too slow to catch
+    /// a ~0.3s transition — the recorder, not this test, produces the evidence.
     func testProbeVolumesTrailingCommandsRideTheInspector() throws {
         let app = try launchFixture(appearance: .dark)
         try selectSidebarRoute("Volumes", in: app)
         try assertFixtureMarker("shopfront_pgdata", in: app)
 
-        let toggle = app.buttons["volumes.inspector"]
+        // Window-scoped: a stale saved-state launch can restore a second window, and
+        // an app-wide query would then match two identical toggles.
+        let window = app.windows.firstMatch
+        let toggle = window.buttons["volumes.inspector"]
         XCTAssertTrue(toggle.waitForExistence(timeout: 10))
-        XCTAssertTrue(app.buttons["volumes.create"].exists)
-        probeShot(app, "open")
-        toggle.click()
-        probeBurst(app, "closing")
+        XCTAssertTrue(window.buttons["volumes.create"].exists)
+        Thread.sleep(forTimeInterval: 3)
+
+        // The leading-edge reference first, via the system key equivalents that
+        // SidebarCommands registers — menu traversal is slow enough to outlive the
+        // external recorder. Proof each command ran is the sidebar rows' visibility.
+        let sidebarRow = automationElement("app.sidebar.containers", in: app)
+        XCTAssertTrue(sidebarRow.waitForExistence(timeout: 10))
+        app.typeKey("s", modifierFlags: [.command, .control]) // hide sidebar
+        XCTAssertTrue(sidebarRow.waitForNonExistence(timeout: 10))
+        Thread.sleep(forTimeInterval: 2)
+        app.typeKey("s", modifierFlags: [.command, .control]) // show sidebar
+        XCTAssertTrue(sidebarRow.waitForExistence(timeout: 10))
+        Thread.sleep(forTimeInterval: 2)
+
+        toggle.click() // hide inspector
         XCTAssertTrue(waitForLabel("Show inspector", on: toggle))
         XCTAssertTrue(
-            app.buttons["volumes.create"].exists,
+            window.buttons["volumes.create"].exists,
             "Create must stay reachable while the inspector is closed.")
         XCTAssertTrue(
-            app.searchFields.firstMatch.exists,
+            window.searchFields.firstMatch.exists,
             "The search field must stay reachable while the inspector is closed.")
-        probeShot(app, "closed")
-        toggle.click()
-        probeBurst(app, "opening")
+        Thread.sleep(forTimeInterval: 2)
+
+        toggle.click() // show inspector
         XCTAssertTrue(waitForLabel("Hide inspector", on: toggle))
-        probeShot(app, "reopened")
+        Thread.sleep(forTimeInterval: 2)
     }
 
     private var probeDirectory: URL {
@@ -561,6 +676,19 @@ final class MorbstackFixtureUITests: XCTestCase {
     /// (docs/design/ACCESSIBILITY-IDENTIFIERS.md).
     private func automationElement(_ identifier: String, in app: XCUIApplication) -> XCUIElement {
         app.descendants(matching: .any)[identifier].firstMatch
+    }
+
+    /// Waits for a static text's accessibility value. SwiftUI `Text` publishes its
+    /// string as the AX value with an empty label, so label-based waits never match.
+    private func waitForValue(
+        _ value: String,
+        on element: XCUIElement,
+        timeout: TimeInterval = 10
+    ) -> Bool {
+        let expectation = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value == %@", value),
+            object: element)
+        return XCTWaiter().wait(for: [expectation], timeout: timeout) == .completed
     }
 
     /// Waits for an element's spoken label. Identifier addresses the control; the

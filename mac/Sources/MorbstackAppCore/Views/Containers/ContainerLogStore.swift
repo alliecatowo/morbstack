@@ -127,6 +127,23 @@ final class TrackBLogStore {
     /// How many lines the current query matches.
     private(set) var matchCount: Int = 0
 
+    /// What the query field does: highlight in place (`.find`) or hide non-matching
+    /// lines (`.filter`). Find is the default — a destructive filter presented as the
+    /// only search is the competitor defect this store exists to avoid.
+    var mode: TrackBLogQueryMode = .find {
+        didSet {
+            guard mode != oldValue else { return }
+            currentMatchID = nil
+            recomputeQuery()
+        }
+    }
+
+    /// Ascending IDs of the lines the find query matches. Empty in filter mode.
+    private(set) var matchIDs: [Int] = []
+
+    /// The match Enter/Shift+Enter last stepped to, if it is still in the scrollback.
+    private(set) var currentMatchID: Int?
+
     private(set) var isStreaming = false
     private(set) var errorText: String?
 
@@ -141,13 +158,18 @@ final class TrackBLogStore {
         didSet {
             guard query != oldValue else { return }
             needle = TrackBLogFilter.normalize(query)
-            recomputeFilter()
+            currentMatchID = nil
+            recomputeQuery()
         }
     }
 
     private(set) var needle: String = ""
 
-    var isFiltering: Bool { !needle.isEmpty }
+    /// Whether non-matching lines are currently hidden.
+    var isFiltering: Bool { mode == .filter && !needle.isEmpty }
+
+    /// Whether matches are currently highlighted in place.
+    var isFinding: Bool { mode == .find && !needle.isEmpty }
 
     /// Lines waiting for the next flush.
     private var staged: [TrackBRenderedLine] = []
@@ -166,6 +188,8 @@ final class TrackBLogStore {
         lines.removeAll()
         filtered.removeAll()
         matchCount = 0
+        matchIDs.removeAll()
+        currentMatchID = nil
         errorText = nil
         isStreaming = true
         tail.jumpToBottom()
@@ -213,9 +237,11 @@ final class TrackBLogStore {
         self.lines.removeAll()
         filtered.removeAll()
         matchCount = 0
+        matchIDs.removeAll()
+        currentMatchID = nil
         errorText = nil
         self.lines.append(contentsOf: lines.map(TrackBRenderedLine.init))
-        recomputeFilter()
+        recomputeQuery()
         self.isStreaming = isStreaming
         tail.jumpToBottom()
     }
@@ -225,6 +251,8 @@ final class TrackBLogStore {
         staged.removeAll()
         filtered.removeAll()
         matchCount = 0
+        matchIDs.removeAll()
+        currentMatchID = nil
         tail.jumpToBottom()
     }
 
@@ -246,15 +274,19 @@ final class TrackBLogStore {
         staged.removeAll(keepingCapacity: true)
         lines.append(contentsOf: batch)
 
-        guard isFiltering else { return }
-        // Only the new lines need testing; everything already in `filtered` still
-        // matches, minus whatever the ring just evicted.
+        guard isFiltering || isFinding else { return }
+        // Only the new lines need testing; everything already computed still stands,
+        // minus whatever the ring just evicted — eviction forces a full recompute.
         if lines.droppedCount > 0 {
-            recomputeFilter()
-        } else {
+            recomputeQuery()
+        } else if isFiltering {
             let additions = TrackBLogFilter.filter(batch, needle: needle, lowered: \.lowered)
             filtered.append(contentsOf: additions)
             matchCount = filtered.count
+        } else {
+            let additions = TrackBLogFilter.filter(batch, needle: needle, lowered: \.lowered)
+            matchIDs.append(contentsOf: additions.map(\.id))
+            matchCount = matchIDs.count
         }
     }
 
@@ -264,14 +296,49 @@ final class TrackBLogStore {
         if let error { errorText = TrackBErrorText.short(error) }
     }
 
-    private func recomputeFilter() {
-        guard isFiltering else {
+    private func recomputeQuery() {
+        if isFiltering {
+            filtered = TrackBLogFilter.filter(lines, needle: needle, lowered: \.lowered)
+            matchIDs.removeAll(keepingCapacity: true)
+            matchCount = filtered.count
+        } else if isFinding {
             filtered.removeAll(keepingCapacity: true)
+            matchIDs = TrackBLogFilter.filter(lines, needle: needle, lowered: \.lowered).map(\.id)
+            matchCount = matchIDs.count
+        } else {
+            filtered.removeAll(keepingCapacity: true)
+            matchIDs.removeAll(keepingCapacity: true)
             matchCount = 0
-            return
         }
-        filtered = TrackBLogFilter.filter(lines, needle: needle, lowered: \.lowered)
-        matchCount = filtered.count
+        // The ring may have evicted the line the person was parked on, or the query
+        // may no longer match it. A stale "current" would highlight the wrong line.
+        if let current = currentMatchID, !TrackBMatchNavigator.contains(current, in: matchIDs) {
+            currentMatchID = nil
+        }
+    }
+
+    // MARK: Find navigation
+
+    /// Steps to the next (or previous) matching line and returns its ID so the view
+    /// can scroll to it. Wraps at either end, exactly like the system find bar.
+    @discardableResult
+    func stepMatch(forward: Bool) -> Int? {
+        guard isFinding else { return nil }
+        currentMatchID = TrackBMatchNavigator.step(
+            from: currentMatchID, in: matchIDs, forward: forward)
+        return currentMatchID
+    }
+
+    /// The "3 of 47" readout. `nil` when find is inactive.
+    var matchPositionText: String? {
+        guard isFinding else { return nil }
+        guard !matchIDs.isEmpty else { return "No matches" }
+        if let current = currentMatchID,
+            let position = TrackBMatchNavigator.position(of: current, in: matchIDs)
+        {
+            return "\(position) of \(matchIDs.count)"
+        }
+        return "\(matchIDs.count) \(matchIDs.count == 1 ? "match" : "matches")"
     }
 
     // MARK: Output

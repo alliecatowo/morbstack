@@ -75,12 +75,17 @@ struct ContainerOverviewTab: View {
             mountsSection(details)
             labelsSection(details)
         }
-        // Automatic system Form — see the clipping note on
-        // `VolumesRootView.detailPane`. A previous comment here claimed the columns
-        // style kept the label/value relationship legible at inspector widths; real
-        // window captures showed the opposite — the columns grid takes its natural
-        // width and clips both edges when a monospaced ID or path is wide. The
-        // automatic style is what the accepted Images inspector uses.
+        // Explicitly `.grouped`, not `.automatic`. In the routes whose inspector
+        // hosts a Form directly (Volumes, Images), automatic already resolves to the
+        // grouped rendering: leading labels, values truncating inside the column.
+        // Inside this `TabView`, automatic instead resolved to the columns grid,
+        // which takes its natural width and clips both edges of a 270–460pt
+        // inspector — verified in the real window 2026-08-05 ("Container ID"
+        // rendered as "ntainer ID", values cut at the window edge) after the
+        // `.formStyle(.columns)` removal elsewhere had already landed. Grouped is
+        // the same system style the accepted inspectors get from automatic; it is
+        // pinned here because the context resolves automatic differently.
+        .formStyle(.grouped)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 

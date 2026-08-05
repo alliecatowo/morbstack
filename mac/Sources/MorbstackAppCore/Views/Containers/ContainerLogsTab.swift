@@ -18,12 +18,22 @@ struct ContainerLogsTab: View {
     @State private var copied = false
     @State private var viewportHeight: CGFloat = 0
     @State private var currentStandardErrorID: Int?
-    @State private var scrollTarget: Int?
+    @State private var scrollRequest: ScrollRequest?
     @State private var pendingExport: TrackBLogExport.Document?
     @State private var exportError: String?
+    @State private var searchFocusRequests = 0
 
     private let streamsLive: Bool
     private let bottomAnchor = "trackb.log.bottom"
+
+    /// A scroll-to-line request. The generation exists because two consecutive
+    /// requests for the *same* line — Enter on a log with one match, or the stderr
+    /// jump wrapping over a single stderr line — are still two requests; an `Int?`
+    /// alone would coalesce them into no `onChange` at all.
+    private struct ScrollRequest: Equatable {
+        var lineID: Int
+        var generation: Int
+    }
 
     init(container: ContainerSummary, client: DockerClient, preloadedStore: TrackBLogStore? = nil) {
         self.container = container
@@ -63,23 +73,130 @@ struct ContainerLogsTab: View {
         }
     }
 
+    /// Two rows, not one: this bar lives in a 270–460pt inspector column, and the
+    /// one-row arrangement measurably overflowed it — the mode picker and options
+    /// menu were clipped outside the column and unreachable (verified in the real
+    /// window under XCUITest). Mode and document status share the first row; the
+    /// query field and its match navigation share the second.
     private var filterBar: some View {
-        HStack(spacing: 8) {
-            DocumentSearchField(text: $store.query, prompt: "Filter lines", identifier: "containers.logs.search")
-            Text(lineCount)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                // Two explicit modes for one query field. Find keeps every line on
+                // screen and highlights matches — a search that hides all context is
+                // the exact defect a competitor shipped and had to walk back
+                // (OrbStack #2178). Filter remains for genuine triage: "show me only
+                // the errors".
+                Picker("Query mode", selection: $store.mode) {
+                    ForEach(TrackBLogQueryMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .controlSize(.small)
+                .labelsHidden()
+                .fixedSize()
+                .accessibilityIdentifier("containers.logs.searchMode")
+                .help("Find highlights matches in place; Filter shows only matching lines")
+
+                Spacer(minLength: 0)
+
+                Text(lineCount)
+                    .font(.caption)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("containers.logs.lineCount")
+
+                streamStatus
+
+                // The log document's commands live with the log document. In the
+                // window toolbar they appeared and disappeared with the inspector
+                // tab, churning the route's toolbar on every tab switch.
+                logOptionsMenu
+            }
+
+            HStack(spacing: 6) {
+                DocumentSearchField(
+                    text: $store.query,
+                    prompt: store.mode == .find ? "Find in log" : "Filter lines",
+                    identifier: "containers.logs.search",
+                    onSubmit: { forward in stepMatch(forward: forward) },
+                    focusRequestCount: searchFocusRequests,
+                    isWidthFlexible: true)
+                // Command-F belongs to find-in-document. The bar is always present,
+                // so the shortcut focuses the field rather than revealing anything.
+                .background {
+                    Button("") { searchFocusRequests += 1 }
+                        .keyboardShortcut("f", modifiers: .command)
+                        .hidden()
+                        .accessibilityHidden(true)
+                }
+
+                if store.isFinding {
+                    matchNavigator
+                }
+            }
+        }
+        .padding(8)
+    }
+
+    /// The "3 of 47" readout and the next/previous steppers, shown only while a find
+    /// query is active. A search that highlights but cannot say where you are is half
+    /// a search.
+    private var matchNavigator: some View {
+        HStack(spacing: 2) {
+            Text(store.matchPositionText ?? "")
                 .font(.caption)
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
-                .accessibilityIdentifier("containers.logs.lineCount")
+                .accessibilityIdentifier("containers.logs.match.position")
+                .accessibilityLabel(matchPositionAccessibilityLabel)
 
-            streamStatus
+            Button {
+                stepMatch(forward: false)
+            } label: {
+                Label("Previous Match", systemImage: "chevron.up")
+                    .labelStyle(.iconOnly)
+            }
+            .buttonStyle(.borderless)
+            .keyboardShortcut("g", modifiers: [.command, .shift])
+            .disabled(store.matchIDs.isEmpty)
+            .accessibilityIdentifier("containers.logs.match.previous")
+            .help("Go to the previous match (⇧⏎ or ⇧⌘G)")
 
-            // The log document's commands live with the log document. In the window
-            // toolbar they appeared and disappeared with the inspector tab, churning
-            // the route's toolbar on every tab switch.
-            logOptionsMenu
+            Button {
+                stepMatch(forward: true)
+            } label: {
+                Label("Next Match", systemImage: "chevron.down")
+                    .labelStyle(.iconOnly)
+            }
+            .buttonStyle(.borderless)
+            .keyboardShortcut("g", modifiers: .command)
+            .disabled(store.matchIDs.isEmpty)
+            .accessibilityIdentifier("containers.logs.match.next")
+            .help("Go to the next match (⏎ or ⌘G)")
         }
-        .padding(8)
+    }
+
+    /// What VoiceOver speaks for the position readout. "3 of 47" alone has no
+    /// subject, and "47 matches" would misstate line-level matching, so the spoken
+    /// forms are "Match 3 of 47" and "47 matching lines".
+    private var matchPositionAccessibilityLabel: String {
+        guard let text = store.matchPositionText else { return "" }
+        if text == "No matches" { return text }
+        if text.contains(" of ") { return "Match \(text)" }
+        return "\(store.matchIDs.count) matching \(store.matchIDs.count == 1 ? "line" : "lines")"
+    }
+
+    private func stepMatch(forward: Bool) {
+        guard store.isFinding else { return }
+        guard let target = store.stepMatch(forward: forward) else { return }
+        requestScroll(to: target)
+    }
+
+    private func requestScroll(to lineID: Int) {
+        scrollRequest = ScrollRequest(
+            lineID: lineID,
+            generation: (scrollRequest?.generation ?? 0) + 1)
     }
 
     private var lineCount: String {
@@ -183,7 +300,7 @@ struct ContainerLogsTab: View {
         } else {
             currentStandardErrorID = standardErrorLines[0].id
         }
-        scrollTarget = currentStandardErrorID
+        if let currentStandardErrorID { requestScroll(to: currentStandardErrorID) }
     }
 
     private func copyVisibleLines() {
@@ -204,7 +321,9 @@ struct ContainerLogsTab: View {
                         TrackBLogRow(
                             line: line,
                             showsTimestamp: store.showsTimestamps,
-                            isCurrentStandardError: line.id == currentStandardErrorID)
+                            isCurrentStandardError: line.id == currentStandardErrorID,
+                            findNeedle: store.isFinding ? store.needle : nil,
+                            isCurrentMatch: line.id == store.currentMatchID)
                         .id(line.id)
                     }
                     Color.clear
@@ -232,11 +351,14 @@ struct ContainerLogsTab: View {
                 guard store.tail.shouldAutoScroll else { return }
                 proxy.scrollTo(bottomAnchor, anchor: .bottom)
             }
-            .onChange(of: scrollTarget) { _, target in
-                guard let target else { return }
-                withAnimation(.easeOut(duration: 0.18)) {
-                    proxy.scrollTo(target, anchor: .center)
-                }
+            .onChange(of: scrollRequest) { _, request in
+                guard let request else { return }
+                // Deliberately not animated. Animating `scrollTo` over a large
+                // LazyVStack of variable-height rows makes the layout engine hunt for
+                // the target's estimated offset; consecutive Enter-Enter match steps
+                // reproducibly wedged the main thread for 30+ seconds under XCUITest.
+                // The system find bar also jumps to matches without animation.
+                proxy.scrollTo(request.lineID, anchor: .center)
             }
             .overlay(alignment: .bottomTrailing) {
                 if store.tail.showsJumpToBottom, !store.visibleLines.isEmpty {
@@ -323,6 +445,42 @@ struct TrackBLogRow: View {
     let line: TrackBRenderedLine
     let showsTimestamp: Bool
     var isCurrentStandardError: Bool = false
+    /// Normalized find query; matches are painted in place. `nil` outside find mode.
+    var findNeedle: String? = nil
+    /// Whether this line is the one the find navigation is parked on.
+    var isCurrentMatch: Bool = false
+
+    /// The pre-rendered line, with find highlights layered over the cached attributed
+    /// string. Only rows the `LazyVStack` actually materialises pay this cost, so the
+    /// ingest-time render cache still carries the 10,000-line scroll performance.
+    ///
+    /// The system's own find idiom supplies the colours: `NSColor.findHighlightColor`
+    /// (with black text, as AppKit pairs it) for the current match, and a translucent
+    /// wash of the same colour for the other matches on screen.
+    private var highlightedText: AttributedString {
+        guard let findNeedle, !findNeedle.isEmpty else { return line.attributed }
+        let spans = TrackBLogFilter.matchSpans(of: findNeedle, in: line.plain)
+        guard !spans.isEmpty else { return line.attributed }
+
+        var text = line.attributed
+        // `attributed` is built from the same spans as `plain`, so character offsets
+        // line up by construction; the count check keeps a hypothetical divergence a
+        // missing highlight instead of a trap.
+        let characterCount = text.characters.count
+        for span in spans {
+            guard span.offset + span.length <= characterCount else { continue }
+            let start = text.index(text.startIndex, offsetByCharacters: span.offset)
+            let end = text.index(start, offsetByCharacters: span.length)
+            if isCurrentMatch {
+                text[start..<end].backgroundColor = Color(nsColor: .findHighlightColor)
+                text[start..<end].foregroundColor = .black
+            } else {
+                text[start..<end].backgroundColor =
+                    Color(nsColor: .findHighlightColor).opacity(0.3)
+            }
+        }
+        return text
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
@@ -343,7 +501,7 @@ struct TrackBLogRow: View {
                 .frame(width: 42, alignment: .leading)
                 .accessibilityLabel(line.stream.logTranscriptAccessibilityLabel)
 
-            Text(line.attributed)
+            Text(highlightedText)
                 .font(.body.monospaced().weight(isCurrentStandardError ? .medium : .regular))
                 .lineSpacing(2)
                 .textSelection(.enabled)
