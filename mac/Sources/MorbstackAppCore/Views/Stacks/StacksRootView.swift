@@ -122,13 +122,7 @@ struct StacksRootView: View {
     @State private var metadata = TrackDComposeMetadata()
     @State private var query = ""
     @State private var selection: StackOutlineID?
-    /// Presented exactly when there is a selection to describe (or when the user
-    /// opens it). An open inspector splits Tahoe's toolbar glass at the inspector
-    /// boundary — the system's treatment — so resting the route on an empty
-    /// inspector fragmented the window for nothing. Selection is route-local state,
-    /// so every entry starts unselected and therefore uninspected.
-    /// See docs/design/DECISIONS.md §8.
-    @State private var showsInspector = false
+    @State private var showsInspector = true
     /// Compose files are supporting metadata, not equal-weight inspector facts.
     @State private var composeFilesExpanded = false
     @State private var busyProjects: Set<String> = []

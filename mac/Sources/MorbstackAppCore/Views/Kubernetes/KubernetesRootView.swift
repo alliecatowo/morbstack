@@ -213,13 +213,7 @@ struct KubernetesRootView: View {
     @State private var resourceDescriptionError: String?
     @State private var isLoadingResourceDescription = false
     @State private var resourceDescriptionRequestID = UUID()
-    /// Presented exactly when there is a selected node/pod to describe (or when the
-    /// user opens it). An open inspector splits Tahoe's toolbar glass at the
-    /// inspector boundary — the system's treatment — so resting the route on an
-    /// empty inspector fragmented the window for nothing. Selections here are
-    /// route-local state, so every entry starts unselected and therefore
-    /// uninspected. See docs/design/DECISIONS.md §8.
-    @State private var showsInspector = false
+    @State private var showsInspector = true
     @State private var lifecycleRequest: KubernetesLifecycleRequest?
     /// A confirmed enable/disable request is still in progress until the daemon
     /// replies with its authoritative status. Keep that short transition separate

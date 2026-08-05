@@ -28,15 +28,6 @@ struct ContainersRootView: View {
         self.model = model
         self.initialDetailTab = initialDetailTab
         _hub = State(initialValue: initialHub ?? TrackBStatsHub())
-        // An inspector describes the current selection, so it is presented exactly
-        // when there is a selection to describe (or the user opens it from the toggle
-        // or the View menu). Resting the route with an open, empty inspector split
-        // Tahoe's toolbar into a third glass section above a vacant pane — the
-        // "three detached slabs" chrome regression. Verified against a stock
-        // NavigationSplitView+`.inspector` probe on macOS 26: the split is the
-        // system's treatment of any open inspector; presenting one without content
-        // was ours. See docs/design/DECISIONS.md §8.
-        _showsInspector = State(initialValue: model.selectedContainerID != nil)
     }
 
     private let initialDetailTab: TrackBDetailTab
@@ -44,12 +35,12 @@ struct ContainersRootView: View {
     @State private var search = ""
     @State private var scope: ContainerScope = .all
     @State private var hub: TrackBStatsHub
-    @State private var showsInspector: Bool
     @State private var busy: Set<String> = []
     @State private var isPruning = false
     @State private var isShowingPruneConfirmation = false
     @State private var removalTarget: ContainerSummary?
     @State private var commandTarget: ContainerSummary?
+    @State private var showsInspector = true
     @State private var pruneError: String?
 
     private var stoppedCount: Int {
@@ -201,22 +192,6 @@ struct ContainersRootView: View {
                 .accessibilityLabel("Run command in \(selected.displayName)")
                 .help("Run a noninteractive command in \(selected.displayName)")
             }
-
-            // The interactive sibling of Run Command: a real TTY in its own window.
-            // Disabled rather than hidden when stopped — the affordance should say a
-            // terminal exists, and the running requirement is Docker's, not ours.
-            ToolbarItem(id: "containers.openTerminal", placement: .secondaryAction) {
-                Button("Open Terminal", systemImage: "apple.terminal") {
-                    ContainerTerminalWindowController.open(for: selected, client: model.client)
-                }
-                .accessibilityIdentifier("containers.openTerminal")
-                .accessibilityLabel("Open terminal in \(selected.displayName)")
-                .help(
-                    selected.isRunning
-                        ? "Open an interactive shell in \(selected.displayName)"
-                        : "The container must be running to open a terminal")
-                .disabled(!selected.isRunning)
-            }
         }
 
         // This is a semantic collection-options menu, not a second, manually managed
@@ -362,10 +337,6 @@ struct ContainersRootView: View {
         }
         Divider()
         Button("Run Command…", systemImage: "terminal") { commandTarget = container }
-        Button("Open Terminal", systemImage: "apple.terminal") {
-            ContainerTerminalWindowController.open(for: container, client: model.client)
-        }
-        .disabled(!container.isRunning)
         Divider()
         Button("Copy Name") { MorbPasteboard.copy(container.displayName) }
         Button("Copy Container ID") { MorbPasteboard.copy(container.id) }
