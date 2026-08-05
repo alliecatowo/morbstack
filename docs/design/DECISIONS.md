@@ -92,3 +92,30 @@ current Apple guidance.
 The deployment target remains a release-engineering decision in `mac/Package.swift`.
 Before introducing an availability-gated API, check that target and the actual SDK; do
 not create a visual wrapper simply to centralize an API gate.
+
+## Taste review is a loop, not a report
+
+A defect register answers "is this broken". Nothing in this repo answered "is this any good", and
+the two questions need different reviewers — a bug hunter grades against a spec, and taste has no
+spec to grade against.
+
+`.claude/agents/taste-reviewer.md` is that reviewer. Three things about it are deliberate:
+
+**It judges from real screenshots, never from source.** Reading SwiftUI tells you what is drawn, not
+what it feels like. Every prior UI misjudgement in this project came from reasoning about code
+instead of looking at the window.
+
+**Its scope is constrained by this document, and that is what makes it useful.** It may not
+recommend custom chrome, tokens, gradients or materials on navigation — that road was taken once and
+the verdict was "vibecoded as fuck". So within a system-native vocabulary, taste is **density,
+hierarchy, restraint, information architecture, presentation and cross-route rhythm** — what we
+choose to show and how we arrange it, never how we paint it. That constraint is a feature: it rules
+out the entire class of "make it pop" advice.
+
+**It runs twice, and the second pass is the point.** Pass 1 files `TASTE-` tickets. Pass 2 re-captures
+the same screens after they land and asks whether each change actually improved the screen or merely
+satisfied the letter of the ticket. **It is explicitly allowed to say a fix made things worse.** A
+one-shot review is a wish list; a loop is a standard.
+
+Every finding is marked `LAW` (follows from this document or the HIG, not negotiable) or `TASTE`
+(opinion, argue with it). Conflating the two is how a preference gets enforced as a rule.
