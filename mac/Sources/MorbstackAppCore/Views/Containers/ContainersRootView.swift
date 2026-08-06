@@ -398,8 +398,38 @@ struct ContainersRootView: View {
         search.isEmpty ? $isKubernetesGroupExpanded : .constant(true)
     }
 
+    /// The published host ports, as `docker ps` would list them, deduplicated and
+    /// ordered.
+    ///
+    /// Only *published* ports appear: a mapping with no `hostPort` is exposed inside
+    /// the container network and is not reachable from this Mac, so listing it here
+    /// would promise something the row cannot deliver. Non-TCP mappings keep their
+    /// protocol suffix because `53/udp` and `53/tcp` are different facts.
+    private func publishedPortSummary(_ ports: [PortMapping]) -> String {
+        var seen = Set<String>()
+        var parts: [String] = []
+        for port in ports.sorted(by: { ($0.hostPort ?? 0) < ($1.hostPort ?? 0) }) {
+            guard let hostPort = port.hostPort else { continue }
+            let isTCP = port.proto.lowercased() == "tcp"
+            let label = isTCP ? "\(hostPort)" : "\(hostPort)/\(port.proto.lowercased())"
+            if seen.insert(label).inserted { parts.append(label) }
+        }
+        return parts.joined(separator: " ")
+    }
+
+    /// A row carried the name, then ~900pt of nothing, then the status — and the
+    /// image was invisible *anywhere* in the list, so the one fact that answers
+    /// "what is this thing" was only reachable by selecting the row. `docker ps`
+    /// shows name, image, ports and status because that is the handful that
+    /// identifies a container at a glance; this row now shows the same four.
+    ///
+    /// Deliberately still a `List` row rather than a `Table`: rows live inside
+    /// Compose-project sections and a collapsed Kubernetes group, and `Table` has
+    /// no outline vocabulary that survives that. The columns are laid out by hand,
+    /// but every element is a plain `Text` in the content layer — nothing here
+    /// redraws a system control.
     private func containerRow(_ container: ContainerSummary) -> some View {
-        HStack {
+        HStack(spacing: 12) {
             Label {
                 Text(container.displayName)
                     .lineLimit(1)
@@ -409,8 +439,26 @@ struct ContainersRootView: View {
                     .foregroundStyle(stateColor(for: container))
                     .accessibilityHidden(true)
             }
+            .layoutPriority(2)
 
-            Spacer(minLength: 12)
+            Text(container.image)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                // An image reference is `registry/namespace/name:tag`. The tag is the
+                // part that differs between two otherwise identical rows, so when
+                // space runs out the middle goes and the ends stay.
+                .truncationMode(.middle)
+                .layoutPriority(1)
+
+            Spacer(minLength: 8)
+
+            if !container.ports.isEmpty {
+                Text(publishedPortSummary(container.ports))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .accessibilityLabel("Published ports: \(publishedPortSummary(container.ports))")
+            }
 
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 Text(container.statusDisplay(at: context.date))
@@ -418,6 +466,7 @@ struct ContainersRootView: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
+            .layoutPriority(2)
         }
         .tag(container.id)
         // Row identity is the engine-facing reference — the unique Docker
