@@ -17,7 +17,10 @@
 # `morb mcp --help` prints the global usage, never the module's own. The
 # grammars below come from mac/Sources/morb/main.swift and from the feature
 # modules it dispatches to (MorbMCP, MorbMigrate, MorbBench, MorbScan,
-# MorbExport).
+# MorbExport). That includes `migrate --to <runtime|socket>` (migrate
+# images/volumes OUT of Morbstack) and `export --all` (export every local
+# image to a directory) — both flags on the parent command itself, not
+# subcommand names.
 
 complete -c morb -f
 
@@ -38,10 +41,10 @@ complete -c morb -n __fish_use_subcommand -a disk -d 'Inspect or grow VM disk ca
 complete -c morb -n __fish_use_subcommand -a ports -d 'Check loopback port availability; never reserves or starts the daemon'
 complete -c morb -n __fish_use_subcommand -a reset-disk -d 'Delete the Docker data disk and start over (destructive)'
 complete -c morb -n __fish_use_subcommand -a mcp -d 'Model Context Protocol server; read-only unless granted'
-complete -c morb -n __fish_use_subcommand -a migrate -d 'Import images, volumes and config from another runtime'
+complete -c morb -n __fish_use_subcommand -a migrate -d 'Import from (--from) or migrate out to (--to) another runtime'
 complete -c morb -n __fish_use_subcommand -a bench -d 'Run the open benchmark suite and report the numbers'
 complete -c morb -n __fish_use_subcommand -a scan -d 'SBOM and CVE scan an image, entirely on this machine'
-complete -c morb -n __fish_use_subcommand -a export -d 'Write an already-local image or named-volume archive to a user-selected file'
+complete -c morb -n __fish_use_subcommand -a export -d 'Write already-local image/volume archives, or --all of them, to a user-selected file'
 complete -c morb -n __fish_use_subcommand -a debug -d 'Inspect safe toolbox availability; does not open a shell yet'
 complete -c morb -n __fish_use_subcommand -a context -d 'Inspect the `morbstack` Docker context and discovery socket'
 complete -c morb -n __fish_use_subcommand -a service -d 'Manage Morbstack\'s explicit per-user background service'
@@ -212,6 +215,15 @@ complete -c morb -n '__fish_seen_subcommand_from migrate; and not __fish_seen_su
 complete -c morb -n '__fish_seen_subcommand_from migrate; and not __fish_seen_subcommand_from detect config plan run images volumes verify help' \
     -a help -d 'Print the migrate usage text'
 
+# `--to` is a flag on `morb migrate` itself, not a subcommand name — it
+# migrates every eligible image and named volume OUT of Morbstack.
+complete -c morb -n '__fish_seen_subcommand_from migrate; and not __fish_seen_subcommand_from detect config plan run images volumes verify help' \
+    -l to -r -d 'Migrate every eligible image and named volume OUT of Morbstack into another runtime'
+complete -c morb -n '__fish_seen_subcommand_from migrate; and contains -- --to (commandline -opc)' \
+    -l dry-run -d 'Print the exact plan without changing anything'
+complete -c morb -n '__fish_seen_subcommand_from migrate; and contains -- --to (commandline -opc)' \
+    -l yes -d 'Skip the confirmation prompt'
+
 complete -c morb -n '__fish_seen_subcommand_from migrate; and __fish_seen_subcommand_from plan run images volumes verify' \
     -l from -r -d 'Docker Desktop, Colima, OrbStack, or a socket path'
 complete -c morb -n '__fish_seen_subcommand_from migrate; and __fish_seen_subcommand_from plan images volumes' \
@@ -292,6 +304,15 @@ complete -c morb -n '__fish_seen_subcommand_from export; and not __fish_seen_sub
 complete -c morb -n '__fish_seen_subcommand_from export; and __fish_seen_subcommand_from image volume' \
     -l output -r -F -d 'Where to write the archive; required'
 complete -c morb -n '__fish_seen_subcommand_from export; and __fish_seen_subcommand_from image volume' \
+    -l replace -d 'Overwrite an existing file at --output'
+
+# `--all` is a flag on `morb export` itself, not a subcommand name — it
+# writes every local tagged image, one archive per image, to a directory.
+complete -c morb -n '__fish_seen_subcommand_from export; and not __fish_seen_subcommand_from image volume help' \
+    -l all -d 'Write every local tagged image, one archive per image, to a directory'
+complete -c morb -n '__fish_seen_subcommand_from export; and contains -- --all (commandline -opc)' \
+    -l output -r -F -d 'Directory to write one archive per image into; required'
+complete -c morb -n '__fish_seen_subcommand_from export; and contains -- --all (commandline -opc)' \
     -l replace -d 'Overwrite an existing file at --output'
 
 # --- debug ---

@@ -19,7 +19,10 @@
 # feature modules it dispatches to (MorbMCP/MCPCLI.swift,
 # MorbMigrate/MigrateCLI.swift, MorbBench/BenchCLI.swift,
 # MorbScan/ScanCLI.swift, MorbScan/DebugCLI.swift,
-# MorbExport/ExportCLI.swift).
+# MorbExport/ExportCLI.swift). That includes `migrate --to <runtime|socket>`
+# (migrate images/volumes OUT of Morbstack) and `export --all` (export every
+# local image to a directory) — both flags on the parent command itself, not
+# subcommand names, so they are completed alongside the subcommand list.
 
 _morb() {
     local curcontext="$curcontext" state line
@@ -42,10 +45,10 @@ _morb() {
         'ports:Check loopback port availability; never reserves or starts the daemon'
         'reset-disk:Delete the Docker data disk and start over (destructive)'
         'mcp:Model Context Protocol server; read-only unless granted'
-        'migrate:Import images, volumes and config from another runtime'
+        'migrate:Import from (--from) or migrate out to (--to) another runtime'
         'bench:Run the open benchmark suite and report the numbers'
         'scan:SBOM and CVE scan an image, entirely on this machine'
-        'export:Write an already-local image or named-volume archive to a user-selected file'
+        'export:Write already-local image/volume archives, or --all of them, to a user-selected file'
         'debug:Inspect safe toolbox availability; does not open a shell yet'
         'context:Inspect the `morbstack` Docker context and discovery socket'
         'service:Manage Morbstack'\''s explicit per-user background service'
@@ -426,9 +429,20 @@ _morb_migrate() {
     case $state in
         subcommand)
             _describe -t migrate-subcommands 'migrate subcommand' subs
+            _arguments \
+                '--to[Migrate every eligible image and named volume OUT of Morbstack into another runtime]:runtime or socket:' \
+                '--json[Emit raw JSON instead of human-readable output]' \
+                '(--help -h)'{--help,-h}'[Print help and exit]'
             ;;
         subargs)
             case ${words[1]} in
+                --to)
+                    _arguments \
+                        '--dry-run[Print the exact plan without changing anything]' \
+                        '--yes[Skip the confirmation prompt]' \
+                        '--json[Emit raw JSON instead of human-readable output]' \
+                        '(--help -h)'{--help,-h}'[Print help and exit]'
+                    ;;
                 plan)
                     _arguments \
                         '--from[Docker Desktop, Colima, OrbStack, or a socket path]:runtime or socket:' \
@@ -565,6 +579,10 @@ _morb_export() {
     case $state in
         subcommand)
             _describe -t export-subcommands 'export subcommand' subs
+            _arguments \
+                '--all[Write every local tagged image, one archive per image, to a directory]' \
+                '--json[Emit raw JSON instead of human-readable output]' \
+                '(--help -h)'{--help,-h}'[Print help and exit]'
             ;;
         subargs)
             case ${words[1]} in
@@ -575,6 +593,13 @@ _morb_export() {
                         '--json[Emit raw JSON instead of human-readable output]' \
                         '(--help -h)'{--help,-h}'[Print help and exit]' \
                         "1:${words[1]} to export:"
+                    ;;
+                --all)
+                    _arguments \
+                        '--output[Directory to write one archive per image into; required]:directory:_files -/' \
+                        '--replace[Overwrite an existing file at --output]' \
+                        '--json[Emit raw JSON instead of human-readable output]' \
+                        '(--help -h)'{--help,-h}'[Print help and exit]'
                     ;;
                 *)
                     _morb_global_args

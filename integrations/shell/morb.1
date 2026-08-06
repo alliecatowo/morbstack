@@ -96,6 +96,11 @@
 .Op Cm detect | config | plan | run | images | volumes | verify
 .Op Ar ...
 .Nm
+.Cm migrate Fl -to Ar runtime | socket
+.Op Fl -dry-run
+.Op Fl -yes
+.Op Fl -json
+.Nm
 .Cm bench
 .Op Cm list | run | history | compare
 .Op Ar ...
@@ -110,6 +115,10 @@
 .Cm image | volume
 .Ar name
 .Fl -output Ar path
+.Op Fl -replace
+.Nm
+.Cm export Fl -all
+.Fl -output Ar directory
 .Op Fl -replace
 .Nm
 .Cm debug
@@ -178,9 +187,9 @@ of starting one just to ask it a question.
 .Cm migrate ,
 .Cm bench ,
 .Cm scan ,
-.Cm export
-and
 .Cm debug
+and
+.Cm export
 are each implemented in their own Swift module
 .Pq Sy MorbMCP , MorbMigrate , MorbBench , MorbScan , MorbExport
 that
@@ -471,7 +480,13 @@ Implemented in the
 .Sy MorbMCP
 module.
 .It Cm migrate
-Import images, volumes and configuration from another container runtime.
+Import images, volumes and configuration from another container runtime with
+.Fl -from ,
+or migrate them OUT of Morbstack into another runtime or socket with
+.Fl -to ,
+verifying every copied item with the same config-ID and sha256sum checks
+.Cm migrate verify
+uses.
 .Cm detect
 .Pq the default
 surveys local runtimes and
@@ -513,6 +528,16 @@ compares the two engines
 .Fl -report ,
 .Fl -yes
 .Pc .
+.Fl -to Ar runtime | socket
+takes only
+.Fl -dry-run
+and
+.Fl -yes ;
+combining it with
+.Fl -json
+requires
+.Fl -yes ,
+since a confirmation prompt cannot share JSON stdout.
 Option values are passed as
 .Ar --name value ,
 never
@@ -565,13 +590,21 @@ Implemented in the
 module.
 .It Cm export
 Write an already-local image or named-volume archive to a user-selected
-file.
+file, or with
+.Fl -all ,
+every local tagged image as one archive per image into a directory that a
+stock
+.Nm docker load
+restores.
 .Cm export image Ar reference Fl -output Ar path
 saves one image through a single
 .Pa GET /images/get ;
 .Cm export volume Ar name Fl -output Ar path
 archives one existing local-driver volume through one owned, stopped,
-read-only helper container and never pulls the helper image.
+read-only helper container and never pulls the helper image;
+.Fl -all Fl -output Ar directory
+writes every local tagged image plus a
+.Pa MANIFEST.txt .
 .Fl -output
 is required and its parent directory must already exist; an existing
 file is refused unless
@@ -641,7 +674,7 @@ are identical — and this holds even for
 and
 .Cm debug ,
 which receive the flag as a separate parameter rather than as an
-argument.
+argument, and whose other arguments are otherwise opaque to this manual.
 .Cm mcp serve
 is the one command that rejects it outright.
 .It Fl -force
@@ -771,7 +804,16 @@ and
 do, honor the docker CLI's own
 .Ev DOCKER_CONFIG
 convention for locating the docker config directory
-.Pq default Pa ~/.docker .
+.Pq default Pa ~/.docker ,
+per that command's own implementation.
+Whether
+.Cm mcp , migrate , bench , scan , debug
+or
+.Cm export
+read any environment variables is not knowable from
+.Nm Ns 's
+own source; each is implemented in a separate module outside the scope
+this manual could verify.
 .Sh FILES
 .Bl -tag -width "~/.morbstack/run/morbstackd.sock"
 .It Pa ~/.morbstack/run/docker.sock
@@ -854,9 +896,19 @@ reports unhealthy, an unavailable endpoint reported by
 or a daemon-reported failure.
 .El
 .Pp
+This is the convention
+.Nm Ns 's
+own code documents and follows for every command it parses directly.
+.Cm mcp , migrate , bench , scan , debug
+and
+.Cm export
+each return whatever exit code their own module computes, which
+.Nm
+merely forwards unchanged; that code was not verified here to follow the
+same 0/1/2 convention.
 .Cm debug
-returns 2 for every successful invocation as well: it reports that no
-toolbox is available, which is never a success.
+in particular returns 2 for every successful invocation as well: it
+reports that no toolbox is available, which is never a success.
 .Sh EXAMPLES
 .Bl -tag -width Ds
 .It Boot the VM and check on it

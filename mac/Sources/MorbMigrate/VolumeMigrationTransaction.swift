@@ -249,6 +249,7 @@ public enum VolumeMigrationTransactionError: Error, CustomStringConvertible {
     case unknownNames([String])
     case ineligibleNames([String])
     case missingSourceSocket
+    case missingDestinationSocket
     case confirmationDoesNotMatch
     case networkConsentDoesNotMatch
     case helperImageNetworkConsentRequired([String])
@@ -261,6 +262,7 @@ public enum VolumeMigrationTransactionError: Error, CustomStringConvertible {
         case .unknownNames(let names): return "these volume names are not in the current plan: \(names.joined(separator: ", "))"
         case .ineligibleNames(let names): return "these volumes are not eligible for the additive transaction: \(names.joined(separator: ", "))"
         case .missingSourceSocket: return "the prepared source has no Docker socket path"
+        case .missingDestinationSocket: return "the prepared destination has no Docker socket path"
         case .confirmationDoesNotMatch: return "confirmation does not belong to this prepared volume migration"
         case .networkConsentDoesNotMatch: return "network consent does not belong to this prepared volume migration"
         case .helperImageNetworkConsentRequired(let labels):
@@ -294,11 +296,18 @@ public enum VolumeMigrationTransaction {
     /// Derives a fresh GET-only plan, narrows it to an explicit eligible selection,
     /// and observes whether each engine already has a usable helper image. It never
     /// creates a helper container, pulls an image, creates a volume, or writes a report.
+    /// - Parameter destinationToken: when non-nil, prepares an **outbound** transfer —
+    ///   Morbstack is the fixed source and `destinationToken` is the target — the
+    ///   reverse of the default inbound direction. See
+    ///   ``ImageMigrationTransaction/prepare(from:to:selection:)`` for the identical
+    ///   convention on the image side.
     public static func prepare(
         from sourceToken: String? = nil,
+        to destinationToken: String? = nil,
         selection: VolumeMigrationSelection
     ) throws -> PreparedVolumeMigration {
-        let plan = MigrationReadOnlyPlanner.inspect(from: sourceToken)
+        let plan = destinationToken.map { MigrationReadOnlyPlanner.inspectOutbound(to: $0) }
+            ?? MigrationReadOnlyPlanner.inspect(from: sourceToken)
         guard plan.source.readiness == .ready, plan.destination.readiness == .ready,
               let volumePlan = plan.volumePlan
         else {
@@ -309,11 +318,14 @@ public enum VolumeMigrationTransaction {
         guard let sourceSocket = plan.source.socketPath else {
             throw VolumeMigrationTransactionError.missingSourceSocket
         }
+        guard let destinationSocket = plan.destination.socketPath else {
+            throw VolumeMigrationTransactionError.missingDestinationSocket
+        }
 
         let sourceClient = EngineClient.forUnixSocket(sourceSocket)
         let selected = try selectedItems(selection, from: volumePlan)
         try verifyArchiveTransferVolumeSemantics(selected, on: sourceClient)
-        let destinationClient = EngineClient()
+        let destinationClient = EngineClient.forUnixSocket(destinationSocket)
         let sourceHasHelper: Bool
         let destinationHasHelper: Bool
         do {
@@ -361,12 +373,18 @@ public enum VolumeMigrationTransaction {
         guard let sourceSocket = prepared.source.socketPath else {
             throw VolumeMigrationTransactionError.missingSourceSocket
         }
+        guard let destinationSocket = prepared.destination.socketPath else {
+            throw VolumeMigrationTransactionError.missingDestinationSocket
+        }
 
         let source = MigrationSource(
             label: prepared.source.name,
             client: EngineClient.forUnixSocket(sourceSocket),
             socketPath: sourceSocket)
-        let destination = EngineClient()
+        // Read from the prepared plan, not fixed to Morbstack: the one transaction
+        // below is what both the inbound `morb migrate volumes` and the outbound
+        // `morb migrate --to` use.
+        let destination = EngineClient.forUnixSocket(destinationSocket)
         let allowsNetwork = networkConsent != nil
         let (sourceImage, destinationImage) = try resolveHelperImages(
             source: source, destination: destination, allowsNetwork: allowsNetwork,

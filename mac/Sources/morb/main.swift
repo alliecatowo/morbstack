@@ -41,10 +41,10 @@ let usage = """
       ports        Check loopback port availability; never reserves or starts the daemon
       reset-disk   Delete the Docker data disk and start over (destructive)
       mcp          Model Context Protocol server; read-only unless granted
-      migrate      Import images, volumes and config from another runtime
+      migrate      Import from (--from) or migrate out to (--to) another runtime
       bench        Run the open benchmark suite and report the numbers
       scan         SBOM and CVE scan an image, entirely on this machine
-      export       Write an already-local image or named-volume archive to a user-selected file
+      export       Write already-local image/volume archives, or --all of them, to a user-selected file
       debug        Inspect safe toolbox availability; does not open a shell yet
       context      Inspect the `morbstack` Docker context and discovery socket
       service      Manage Morbstack's explicit per-user background service

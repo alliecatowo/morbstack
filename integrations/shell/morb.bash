@@ -33,7 +33,10 @@
 # `morb mcp --help` prints the global usage, never the module's own. The
 # grammars below come from mac/Sources/morb/main.swift and from the feature
 # modules it dispatches to (MorbMCP, MorbMigrate, MorbBench, MorbScan,
-# MorbExport).
+# MorbExport). That includes `migrate --to <runtime|socket>` (migrate
+# images/volumes OUT of Morbstack) and `export --all` (export every local
+# image to a directory) — both flags on the parent command itself, not
+# subcommand names.
 
 _morb() {
     local cur cmd sub op i word
@@ -170,7 +173,11 @@ _morb() {
             ;;
         migrate)
             if [[ -z "$sub" ]]; then
-                COMPREPLY=($(compgen -W "detect config plan run images volumes verify help $global_opts" -- "$cur"))
+                COMPREPLY=($(compgen -W "detect config plan run images volumes verify help --to $global_opts" -- "$cur"))
+            elif [[ " ${COMP_WORDS[*]:0:COMP_CWORD} " == *' --to '* ]]; then
+                # `--to` is a flag on `morb migrate` itself, not a subcommand
+                # name, so `$sub` here is its <runtime|socket> value.
+                COMPREPLY=($(compgen -W "--dry-run --yes $global_opts" -- "$cur"))
             else
                 case "$sub" in
                     plan)
@@ -221,8 +228,10 @@ _morb() {
             ;;
         export)
             if [[ -z "$sub" ]]; then
-                COMPREPLY=($(compgen -W "image volume help $global_opts" -- "$cur"))
+                COMPREPLY=($(compgen -W "image volume help --all $global_opts" -- "$cur"))
             elif [[ "$sub" == "image" || "$sub" == "volume" ]]; then
+                COMPREPLY=($(compgen -W "--output --replace $global_opts" -- "$cur"))
+            elif [[ " ${COMP_WORDS[*]:0:COMP_CWORD} " == *' --all '* ]]; then
                 COMPREPLY=($(compgen -W "--output --replace $global_opts" -- "$cur"))
             else
                 COMPREPLY=($(compgen -W "$global_opts" -- "$cur"))
