@@ -7,6 +7,13 @@
 > others were dated captures of superseded builds. The findings stand as written; the
 > images are recoverable from git history if a specific one is ever needed.
 
+> **Staleness note (2026-08-05):** wherever this handoff refers to the `-P` patch/allocator
+> or to a guest-image rebuild as a Docker/Buildx workload — including reviewer question 1 —
+> it describes a mechanism deleted under TECH-1 on 2026-08-04. Morbstack ships unmodified
+> upstream `dockerd` and serves published ports through its stock `--userland-proxy-path`
+> hook; `mise run guest-image` needs no Docker and no buildx. Text left unchanged as dated
+> evidence; see `docs/design/PATCH-FREE-PUBLISH-ALL.md`.
+
 
 ## Purpose and review posture
 
@@ -209,6 +216,11 @@ Still required after the final commit:
    search, table sort/selection, and unavailable/confirmation states.
 2. A guest-image rebuild before testing guest Rust/Moby changes. This is a Docker
    Buildx workload and was deliberately not run while the user was unavailable.
+   *(Dated note, 2026-08-05: no longer true. TECH-1 deleted the Moby patch on
+   2026-08-04, so `mise run guest-image` is not a Docker or Buildx workload at all —
+   it cross-builds `morbinit` and fetches the pinned, hash-verified upstream `dockerd`
+   like every other third-party guest asset. It needs only the
+   `aarch64-unknown-linux-musl` toolchain. See `docs/design/PATCH-FREE-PUBLISH-ALL.md`.)*
 3. The serial clean-profile CP-01 through CP-07 acceptance matrix: normal CLI/
    context/direct socket, Docker/Compose/Buildx, `-p`/`-P`, mounts, Testcontainers
    (Java/Go/Node/Python), and Dev Containers.

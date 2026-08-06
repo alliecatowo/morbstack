@@ -69,7 +69,7 @@ WSL competitor. Compete there deliberately or not at all; do not drift into it.
 
 | Capability | Them | Us | State |
 | --- | --- | --- | --- |
-| Stock `docker` CLI works with zero setup | both | bundled toolchain, docker 29.7.1 / compose v5.3.1 / buildx v0.36.0, SHA-pinned | `runs-here` |
+| Stock `docker` CLI works with zero setup | both | bundled toolchain, docker 29.7.1 / compose v5.3.1 / buildx v0.36.0, SHA-pinned; since ECO-1 `morb install-cli` also registers the `morbstack` context and the `~/.docker/run/docker.sock` link, so context-blind clients find Morbstack with no env vars ([design/ZERO-CONFIG-DISCOVERY.md](design/ZERO-CONFIG-DISCOVERY.md)). Defers to Docker Desktop when Desktop already owns the conventional socket | `runs-here` |
 | `docker run -p` in all forms | both | fixed/dynamic/UDP/ranges; ambiguity preflight bug just fixed | matrix in progress |
 | `docker run -P` | both | stock dockerd through its own `--userland-proxy-path` hook — no engine patch (TECH-1); `docker run -P nginx:alpine` served `curl` HTTP 200 in 4.3 ms against a rebuilt guest ([design/PATCH-FREE-PUBLISH-ALL.md](design/PATCH-FREE-PUBLISH-ALL.md)) | `runs-here` |
 | Compose | both | 3-service healthcheck-chained stack up in 12.9 s incl. a BuildKit build | `runs-here` |
@@ -77,8 +77,8 @@ WSL competitor. Compete there deliberately or not at all; do not drift into it.
 | Bind mounts that serve the *host's* files | both | `435d09f` fail-closed fix, first runtime check in progress | verifying |
 | `host.docker.internal` | both | guest DNS | `source-only` |
 | Volumes, networks, logs, exec, cp, stats | both | present | mostly `runs-here` |
-| Testcontainers (Java/Go/Node/Python) | both | **never tested** | `absent` as evidence |
-| Dev Containers | both | **never tested** | `absent` as evidence |
+| Testcontainers (Java/Go/Node/Python) | both | tested live 2026-08-04 (EN-8): all four languages ran real Postgres round trips against server 29.7.1 with Ryuk, warm totals 1.5–5.9 s, and after ECO-1/ECO-2 with **no Docker env vars at all**. Known limit: testcontainers-java ≤1.20.x fails against *any* engine-29 daemon (its `/v1.32/info` probe vs moby 29's `MinAPIVersion`), mitigated in the guest with `DOCKER_MIN_API_VERSION=1.24` | `runs-here` ([audit/ECOSYSTEM-MATRIX.md](audit/ECOSYSTEM-MATRIX.md)); `accepted` still needs CP-06 |
+| Dev Containers | both | tested live 2026-08-04 (EN-9): @devcontainers/cli 0.88.0 `up` in 34 s incl. pull, plus exec, two-way workspace bind mount, `postCreateCommand`, and a features/derived-image build through Morbstack BuildKit — context-only discovery, no `DOCKER_HOST`. The VS Code extension flow is untested | `runs-here` ([audit/ECOSYSTEM-MATRIX.md](audit/ECOSYSTEM-MATRIX.md)); `accepted` still needs CP-07 |
 | Installs on a Mac with no Docker | both | bundle is right; **not notarized**, so Gatekeeper blocks everyone but the author | blocked |
 
 ---
