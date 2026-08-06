@@ -1,0 +1,156 @@
+name: Release
+
+# Tag-triggered by default (push a `v*` tag to cut a release), plus a manual
+# button so this can be re-run by hand — e.g. to rebuild a release after a
+# transient runner failure without pushing a new tag. See docs/RELEASING.md
+# for the full local-vs-CI story; scripts/release.sh (which this workflow
+# calls) is written to run the same way on a contributor's own Mac, since
+# this workflow is currently unproven (see that doc for why).
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch: {}
+
+# One release build per ref at a time; unlike ci.yml this does NOT cancel an
+# in-progress run when a newer one starts — a release in flight should
+# finish (or fail) on its own rather than being killed mid-DMG by a second
+# tag push.
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+# contents: write is required by the "Create GitHub Release" step below to
+# upload the DMG as a release asset. Everything else in this workflow only
+# needs read access; scoped at the job level rather than the workflow level
+# so that scope is visible right next to the one step that needs it.
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Builds and packages the DMG. Apple silicon is required end to end —
+  # Virtualization.framework for the daemon build/entitlement check, and
+  # this is also where the aarch64 guest assets and cross-compiled morbinit
+  # come together — so macos-26 (Apple Silicon), same as ci.yml.
+  # ---------------------------------------------------------------------
+  build:
+    runs-on: macos-26
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    outputs:
+      dmg_path: ${{ steps.release.outputs.dmg_path }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same rationale as ci.yml: the runner's default Xcode already
+      # satisfies "Xcode 26 or later" for this project's declared
+      # toolchain; pin explicitly here only if a future Swift-only feature
+      # needs a newer default than whatever GitHub ships that month.
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - uses: jdx/mise-action@v2
+
+      # Mirrors ci.yml's first-run path: mise refuses to even parse an
+      # untrusted config (including its task list), so this has to be the
+      # literal commands rather than `mise run setup`.
+      - name: Set up toolchain
+        run: mise trust && mise install
+
+      - name: Install aarch64-unknown-linux-musl cross toolchain
+        run: |
+          brew tap messense/macos-cross-toolchains
+          brew install messense/macos-cross-toolchains/aarch64-unknown-linux-musl
+
+      - name: Add Rust cross target
+        run: rustup target add aarch64-unknown-linux-musl
+
+      # Same cache shape as ci.yml's build-and-test job — SwiftPM has no
+      # third-party dependencies to resolve, so this buys incremental
+      # compilation reuse across runs, not dependency-resolution time.
+      - name: Cache SwiftPM build
+        uses: actions/cache@v4
+        with:
+          path: mac/.build
+          key: swiftpm-release-${{ runner.os }}-${{ hashFiles('mac/Package.swift') }}-${{ github.sha }}
+          restore-keys: |
+            swiftpm-release-${{ runner.os }}-${{ hashFiles('mac/Package.swift') }}-
+            swiftpm-release-${{ runner.os }}-
+            swiftpm-${{ runner.os }}-
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            guest/morbinit/target
+          key: cargo-release-${{ runner.os }}-${{ hashFiles('guest/morbinit/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            cargo-release-${{ runner.os }}-${{ hashFiles('guest/morbinit/Cargo.lock') }}-
+            cargo-release-${{ runner.os }}-
+            cargo-${{ runner.os }}-
+
+      # Same shape as ci.yml's guest-image job cache: dist/{guest-bin,
+      # rootfs,apks} hold the third-party assets scripts/fetch-guest-
+      # assets.sh downloads and verifies; keying on that script plus
+      # Cargo.lock means a cache hit skips ~300MB of re-downloads on
+      # consecutive release runs.
+      - name: Cache pinned upstream assets
+        uses: actions/cache@v4
+        with:
+          path: |
+            dist/guest-bin
+            dist/rootfs
+            dist/apks
+            dist/host-bin
+          key: release-assets-${{ runner.os }}-${{ hashFiles('scripts/fetch-guest-assets.sh') }}
+          restore-keys: |
+            release-assets-${{ runner.os }}-
+
+      # scripts/release.sh is intentionally the single source of truth for
+      # build order (fetch -> guest-image -> app -> DMG -> entitlement
+      # verification) — see CLAUDE.md §1.1 on why that order and the
+      # inside-out signing inside it are not safe to reimplement here.
+      # MORBSTACK_SIGN_IDENTITY is deliberately left unset: this workflow
+      # does not carry a Developer ID, so the DMG file itself is built
+      # unsigned (the app inside it is still ad-hoc signed by mise-tasks/
+      # app, same as any local run — see docs/RELEASING.md).
+      - name: Build, package, and verify the release DMG
+        id: release
+        run: scripts/release.sh
+
+      - name: Upload DMG as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: morbstack-${{ steps.release.outputs.version }}
+          path: ${{ steps.release.outputs.dmg_path }}
+          if-no-files-found: error
+
+      # Only attach to a GitHub Release on an actual tag push — a manual
+      # workflow_dispatch run (e.g. re-testing this workflow, or building a
+      # DMG from a non-tag ref) still produces and uploads the workflow
+      # artifact above, but does not publish anything public.
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.release.outputs.dmg_path }}
+          generate_release_notes: true
+          # This DMG is ad-hoc signed, not Developer ID signed or
+          # notarized (REL-2/SP-9 track that separately). Say so on the
+          # release itself, not just in docs/RELEASING.md, so nobody
+          # downloads it expecting a Gatekeeper-clean install.
+          body: |
+            Ad-hoc signed build. Not notarized, not signed with a Developer ID.
+            See [docs/RELEASING.md](https://github.com/${{ github.repository }}/blob/main/docs/RELEASING.md)
+            for what that means before you run this on a Mac other than the one
+            that built it — in particular, the bundled engine cannot open a VM
+            there (`com.apple.security.virtualization` is a restricted
+            entitlement that an ad-hoc signature does not carry across
+            machines).
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
