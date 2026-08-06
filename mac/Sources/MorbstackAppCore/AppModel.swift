@@ -218,6 +218,13 @@ final class AppModel {
     /// once, not pin every container the user subsequently clicks to the Logs tab.
     var logsTabRequest: String?
 
+    /// A request from the menu bar that the Stacks screen select this Compose project.
+    ///
+    /// One-shot for the same reason ``logsTabRequest`` is: the Stacks outline owns its
+    /// own selection, and a menu-bar jump must place the cursor once rather than
+    /// re-selecting the project every time that view happens to rebuild.
+    var stackSelectionRequest: String?
+
     // MARK: Collaborators
 
     @ObservationIgnored var client: DockerClient
@@ -979,5 +986,11 @@ final class AppModel {
         guard logsTabRequest == id else { return false }
         logsTabRequest = nil
         return true
+    }
+
+    /// Consumes a pending Stacks selection request, returning the project name once.
+    func consumeStackSelectionRequest() -> String? {
+        defer { stackSelectionRequest = nil }
+        return stackSelectionRequest
     }
 }

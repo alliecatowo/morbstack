@@ -292,6 +292,10 @@ struct StacksRootView: View {
             }
             .onChange(of: visibleRowIDs) { _, _ in
                 reconcileSelectionWithVisibleRows()
+                applyPendingStackSelection()
+            }
+            .task(id: model.stackSelectionRequest) {
+                applyPendingStackSelection()
             }
             .sheet(
                 isPresented: Binding(
@@ -1142,6 +1146,22 @@ struct StacksRootView: View {
     private func reconcileSelectionWithVisibleRows() {
         guard let selection, !visibleRowIDs.contains(selection) else { return }
         self.selection = nil
+    }
+
+    /// Places the cursor on a project the menu bar jumped to.
+    ///
+    /// The request is only consumed once the project is actually on screen: this view
+    /// can appear before the first `/containers/json` answers, and a request thrown
+    /// away against an empty list would land the person on Stacks with nothing selected
+    /// and no way to tell that the jump had happened at all. An active search is
+    /// cleared, because a filter that hides the row would do the same thing.
+    private func applyPendingStackSelection() {
+        guard let project = model.stackSelectionRequest,
+            stacks.contains(where: { $0.id == project })
+        else { return }
+        _ = model.consumeStackSelectionRequest()
+        query = ""
+        selection = .project(project)
     }
 
     /// The project label shown in the inspector is observational Docker metadata. A
