@@ -19,17 +19,27 @@ public struct LocatedTool: Sendable {
 
 public enum ToolLocator {
 
-    /// Search order for `syft`/`grype`, same shape as `MorbCliPlugins.sourceBinary`
-    /// in MorbstackKit (not reused directly — that type is `internal` to its own
-    /// module for this pair — but the layout it encodes is a project-wide contract:
-    /// a shipped `.app` bundles `dist/host-bin` under `Contents/Resources/host-bin`,
-    /// a dev checkout has `mac/.build/debug/morb` with `dist/host-bin` a few
-    /// directories up). Falls through to `PATH` last: a developer who already has
-    /// syft/grype from Homebrew for other projects should not be told to
-    /// re-download 60 MB of binaries this repo can already see.
+    /// Search order for `syft`/`grype`.
+    ///
+    /// `ScanPaths.toolsDirectory` (`$MORBSTACK_HOME/scan/bin`) is checked first: it is
+    /// where `scripts/fetch-scan-tools.sh` installs the pinned copies, on a repo
+    /// checkout and a shipped app alike, and unlike the directories below it is never
+    /// swept into a signed app bundle (see that constant's doc comment).
+    ///
+    /// The remaining candidates match `MorbCliPlugins.sourceBinary` in MorbstackKit
+    /// (not reused directly — that type is `internal` to its own module for this pair
+    /// — but the layout it encodes is a project-wide contract: a shipped `.app`
+    /// bundles `dist/host-bin` under `Contents/Resources/host-bin`, a dev checkout has
+    /// `mac/.build/debug/morb` with `dist/host-bin` a few directories up). syft/grype
+    /// are deliberately never fetched there (see `ScanPaths.toolsDirectory`), but a
+    /// hand-placed copy is still honored rather than silently ignored. Falls through
+    /// to `PATH` last: a developer who already has syft/grype from Homebrew for other
+    /// projects should not be told to re-download 60 MB of binaries this repo can
+    /// already see.
     static func candidateDirectories() -> [URL] {
         let exeDir = MorbExecutable.currentDirectory()
         var dirs: [URL] = [
+            ScanPaths.toolsDirectory,
             exeDir.deletingLastPathComponent()
                 .appendingPathComponent("Resources", isDirectory: true)
                 .appendingPathComponent("host-bin", isDirectory: true),
@@ -47,10 +57,10 @@ public enum ToolLocator {
         return dirs
     }
 
-    /// Finds `name` (`"syft"` or `"grype"`), preferring the pinned copy this repo
-    /// fetched over whatever might be on `PATH`, so a scan's results are
-    /// reproducible against the version `scripts/fetch-scan-tools.sh` pinned rather
-    /// than whatever a developer's Homebrew happened to have that week.
+    /// Finds `name` (`"syft"` or `"grype"`), preferring the pinned copy
+    /// `scripts/fetch-scan-tools.sh` fetched over whatever might be on `PATH`, so a
+    /// scan's results are reproducible against the version pinned there rather than
+    /// whatever a developer's Homebrew happened to have that week.
     public static func locate(_ name: String) -> LocatedTool? {
         for dir in candidateDirectories() {
             let candidate = dir.appendingPathComponent(name, isDirectory: false)
@@ -86,7 +96,7 @@ public enum ToolLocator {
     /// is the message users hit far more often than any error in the scan itself,
     /// on a machine that has never run `scripts/fetch-scan-tools.sh`.
     public static func missingToolMessage(_ name: String) -> String {
-        "`\(name)` was not found (checked dist/host-bin and PATH) — run "
+        "`\(name)` was not found (checked \(ScanPaths.toolsDirectory.path) and PATH) — run "
             + "`scripts/fetch-scan-tools.sh` to download it, or install it yourself and put it on PATH."
     }
 }
