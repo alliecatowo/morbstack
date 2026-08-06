@@ -447,6 +447,60 @@ final class TarChildWalkerTests: XCTestCase {
         XCTAssertEqual(walker.children.first(where: { $0.name == "dev" })?.kind, .other)
     }
 
+    func testContiguousFileTypeflagIsTreatedAsARegularFile() throws {
+        // Typeflag '7' ("contiguous file") is a regular file for every practical
+        // purpose, and `ContainerTarHeaderReader`/`TarLite` have always agreed — this
+        // walker's own inline typeflag switch did not, and would have shown a
+        // contiguous-file entry as "other" until it adopted the shared
+        // `TarFormat.kind(forTypeflag:)` table.
+        var archive = Data()
+        archive.append(header(name: "data/contiguous", typeflag: UInt8(ascii: "7"), size: 0))
+        archive.append(endOfArchive())
+
+        var walker = makeWalker()
+        try walker.feed(archive)
+
+        XCTAssertEqual(walker.children.first?.kind, .file)
+    }
+
+    func testGNULongLinkOverridesTheTruncatedUstarLinkname() throws {
+        // A symlink target longer than the ustar `linkname` field's 100 bytes needs a
+        // GNU `K` (long link) entry the same way a long name needs `L`. This walker
+        // used to skip `K` entirely ("not needed for listing"), which was wrong: it
+        // does show a symlink's target, so a long one was silently truncated to 100
+        // bytes instead of read in full.
+        let longTarget = "../" + String(repeating: "shared/", count: 20) + "target"
+        XCTAssertGreaterThan(longTarget.utf8.count, 100)
+
+        var archive = Data()
+        archive.append(gnuLongLinkHeader(longLink: longTarget, includeTrailingNUL: true))
+        archive.append(header(name: "data/current", typeflag: symlinkType, size: 0))
+        archive.append(endOfArchive())
+
+        var walker = makeWalker()
+        try walker.feed(archive)
+
+        XCTAssertEqual(walker.children.first?.linkTarget, longTarget)
+    }
+
+    func testPaxGlobalHeaderDoesNotLeakIntoTheNextEntrysOverrides() throws {
+        // A `g` (PAX global) header applies to the whole archive, not to the single
+        // entry that happens to follow it. This walker used to collect `g` the same
+        // way as a per-entry `x` header and apply its records to the very next entry —
+        // so a global `path` override would have silently renamed one file. The
+        // archive below has no legitimate `x` header at all, so if this passes, the
+        // global's `path` record was correctly dropped rather than applied.
+        var archive = Data()
+        archive.append(paxGlobalHeader(records: [("path", "data/should-not-apply")]))
+        archive.append(header(name: "data/real-name.txt", typeflag: fileType, size: 0))
+        archive.append(endOfArchive())
+
+        var walker = makeWalker()
+        try walker.feed(archive)
+
+        XCTAssertEqual(walker.children.map(\.name), ["real-name.txt"])
+    }
+
     // MARK: - Fixture construction
 
     private let fileType = UInt8(ascii: "0")
@@ -501,6 +555,17 @@ final class TarChildWalkerTests: XCTestCase {
         return data
     }
 
+    /// A GNU `K` (long link) header, followed by its padded content block — the
+    /// long-target counterpart to `gnuLongNameHeader`.
+    private func gnuLongLinkHeader(longLink: String, includeTrailingNUL: Bool) -> Data {
+        var linkBytes = Data(longLink.utf8)
+        if includeTrailingNUL { linkBytes.append(0) }
+        var data = header(name: "", typeflag: UInt8(ascii: "K"), size: linkBytes.count)
+        data.append(linkBytes)
+        data.append(Data(repeating: 0, count: paddingLength(for: linkBytes.count)))
+        return data
+    }
+
     /// A PAX (`x`) extended header carrying the given records, followed by its padded
     /// content block. Record framing matches the spec: `"<len> key=value\n"`, where
     /// `len` counts the whole record including itself.
@@ -511,6 +576,21 @@ final class TarChildWalkerTests: XCTestCase {
         }
         let bodyData = Data(body.utf8)
         var data = header(name: "", typeflag: UInt8(ascii: "x"), size: bodyData.count)
+        data.append(bodyData)
+        data.append(Data(repeating: 0, count: paddingLength(for: bodyData.count)))
+        return data
+    }
+
+    /// A PAX (`g`) *global* header — same record framing as `paxHeader`, but a
+    /// distinct typeflag: it applies to the whole archive, never to the one entry
+    /// that happens to follow it.
+    private func paxGlobalHeader(records: [(String, String)]) -> Data {
+        var body = ""
+        for (key, value) in records {
+            body += paxRecord(key: key, value: value)
+        }
+        let bodyData = Data(body.utf8)
+        var data = header(name: "", typeflag: UInt8(ascii: "g"), size: bodyData.count)
         data.append(bodyData)
         data.append(Data(repeating: 0, count: paddingLength(for: bodyData.count)))
         return data

@@ -35,6 +35,20 @@ public struct VolumeContentEntry: Sendable, Equatable, Identifiable {
         /// A device, FIFO, socket, or anything else `ustar`/GNU/PAX can name. Shown
         /// honestly as "other" rather than guessed at.
         case other
+
+        /// This browser's own four-way vocabulary is a deliberately coarser view of
+        /// the same kinds MorbstackKit's shared typeflag mapping produces — a listing
+        /// has no separate glyph for a character device versus a FIFO, so both
+        /// collapse to `.other`. It is still one decision about what a typeflag means,
+        /// made once, in `TarFormat.kind(forTypeflag:)`.
+        init(_ kind: TarEntryKind) {
+            switch kind {
+            case .directory: self = .directory
+            case .symbolicLink: self = .symlink
+            case .regularFile: self = .file
+            case .hardLink, .characterDevice, .blockDevice, .fifo, .socket, .unknown: self = .other
+            }
+        }
     }
 
     public var id: String { name }
@@ -458,7 +472,13 @@ struct TarChildWalker {
 
     private enum AuxKind: Equatable {
         case gnuLongName
-        case pax
+        case gnuLongLink
+        case paxExtended
+        /// A `g` header applies to the whole archive, not the entry that follows it.
+        /// Docker never writes one that changes a listing, so its bytes are still
+        /// walked (to stay in sync with the stream) but never applied — a per-entry
+        /// PAX override is not something a global header gets to become.
+        case paxGlobal
     }
 
     private let rootName: String
@@ -469,6 +489,7 @@ struct TarChildWalker {
     private var buffer: [UInt8] = []
     private var phase: Phase = .header
     private var pendingLongName: String?
+    private var pendingLongLink: String?
     private var pendingPaxOverrides: [String: String] = [:]
 
     private(set) var children: [VolumeContentEntry] = []
@@ -508,17 +529,23 @@ struct TarChildWalker {
 
             case .auxData(let kind, let size, let padded):
                 guard buffer.count >= padded else { return }
-                let content = String(decoding: buffer[0..<size], as: UTF8.self)
+                let content = Array(buffer[0..<size])
                 buffer.removeFirst(padded)
                 switch kind {
                 case .gnuLongName:
                     // GNU writers declare the field's size *including* its NUL
-                    // terminator, so `content` ends in `"\0"` on a real archive.
-                    // Keeping that byte would poison every long name: it is a control
-                    // character, and `isSafeChildName` would reject the entry outright.
-                    pendingLongName = String(content.prefix(while: { $0 != "\u{0}" }))
-                case .pax:
+                    // terminator. `TarFormat.cString` truncates at that byte on the
+                    // raw bytes directly, rather than decoding to a `String` first and
+                    // only then hunting for a NUL — which is what let that trailing
+                    // byte survive into `isSafeChildName`'s control-character check and
+                    // silently drop every real-world long-name entry.
+                    pendingLongName = TarFormat.cString(content)
+                case .gnuLongLink:
+                    pendingLongLink = TarFormat.cString(content)
+                case .paxExtended:
                     applyPaxRecords(content)
+                case .paxGlobal:
+                    break
                 }
                 phase = .header
 
@@ -561,14 +588,24 @@ struct TarChildWalker {
                         // entry simply keeps its literal ustar name instead.
                         phase = .skipData(remaining: padded)
                     }
-                case UInt8(ascii: "x"), UInt8(ascii: "g"):  // PAX extended / global header
+                case UInt8(ascii: "K"):  // GNU long link: data is the *next* entry's link target
                     if parsed.size >= 0, parsed.size <= maxAuxDataBytes {
-                        phase = .auxData(kind: .pax, size: parsed.size, padded: padded)
+                        phase = .auxData(kind: .gnuLongLink, size: parsed.size, padded: padded)
                     } else {
                         phase = .skipData(remaining: padded)
                     }
-                case UInt8(ascii: "K"):  // GNU long link name — not needed for listing
-                    phase = .skipData(remaining: padded)
+                case UInt8(ascii: "x"):  // PAX extended header — applies to the next entry only
+                    if parsed.size >= 0, parsed.size <= maxAuxDataBytes {
+                        phase = .auxData(kind: .paxExtended, size: parsed.size, padded: padded)
+                    } else {
+                        phase = .skipData(remaining: padded)
+                    }
+                case UInt8(ascii: "g"):  // PAX global header — applies archive-wide, not per-entry
+                    if parsed.size >= 0, parsed.size <= maxAuxDataBytes {
+                        phase = .auxData(kind: .paxGlobal, size: parsed.size, padded: padded)
+                    } else {
+                        phase = .skipData(remaining: padded)
+                    }
                 default:
                     handleRegularEntry(parsed)
                     phase = .skipData(remaining: padded)
@@ -580,6 +617,7 @@ struct TarChildWalker {
     private mutating func handleRegularEntry(_ parsed: ParsedHeader) {
         defer {
             pendingLongName = nil
+            pendingLongLink = nil
             pendingPaxOverrides = [:]
         }
         var finalName = pendingLongName ?? parsed.name
@@ -608,14 +646,11 @@ struct TarChildWalker {
             return
         }
 
-        var linkTarget = pendingPaxOverrides["linkpath"] ?? parsed.linkname
-        let kind: VolumeContentEntry.Kind
-        switch parsed.typeflag {
-        case UInt8(ascii: "5"): kind = .directory
-        case UInt8(ascii: "2"): kind = .symlink
-        case UInt8(ascii: "0"), 0: kind = .file
-        default: kind = .other
-        }
+        // GNU `K` (long link) beats the ustar `linkname` field the same way `L` beats
+        // `name`; a PAX `linkpath` record, applied last, beats both.
+        var linkTarget = pendingLongLink ?? parsed.linkname
+        if let overridden = pendingPaxOverrides["linkpath"] { linkTarget = overridden }
+        let kind = VolumeContentEntry.Kind(TarFormat.kind(forTypeflag: parsed.typeflag))
         if kind != .symlink { linkTarget = "" }
 
         children.append(
@@ -632,33 +667,12 @@ struct TarChildWalker {
         }
     }
 
-    /// PAX records are `"<decimal-length> key=value\n"`, length-prefixed (in bytes,
-    /// counting the length field itself) so a value may contain anything, including a
-    /// newline. Walked over the UTF-8 view rather than `String.Index`/`Character`
-    /// offsets, because `recordLength` is a byte count and a PAX value is free to
-    /// contain non-ASCII text — a `Character`-offset walk would misalign on the first
-    /// multi-byte value.  A record whose declared length does not land on a real UTF-8
-    /// boundary still cannot crash this: `String(decoding:as:)` replaces invalid
-    /// sequences rather than trapping. Only `path` and `linkpath` are applied; anything
-    /// else is parsed (so the stream stays in sync) and discarded.
-    private mutating func applyPaxRecords(_ content: String) {
-        var view = content.utf8[...]
-        while !view.isEmpty {
-            guard let space = view.firstIndex(of: UInt8(ascii: " ")),
-                let recordLength = Int(String(decoding: view[view.startIndex..<space], as: UTF8.self))
-            else { break }
-            guard let recordEnd = view.index(view.startIndex, offsetBy: recordLength, limitedBy: view.endIndex)
-            else { break }
-            let record = String(decoding: view[view.index(after: space)..<recordEnd], as: UTF8.self)
-            if let equals = record.firstIndex(of: "=") {
-                let key = String(record[record.startIndex..<equals])
-                var value = String(record[record.index(after: equals)...])
-                if value.hasSuffix("\n") { value.removeLast() }
-                if key == "path" || key == "linkpath" {
-                    pendingPaxOverrides[key] = value
-                }
-            }
-            view = view[recordEnd...]
+    /// Only `path` and `linkpath` are kept from a per-entry PAX header; anything else
+    /// is parsed by `TarFormat.parsePaxRecords` (so the stream stays in sync) and
+    /// discarded here.
+    private mutating func applyPaxRecords(_ bytes: [UInt8]) {
+        for record in TarFormat.parsePaxRecords(bytes) where record.key == "path" || record.key == "linkpath" {
+            pendingPaxOverrides[record.key] = record.value
         }
     }
 
@@ -688,50 +702,24 @@ struct TarChildWalker {
         // A wrapped-around size is the dangerous case: it would make the walker treat
         // an entry's own content as the start of the next header, silently desyncing
         // rather than stopping. Refused rather than clamped.
-        guard let rawSize = numeric(header, 124, 12), rawSize >= 0, rawSize <= Int64(Int.max) else {
+        guard let rawSize = TarFormat.numericField(header[124..<136]), rawSize >= 0, rawSize <= Int64(Int.max)
+        else {
             throw Failure.malformedNumericField("size")
         }
         let size = Int(rawSize)
         // An unreadable mtime is not dangerous the same way — it never drives how many
         // bytes get consumed — so it degrades to "unknown" rather than aborting the walk.
-        let mtimeSeconds = numeric(header, 136, 12) ?? 0
+        let mtimeSeconds = TarFormat.numericField(header[136..<148]) ?? 0
         let mtime = mtimeSeconds > 0 ? Date(timeIntervalSince1970: Double(mtimeSeconds)) : nil
         let linkname = string(header, 157, 100)
         return ParsedHeader(name: name, typeflag: typeflag, size: size, mtime: mtime, linkname: linkname)
     }
 
-    /// A fixed-width tar text field, NUL/space padded.
+    /// A fixed-width tar text field, NUL-terminated (`TarFormat.cString`), with any
+    /// leftover ASCII whitespace also trimmed — defensive against a writer that pads a
+    /// text field with spaces rather than NULs, which the ustar spec permits.
     private static func string(_ header: [UInt8], _ offset: Int, _ length: Int) -> String {
-        let bytes = header[offset..<(offset + length)]
-        let trimmed = bytes.prefix(while: { $0 != 0 })
-        return String(decoding: trimmed, as: UTF8.self)
-            .trimmingCharacters(in: .whitespaces)
-    }
-
-    /// Tar numeric fields are ASCII octal, NUL/space padded — except the GNU base-256
-    /// extension, signalled by the field's first byte having its top bit set, used for
-    /// values (large file sizes, pre-1970 mtimes) that do not fit in octal ASCII.
-    ///
-    /// `nil` means the field could not be read at all: malformed octal text, or a
-    /// base-256 value whose magnitude would overflow `Int64` before all of its bytes
-    /// were folded in. The caller decides whether that is refused outright (`size`) or
-    /// tolerated as "unknown" (`mtime`) — this function never guesses a value.
-    static func numeric(_ header: [UInt8], _ offset: Int, _ length: Int) -> Int64? {
-        let field = header[offset..<(offset + length)]
-        if let first = field.first, first & 0x80 != 0 {
-            // GNU base-256: the top bit of the first byte is only the marker: its
-            // remaining 7 bits are the high-order magnitude bits, not a byte to discard.
-            var value = Int64(first & 0x7F)
-            for byte in field.dropFirst() {
-                guard value <= (Int64.max >> 8) else { return nil }
-                value = (value << 8) | Int64(byte)
-            }
-            return value
-        }
-        let text = String(decoding: field, as: UTF8.self)
-            .trimmingCharacters(in: CharacterSet(charactersIn: " \0"))
-        guard !text.isEmpty else { return 0 }
-        return Int64(text, radix: 8)
+        TarFormat.cString(header[offset..<(offset + length)]).trimmingCharacters(in: .whitespaces)
     }
 
     /// The ustar header checksum: the field itself is treated as spaces while summing,
@@ -739,14 +727,6 @@ struct TarChildWalker {
     /// accepted, matching real-world writers. A mismatch means this block is not a tar
     /// header at all — the stream has been lost.
     static func checksumMatches(_ header: [UInt8]) -> Bool {
-        guard header.count == 512, let declared = numeric(header, 148, 8) else { return false }
-        var unsigned = 0
-        var signedSum = 0
-        for (index, byte) in header.enumerated() {
-            let value = (148..<156).contains(index) ? UInt8(ascii: " ") : byte
-            unsigned += Int(value)
-            signedSum += Int(Int8(bitPattern: value))
-        }
-        return declared == Int64(unsigned) || declared == Int64(signedSum)
+        TarFormat.checksumMatches(header)
     }
 }

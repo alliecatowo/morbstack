@@ -60,6 +60,72 @@ final class TarLiteTests: XCTestCase {
         XCTAssertEqual(TarLite.countRegularFiles(at: try write(archive)), 2)
     }
 
+    // MARK: - TECH-4: promoted onto MorbstackKit's shared `TarFormat`
+    //
+    // Before TECH-4, TarLite had no checksum validation and no base-256 support at
+    // all — `parseOctal` decoded a base-256 field's bytes as UTF-8 text, which is
+    // garbage, and silently fell back to `0`. The tests below are what that gap looks
+    // like once there is something to lose: a real file's content under-skipped, or a
+    // corrupted header trusted anyway, either of which would desync the count from
+    // here on rather than just mis-stating this one entry.
+
+    func testContiguousFileTypeflagIsCountedAsARegularFile() throws {
+        // Typeflag '7' ("contiguous file"): the same shared `TarFormat.kind` table
+        // `ContainerTarHeaderReader` and `TarChildWalker` use, both of which have
+        // always counted it as a regular file.
+        var archive = Data()
+        archive.append(header(name: "contiguous", typeflag: UInt8(ascii: "7"), size: 0))
+        archive.append(endOfArchive())
+
+        XCTAssertEqual(TarLite.countRegularFiles(at: try write(archive)), 1)
+    }
+
+    func testBase256SizeIsDecodedRatherThanSilentlyTreatedAsZero() throws {
+        // A size of 600 bytes both exceeds one block (exercising real multi-block
+        // skipping) and would previously have been read as `0` by `parseOctal`'s
+        // UTF-8 misinterpretation of the base-256 bytes — which under-skips the
+        // content, so the very next "header" read is actually still this file's data.
+        // That desync would have miscounted (or crashed on) every entry after it; the
+        // second, ordinary entry below is only reached if the size was read correctly.
+        let content = String(repeating: "x", count: 600)
+        var fileHeader = header(name: "data/big.bin", typeflag: UInt8(ascii: "0"), size: 0)
+        setBase256Size(&fileHeader, value: UInt64(content.utf8.count))
+        var archive = Data()
+        archive.append(fileHeader)
+        archive.append(Data(content.utf8))
+        archive.append(Data(repeating: 0, count: paddingLength(for: content.utf8.count)))
+        archive.append(entry(name: "data/after.txt", contents: "ok"))
+        archive.append(endOfArchive())
+
+        XCTAssertEqual(TarLite.countRegularFiles(at: try write(archive)), 2)
+    }
+
+    func testBase256SizeOverflowStopsCountingRatherThanWrapping() throws {
+        // All-0xFF magnitude bytes guarantee the running value exceeds Int64.max
+        // before the last byte is folded in — the same fixture `TarArchiveFormatTests`
+        // and `TarChildWalkerTests` use for the identical field. `TarLite` used to
+        // have no guard here at all.
+        var fileHeader = header(name: "data/huge.bin", typeflag: UInt8(ascii: "0"), size: 0)
+        var sizeField = [UInt8](repeating: 0xFF, count: 12)
+        sizeField[0] = 0x80 | 0xFF
+        fileHeader.replaceSubrange(124..<136, with: Data(sizeField))
+        recomputeChecksum(&fileHeader)
+        let archive = fileHeader
+
+        XCTAssertEqual(TarLite.countRegularFiles(at: try write(archive)), 0)
+    }
+
+    func testABadHeaderChecksumStopsCountingRatherThanInventingEntries() throws {
+        var archive = Data()
+        archive.append(entry(name: "counted", contents: "1"))
+        var corrupt = header(name: "data/a.txt", typeflag: UInt8(ascii: "0"), size: 0)
+        corrupt[corrupt.startIndex] ^= 0xFF  // breaks the checksum, not the typeflag
+        archive.append(corrupt)
+        archive.append(entry(name: "never-reached", contents: "2"))
+
+        XCTAssertEqual(TarLite.countRegularFiles(at: try write(archive)), 1)
+    }
+
     // MARK: - ustar construction
 
     private func write(_ data: Data) throws -> URL {
@@ -102,6 +168,31 @@ final class TarLiteTests: XCTestCase {
 
     private func endOfArchive() -> Data {
         Data(repeating: 0, count: 1024)
+    }
+
+    private func paddingLength(for size: Int) -> Int {
+        (512 - size % 512) % 512
+    }
+
+    private func setBase256Size(_ block: inout Data, value: UInt64) {
+        var sizeField = [UInt8](repeating: 0, count: 12)
+        var remaining = value
+        for index in stride(from: 11, through: 1, by: -1) {
+            sizeField[index] = UInt8(remaining & 0xFF)
+            remaining >>= 8
+        }
+        sizeField[0] = 0x80
+        block.replaceSubrange(124..<136, with: Data(sizeField))
+        recomputeChecksum(&block)
+    }
+
+    /// Recomputes the checksum field in place, treating it as spaces while summing —
+    /// the same convention `TarFormat.checksumMatches` uses.
+    private func recomputeChecksum(_ block: inout Data) {
+        block.replaceSubrange(148..<156, with: Data(repeating: UInt8(ascii: " "), count: 8))
+        let checksum = block.reduce(0) { $0 + Int($1) }
+        let checksumOctal = String(checksum, radix: 8).leftPadded(to: 6) + "\0 "
+        block.replaceSubrange(148..<156, with: Data(checksumOctal.utf8))
     }
 }
 
