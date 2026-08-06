@@ -27,6 +27,14 @@ jobs:
   # ---------------------------------------------------------------------
   changes:
     runs-on: ubuntu-latest
+    # On a pull_request event paths-filter does not diff locally — it calls the
+    # API's listFiles, which the workflow-level `contents: read` does not cover.
+    # Without this the job fails with "Resource not accessible by integration"
+    # and takes every downstream job with it. Scoped to this job rather than
+    # raised workflow-wide: nothing else here reads pull requests.
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       guest_image: ${{ steps.filter.outputs.guest_image }}
     steps:

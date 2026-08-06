@@ -192,8 +192,14 @@ Caveats worth knowing:
 
 ## 5. Known-bad state to be aware of
 
-- There is **no git remote** and CI has never executed. `.github/workflows/ci.yml`
-  is real but unproven. Do not assume "it passed CI".
-- `swift test` currently fails: several tests bind **real host ports** (5353 is
-  owned by mDNSResponder on any normal Mac) and several assert stale
-  expectations. See `docs/audit/REPO-AUDIT.md` for the current list.
+- The remote is `git@github.com:alliecatowo/morbstack.git` and **CI does execute**
+  — check it rather than guessing: `gh run list --limit 5`, `gh run view <id>
+  --log-failed`. This entry used to say there was no remote and CI had never run;
+  that was true until 2026-08-04 and false after, and agents were acting on it.
+  The README's CI badge still points at a `morbstack/morbstack` org that does not
+  own this repo, so the badge is broken and is not evidence of anything.
+- `swift test` used to fail on tests that bound **real host ports** (5353 is owned
+  by mDNSResponder on any normal Mac) and on stale expectations. As of 2026-08-05
+  `mise run check` is green — 1009 Swift, 260 Rust, 0 failures. Treat a red suite
+  as a regression to investigate, not as the expected state.
+  `docs/audit/REPO-AUDIT.md` holds the historical list.
