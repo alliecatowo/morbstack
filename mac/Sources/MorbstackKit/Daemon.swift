@@ -98,6 +98,10 @@ public final class Daemon {
     /// (vsock 2382). Held here so its EOF watchers outlive the closure
     /// registered with the VM manager.
     private let portLeaseServer: GuestPortLeaseServer
+    /// Serves the guest's SSH-agent forward channel (vsock 2383, UX-19). Held
+    /// for the same reason as ``portLeaseServer``: the closure registered with
+    /// the VM manager must not outlive the object it calls into.
+    private let sshAgentForwardServer: SSHAgentForwardServer
     private let liveShareTransport: MorbLiveShareTransport
     private let k8s: K8sManager
     private let controlServer: UnixSocketServer
@@ -209,6 +213,20 @@ public final class Daemon {
         self.portLeaseServer = leaseServer
         vm.setGuestInitiatedConnectionHandler(port: MorbVsockPorts.hostPortLease) { fd in
             leaseServer.handleConnection(fd: fd)
+        }
+        // The guest-initiated SSH-agent forward channel (UX-19). Off by
+        // default: `config.sshAgentForwarding` is this process's actual
+        // `ssh_agent_forwarding` setting, loaded once at startup like every
+        // other configuration value here — an edit needs a daemon restart to
+        // take effect, same as the rest of `config.toml`. Registered the same
+        // durable way as the lease server above — VMManager re-installs it on
+        // every VM generation.
+        let sshAgentForwardingEnabled = config.sshAgentForwarding
+        let sshAgentServer = SSHAgentForwardServer(
+            isEnabled: { sshAgentForwardingEnabled }, log: logger)
+        self.sshAgentForwardServer = sshAgentServer
+        vm.setGuestInitiatedConnectionHandler(port: MorbVsockPorts.sshAgentForward) { fd in
+            sshAgentServer.handleConnection(fd: fd)
         }
         self.liveShareTransport = MorbLiveShareTransport(vm: vm, config: config, log: logger)
         self.k8s = K8sManager(vm: vm, log: logger)

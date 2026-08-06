@@ -335,6 +335,7 @@ Failure:
 | 2378 | Datagram-dial: framed UDP relay for published container ports |
 | 2381 | Live-share receiver: authenticated host FSEvents invalidations for explicitly selected VirtioFS project roots |
 | 2382 | Host-side port lease: the guest userland-proxy wrapper asks the host to bind a published port; guest-initiated |
+| 2383 | Host-side SSH-agent forward: the guest's `/run/host-services/ssh-auth.sock` listener asks the host to splice to the host's real SSH agent; guest-initiated, off by default |
 
 Port 2375 is the conventional plaintext Docker Engine API port; it is used
 here only on the host<->guest vsock link, which is not reachable from the
@@ -358,7 +359,7 @@ persistent ext4 disk keeps the cost proportional to the feature's use. See
 §3.4.
 
 New ports must be added to this table before use. Do not reuse 1024, 2375,
-2376, 2377, 2378, 2381, or 2382 for anything else. Ports 2379 and 2380 are
+2376, 2377, 2378, 2381, 2382, or 2383 for anything else. Ports 2379 and 2380 are
 retired — 2379 was the publish-all allocator for a patched Moby that no
 longer ships (see §3.6); 2380 never shipped past a decision draft. Neither
 may be reused: this document has a specific, dated failure mode of
@@ -836,6 +837,66 @@ as a direct pass-through to the stock proxy: a `-v`/`-version` probe (there
 is nothing to lease), and `-proto sctp` (macOS has no SCTP listener to
 offer — matching Docker Desktop's own behavior — though the guest-side
 proxy still runs, so container-to-container SCTP traffic works).
+
+### 3.7 The vsock 2383 SSH-agent forward protocol (UX-19)
+
+Transport: vsock, guest-initiated like §3.6 — **port 2383 is a listener on
+the host**, and the guest connects out to it. Full design and threat model:
+[`docs/design/SSH-AGENT-FORWARDING.md`](design/SSH-AGENT-FORWARDING.md).
+
+`morbinit` always binds a Unix listener at
+`/run/host-services/ssh-auth.sock` inside the guest — Docker Desktop's own
+documented path, matched exactly so a Compose file or devcontainer config
+copied from a Docker Desktop machine finds the socket it expects instead of
+failing to locate it. Every accepted local connection to that socket opens a
+**fresh** vsock connection to the host and speaks one bounded ASCII request,
+answered with one bounded ASCII reply:
+
+```text
+guest -> host:  "SSHAUTH\n"
+host  -> guest: "OK\n"             then the connection splices to $SSH_AUTH_SOCK
+           or:  "ERR <reason>\n"   then the connection closes
+```
+
+Unlike §3.6's `LEASE` line, the request carries no fields — the mapping is
+always "the one host SSH agent" — so `SSHAUTH` is the entire grammar. This is
+deliberately treated as an untrusted-input surface (the guest is running
+arbitrary containers, any of which can dial the local socket): the host's
+parser accepts only that exact line and bounds it at 64 bytes including the
+newline (`SSHAgentForward.maxRequestLineBytes`,
+`mac/Sources/MorbstackKit/SSHAgentForward.swift`), with a 10 s deadline to
+deliver it.
+
+On `OK`, the host has already dialed the Mac's `SSH_AUTH_SOCK` (resolved
+fresh from `morbstackd`'s own process environment, not cached) and the
+connection becomes a raw two-way splice, exactly as `dial.rs`'s stream-dial
+splice works for published container ports — half-close propagated in both
+directions, no framing beyond that point. `ERR` covers three distinct,
+honestly-worded cases the guest logs verbatim and then closes the local
+connection, which an SSH client inside the container reports as an ordinary
+connection reset:
+
+- **Forwarding is disabled** (the default —
+  `MorbConfig.sshAgentForwarding == false`): `"ssh agent forwarding is
+  disabled; set ssh_agent_forwarding = true in ~/.morbstack/config.toml to
+  enable it"`.
+- **No agent configured on the host**: `"no SSH agent is available on the
+  host (SSH_AUTH_SOCK is not set)"`.
+- **The configured agent is unreachable**: a `connect` failure detail against
+  the resolved `SSH_AUTH_SOCK` path.
+
+An unreachable host (the vsock connect itself fails) is handled the same way
+as an `ERR`: the guest logs the reason and closes the local connection rather
+than retrying or hanging, so a container blocked on `git clone` sees a fast,
+legible failure instead of a stall.
+
+**This forwards the Mac's SSH agent into the guest VM.** Once enabled, every
+container that bind-mounts `/run/host-services/ssh-auth.sock` and sets
+`SSH_AUTH_SOCK` to it can ask the host agent to sign with the user's own keys
+for as long as `morbstackd` is running. Off by default is a deliberate
+security posture, not a placeholder — see
+`docs/design/SSH-AGENT-FORWARDING.md` for the full threat model before
+turning it on.
 
 ## 4. Versioning and compatibility rules
 

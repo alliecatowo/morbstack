@@ -65,6 +65,22 @@ public struct MorbConfig: Equatable, Codable, Sendable {
     /// here does not claim that inotify delivery exists yet.
     public var liveSharePaths: [String]
 
+    /// Whether the guest's `/run/host-services/ssh-auth.sock` listener (UX-19) is
+    /// allowed to forward to this Mac's real `SSH_AUTH_SOCK`.
+    ///
+    /// **Off by default, and this is a real security boundary, not a convenience
+    /// default.** Once `true`, any running container that bind-mounts that fixed
+    /// guest path and sets `SSH_AUTH_SOCK` to it can ask the host's SSH agent to
+    /// sign with the user's own keys for as long as `morbstackd` is running — the
+    /// same shape Docker Desktop and OrbStack both already ship, but nothing about
+    /// starting a container should silently imply "and it can now authenticate as
+    /// me." The guest-side socket path always exists regardless of this flag, so a
+    /// Compose file copied from a Docker Desktop machine finds the path it expects;
+    /// every connection to it is refused with an explicit reason
+    /// (``SSHAgentForward``) until this is turned on. See
+    /// `docs/design/SSH-AGENT-FORWARDING.md`.
+    public var sshAgentForwarding: Bool
+
     /// How the guest is brought up.
     public enum BootMode: String, Equatable, Sendable {
         /// Kernel + initramfs; `morbinit` runs as `/init` and the rootfs lives in RAM.
@@ -98,7 +114,8 @@ public struct MorbConfig: Equatable, Codable, Sendable {
         autoSuspendMinutes: Int = 5,
         allowLANPortPublishing: Bool = true,
         sharedPaths: [String] = MorbShares.defaultSharedPaths,
-        liveSharePaths: [String] = []
+        liveSharePaths: [String] = [],
+        sshAgentForwarding: Bool = false
     ) {
         self.cpus = cpus
         self.memoryMiB = memoryMiB
@@ -111,6 +128,7 @@ public struct MorbConfig: Equatable, Codable, Sendable {
         self.allowLANPortPublishing = allowLANPortPublishing
         self.sharedPaths = sharedPaths
         self.liveSharePaths = liveSharePaths
+        self.sshAgentForwarding = sshAgentForwarding
     }
 
     /// The concrete CPU count to hand to the hypervisor, resolving the `0` sentinel.
@@ -197,6 +215,7 @@ public struct MorbConfig: Equatable, Codable, Sendable {
         case allowLANPortPublishing = "allow_lan_port_publishing"
         case sharedPaths = "shared_paths"
         case liveSharePaths = "live_share_paths"
+        case sshAgentForwarding = "ssh_agent_forwarding"
     }
 
     /// Loads a configuration from disk, returning defaults when the file does not exist.
@@ -244,6 +263,7 @@ public struct MorbConfig: Equatable, Codable, Sendable {
         if baseline.allowLANPortPublishing != candidate.allowLANPortPublishing { changed.insert(.allowLANPortPublishing) }
         if baseline.sharedPaths != candidate.sharedPaths { changed.insert(.sharedPaths) }
         if baseline.liveSharePaths != candidate.liveSharePaths { changed.insert(.liveSharePaths) }
+        if baseline.sshAgentForwarding != candidate.sshAgentForwarding { changed.insert(.sshAgentForwarding) }
         return changed
     }
 
@@ -328,6 +348,7 @@ public struct MorbConfig: Equatable, Codable, Sendable {
         case .allowLANPortPublishing: .boolean(allowLANPortPublishing)
         case .sharedPaths: .stringArray(sharedPaths)
         case .liveSharePaths: .stringArray(liveSharePaths)
+        case .sshAgentForwarding: .boolean(sshAgentForwarding)
         }
     }
 
@@ -344,6 +365,7 @@ public struct MorbConfig: Equatable, Codable, Sendable {
         case (.allowLANPortPublishing, .boolean(let value)): allowLANPortPublishing = value
         case (.sharedPaths, .stringArray(let value)): sharedPaths = value
         case (.liveSharePaths, .stringArray(let value)): liveSharePaths = value
+        case (.sshAgentForwarding, .boolean(let value)): sshAgentForwarding = value
         default:
             assertionFailure("PersistedKey and TOMLValue no longer agree")
         }
@@ -532,6 +554,14 @@ public struct MorbConfig: Equatable, Codable, Sendable {
         out += "# off by default; each path must be a\n"
         out += "# strict descendant of one shared_paths root. Must be written on one line.\n"
         out += "live_share_paths = \(MorbConfig.quoteArray(liveSharePaths))\n"
+        out += "\n"
+        out += "# Forward this Mac's SSH agent into the guest at\n"
+        out += "# /run/host-services/ssh-auth.sock (Docker Desktop's own path). Off by\n"
+        out += "# default: once true, any container that bind-mounts that path and sets\n"
+        out += "# SSH_AUTH_SOCK to it can ask the host agent to sign with the user's own\n"
+        out += "# keys for as long as morbstackd is running. See\n"
+        out += "# docs/design/SSH-AGENT-FORWARDING.md before enabling this.\n"
+        out += "ssh_agent_forwarding = \(sshAgentForwarding)\n"
         return out
     }
 
@@ -616,6 +646,8 @@ public struct MorbConfig: Equatable, Codable, Sendable {
                 // live-share bridge validates strict containment before it creates a
                 // watcher; parsing only preserves the person's declared selection.
                 config.liveSharePaths = try requireStringArray(value, key: key, line: lineNumber)
+            case .sshAgentForwarding:
+                config.sshAgentForwarding = try requireBool(value, key: key, line: lineNumber)
             }
         }
         return config

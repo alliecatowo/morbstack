@@ -2480,10 +2480,16 @@ public enum MorbVsockPorts {
     public static let datagramDial: UInt32 = 2378
     /// Bounded host-to-guest shared-file event receiver.
     public static let liveShareReceiver: UInt32 = 2381
-    /// Host-side port-lease channel — the registry's one **guest-initiated**
-    /// entry. The guest's userland-proxy wrapper (`morbstack-docker-proxy`,
+    /// Host-side port-lease channel — one of two **guest-initiated**
+    /// entries. The guest's userland-proxy wrapper (`morbstack-docker-proxy`,
     /// which stock dockerd execs per published port) connects out to the host
     /// on this port, asks for the Mac endpoint, and holds the connection for
     /// the proxy process's lifetime; EOF releases the Mac listener.
     public static let hostPortLease: UInt32 = 2382
+    /// Host-side SSH-agent forward channel (UX-19) — the registry's other
+    /// **guest-initiated** entry. The guest's `/run/host-services/ssh-auth.sock`
+    /// listener connects out to the host on this port per accepted local
+    /// connection; see ``SSHAgentForward``. Off by default
+    /// (``MorbConfig/sshAgentForwarding``).
+    public static let sshAgentForward: UInt32 = 2383
 }

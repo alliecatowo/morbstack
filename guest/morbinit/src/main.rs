@@ -16,6 +16,8 @@
 //!        * the Docker API relay on vsock 2375 (`proxy.rs`),
 //!        * the stream dialer on vsock 2376 (`dial.rs`),
 //!        * the datagram dialer on vsock 2378 (`datagram.rs`),
+//!        * the local ssh-agent forward listener, guest-initiated out to vsock
+//!          2383 per accepted connection (`ssh_agent_forward.rs`),
 //!        * the dockerd readiness monitor (`proxy.rs`), which also triggers
 //!          the one-shot offline image load.
 //!
@@ -62,6 +64,7 @@ mod proxy;
 mod proxy_wrapper;
 mod sha256;
 mod shares;
+mod ssh_agent_forward;
 mod supervisor;
 mod sys;
 mod wire;
@@ -419,6 +422,19 @@ fn real_init() {
     // morbstack-docker-proxy wrapper (see proxy_wrapper.rs) per published
     // port, and the wrapper leases the Mac endpoint host-side over its own
     // guest-initiated vsock connection.
+
+    // SSH agent forward (UX-19): the local /run/host-services/ssh-auth.sock
+    // listener always exists, matching Docker Desktop's static contract, but
+    // every connection is a request the host answers fresh — off by default.
+    // Same failure policy as the others: loud, not fatal.
+    if let Err(e) = ssh_agent_forward::spawn_ssh_agent_forwarder() {
+        log::log(&format!(
+            "ERROR: could not bind the ssh-agent forward listener at {}: {} — \
+             SSH_AUTH_SOCK forwarding will not be available in containers",
+            ssh_agent_forward::SSH_AUTH_SOCK_PATH,
+            e
+        ));
+    }
 
     // Kubernetes payload install (vsock 2377 -> the persistent disk). Bound
     // unconditionally even though Kubernetes is off: this is the channel the
