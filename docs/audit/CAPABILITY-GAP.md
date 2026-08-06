@@ -64,11 +64,11 @@ wakeups and RSS honestly (`mac/Sources/MorbBench/Benchmarks/`), and is **missing
 people actually compare**: `git status` over a bind mount, and `npm install` bind-mount vs named
 volume. Docker publishes a percentage with no method; OrbStack publishes charts from a three-year-old
 version. "Here is the harness, run it on your Mac against all three" is a claim a closed competitor
-cannot answer. → **CAP-1**
+cannot answer. → **UX-14**
 
 The file-watch story needs the same treatment and is worse today: our bridge covers `IN_ATTRIB`
 consumers and we have never published *which watchers pass*. OrbStack regressed this feature twice in
-a year; a matrix is both a defensive record and a marketing asset. → folds into **CAP-1**.
+a year; a matrix is both a defensive record and a marketing asset. → folds into **UX-14**.
 
 ## 2. Container domains and per-container DNS — verdict: **in flight (DIF-4), and our mechanism is better than theirs**
 
@@ -137,7 +137,7 @@ and SP-2 already settled that it points at the **guest's** `192.168.64.x`.
 documented fallback. That gate *is* routable-container-IP work; what it lacks is a user-visible
 payoff of its own. When it passes, show the container's guest-reachable address in the inspector and
 in `morb status --json` even before domains land. Half a day on top of work that must happen anyway,
-and it converts an internal milestone into a shipped capability. → **CAP-2**
+and it converts an internal milestone into a shipped capability. → **UX-15**
 
 We should also stop under-selling the honest half: Docker gates host networking behind a **login**
 for a purely local capability. That belongs in the comparison copy.
@@ -176,7 +176,7 @@ Virtualization.framework's virtio-blk translate a guest `discard` into hole-punc
 Apple does not document it either way. If yes, `-o discard` or a periodic `fstrim` on ext4 reclaims
 space with **zero new architecture** and we ship the one thing in this market that gives disk back.
 If no, reclamation needs the heavier compact-by-copy path and the kernel fork moves up the list.
-Either way the answer is cheap and everything downstream depends on it. → **CAP-3** (the
+Either way the answer is cheap and everything downstream depends on it. → **UX-16** (the
 user-visible half; TECH-3 stays the experiment).
 
 ## 5. Memory returned to the host — verdict: **build (small), currently a silent gap**
@@ -205,7 +205,7 @@ is busy all day.
 **Verdict: build small.** Driving the balloon toward the guest's actual working set on a slow timer
 is a contained change in one file, and it closes the one case auto-suspend cannot. Rank it below
 everything in §1–4. Do **not** promise "dynamic memory" in copy until it is measured — OrbStack's own
-tracker shows what that claim costs when it slips. → **CAP-4**
+tracker shows what that claim costs when it slips. → **UX-17**
 
 ## 6. Startup, idle cost and suspend — verdict: **defend, and nobody can see it**
 
@@ -235,7 +235,7 @@ have a *measured* number and Docker has none.
 will read. `morb bench` should be runnable in one command against a stock install, its output
 copy-pasteable, and the cold-boot figure should appear in the README's first screenful next to the
 harness that produces it. This is not a feature build; it is publishing something we already have.
-→ folds into **CAP-1**.
+→ folds into **UX-14**.
 
 ## 7. Rosetta and x86-64 — verdict: **defend, with one honest caveat**
 
@@ -295,7 +295,7 @@ beats us on a capability we could ship in days**: inheriting the system proxy is
 `morb doctor` check that says "a system proxy is configured and containers are using it" or "…and
 containers are **not**". Corporate CA injection into the guest trust store is a second, larger
 commit with its own trust story and should not block the first. **Neither costs an account, and
-Docker charges Business money for the SOCKS5 half of it.** → **CAP-5**
+Docker charges Business money for the SOCKS5 half of it.** → **UX-18**
 
 ## 9. SSH agent forwarding — verdict: **build (small)**
 
@@ -321,7 +321,7 @@ the agent over BuildKit's gRPC session rather than a bind mount, and
 `docker buildx build --ssh default` against a private repo works end to end, and a line in
 `docs/parity.md` recording it. Commit two provides the Docker-compatible runtime path so that copied
 `compose.yaml` files with `/run/host-services/ssh-auth.sock` in them do not simply fail.
-→ **CAP-6**
+→ **UX-19**
 
 ## 10. Credential helpers — verdict: **defend**
 
@@ -379,7 +379,7 @@ else, not at all. That subset is not small and is badly served by both incumbent
    us for free. It appears nowhere a user can see.
 2. **`kubectl top` does not work** because metrics-server is disabled for boot speed. That is a
    defensible trade, but it should be an honest, discoverable message rather than a confusing error —
-   and our own Kubernetes route already renders resource data it could offer instead. → **CAP-7**
+   and our own Kubernetes route already renders resource data it could offer instead. → **UX-20**
 
 Do not chase multi-node. Docker gets it free from kind and OrbStack refuses it; a single-node cluster
 that starts fast and shares the image store is the right product.
@@ -435,7 +435,7 @@ minutes and Docker Debug are metered, and we have neither meter.
 
 **Verdict: defend loudly, and fix the paperwork.** No new capability is needed. What is needed is
 that [../COMPETITIVE-GAPS.md](../COMPETITIVE-GAPS.md) stop saying Testcontainers and Dev Containers
-were "never tested" and that VS Code/JetBrains integration is `absent` — see §16. → **CAP-8** is the
+were "never tested" and that VS Code/JetBrains integration is `absent` — see §16. → **UX-21** is the
 correction pass, not a build.
 
 ## 13. Linux machines — verdict: **decide (DIF-13), and the case for "no" got stronger**
@@ -494,7 +494,7 @@ and `VolumeMigrationTransaction` move them transactionally, `VerifyCommand` chec
 it the other way: `morb migrate --to <runtime|socket>`, same transactions, same verification, plus a
 bulk `morb export --all` that writes a directory a stock `docker load` can restore. Then say it in the
 README, in one line, above the fold: **"Leaving is one command, and it is tested."** Neither competitor
-can copy that sentence — OrbStack's own tracker says so. → **CAP-9**
+can copy that sentence — OrbStack's own tracker says so. → **UX-22**
 
 ## 15. The things they ship that we should not build
 
@@ -549,30 +549,30 @@ None are edited here — they belong to their owners.
 Frequency × cost, the same axis [UI-FEATURE-GAP.md](UI-FEATURE-GAP.md) ranks on. Novelty scores
 nothing.
 
-1. **Disk space that never comes back (CAP-3, via TECH-3).** Every user, every day, invisibly, until
+1. **Disk space that never comes back (UX-16, via TECH-3).** Every user, every day, invisibly, until
    the morning the Mac is full and the only remedy is deleting the disk image. We currently reproduce
    the incumbent's most-complained-about behaviour, our two audits disagree about whether we do, and
    the experiment that decides the fix is one afternoon. Highest cost-to-benefit ratio on this page.
-2. **Proxy support (CAP-5).** Zero lines of it exist. It is invisible to everyone at home and
+2. **Proxy support (UX-18).** Zero lines of it exist. It is invisible to everyone at home and
    disqualifying for everyone behind a corporate MITM — and OrbStack gives away for free the SOCKS5
    half that Docker charges Business money for. Days of work, not weeks.
-3. **Publishing the benchmark harness and the watcher matrix (CAP-1).** We have a measured 1.79 s cold
+3. **Publishing the benchmark harness and the watcher matrix (UX-14).** We have a measured 1.79 s cold
    boot and 0% idle CPU; Docker publishes **no** macOS startup number at all and OrbStack's benchmarks
    page is three years stale with the figures locked in images. This is the cheapest credibility we
    will ever buy, and it is already built — it needs two more workloads and a place to read it.
-4. **Migration *out* (CAP-9).** The mechanism exists in `MorbMigrate` and points one way. Turning it
+4. **Migration *out* (UX-22).** The mechanism exists in `MorbMigrate` and points one way. Turning it
    around buys the single sentence that answers the objection every prospective user of a
    one-maintainer project has, and OrbStack's own tracker (#2517) confirms they cannot answer it.
-5. **Correcting our own docs (CAP-8).** Three current documents describe our Testcontainers, Dev
+5. **Correcting our own docs (UX-21).** Three current documents describe our Testcontainers, Dev
    Containers and IDE story as absent when it is the strongest thing we have. A capability nobody can
    find is not shipping, and this one is not even a build.
-6. **Routable guest addresses surfaced (CAP-2).** Half a day on top of DIF-4's mandatory step 0, and
+6. **Routable guest addresses surfaced (UX-15).** Half a day on top of DIF-4's mandatory step 0, and
    it turns an internal gate into a visible capability while domains are still weeks away.
-7. **Memory balloon driven (CAP-4).** Real, contained, and mostly already covered by 5-minute
+7. **Memory balloon driven (UX-17).** Real, contained, and mostly already covered by 5-minute
    auto-suspend. Below everything above it.
-8. **SSH agent forwarding (CAP-6).** Verify the build-time path first — it is probably already free —
+8. **SSH agent forwarding (UX-19).** Verify the build-time path first — it is probably already free —
    then add the runtime bind mount for copied Compose files.
-9. **`kubectl top` honesty (CAP-7).** Small, and only touches the Kubernetes subset. Worth doing
+9. **`kubectl top` honesty (UX-20).** Small, and only touches the Kubernetes subset. Worth doing
    because it is currently a confusing error rather than a stated trade.
 
 **Deliberately not building:** everything in §15 (USB, sound, CRIU, GPU, the AI/cloud/fleet surface,
