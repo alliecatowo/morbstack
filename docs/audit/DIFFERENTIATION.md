@@ -54,6 +54,36 @@ These are ordered by "how fast does a new user hit this".
 | T7 | Add a shared folder without editing a TOML | ABSENT | `TrackDSharingSettings.swift:5-7` admits the config file is the editing surface. |
 | T8 | Disk reclaims space | ABSENT | Docker Desktop's ever-growing disk is a top-3 user complaint. Reproducing it is not neutral, it is a known defect. |
 
+> **Three of these have been met since, 2026-08-05 (UX-21).** The table is kept
+> as the dated snapshot; this is what the code did to it.
+>
+> - **T3 — met, and it is now a lead.** Fixture and harness both exist
+>   (`integrations/fixtures/devcontainer`, `scripts/ecosystem-acceptance.sh`),
+>   and Testcontainers **Node 12.1.0, Go v0.43.0, Java 1.21.4 and Python
+>   4.15.0** all passed real Postgres round trips with Ryuk against server
+>   29.7.1 — under `env -i`, **no `DOCKER_*` or `TESTCONTAINERS_*` variables at
+>   all**, no `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE`
+>   ([ECOSYSTEM-MATRIX.md](ECOSYSTEM-MATRIX.md) zero-config rerun; ECO-1/ECO-2,
+>   design in [../design/ZERO-CONFIG-DISCOVERY.md](../design/ZERO-CONFIG-DISCOVERY.md)).
+>   OrbStack has an open Testcontainers issue (#2035, since 2025-07-10) and
+>   Docker meters Testcontainers Cloud; see [CAPABILITY-GAP.md](CAPABILITY-GAP.md) §12.
+> - **T4 — met.** TECH-1 ships stock upstream dockerd driven through its own
+>   `--userland-proxy-path` hook, no engine patch; `docker run -P nginx:alpine`
+>   served `curl` an HTTP 200 in 4.3 ms against a rebuilt guest
+>   ([../design/PATCH-FREE-PUBLISH-ALL.md](../design/PATCH-FREE-PUBLISH-ALL.md)).
+> - **T6 — the stated evidence is now false, though the user-visible gate is
+>   only half open.** `DockerClient.swift` has exec (`executeContainerCommand`
+>   :1042, `createExec`/`resizeExec`/`inspectExec` :1524-1547) and there *is* a
+>   PTY view: `mac/Sources/MorbstackAppCore/Terminal/` holds
+>   `DockerExecPTYSession`, `TerminalEmulator`, `TerminalKeyEncoding`,
+>   `TerminalSurfaceView` and `ContainerTerminalWindowController` with four test
+>   files. No UI entry point calls it yet, so "one click away" is still DIF-2's
+>   to close — but the VS Code extension already ships the interactive shell
+>   over a hijacked exec stream (`integrations/vscode/src/api.ts:329-402`).
+>
+> **T7 and T8 stand as written.** `sharedPaths` is still config-file-only, and
+> disk space still never returns to the Mac — see the Tier B correction below.
+
 **T1 is the one that should be uncomfortable.** 75,000 lines of Swift, 739 test
 functions, a genuinely careful port-lease design, an excellent security posture
 — and zero people have ever run it. Every additional week of feature work
@@ -205,8 +235,27 @@ performance target with no implementation behind it.
   `@devcontainers/cli`, JetBrains Gateway, DevPod all implement it). Being a
   *good host* for it is mostly free once T2/T3 pass — it needs a pinned fixture
   and a CI job, not a feature.
+
+  > **Mostly done, 2026-08-05 (UX-21).** The pinned fixture exists
+  > (`integrations/fixtures/devcontainer`), the harness exists
+  > (`scripts/ecosystem-acceptance.sh`, suite `devcontainers-cli`), and
+  > `@devcontainers/cli` 0.88.0 passed live and **zero-config** — context-only,
+  > no `DOCKER_HOST` — including exec, a two-way workspace bind mount,
+  > `postCreateCommand`, and a features/derived-image build through Morbstack
+  > BuildKit ([ECOSYSTEM-MATRIX.md](ECOSYSTEM-MATRIX.md), EN-9). What is still
+  > missing is only the CI job: `.github/workflows/ci.yml` has no ecosystem
+  > suite, which is why [../COMPETITIVE-GAPS.md](../COMPETITIVE-GAPS.md) reads
+  > `runs-here` and not `accepted` (CP-07).
+
 - **A GUI for shared folders (T7) and live-share paths.** Half a week each.
   Currently both are TOML-only, which no competitor requires.
+
+  > **Half done, 2026-08-05 (UX-21).** Live-share paths have their GUI:
+  > Settings › Sharing writes `liveSharePaths` through an `NSOpenPanel` "Add
+  > Project Folder…" with per-row Remove, validated by `MorbLiveShareBridge.plan`
+  > before it saves (`mac/Sources/MorbstackAppCore/Settings/TrackDSharingSettings.swift:95,179-198`).
+  > `sharedPaths` (T7) is the half still standing: same screen, "Open
+  > config.toml" only (lines 43, 56).
 - **Volume browsing.** Full Finder mounting (FSKit) is a large project with
   hard consistency and durability semantics. A *read-only browser* inside the
   app, on top of the existing archive/export machinery, gets 80% of the value
@@ -217,6 +266,23 @@ performance target with no implementation behind it.
   `fstrim` → host sparse-file release path is more plumbing than research.
   Being the container tool whose disk *gives space back* is a small, memorable
   win against the incumbent's most-complained-about behaviour.
+
+  > **Corrected 2026-08-05 (UX-21). This bullet was wrong, and wrong in the
+  > direction that matters.** `discard=async` is on the **btrfs** arm of
+  > `FsKind::mount_data` only (`disk.rs:271-275`); the ext4 arm returns `None`,
+  > i.e. kernel defaults, i.e. no `discard`. The M0 kata kernel has no btrfs
+  > driver, `disk.rs` probes `/proc/filesystems` before choosing, and so ext4
+  > wins on **every shipped install** (`docs/architecture.md:183`, and the test
+  > at `disk.rs:1299-1302` exists for exactly this case). There is no `fstrim`
+  > anywhere in the tree. So disk space genuinely never returns to macOS today
+  > — we currently reproduce Docker Desktop's single most-complained-about
+  > behaviour. [TECHNOLOGY-AUDIT.md](TECHNOLOGY-AUDIT.md) Bet 8 has this right
+  > and this bullet had it wrong; where the two disagreed, Bet 8 wins. It is
+  > also not "plumbing": the deciding unknown is whether
+  > `Virtualization.framework`'s virtio-blk translates a guest discard into
+  > hole-punching on the raw image at all, which Apple does not document.
+  > That experiment is **TECH-3**, and **UX-16** now owns the whole item and
+  > ranks it first in [CAPABILITY-GAP.md](CAPABILITY-GAP.md). Not Tier B.
 - **Fix the leaks in what exists.** `scripts/fetch-scan-tools.sh` referenced
   five times and absent; shell completions stale by 7 commands and factually
   wrong about `debug`; JetBrains "integration" is a README. Each is under a day
