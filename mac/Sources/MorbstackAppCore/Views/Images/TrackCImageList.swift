@@ -108,6 +108,11 @@ enum TrackCImageList {
 /// inventing a complete dependency list.
 enum TrackCImageInspector {
 
+    /// Shown wherever a container-use fact would be if the Disk scan had run.
+    /// Matches `TrackCVolumeInspector.unscannedValue`: "not reported" reads as Docker
+    /// having no answer, when the truth is that nobody has asked it yet.
+    static let unscannedValue = "Not scanned yet"
+
     enum ContainerUsage: Equatable {
         /// Docker omitted the image's `Containers` count. The names, if any, are still
         /// exact matches from the current container inventory, not a total.

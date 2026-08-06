@@ -964,11 +964,13 @@ struct BuildsRootView: View {
                         "Last Used",
                         value: record.lastUsedAt.map(Formatters.absoluteDate) ?? "Never")
                     LabeledContent("Used", value: "\(record.usageCount) time\(record.usageCount == 1 ? "" : "s")")
-                    LabeledContent(
-                        "Storage",
-                        value: record.shared
-                            ? "Shared — excluded from deduplicated total"
-                            : "Included in deduplicated total")
+                    // Only the exception is worth a row: an unshared record is already
+                    // the default the Cache Storage section's deduplicated total
+                    // assumes, so a "yes, this one is normal" line said nothing this
+                    // pane's own numbers didn't already say.
+                    if record.shared {
+                        LabeledContent("Storage", value: "Shared — excluded from deduplicated total")
+                    }
                 }
             }
             // Automatic system Form — see the clipping note on

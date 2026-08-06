@@ -861,9 +861,6 @@ struct VolumesRootView: View {
                     LabeledContent(
                         "Volume",
                         value: TrackCDiskMath.isAnonymousVolumeName(volume.name) ? "Anonymous" : "Named")
-                    LabeledContent(
-                        "Prune",
-                        value: TrackCDiskMath.isAnonymousVolumeName(volume.name) ? "Eligible" : "Retained")
                 }
 
                 if !labels.isEmpty {

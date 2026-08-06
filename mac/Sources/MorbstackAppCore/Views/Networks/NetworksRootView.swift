@@ -569,14 +569,12 @@ struct NetworksRootView: View {
             .accessibilityIdentifier("networks.row.\(network.name)")
     }
 
-    @ViewBuilder
     private func containersCell(_ network: NetworkSummary) -> some View {
-        if network.containers > 0 {
-            Text(network.containers, format: .number)
-                .monospacedDigit()
-        } else {
-            Text("None")
-        }
+        // A count column says a number, including zero — "None" beside "3" makes the
+        // reader parse two different kinds of value in the same column.
+        Text(network.containers, format: .number)
+            .monospacedDigit()
+            .foregroundStyle(network.containers > 0 ? .primary : .secondary)
     }
 
     @ViewBuilder

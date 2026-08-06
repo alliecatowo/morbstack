@@ -89,9 +89,14 @@ struct ContainerOverviewTab: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
+    /// Identity, Lifecycle, and Configuration used to be three separate `Section`s.
+    /// Half the nine section headers on this tab held one or two rows each — more
+    /// skeleton than body — and these three describe one thing: the selected
+    /// container. One "Container" group, in the same identity → lifecycle →
+    /// configuration reading order the three sections already used.
     @ViewBuilder
     private func configurationSections(_ details: TrackBInspectDetails) -> some View {
-        Section("Identity") {
+        Section("Container") {
             LabeledContent("Name") {
                 monospaced(details.name.isEmpty ? container.displayName : details.name)
             }
@@ -106,9 +111,7 @@ struct ContainerOverviewTab: View {
             } else {
                 LabeledContent("Created", value: "Not reported")
             }
-        }
 
-        Section("Lifecycle") {
             LabeledContent("Status") {
                 Text(statusText(details))
             }
@@ -140,9 +143,7 @@ struct ContainerOverviewTab: View {
             if let policy = details.restartPolicy {
                 LabeledContent("Restart Policy") { Text(policy) }
             }
-        }
 
-        Section("Configuration") {
             LabeledContent("Image") {
                 monospaced(details.imageRef.isEmpty ? container.image : details.imageRef)
             }
@@ -173,10 +174,20 @@ struct ContainerOverviewTab: View {
         networksSection(details)
     }
 
+    /// Every technical value on this tab — IDs, digests, image references, commands,
+    /// paths — goes through here. `lineLimit(2)` with `truncationMode(.middle)` is
+    /// the Volumes "Guest Mount Point" pattern (`VolumesRootView.detailPane`): in a
+    /// `Form`, a `LabeledContent` value that can wrap instead of being forced onto
+    /// one line breaks onto its own full-width row below the label rather than
+    /// fighting the label for a ~300pt trailing column. A short value like a status
+    /// word or a container name still renders on one line; only long identifiers pay
+    /// for the second line they actually need. `textSelection(.enabled)` makes every
+    /// one of them copyable via the system's normal select-and-Copy, the same as
+    /// every other identifier in the app.
     private func monospaced(_ text: String) -> some View {
         Text(text)
             .font(.system(.body, design: .monospaced))
-            .lineLimit(1)
+            .lineLimit(2)
             .truncationMode(.middle)
             .textSelection(.enabled)
             .help(text)
@@ -280,7 +291,9 @@ struct ContainerOverviewTab: View {
         } header: {
             Text("Ports")
         } footer: {
-            Text("Browser actions use only Docker-reported TCP bindings on literal loopback addresses and open an HTTP address. Morbstack does not probe the service.")
+            // One sentence: which bindings a browser action will open, and that
+            // Morbstack never probes the service to decide. Was two.
+            Text("Browser actions open only Docker-reported TCP bindings on loopback addresses — Morbstack never probes the service.")
         }
     }
 

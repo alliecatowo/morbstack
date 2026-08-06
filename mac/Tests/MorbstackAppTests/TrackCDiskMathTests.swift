@@ -239,6 +239,21 @@ final class TrackCDiskMathTests: XCTestCase {
             .stopEngine)
     }
 
+    /// The exact pass-2 scenario TASTE-10 fixed: the engine can be running and
+    /// needing a guest resize before Morbstack ever gets a readiness diagnostic back
+    /// from it. The action must still be `.stopEngine` with `diagnostic: nil`, or the
+    /// view has no pure signal to tell it the "has not checked yet" sentence would be
+    /// lying about what the Stop Engine button underneath it does.
+    func testAConfiguredIncreaseWithNoDiagnosticYetStillOffersStopEngine() {
+        XCTAssertEqual(
+            TrackCDiskGrowthPresentation.action(
+                capacity: capacity(.increaseRequiresGuestResize),
+                diagnostic: nil,
+                hasRecoveryJournal: false,
+                engineIsRunning: true),
+            .stopEngine)
+    }
+
     func testAStoppedGuestWithNoPriorReportCanOnlyReachReviewedGrowth() {
         XCTAssertEqual(
             TrackCDiskGrowthPresentation.action(
@@ -274,6 +289,42 @@ final class TrackCDiskMathTests: XCTestCase {
                 hasRecoveryJournal: true,
                 engineIsRunning: false),
             .reviewRecovery)
+    }
+
+    // MARK: - Capacity row/summary collapse (TASTE-10)
+
+    func testConfiguredCapacityRowIsHiddenWhenItMatchesCurrent() {
+        XCTAssertFalse(
+            TrackCDiskGrowthPresentation.showsConfiguredCapacityRow(
+                currentBytes: 128 * MorbDiskCapacity.bytesPerGiB,
+                configuredBytes: 128 * MorbDiskCapacity.bytesPerGiB))
+    }
+
+    func testConfiguredCapacityRowShowsWhenItDiffersFromCurrent() {
+        XCTAssertTrue(
+            TrackCDiskGrowthPresentation.showsConfiguredCapacityRow(
+                currentBytes: 64 * MorbDiskCapacity.bytesPerGiB,
+                configuredBytes: 128 * MorbDiskCapacity.bytesPerGiB))
+    }
+
+    /// No existing image means there is nothing to compare the configured figure
+    /// against, so it is the only number on screen and always shows.
+    func testConfiguredCapacityRowShowsWhenThereIsNoCurrentImage() {
+        XCTAssertTrue(
+            TrackCDiskGrowthPresentation.showsConfiguredCapacityRow(
+                currentBytes: nil,
+                configuredBytes: 128 * MorbDiskCapacity.bytesPerGiB))
+    }
+
+    func testCapacitySummaryIsSuppressedOnlyWhenItMatchesConfiguration() {
+        XCTAssertFalse(TrackCDiskGrowthPresentation.showsCapacitySummary(for: .matchesConfiguration))
+        for state: MorbDiskCapacity.State in [
+            .willCreate, .increaseRequiresGuestResize, .decreaseUnsupported, .unavailable,
+        ] {
+            XCTAssertTrue(
+                TrackCDiskGrowthPresentation.showsCapacitySummary(for: state),
+                "\(state) should still show its summary")
+        }
     }
 
     // MARK: - Anonymous volume names

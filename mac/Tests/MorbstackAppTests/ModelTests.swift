@@ -620,8 +620,8 @@ final class DiskUsageTests: XCTestCase {
         let usage = DockerClient.diskUsage(from: [
             "LayersSize": 1_100_000_000,
             "Images": [
-                ["Size": 1_000_000_000, "SharedSize": 400_000_000, "Containers": 2],
-                ["Size": 500_000_000, "SharedSize": 400_000_000, "Containers": 0],
+                ["Id": "sha256:inuse", "Size": 1_000_000_000, "SharedSize": 400_000_000, "Containers": 2],
+                ["Id": "sha256:unused", "Size": 500_000_000, "SharedSize": 400_000_000, "Containers": 0],
             ],
             "Volumes": [
                 ["UsageData": ["Size": 300_000_000, "RefCount": 1]],
@@ -651,6 +651,32 @@ final class DiskUsageTests: XCTestCase {
         XCTAssertEqual(usage.imagesReclaimable, 500_000_000)
         // 500M images + 200M unused volume + 50M idle cache + 20M exited container
         XCTAssertEqual(usage.reclaimable, 770_000_000)
+    }
+
+    /// `/images/json` reports `Containers` as `-1` on every engine this app has been
+    /// tested against, so the Images screen's "In use" column has to come from the
+    /// same `/system/df` scan the reclaimable-bytes math above already reads
+    /// `Containers` from. Keyed by image ID like `volumeUsage` is keyed by volume name.
+    func testCollectsPerImageContainerCountsForTheImagesScreen() {
+        let usage = DockerClient.diskUsage(from: [
+            "Images": [
+                ["Id": "sha256:inuse", "Size": 100, "Containers": 2],
+                ["Id": "sha256:unused", "Size": 50, "Containers": 0],
+            ]
+        ])
+
+        XCTAssertEqual(usage.imageUsage, ["sha256:inuse": 2, "sha256:unused": 0])
+    }
+
+    /// A `Containers` value below zero is Docker declining to answer, not a real
+    /// count. It must not enter `imageUsage`, or a not-yet-merged image would look
+    /// like a scanned, confidently-negative fact.
+    func testOmitsImagesWhereDockerDidNotReportAContainerCount() {
+        let usage = DockerClient.diskUsage(from: [
+            "Images": [["Id": "sha256:unreported", "Size": 100, "Containers": -1]]
+        ])
+
+        XCTAssertTrue(usage.imageUsage.isEmpty)
     }
 
     /// A shared build-cache record is reported once per parent; counting it each time
