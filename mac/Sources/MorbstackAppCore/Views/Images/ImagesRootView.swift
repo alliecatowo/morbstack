@@ -1049,15 +1049,16 @@ struct ImagesRootView: View {
         Section("Container References") {
             switch usage {
             case .unreported(let known):
-                LabeledContent("Reported use", value: "Not reported")
-                if known.isEmpty {
-                    Text("Docker did not report container usage for this image.")
-                        .foregroundStyle(.secondary)
-                } else {
+                // `image.containersUsing < 0` means the Disk scan that fills it in
+                // (`AppModel.mergeImageUsageFromDisk`, TASTE-5) has not run yet — a
+                // remedy, not a dead end, so this uses the same word and the same
+                // one-footnote-naming-the-remedy shape as Volumes' unscanned Usage row.
+                LabeledContent("Reported use", value: TrackCImageInspector.unscannedValue)
+                if !known.isEmpty {
                     containerReferenceRows(known)
-                    Text("Docker did not report a total. The listed containers match the current image ID or tag exactly.")
-                        .foregroundStyle(.secondary)
                 }
+                Text("Container references come from the Disk scan. Open Disk to compute them.")
+                    .foregroundStyle(.secondary)
 
             case .none:
                 LabeledContent("Reported use", value: "No containers")
