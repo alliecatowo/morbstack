@@ -187,3 +187,111 @@ TASTE-4 and the honest gallery grows by three routes.
 
 *Pass 2 will re-capture these screens after the tickets land and judge each change on whether it
 improved the screen — including the license to say a fix made it worse.*
+
+---
+
+## Pass 2 — 2026-08-05, commit `47adb92` (branch `swarm/cleanup`)
+
+Evidence: the refreshed `docs/gallery/*.png` (real WindowServer captures, dark, 1600×1000, taken
+after the fixes) plus the working captures in `/tmp/mrbcap/` — including the pre-fix Containers
+shots (`verify.png`, `swallow-open.png`), which make honest before/after comparison possible.
+Judged: TASTE-1, TASTE-2, TASTE-3, TASTE-4, TASTE-6. Not judged: UI-051 (the on-disk probes
+predate the one-cluster implementation, which is in flight in another lane).
+
+Two evidence gaps, stated up front rather than papered over:
+
+1. **No narrow or light re-captures of the changed routes exist.** All five verdicts below hold
+   at 1600 dark; TASTE-3's layout-priority behaviour (the image yields first when space runs out)
+   is exactly the width-dependent claim pass 1 warned about, and it is unverified. Next capture
+   session should include Containers at ~1100.
+2. **No container in the capture set publishes a port**, so the ports third of TASTE-3 has no
+   visual evidence either way. The code renders published ports monospaced-digit and sorted;
+   whether the row still balances with a port list in the middle is unproven.
+
+Neither gap is worth taking the machine lane for today. Both belong in the next routine capture.
+
+### Verdicts on the landed tickets
+
+**TASTE-1 (Stacks) — better, decisively.** The one collapsed pink bar became a legible project
+block: `shopdemo` with "0 of 3 running" in the header, and three service rows each carrying
+symbol, name, dimmed image, and status. The route now answers "what is my project doing" in one
+glance without a single click, and the ~800 pt below is honest emptiness — one project is one
+project. The row grammar matches Containers exactly, which is the cross-route rhythm pass 1
+asked for. One deliverable did not land: the project inspector never gained its per-service
+breakdown. **The list expansion demoted that deliverable** — with services inline, the inspector
+no longer carries the route — so I am not re-filing it. What remains wrong in that pane is its
+"Compose files — Not reported" row, which is an absence-vocabulary problem, folded into
+TASTE-12 below.
+
+**TASTE-2 (Containers grouping) — better.** One idiom now: both `shopdemo` and
+`Kubernetes-Managed` are disclosure rows with a symbol and "n of m running". The before/after
+pair proves the count change earns its place — in `verify.png` shopdemo's header says nothing
+and the project looks plausibly alive; in the current shot "0 of 3 running" announces it is dead
+before you read a row. The pass-1 worry about the five ungrouped containers needing an anchor
+**dissolved without one**: once shopdemo became a chevroned row with indented children, nothing
+floats and nothing is ambiguous. Not adding a "Standalone" header was the right call — it would
+have been a label for the absence of a label.
+
+**TASTE-3 (container rows) — better, two-thirds proven.** `lonely alpine:3.20` and
+`netA nginx:alpine` are now different things at a glance, and the three running rows read like
+`docker ps` output, which is the muscle memory this list replaces. Middle truncation for image
+references is the right cut. The ports third is unproven (evidence gap 2), and the narrow
+behaviour is unproven (gap 1). Nothing visible got worse.
+
+**TASTE-6 (Disk inspector) — better; the fix exposed the next layer.** "Transaction Readiness",
+"Recovery Phase — host-grown" and "verified proof" are gone, and each landed "no" names its
+remedy. What the removal uncovered, in the captured state:
+
+- The pane still states **one capacity five ways in seven lines**: "Apparent — 77.31 GB" in the
+  section above, then "Current Raw Capacity — 77.31 GB", "Configured Capacity — 77.31 GB",
+  "Capacity State — Matches configuration", and the summary sentence "The existing disk matches
+  the configured capacity." Three names for one number across two adjacent sections, then a row
+  and a sentence for one state. This is TASTE-4's disease, one route over. → TASTE-10.
+- When readiness is unreported but the pending action is Stop Engine, the lead sentence
+  ("Morbstack has not checked yet whether this disk can grow…") sits directly above a
+  **Stop Engine** button it never mentions — the sentence and its own remedy disagree. Part of
+  TASTE-10.
+
+The verdict stands at better: what was removed was worse than what remains.
+
+**TASTE-4 (Volumes inspector) — better on Volumes; the sweep stopped early.** The pane now says
+"Usage — Not scanned yet" once, with one footnote that names the remedy ("Size and container
+references come from the Disk scan. Open Disk to compute them."). That is exactly what the
+ticket asked for, and nothing wanted was lost — the deleted "Docker Usage" row was derived from
+a count the pane still prints after a scan. Three residuals:
+
+- **Same pane, same disease, different fact**: "Volume — Anonymous" and "Prune — Eligible" are
+  two rows computed from the one predicate `isAnonymousVolumeName`. The second restates the
+  first, and "Eligible" reads as a safety verdict sitting directly above a Usage row that says
+  usage is unknown. → TASTE-11.
+- The ticket's own scope named the milder Images and Networks cases; **Images was not swept**.
+  Its inspector still says "Reported use — Not reported" plus a remedy-free footnote, and the
+  app now has two vocabularies for one category of absence: "Not scanned yet" (Volumes) versus
+  "Not reported" (Images). → TASTE-12.
+- One line, not graded, possibly a defect or capture ordering: the Disk route's "Largest
+  Individual Resources" lists volume sizes (morbaudit_dbdata 47.8 MB, 9e1e5361fbbb 47.7 MB)
+  while the Volumes route in the same gallery session says "Not scanned yet". If visiting Disk
+  does not actually populate Volumes' usage, the footnote's remedy is a promise the app does not
+  keep. Defect lane should verify the propagation.
+
+**Did any fix make anything worse? No.** All five commits are net improvements, and none
+overshot into removing information anyone would miss.
+
+### Open tickets, updated view
+
+- **TASTE-5** — still live, confirmed in `images.png`: 26 em-dashes out of 26. New constraint
+  from this pass: whatever populates or replaces the column must share vocabulary with the
+  Volumes pane ("Not scanned yet" where a scan is the remedy) — see TASTE-12.
+- **TASTE-7, TASTE-8** — no new captures of Migration or the container Overview; pass-1
+  judgements stand unchanged.
+- **TASTE-9** — confirmed still live in `networks.png`: the Containers column mixes "3" with
+  "None" on adjacent rows.
+- **UI-051** — not judged this pass; the captures on disk predate the implementation.
+
+### The bar, revisited
+
+Images remains the best-composed route, but **Containers at rest is now the shot the gallery
+should lead with**: three running containers on top with image and uptime, a dead project that
+says it is dead, and eight rows of Kubernetes noise as one honest line. Two passes ago that
+screen was sixteen undifferentiated rows. The delta is entirely subtraction and arrangement —
+no decoration was added anywhere in these five commits, which is what this loop was for.
