@@ -437,7 +437,43 @@ limit. What it established:
 3. Its comments were mid-edit fragments referring to a `VolumesRootView` shape that no longer
    existed after the revert.
 
-**To finish:** keep the anchoring discovery, keep the toggle, keep every identifier. Verify on
-Containers, Images and Volumes — the inspector behaves differently where a row auto-selects. Capture
-the left sidebar and the inspector animating side by side; the left one is the reference
-implementation and it is already in this codebase.
+### 2026-08-05: the recorded mechanism does not reproduce. Do not try it a fourth time.
+
+Four toolbar variants were built, signed, launched and captured on Volumes at 1600×1000 dark, with
+the trailing cluster mounted on the inspector content exactly as the note above describes:
+
+| Variant | Result |
+| --- | --- |
+| `trailingCommandItems` alone (committed shape) | baseline |
+| `trailingCommandItems` then `DefaultToolbarItem(kind: .search)` | **byte-identical**, 138306 B |
+| `DefaultToolbarItem(kind: .search)` then `trailingCommandItems` | **byte-identical**, 138306 B |
+| `ToolbarSpacer(.flexible)` before the secondary-action group | **byte-identical**, 138306 B |
+
+Byte-identical PNGs of the same window. Declaration order inside `ToolbarContent` is inert here:
+the system resolves the trailing run by `placement:`, and `.primaryAction` / `.secondaryAction` /
+`.automatic` are each placed against the window, not against the inspector. `DefaultToolbarItem`
+and `ToolbarSpacer` do not override that. The earlier session's "verified in a real window" was
+observing something that is true without the change — see the measurement below.
+
+**What is actually happening**, from the open/closed pair (inspector 268 pt wide):
+
+| Element | Inspector open | Inspector closed | Δ |
+| --- | --- | --- | --- |
+| trash + share group | 745–815 | 880–950 | 135 pt |
+| `+` + inspector toggle | 1005–1080 | 1072–1145 | 67 pt |
+| search field | 1270–1590 | 1270–1590 | **0** |
+
+So the two glass groups are **centred in the content region** — they slide by half the inspector's
+width, which is why they drift without ever arriving anywhere. The search field never moves at all:
+it is anchored to the window's right edge and the inspector slides *under* it, which is the whole
+of the earlier "the search field does move into the inspector region" claim. Three islands
+distributed across the bar, one of them overlapping the inspector, is exactly the "detached panel"
+the user is reacting to, and it is also the *"top toolbar seperation was a net negative"* report.
+
+**To finish:** the framing "put custom items in the inspector's toolbar section" appears to have no
+public API behind it — `NavigationSplitView` owns the sidebar toggle specially and there is no
+`.inspectorToggle` counterpart. Before writing any more code, establish with a **stock-SwiftUI probe
+containing zero Morbstack code** (the technique that settled the Tahoe chrome question) whether any
+declaration can place a custom item trailing-of-search. If none can, this ticket becomes a different
+one: stop the groups being centred, so the right side reads as one cluster against the inspector
+edge instead of three islands. Keep the toggle. Keep every identifier byte-identical.
