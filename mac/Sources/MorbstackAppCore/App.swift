@@ -753,11 +753,18 @@ struct DetailHost: View {
         // opened. Doing it here rather than inside the screen keeps the rule ("the
         // expensive endpoint is fetched only when it is being looked at") in the same
         // file as the decision not to include it in the ordinary refresh.
-        .task(id: model.selection) {
+        //
+        // The id includes `engine.isRunning`: a route selected at launch (restored
+        // state, or `--tour-select`) mounts before the first engine-status round trip
+        // lands, so a plain `model.selection` id fires this task once while
+        // `isRunning` is still false and never retries — the route then shows an
+        // empty state even though the engine comes up moments later. Folding the
+        // engine flag into the id makes the flip from false to true re-run the task.
+        .task(id: "\(model.selection)|\(model.engine.isRunning)") {
             guard model.selection == .disk else { return }
             await model.refreshDisk()
         }
-        .task(id: model.selection) {
+        .task(id: "\(model.selection)|\(model.engine.isRunning)") {
             guard model.selection == .builds else { return }
             await model.refreshBuildCache()
         }
