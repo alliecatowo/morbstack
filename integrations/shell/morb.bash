@@ -17,11 +17,13 @@
 # The command surface here is derived from mac/Sources/morb/main.swift,
 # not just `morb --help` — see integrations/shell/README.md for the
 # discrepancies found between the two, and for an important caveat: `mcp`,
-# `migrate`, `bench`, `scan` and `debug` each parse their own arguments in
-# a separate Swift module that main.swift does not define and this
-# completion could not read, so only their top-level command name and the
-# globally-valid flags are completed for them — nothing subcommand- or
-# flag-specific.
+# `migrate`, `bench`, `scan`, `debug` and `export` each parse their own
+# arguments in a separate Swift module that main.swift does not define and
+# this completion could not read, so only their top-level command name and
+# the globally-valid flags are completed for them — nothing subcommand- or
+# flag-specific. That includes `migrate --to <runtime|socket>` (migrate
+# images/volumes OUT of Morbstack) and `export --all` (export every local
+# image to a directory).
 
 _morb() {
     local cur cmd sub i word
@@ -32,7 +34,7 @@ _morb() {
     # argument list, and finds the command/subcommand as the first
     # non-option word wherever it falls. Mirror that here rather than
     # assuming positional args.
-    local commands="status start stop suspend resume shares rosetta k8s version doctor reset-disk context install-cli-plugins mcp migrate bench scan debug"
+    local commands="status start stop suspend resume shares rosetta k8s version doctor reset-disk context install-cli-plugins mcp migrate bench scan debug export"
     local global_opts="--json --help -h"
 
     cmd=""
@@ -100,12 +102,12 @@ _morb() {
         start | suspend | resume | status | shares | version | doctor)
             COMPREPLY=($(compgen -W "$global_opts" -- "$cur"))
             ;;
-        mcp | migrate | bench | scan | debug)
+        mcp | migrate | bench | scan | debug | export)
             # Each of these owns its own argument parser in a separate
             # Swift module (MorbMCP / MorbMigrate / MorbBench / MorbScan /
-            # a debug module) that main.swift merely dispatches to and
-            # does not define the grammar of. Only the flags that morb's
-            # top-level parser itself honors uniformly are offered.
+            # a debug module / MorbExport) that main.swift merely dispatches
+            # to and does not define the grammar of. Only the flags that
+            # morb's top-level parser itself honors uniformly are offered.
             COMPREPLY=($(compgen -W "$global_opts" -- "$cur"))
             ;;
         *)

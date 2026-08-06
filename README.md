@@ -44,6 +44,13 @@ app — is thin, native Swift glue.
 - **Native SwiftUI, zero web views.** The app is AppKit/SwiftUI, not an
   embedded browser — see "The five differentiation domains" in
   [`docs/architecture.md`](docs/architecture.md).
+- **Leaving is one command, and it is tested.** `morb migrate --to
+  <runtime|socket>` moves your images and volumes back out to Docker
+  Desktop, Colima, OrbStack, or any socket, then verifies every copy with
+  a config-ID and sha256sum check before it says done. No other Docker
+  Desktop alternative ships a supported way out at all — OrbStack's own
+  [issue #2517](https://github.com/orbstack/orbstack/issues/2517) asking
+  for one is still open.
 
 ## Status: pre-release (milestone M0)
 

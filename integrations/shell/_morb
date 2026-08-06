@@ -9,12 +9,14 @@
 # just `morb --help` — per-subcommand flags in particular are not fully
 # documented by the help text. See the README for the discrepancies found.
 #
-# Important caveat: `mcp`, `migrate`, `bench`, `scan` and `debug` each
-# parse their own arguments in a separate Swift module that main.swift
+# Important caveat: `mcp`, `migrate`, `bench`, `scan`, `debug` and `export`
+# each parse their own arguments in a separate Swift module that main.swift
 # does not define ("The feature modules own their own argument parsing,
 # output and exit codes" — main.swift's own comment) and this completion
 # could not read. Only their command name and the flags morb's top-level
-# parser honors uniformly (--json, --help/-h) are completed for them.
+# parser honors uniformly (--json, --help/-h) are completed for them. That
+# includes `migrate --to <runtime|socket>` (migrate images/volumes OUT of
+# Morbstack) and `export --all` (export every local image to a directory).
 
 _morb() {
     local curcontext="$curcontext" state line
@@ -36,10 +38,11 @@ _morb() {
         'context:Manage the morbstack docker context (zero-config discovery)'
         'install-cli-plugins:Symlink docker-compose/docker-buildx into ~/.docker/cli-plugins'
         'mcp:Model Context Protocol server; read-only unless granted'
-        'migrate:Import images, volumes and config from another runtime'
+        'migrate:Import from (--from) or migrate out to (--to) another runtime'
         'bench:Run the open benchmark suite and report the numbers'
         'scan:SBOM and CVE scan an image, entirely on this machine'
         'debug:Open a toolbox shell in a container, even a distroless one'
+        'export:Write already-local image/volume archives, or --all of them, to a user-selected file'
     )
 
     _arguments -C \
@@ -82,7 +85,7 @@ _morb() {
                         '--json[Emit raw JSON instead of human-readable output]' \
                         '(--help -h)'{--help,-h}'[Print help and exit]'
                     ;;
-                mcp | migrate | bench | scan | debug)
+                mcp | migrate | bench | scan | debug | export)
                     # No sub-subcommand or flag information is available:
                     # each of these has its own parser in a separate
                     # Swift module not defined in main.swift. Only the

@@ -282,6 +282,7 @@ public enum ImageMigrationTransactionError: Error, CustomStringConvertible {
     case unknownReferences([String])
     case alreadyPresentReferences([String])
     case missingSourceSocket
+    case missingDestinationSocket
     case confirmationDoesNotMatch
 
     public var description: String {
@@ -293,6 +294,7 @@ public enum ImageMigrationTransactionError: Error, CustomStringConvertible {
         case .alreadyPresentReferences(let references):
             return "these image references already have the planned image ID in Morbstack: \(references.joined(separator: ", "))"
         case .missingSourceSocket: return "the prepared source has no Docker socket path"
+        case .missingDestinationSocket: return "the prepared destination has no Docker socket path"
         case .confirmationDoesNotMatch: return "confirmation does not belong to this prepared migration"
         }
     }
@@ -304,11 +306,20 @@ public enum ImageMigrationTransaction {
     /// Derives an exact, read-only plan and narrows it to an explicit selection.
     /// Calling this method does not create a report, write either engine, pull an
     /// image, start a runtime, access Docker configuration, or contact a registry.
+    ///
+    /// - Parameter destinationToken: when non-nil, this prepares an **outbound**
+    ///   migration — Morbstack is the fixed source and `destinationToken` (a named
+    ///   runtime or socket path) is the target, exactly the reverse of the default
+    ///   inbound direction. Passing both `sourceToken` and `destinationToken` is a
+    ///   caller error the read-only planner already refuses to make ambiguous: the
+    ///   outbound plan ignores `sourceToken`.
     public static func prepare(
         from sourceToken: String? = nil,
+        to destinationToken: String? = nil,
         selection: ImageMigrationSelection
     ) throws -> PreparedImageMigration {
-        let plan = MigrationReadOnlyPlanner.inspect(from: sourceToken)
+        let plan = destinationToken.map { MigrationReadOnlyPlanner.inspectOutbound(to: $0) }
+            ?? MigrationReadOnlyPlanner.inspect(from: sourceToken)
         guard plan.source.readiness == .ready, plan.destination.readiness == .ready,
               let imagePlan = plan.imagePlan
         else {
@@ -374,12 +385,20 @@ public enum ImageMigrationTransaction {
         guard let sourceSocket = prepared.source.socketPath else {
             throw ImageMigrationTransactionError.missingSourceSocket
         }
+        guard let destinationSocket = prepared.destination.socketPath else {
+            throw ImageMigrationTransactionError.missingDestinationSocket
+        }
 
         let source = MigrationSource(
             label: prepared.source.name,
             client: EngineClient.forUnixSocket(sourceSocket),
             socketPath: sourceSocket)
-        let destination = EngineClient()
+        // The destination is read from the prepared plan rather than fixed to
+        // Morbstack's own socket, which is what makes this one `execute` correct for
+        // both the default inbound direction (destination == Morbstack) and an
+        // outbound `--to` migration (destination == the external target) without a
+        // second, parallel transfer implementation.
+        let destination = EngineClient.forUnixSocket(destinationSocket)
         var report = ImageMigrationTransactionReport(
             transactionID: prepared.transactionID,
             preparedAt: prepared.preparedAt,

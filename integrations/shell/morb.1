@@ -42,7 +42,7 @@
 .Op Fl -print-plan
 .Op Fl -json
 .Nm
-.Cm mcp | migrate | bench | scan | debug
+.Cm mcp | migrate | bench | scan | debug | export
 .Op Ar ...
 .Sh DESCRIPTION
 .Nm
@@ -89,11 +89,12 @@ of starting one just to ask it a question.
 .Cm mcp ,
 .Cm migrate ,
 .Cm bench ,
-.Cm scan
-and
+.Cm scan ,
 .Cm debug
+and
+.Cm export
 are each implemented in their own Swift module
-.Pq MorbMCP , MorbMigrate , MorbBench , MorbScan
+.Pq MorbMCP , MorbMigrate , MorbBench , MorbScan , MorbExport
 that
 .Nm
 dispatches to with the remaining command-line arguments and the global
@@ -252,7 +253,13 @@ module; see
 .Sx DESCRIPTION
 for what that means for this manual's coverage of it.
 .It Cm migrate
-Import images, volumes and configuration from another container runtime.
+Import images, volumes and configuration from another container runtime with
+.Fl -from ,
+or migrate them OUT of Morbstack into another runtime or socket with
+.Fl -to ,
+verifying every copied item with the same config-ID and sha256sum checks
+.Cm migrate verify
+uses.
 Implemented in the
 .Sy MorbMigrate
 module; see
@@ -273,6 +280,17 @@ module; see
 Open a toolbox shell in a container, even a distroless one that has no
 shell of its own.
 Implemented in its own module; see
+.Sx DESCRIPTION .
+.It Cm export
+Write an already-local image or named-volume archive to a user-selected
+file, or with
+.Fl -all ,
+every local tagged image to a directory that a stock
+.Nm docker load
+restores.
+Implemented in the
+.Sy MorbExport
+module; see
 .Sx DESCRIPTION .
 .It Cm version
 Print the CLI version, and the daemon's version if it can be reached.
@@ -308,9 +326,9 @@ read, so
 and
 .Nm morb status --json
 are identical — and this holds even for
-.Cm mcp , migrate , bench , scan
+.Cm mcp , migrate , bench , scan , debug
 and
-.Cm debug ,
+.Cm export ,
 whose other arguments are otherwise opaque to this manual.
 .It Fl -force
 Skip a confirmation prompt, with a command-dependent meaning:
@@ -422,9 +440,9 @@ convention for locating the docker config directory
 .Pq default Pa ~/.docker ,
 per that command's own implementation.
 Whether
-.Cm mcp , migrate , bench , scan
+.Cm mcp , migrate , bench , scan , debug
 or
-.Cm debug
+.Cm export
 read any environment variables is not knowable from
 .Nm Ns 's
 own source; each is implemented in a separate module outside the scope
@@ -498,9 +516,9 @@ reports unhealthy, or a daemon-reported failure.
 This is the convention
 .Nm Ns 's
 own code documents and follows for every command it parses directly.
-.Cm mcp , migrate , bench , scan
+.Cm mcp , migrate , bench , scan , debug
 and
-.Cm debug
+.Cm export
 each return whatever exit code their own module computes, which
 .Nm
 merely forwards unchanged; that code was not verified here to follow the

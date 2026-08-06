@@ -31,6 +31,13 @@ enum MigrateCLI {
             }
             return DetectCommand.run(json: json)
 
+        case "--to":
+            // Unlike every other case here, `--to` is a flag on `morb migrate` itself,
+            // not a subcommand name — so it needs the full, undropped argument list to
+            // parse its own `<runtime|socket>` value. This is the outbound direction:
+            // "migrate in" has --from; "migrate out" is --to.
+            return MigrateOutCommand.run(arguments: arguments, json: json)
+
         case "config":
             guard commandArguments.isEmpty else {
                 return usageError("config does not take arguments")
@@ -139,6 +146,10 @@ enum MigrateCLI {
           images [options]       Copy images into Morbstack.
           volumes [options]      Copy named volumes into Morbstack.
           verify [options]       Compare images and volumes between engines.
+          --to <runtime|socket>  Migrate every eligible image and named volume OUT of
+                                  Morbstack into another runtime, then verify the
+                                  copies with the same config-ID and sha256sum checks
+                                  `verify` uses. [--dry-run] [--yes]
 
         Image options:
           --from <runtime|socket>  Docker Desktop, Colima, OrbStack, or a socket path.

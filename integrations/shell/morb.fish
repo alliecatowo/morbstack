@@ -10,13 +10,15 @@
 # `morb --help`, and `rosetta install` refuses --force rather than
 # accepting it.
 #
-# Important caveat: `mcp`, `migrate`, `bench`, `scan` and `debug` each
-# parse their own arguments in a separate Swift module that main.swift
+# Important caveat: `mcp`, `migrate`, `bench`, `scan`, `debug` and `export`
+# each parse their own arguments in a separate Swift module that main.swift
 # does not define ("The feature modules own their own argument parsing,
 # output and exit codes" — main.swift's own comment) and this completion
 # could not read. Only their command name and the flags morb's top-level
 # parser honors uniformly (--json, --help/-h) are completed for them —
-# nothing subcommand- or flag-specific.
+# nothing subcommand- or flag-specific. That includes `migrate --to
+# <runtime|socket>` (migrate images/volumes OUT of Morbstack) and `export
+# --all` (export every local image to a directory).
 #
 # NOTE: this file was syntax-checked with `fish -n`, but fish is not
 # installed on the machine these completions were written and tested on,
@@ -42,10 +44,11 @@ complete -c morb -n __fish_use_subcommand -a reset-disk -d 'Delete the Docker da
 complete -c morb -n __fish_use_subcommand -a context -d 'Manage the morbstack docker context (zero-config discovery)'
 complete -c morb -n __fish_use_subcommand -a install-cli-plugins -d 'Symlink docker-compose/docker-buildx into ~/.docker/cli-plugins'
 complete -c morb -n __fish_use_subcommand -a mcp -d 'Model Context Protocol server; read-only unless granted'
-complete -c morb -n __fish_use_subcommand -a migrate -d 'Import images, volumes and config from another runtime'
+complete -c morb -n __fish_use_subcommand -a migrate -d 'Import from (--from) or migrate out to (--to) another runtime'
 complete -c morb -n __fish_use_subcommand -a bench -d 'Run the open benchmark suite and report the numbers'
 complete -c morb -n __fish_use_subcommand -a scan -d 'SBOM and CVE scan an image, entirely on this machine'
 complete -c morb -n __fish_use_subcommand -a debug -d 'Open a toolbox shell in a container, even a distroless one'
+complete -c morb -n __fish_use_subcommand -a export -d 'Write already-local image/volume archives, or --all of them, to a user-selected file'
 
 # --- Global options, valid anywhere in the command line ---
 
@@ -113,10 +116,10 @@ complete -c morb -n '__fish_seen_subcommand_from install-cli-plugins' \
 complete -c morb -n '__fish_seen_subcommand_from stop reset-disk' \
     -l force -d 'Skip the confirmation prompt (reset-disk), or stop without asking the guest first (stop)'
 
-# --- mcp / migrate / bench / scan / debug ---
+# --- mcp / migrate / bench / scan / debug / export ---
 #
 # Each of these parses its own arguments in a separate Swift module
-# (MorbMCP / MorbMigrate / MorbBench / MorbScan / a debug module) that
-# main.swift merely dispatches to. No sub-subcommand or flag information
-# for them is available from main.swift, so nothing beyond the command
-# name and the global options above is completed here.
+# (MorbMCP / MorbMigrate / MorbBench / MorbScan / a debug module /
+# MorbExport) that main.swift merely dispatches to. No sub-subcommand or
+# flag information for them is available from main.swift, so nothing
+# beyond the command name and the global options above is completed here.

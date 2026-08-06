@@ -214,6 +214,83 @@ public enum MigrationReadOnlyPlanner {
             volumeUnavailableReason: volumePlanError)
     }
 
+    /// The outbound mirror of ``inspect(from:filter:includeDanglingImages:)``: Morbstack
+    /// is the fixed *source* and `destinationToken` (a named runtime or a socket path,
+    /// resolved exactly like `--from` is) is the target being migrated *to*. This is
+    /// the read-only comparison behind `morb migrate --to`.
+    ///
+    /// It deliberately shares every planning primitive with the inbound planner —
+    /// ``ImagesCommand/plan(source:destination:filter:includeAll:)``,
+    /// ``deriveVolumePlan(source:destination:)``, ``endpoint(for:)`` — so an outbound
+    /// plan carries the exact same guarantees (GET-only reads, no engine mutation) as
+    /// an inbound one.
+    public static func inspectOutbound(
+        to destinationToken: String,
+        filter: String? = nil,
+        includeDanglingImages: Bool = false
+    ) -> MigrationReadOnlyPlan {
+        let sourceEndpoint = endpoint(for: RuntimeDetect.detectMorbstack())
+
+        let resolvedDestination: MigrationSource
+        do {
+            resolvedDestination = try SourceResolver.resolve(from: destinationToken)
+        } catch {
+            let reason = "Destination is unavailable: \(error)"
+            let destination = MigrationPlanEndpoint(
+                name: destinationToken, socketPath: nil, readiness: .unavailable, detail: reason)
+            return MigrationReadOnlyPlan(
+                source: sourceEndpoint, destination: destination, imagePlan: nil,
+                unavailableReason: reason, volumePlan: nil, volumeUnavailableReason: reason)
+        }
+
+        // Morbstack cannot be its own outbound destination — the same self-comparison
+        // guard `inspect(from:)` applies to a source, applied to a destination instead.
+        if destinationToken.lowercased() == "morbstack"
+            || sameSocket(resolvedDestination.socketPath, MorbPaths.dockerSocket.path)
+        {
+            let destination = MigrationPlanEndpoint(
+                name: "Morbstack", socketPath: resolvedDestination.socketPath, readiness: .unavailable,
+                detail: "Morbstack is the migration source for an outbound transfer, not a destination. Pass another runtime or socket with --to.")
+            return MigrationReadOnlyPlan(
+                source: sourceEndpoint, destination: destination, imagePlan: nil,
+                unavailableReason: destination.detail, volumePlan: nil, volumeUnavailableReason: destination.detail)
+        }
+
+        guard sourceEndpoint.readiness == .ready else {
+            let reason = sourceEndpoint.detail ?? "Morbstack's Docker engine is not running."
+            let destination = MigrationPlanEndpoint(
+                name: resolvedDestination.label, socketPath: resolvedDestination.socketPath, readiness: .ready, detail: nil)
+            return MigrationReadOnlyPlan(
+                source: sourceEndpoint, destination: destination, imagePlan: nil,
+                unavailableReason: reason, volumePlan: nil, volumeUnavailableReason: reason)
+        }
+
+        let destination = MigrationPlanEndpoint(
+            name: resolvedDestination.label, socketPath: resolvedDestination.socketPath, readiness: .ready, detail: nil)
+        let morbstackAsSource = MigrationSource(
+            label: sourceEndpoint.name, client: EngineClient(), socketPath: sourceEndpoint.socketPath ?? MorbPaths.dockerSocket.path)
+
+        let (items, planError) = ImagesCommand.plan(
+            source: morbstackAsSource, destination: resolvedDestination.client,
+            filter: filter, includeAll: includeDanglingImages)
+        let imagePlan: MigrationImagePlan?
+        if planError == nil {
+            imagePlan = MigrationImagePlan(items: items.map { item in
+                MigrationImagePlanItem(
+                    reference: item.reference, imageID: item.id, sizeBytes: item.size,
+                    disposition: item.status == "planned" ? .wouldCopy : .alreadyPresent)
+            })
+        } else {
+            imagePlan = nil
+        }
+        let (derivedVolumePlan, volumePlanError) = deriveVolumePlan(
+            source: morbstackAsSource, destination: resolvedDestination.client)
+        return MigrationReadOnlyPlan(
+            source: sourceEndpoint, destination: destination, imagePlan: imagePlan,
+            unavailableReason: planError, volumePlan: derivedVolumePlan,
+            volumeUnavailableReason: volumePlanError)
+    }
+
     /// Reads the two Docker volume inventories only. In particular, it does not use
     /// `VolumesCommand.isDestinationVolumeEmpty`: that path creates a helper
     /// container and is appropriate only after a user has opted into transfer review.
