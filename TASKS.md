@@ -517,14 +517,16 @@ region instead. Every route mixed the two, so the trailing edge was two or three
 drifted a different distance whenever the inspector moved. **The fix is one line per item:** every
 trailing item is `.primaryAction`.
 
-Measured on Volumes at 1600×1000 dark, real window via `capture-window.sh`:
+Measured on Volumes at 1600×1000 dark, real window via `capture-window.sh`, x-ranges of the glyph
+runs (the glass fill is too subtle over the toolbar to threshold reliably; capsule edges sit ~8 pt
+outside each range):
 
 | | before | after |
 | --- | --- | --- |
-| trash + share | 745–815 | 1077–1163 |
-| `+` + inspector toggle | 1005–1080 | 1167–1250 |
+| trash + share | 745–814 | 1085–1154 |
+| `+` + inspector toggle | 1005–1078 | 1175–1248 |
 | search field | 1267–1591 | 1267–1591 |
-| gap, cluster to search | 187 pt | 17 pt |
+| gap, last glyph to search | 189 pt | 19 pt |
 | drift when the inspector toggles | 135 pt / 67 pt | **0 pt / 0 pt** |
 
 The inspector-closed capture is byte-position identical to the inspector-open one: the cluster is
