@@ -395,6 +395,48 @@ final class K8sTests: XCTestCase {
         XCTAssertEqual(fields["message"], .string("waiting for the node"))
     }
 
+    // MARK: - Diagnosis (UX-20: an honest `kubectl top` story once ready)
+
+    func testReadyDiagnosisNamesTheMetricsServerTradeAndOffersDockerStats() {
+        // metrics-server is deliberately disabled for boot speed
+        // (guest/morbinit/src/k8s.rs); left unstated, `kubectl top` fails with a
+        // raw "Metrics API not available" that reads like a broken cluster. The
+        // ready-with-nothing-to-do guidance is the one place a user reliably sees
+        // after enabling Kubernetes, so it is where this gets said honestly.
+        let status = K8s.Status(
+            installed: true, enabled: true, persistent: true, phase: .ready,
+            nodes: 1, nodesReady: 1, pods: 3, podsReady: 3)
+        let diagnosis = K8s.Diagnosis(
+            status: status, hostAPIServerPort: 51234, kubeconfigExists: true)
+        XCTAssertEqual(diagnosis.recommendedAction, .none)
+        XCTAssertTrue(
+            diagnosis.guidance.contains("metrics-server"),
+            "must name the trade, not just say nothing is wrong: \(diagnosis.guidance)")
+        XCTAssertTrue(
+            diagnosis.guidance.contains("kubectl top"),
+            "must name the command that will otherwise fail with no explanation: \(diagnosis.guidance)")
+        XCTAssertTrue(
+            diagnosis.guidance.contains("docker stats"),
+            "must offer the resource data that already exists instead: \(diagnosis.guidance)")
+        // The reversal command must be syntactically real, not a placeholder.
+        XCTAssertTrue(diagnosis.guidance.contains("kubectl apply -f"))
+    }
+
+    func testOnlyTheFullyReadyNoActionGuidanceMentionsMetrics() {
+        // Every other phase is guidance toward making the cluster reachable at
+        // all; naming a `kubectl top` trade before there is a kubeconfig or an
+        // API forward to run it against would be noise, not help.
+        let notReady = K8s.Diagnosis(
+            status: K8s.Status(installed: false, enabled: false, phase: .notInstalled),
+            hostAPIServerPort: nil, kubeconfigExists: false)
+        XCTAssertFalse(notReady.guidance.contains("metrics-server"))
+
+        let readyNoKubeconfig = K8s.Diagnosis(
+            status: K8s.Status(installed: true, enabled: true, phase: .ready, nodes: 1, nodesReady: 1),
+            hostAPIServerPort: nil, kubeconfigExists: false)
+        XCTAssertFalse(readyNoKubeconfig.guidance.contains("metrics-server"))
+    }
+
     // MARK: - Payload pins
 
     func testPayloadDigestsMatchTheFetchScript() throws {

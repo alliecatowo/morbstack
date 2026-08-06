@@ -348,7 +348,14 @@ Mac cannot represent that regardless of which package hits it next.
   cluster simulator.
 - **`traefik` and `metrics-server`** are disabled by default (see "Why
   this shape") — `kubectl top` and ingress need an explicit
-  `kubectl apply` for anyone who wants them.
+  `kubectl apply` for anyone who wants them. Without that, `kubectl top`
+  fails with kubectl's own "Metrics API not available", which reads like a
+  broken cluster rather than a documented default; `morb k8s status`/`morb
+  k8s diagnose` say so explicitly once the cluster is ready, name the exact
+  `kubectl apply` command that installs metrics-server, and point at
+  `docker stats` for live CPU/memory in the meantime — every Pod is an
+  ordinary container on the same shared Docker engine, so it already
+  reports there (UX-20).
 
 ## See also
 
