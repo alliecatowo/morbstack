@@ -507,12 +507,16 @@ struct NetworksRootView: View {
             }
             .inspector(isPresented: $showsInspector) {
                 detailPane
-                    .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
                     // See the note on `VolumesRootView`: the trailing commands and
                     // search ride the inspector's toolbar region and remain present
                     // while the inspector is closed.
                     .toolbar { trailingCommandItems }
                     .searchable(text: $query, placement: .toolbarPrincipal, prompt: "Name, driver, ID")
+                    // Must be the outermost modifier on the inspector's content —
+                    // see the note in `ContainersRootView`: applied beneath
+                    // `.toolbar`/`.searchable` its preferred width was silently
+                    // discarded.
+                    .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
             }
         }
     }

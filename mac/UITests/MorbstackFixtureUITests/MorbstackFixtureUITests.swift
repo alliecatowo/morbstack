@@ -600,9 +600,9 @@ final class MorbstackFixtureUITests: XCTestCase {
         URL(fileURLWithPath: ProcessInfo.processInfo.environment["MORB_PROBE_DIR"] ?? NSTemporaryDirectory())
     }
 
-    private func probeShot(_ app: XCUIApplication, _ name: String) {
+    private func probeShot(_ app: XCUIApplication, _ name: String, window: XCUIElement? = nil) {
         try? FileManager.default.createDirectory(at: probeDirectory, withIntermediateDirectories: true)
-        let shot = app.windows.firstMatch.screenshot()
+        let shot = (window ?? app.windows.firstMatch).screenshot()
         try? shot.pngRepresentation.write(to: probeDirectory.appendingPathComponent("probe-\(name).png"))
         let attachment = XCTAttachment(screenshot: shot)
         attachment.name = "probe-\(name)"
@@ -952,6 +952,76 @@ final class MorbstackFixtureUITests: XCTestCase {
             volumesToggle.click()
             Thread.sleep(forTimeInterval: 3)
             probeShot(app, "u51-volumes-closed")
+        }
+    }
+
+    /// Real-engine evidence for three routes a fixture-only pass cannot reach: an
+    /// interactive terminal needs a live exec hijack, a Files scan needs a live
+    /// container filesystem, and a Compose merged log needs live interleaved service
+    /// output. `--tour-container` preselects the record so this never depends on
+    /// clicking a row in a live-refreshing list — the failure mode that discarded an
+    /// earlier capture attempt when an arrow-key fallback walked the sidebar instead.
+    /// Requires the real daemon running with the `shopdemo` Compose project up.
+    /// Delete or update this once the gallery has durable captures of all three.
+    func testEvidenceTerminalFilesTabAndComposeLogs() throws {
+        let app = XCUIApplication(url: try appBundleURL())
+        app.launchArguments = [
+            "--tour-select", "containers",
+            "--tour-container", "shopdemo-web-1",
+            "--appearance", "dark",
+            "--window-size", "1600x1000",
+            "-ApplePersistenceIgnoreState", "YES",
+            "-AppleLanguages", "(en)",
+            "-AppleLocale", "en_US",
+        ]
+        app.launch()
+        launchedApp = app
+        XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 25))
+
+        // MARK: Files tab on a real container
+        let filesTab = automationElement("containers.detail.tab.files", in: app)
+        XCTAssertTrue(filesTab.waitForExistence(timeout: 20), "shopdemo-web-1 did not open in the detail pane")
+        filesTab.click()
+        let filesList = automationElement("containers.files.list", in: app)
+        XCTAssertTrue(filesList.waitForExistence(timeout: 20), "the container filesystem scan never completed")
+        Thread.sleep(forTimeInterval: 2)
+        probeShot(app, "evidence-containers-files-tab")
+
+        // MARK: A real interactive terminal on the same running container
+        let openTerminal = app.windows.firstMatch.buttons["containers.openTerminal"]
+        XCTAssertTrue(openTerminal.waitForExistence(timeout: 10))
+        XCTAssertTrue(openTerminal.isEnabled, "shopdemo-web-1 is running; Open Terminal must be reachable")
+        openTerminal.click()
+        let terminalWindow = app.windows
+            .matching(NSPredicate(format: "title BEGINSWITH %@", "shopdemo-web-1"))
+            .firstMatch
+        XCTAssertTrue(terminalWindow.waitForExistence(timeout: 15), "the terminal window for shopdemo-web-1 did not open")
+        // Let the exec hijack resolve a shell and print its prompt before capturing.
+        Thread.sleep(forTimeInterval: 5)
+        probeShot(app, "evidence-container-terminal", window: terminalWindow)
+        if terminalWindow.buttons[XCUIIdentifierCloseWindow].waitForExistence(timeout: 5) {
+            terminalWindow.buttons[XCUIIdentifierCloseWindow].click()
+        }
+
+        // MARK: The shopdemo Compose project's merged, interleaved log window
+        let projectGroup = automationElement("containers.project.shopdemo", in: app)
+        XCTAssertTrue(projectGroup.waitForExistence(timeout: 10))
+        projectGroup.rightClick()
+        let viewLogs = automationElement("containers.project.logs", in: app)
+        XCTAssertTrue(viewLogs.waitForExistence(timeout: 10), "the project context menu did not offer merged logs")
+        viewLogs.click()
+        let logsWindow = app.windows
+            .matching(NSPredicate(format: "title CONTAINS %@", "shopdemo"))
+            .firstMatch
+        let logsWindowAppeared = logsWindow.waitForExistence(timeout: 25)
+        if !logsWindowAppeared {
+            let titles = app.windows.allElementsBoundByIndex.map(\.title)
+            XCTFail("the shopdemo merged project log window did not open; open window titles: \(titles)")
+        } else {
+            // Let output from more than one service arrive so the capture actually
+            // shows interleaving rather than one service's first line.
+            Thread.sleep(forTimeInterval: 6)
+            probeShot(app, "evidence-compose-project-logs", window: logsWindow)
         }
     }
 

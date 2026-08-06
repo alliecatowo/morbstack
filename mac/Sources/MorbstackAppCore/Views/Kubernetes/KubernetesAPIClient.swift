@@ -213,9 +213,28 @@ private struct KubernetesAPICredential {
         guard let authority = SecCertificateCreateWithData(
             nil, configuration.certificateAuthority as CFData),
             let certificate = SecCertificateCreateWithData(
-                nil, configuration.clientCertificate as CFData),
-            let key = SecKeyCreateWithData(
-                configuration.clientKey as CFData,
+                nil, configuration.clientCertificate as CFData)
+        else {
+            throw K8sResourceAccessError.malformedKubeconfig
+        }
+        // Fixing the RSA/EC algorithm mismatch (see `clientKeyType` above) was not
+        // enough on its own: `SecKeyCreateWithData` does not take the same byte
+        // layout for every key type. `KubernetesPEM.der(from:)` produces the SEC1
+        // ASN.1 DER a PEM `-----BEGIN EC PRIVATE KEY-----` document actually
+        // contains — correct as-is for RSA, whose PKCS#1 DER *is* the layout
+        // `SecKeyCreateWithData` wants, but wrong for EC, which needs Apple's own
+        // ANSI X9.63 external representation instead. Feeding it SEC1 bytes made
+        // `SecKeyCreateWithData` fail outright, which is what was still producing
+        // "cannot be used for a TLS-authenticated connection" after the RSA/EC fix.
+        guard let keyData = KubernetesPEM.secKeyExternalRepresentation(
+            der: configuration.clientKey,
+            keyType: configuration.clientKeyType,
+            certificate: certificate)
+        else {
+            throw K8sResourceAccessError.malformedKubeconfig
+        }
+        guard let key = SecKeyCreateWithData(
+                keyData as CFData,
                 [
                     kSecAttrKeyType: configuration.clientKeyType,
                     kSecAttrKeyClass: kSecAttrKeyClassPrivate,
@@ -314,6 +333,84 @@ private enum KubernetesPEM {
         guard let text = String(data: data, encoding: .utf8) else { return kSecAttrKeyTypeEC }
         if text.contains("-----BEGIN RSA PRIVATE KEY-----") { return kSecAttrKeyTypeRSA }
         return kSecAttrKeyTypeEC
+    }
+
+    /// The bytes `SecKeyCreateWithData` actually wants, which is not the same
+    /// layout for every key type.
+    ///
+    /// For RSA, `der` (PKCS#1 DER, from a `-----BEGIN RSA PRIVATE KEY-----`
+    /// document) already *is* that external representation — pass it straight
+    /// through.
+    ///
+    /// For EC, `der` is the SEC1 DER a `-----BEGIN EC PRIVATE KEY-----`
+    /// document contains (RFC 5915: `SEQUENCE { INTEGER version, OCTET STRING
+    /// privateKey, [0] parameters OPTIONAL, [1] publicKey OPTIONAL }`), which
+    /// `SecKeyCreateWithData` does not accept for an EC key at all. Apple's
+    /// external representation for an EC private key is instead the ANSI
+    /// X9.63 form `04 || X || Y || K` — the public point concatenated with
+    /// the big-endian private scalar (see "Storing Keys as Data" in Apple's
+    /// Security documentation). `K` is read out of the SEC1 document; `X ||
+    /// Y` is read from the certificate's own public key via
+    /// `SecCertificateCopyKey` + `SecKeyCopyExternalRepresentation` rather
+    /// than hand-parsed out of the SEC1 document's optional `[1]` field,
+    /// since the certificate already carries it and Apple's own code is what
+    /// extracts it.
+    static func secKeyExternalRepresentation(
+        der: Data, keyType: CFString, certificate: SecCertificate
+    ) -> Data? {
+        guard keyType == kSecAttrKeyTypeEC else { return der }
+        guard let scalar = ecPrivateScalar(fromSEC1DER: der),
+              let publicKey = SecCertificateCopyKey(certificate)
+        else { return nil }
+        var error: Unmanaged<CFError>?
+        guard let publicKeyData = SecKeyCopyExternalRepresentation(publicKey, &error) as Data?
+        else { return nil }
+        return publicKeyData + scalar
+    }
+
+    /// Reads the raw private scalar `K` out of a SEC1 `ECPrivateKey` DER
+    /// document. Only the two fixed leading fields are read — the version
+    /// `INTEGER` (discarded) and the `privateKey` `OCTET STRING` — because the
+    /// public half comes from the certificate instead of the document's
+    /// optional `[1]` field.
+    private static func ecPrivateScalar(fromSEC1DER der: Data) -> Data? {
+        var reader = DERReader(remaining: der)
+        guard let sequence = reader.readValue(expectedTag: 0x30) else { return nil }
+        var body = DERReader(remaining: sequence)
+        guard body.readValue(expectedTag: 0x02) != nil else { return nil }  // version
+        return body.readValue(expectedTag: 0x04)  // privateKey OCTET STRING
+    }
+
+    /// The minimal DER TLV reader `ecPrivateScalar` needs: read one
+    /// tag/length/value off the front of `remaining` at a time. This is not a
+    /// general ASN.1 parser — it only reads the two fixed-position, top-level
+    /// fields SEC1 guarantees are first.
+    private struct DERReader {
+        var remaining: Data
+
+        mutating func readValue(expectedTag: UInt8) -> Data? {
+            guard let tag = remaining.first, tag == expectedTag else { return nil }
+            remaining = remaining.dropFirst()
+            guard let lengthByte = remaining.first else { return nil }
+            remaining = remaining.dropFirst()
+            let length: Int
+            if lengthByte & 0x80 == 0 {
+                length = Int(lengthByte)
+            } else {
+                let byteCount = Int(lengthByte & 0x7F)
+                guard byteCount > 0, byteCount <= 4, remaining.count >= byteCount else { return nil }
+                var accumulated = 0
+                for _ in 0..<byteCount {
+                    accumulated = (accumulated << 8) | Int(remaining.first!)
+                    remaining = remaining.dropFirst()
+                }
+                length = accumulated
+            }
+            guard length >= 0, remaining.count >= length else { return nil }
+            let value = remaining.prefix(length)
+            remaining = remaining.dropFirst(length)
+            return Data(value)
+        }
     }
 }
 

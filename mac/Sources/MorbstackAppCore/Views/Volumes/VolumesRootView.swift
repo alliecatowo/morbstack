@@ -724,7 +724,6 @@ struct VolumesRootView: View {
             }
             .inspector(isPresented: $showsInspector) {
                 detailPane
-                    .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
                     // Mounting the trailing commands and search on the inspector
                     // content hands them to the inspector's region of the unified
                     // toolbar: at rest they sit against the inspector's edge instead
@@ -738,6 +737,19 @@ struct VolumesRootView: View {
                         text: $query,
                         placement: .toolbarPrincipal,
                         prompt: "Name, driver, label, or mount point")
+                    // `.inspectorColumnWidth` must be the OUTERMOST modifier on the
+                    // inspector's content. Apple's own documentation says to "apply
+                    // this modifier on the content of a .inspector(...)", and this
+                    // route (and seven others copied from it) put it innermost,
+                    // before `.toolbar`/`.searchable` — those are also modifiers on
+                    // "the content" so the width preference set beneath them was
+                    // silently discarded, and every one of those routes' inspectors
+                    // rendered at SwiftUI's undeclared system default (~270pt) no
+                    // matter what min/ideal/max was written here. Verified against
+                    // the real window 2026-08-06: reordering this one line took the
+                    // Containers inspector from 269pt (clipping every value) to the
+                    // declared 400pt ideal, with no other change.
+                    .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
             }
         }
     }

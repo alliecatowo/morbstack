@@ -39,11 +39,44 @@ previous trailing-edge placement read as a detached strip.
 ![Container detail](containers-detail-tabs.png)
 
 `shopdemo-web-1` selected, showing the detail pane's five tabs — Overview, Logs, **Files**,
-**Statistics**, Inspect — the two bolded ones new this session (UX-4's read-first filesystem browser,
-UX-9's network/disk-I/O rate charts on top of the existing CPU/memory charts). This capture is the
-Overview tab only; driving to Files or Statistics needs a real click and this session's evidence tools
-could not reliably deliver one against this route's real (non-fixture) data — see
-[Not yet captured](#not-yet-captured).
+**Statistics**, Inspect. This capture also proves a real, reproducible bug found and fixed this
+session: `.inspectorColumnWidth(min: 340, ideal: 400, max: 520)` was declared but not honored — the
+column rendered at SwiftUI's undeclared system default (~270pt) on *every* route in the app, not just
+this one, clipping "Running" to "Runnin", "linux" to "linu", "Default" to "Defau" and so on wherever a
+value's `Text` had no explicit `.lineLimit`. The cause: the modifier was applied *underneath*
+`.toolbar { … }` and `.searchable(…)` in the inspector's content closure rather than as the outermost
+modifier on that content. Apple's own documentation says to "apply this modifier on the content of a
+`.inspector(isPresented:content:)`" — with other modifiers chained after it, it no longer was that
+content's outermost modifier, and its preferred-width preference was silently discarded. Moving it to
+the end of the chain (verified against this real window, before/after, with no other change) took the
+column from 269pt to the declared 400pt ideal. Fixed identically in all eight routes that had the same
+copy-pasted ordering (`ContainersRootView`, `BuildsRootView` ×2, `DiskRootView`, `ImagesRootView`,
+`KubernetesRootView`, `MigrationRootView`, `NetworksRootView`, `StacksRootView`, `VolumesRootView`).
+
+### Containers, the Files tab on a real container
+
+![Container files](containers-files-tab.png)
+
+`shopdemo-web-1`'s actual root filesystem (UX-4), read live through
+`HEAD /containers/{id}/archive?path=X` with no exec and no shell in the container — `bin`, `dev`,
+`etc`, `docker-entrypoint.d`, real entry counts per folder, `.dockerenv`, `docker-entrypoint.sh`.
+
+### The container terminal, a live shell
+
+![Container terminal](container-terminal.png)
+
+An interactive `exec` session actually connected to `shopdemo-web-1` — the window title tracks the
+resolved shell (`shopdemo-web-1 — /bin/sh`) and the prompt (`/ #`) is real output from the container,
+not a placeholder.
+
+### Containers, the Compose-aggregated log window
+
+![Compose project logs](containers-compose-logs.png)
+
+The `shopdemo` project's merged log (UX-2/UX-3): five services' `stderr` interleaved by real arrival
+time, each line colour-coded and labelled by service (`api`, `web`, …), the window title stating how
+many of the project's services are currently streaming ("5 of 8 services streaming"), 3,560 lines and
+counting.
 
 ### Stacks
 
@@ -94,20 +127,37 @@ Docker will refuse if the volume is attached, and that it cannot tell you what i
 
 ![Kubernetes](kubernetes.png)
 
-**This is a real defect, captured honestly rather than avoided.** The cluster behind this screen is
-enabled and healthy — `morb k8s status` reports `1 of 1 node ready`, `4 of 4 pods ready`, matching the
-header — and a real `kubectl` against the same kubeconfig file works. But the app's own resource
-reader cannot authenticate to it: `KubernetesAPICredential` builds a `SecIdentity` from the
-kubeconfig's client certificate and key, and it assumed an RSA key. k3s (Morbstack's bundled
-Kubernetes) issues ECDSA keys by default. This session fixed that specific assumption
-(`KubernetesAPIClient.swift`, reading the PEM header instead of hardcoding `kSecAttrKeyTypeRSA`), but
-the exact same failure persists after the fix, which means a second problem sits behind it —
-plausibly `SecIdentityCreate` itself, which is not a conventional public constructor on macOS (unlike
-iOS, macOS normally mints a `SecIdentity` by importing a cert+key pair into a keychain, not by
-pairing bare `SecCertificate`/`SecKey` objects). Not resolved this session; recorded in the commit
-history rather than declared fixed. The picker at the toolbar's centre (Pods/Nodes, a `.principal`
-item) and the search field this session moved to `.toolbarPrincipal` cannot be shown coexisting as a
-result — this screen is the one case where the data path that mounts search never renders.
+**This screenshot is stale evidence of a now-fixed defect; kept here because the live route still
+has not been recaptured.** The cluster behind this screen was enabled and healthy — `morb k8s status`
+reported `1 of 1 node ready`, `4 of 4 pods ready`, matching the header — and a real `kubectl` against
+the same kubeconfig file worked. But the app's own resource reader could not authenticate to it.
+Two compounding bugs, found and fixed in two sessions:
+
+1. `KubernetesAPICredential` built a `SecIdentity` from the kubeconfig's client certificate and key,
+   and assumed an RSA key. k3s (Morbstack's bundled Kubernetes) issues ECDSA keys by default. Fixed by
+   reading the PEM header instead of hardcoding `kSecAttrKeyTypeRSA`.
+2. Fixing (1) alone did not fix the route: `SecKeyCreateWithData` does not take the same byte layout
+   for every key type. The code was feeding it the SEC1 ASN.1 DER a `-----BEGIN EC PRIVATE
+   KEY-----` document actually contains — correct for RSA (whose PKCS#1 DER *is* the layout
+   `SecKeyCreateWithData` wants) but wrong for EC, which needs Apple's own ANSI X9.63 external
+   representation instead (`04 || X || Y || K`: the public point from `SecCertificateCopyKey` +
+   `SecKeyCopyExternalRepresentation`, concatenated with the private scalar read out of the SEC1
+   document). Feeding it SEC1 bytes made `SecKeyCreateWithData` fail outright — reproduced against the
+   real on-disk kubeconfig standalone (`SecKeyCreateWithData` returns `nil` on the old bytes, succeeds
+   on the converted ones) and confirmed the fix is not just "compiles": the resulting `SecKey` passed
+   to `SecIdentityCreate` together with the certificate now succeeds, which only happens when the
+   private key mathematically corresponds to the certificate's public key.
+
+`SecIdentityCreate` itself was never the fault; it was correctly reporting "these do not match" for
+malformed key bytes, exactly as its own documentation says it will. What was not verified this session:
+a live end-to-end HTTP round trip against the real API server, because the cluster was disabled
+(nothing listening on `127.0.0.1:6443`) at fix time — connecting failed with a plain TCP
+connection-refused, a different and expected failure distinct from the TLS/identity failure being
+fixed. Turning the cluster on to get a full round trip is an engine-lane operation outside this
+session's scope; the live resource list in this screen is still not recaptured. The picker at the
+toolbar's centre (Pods/Nodes, a `.principal` item) and the search field this session moved to
+`.toolbarPrincipal` cannot be shown coexisting as a result — this screen is the one case where the
+data path that mounts search never renders.
 
 ### Networks
 
@@ -141,30 +191,26 @@ than colliding.
 Everything above is a real window. These are real screens too, but nobody has photographed them, so
 this page says nothing about how they look:
 
-- **Kubernetes, resources actually listed** — blocked on the `SecIdentityCreate` failure described
-  above, not on anything this page could stage around.
+- **Kubernetes, resources actually listed** — the credential defect described above is now fixed and
+  verified standalone, but the cluster was disabled at fix time, so the live route itself is still
+  unphotographed.
 - **Migration** — the ninth sidebar route, which compares another runtime's images against
   Morbstack's and imports selected ones ([`../migrate.md`](../migrate.md)).
-- **The Statistics tab's charts** (network + disk I/O rates, UX-9) and the **Files tab** (UX-4) with
-  a real directory listing, both reachable in the app right now but not driven to in this pass — see
-  below.
-- **The container terminal**, actually opened and holding a live shell — the interactive `exec`
-  window described in [`../exec.md`](../exec.md).
-- **The Compose-aggregated log window** (UX-2/UX-3) — per-service interleaved output, the wrap toggle,
-  clickable links.
+- **The Statistics tab's charts** (network + disk I/O rates, UX-9), reachable in the app right now but
+  not driven to in any pass yet.
 - **Settings and the light appearance** of every route above.
 
-**Why the interactive captures above are missing, specifically.** This session had no Computer Use
-access and no Accessibility permission for scripted mouse/keyboard control (`osascript`/System Events
-both refused with "not allowed assistive access"), so the only interaction channel left was
-`XCUITest`. That worked for the sidebar and for buttons the moment a route had focus, but clicking a
-real (non-fixture) `List` row to select a container — the one action every capture above needed —
-did not reliably register a selection in this environment; a synthetic click that silently fails to
-select, followed by an arrow-key fallback, was once observed to move the *sidebar's* selection
-instead (confirmed by capturing the wrong route entirely), because keyboard focus had never actually
-reached the content list. The menu-bar and Builds/Disk captures above did not need a row selection and
-came through the same harness cleanly. This is recorded here rather than worked around with a fixture
-window standing in for a real one.
+**How the container terminal, Files tab, and Compose log window captures above were actually taken.**
+An earlier pass in this project had no Computer Use access and no Accessibility permission for
+`osascript`/System Events, so it tried to select a real (non-fixture) container by clicking a `List`
+row through XCUITest and found that unreliable — a synthetic click that silently failed to select,
+followed by an arrow-key fallback, was once observed to move the *sidebar's* selection instead. The
+fix was to stop clicking the row at all: `--tour-container <name>` (already used throughout this page
+for `shopdemo-web-1`) preselects the record before the window even appears, so XCUITest only ever has
+to click a stable, already-onscreen control by accessibility identifier — the Files tab, the Open
+Terminal toolbar button, a project group's context menu — never a list row. That is what
+`testEvidenceTerminalFilesTabAndComposeLogs` in `mac/UITests/MorbstackFixtureUITests/…` does, against
+the real engine (`shopdemo-web-1` running, the `shopdemo` project up), with no fixtures involved.
 
 **There are no animated captures.** No `.gif` or video exists anywhere in this repository, and
 nothing on this page is a still frame lifted from one.

@@ -812,7 +812,6 @@ struct KubernetesRootView: View {
                 resourceTable
                     .inspector(isPresented: $showsInspector) {
                         inspector
-                            .inspectorColumnWidth(min: 280, ideal: 340, max: 460)
                             // See the note on `VolumesRootView`: the trailing
                             // commands and search ride the inspector's toolbar
                             // region and remain present while the inspector is
@@ -822,6 +821,11 @@ struct KubernetesRootView: View {
                                 text: $query,
                                 placement: .toolbarPrincipal,
                                 prompt: "Search \(resource.rawValue.lowercased())")
+                            // Must be the outermost modifier on the inspector's
+                            // content — see the note in `ContainersRootView`:
+                            // applied beneath `.toolbar`/`.searchable` its
+                            // preferred width was silently discarded.
+                            .inspectorColumnWidth(min: 280, ideal: 340, max: 460)
                     }
             }
         }

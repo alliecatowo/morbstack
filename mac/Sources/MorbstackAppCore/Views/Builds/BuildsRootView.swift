@@ -724,12 +724,18 @@ struct BuildsRootView: View {
             }
             .inspector(isPresented: $showsInspector) {
                 detailPane
-                    .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
                     // See the note on `VolumesRootView`: the trailing commands and
                     // search ride the inspector's toolbar region and remain present
                     // while the inspector is closed.
                     .toolbar { trailingCommandItems }
                     .searchable(text: $query, placement: .toolbarPrincipal, prompt: searchPrompt)
+                    // `.inspectorColumnWidth` must be the outermost modifier on the
+                    // inspector's content — applied beneath `.toolbar`/`.searchable`
+                    // its preferred width was silently discarded and every route
+                    // fell back to the system default (~270pt), clipping every
+                    // value regardless of the min/ideal/max declared here. Verified
+                    // empirically against the real window 2026-08-06.
+                    .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
             }
         }
     }
@@ -846,10 +852,12 @@ struct BuildsRootView: View {
                 }
                 .inspector(isPresented: $showsInspector) {
                     historyDetailPane
-                        .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
                         // See the note on `VolumesRootView`.
                         .toolbar { trailingCommandItems }
                         .searchable(text: $query, placement: .toolbarPrincipal, prompt: searchPrompt)
+                        // See the note above this pattern's other use in this file:
+                        // must be outermost or its width is silently discarded.
+                        .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
                 }
             }
         }

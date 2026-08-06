@@ -289,11 +289,14 @@ struct MigrationRootView: View {
             .accessibilityHint("Select a runtime to review migration readiness")
             .inspector(isPresented: $showsInspector) {
                 detailPane
-                    .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
                     // See the note on `VolumesRootView`: the trailing commands ride
                     // the inspector's toolbar region and remain present while the
                     // inspector is closed.
                     .toolbar { trailingCommandItems }
+                    // Must be the outermost modifier on the inspector's content —
+                    // see the note in `ContainersRootView`: applied beneath
+                    // `.toolbar` its preferred width was silently discarded.
+                    .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
             }
         }
     }

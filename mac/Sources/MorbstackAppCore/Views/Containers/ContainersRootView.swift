@@ -372,12 +372,17 @@ struct ContainersRootView: View {
             }
             .inspector(isPresented: $showsInspector) {
                 inspector
-                    .inspectorColumnWidth(min: 340, ideal: 400, max: 520)
                     // See the note on `VolumesRootView`: the trailing commands and
                     // search ride the inspector's toolbar region and remain present
                     // while the inspector is closed.
                     .toolbar { trailingCommandItems }
                     .searchable(text: $search, placement: .toolbarPrincipal, prompt: "Name, image, or project")
+                    // Must be the outermost modifier on the inspector's content —
+                    // see the note in `VolumesRootView`: applied beneath
+                    // `.toolbar`/`.searchable` its preferred width was silently
+                    // discarded and the column fell back to the system default
+                    // (~270pt), which is what was clipping every value here.
+                    .inspectorColumnWidth(min: 340, ideal: 400, max: 520)
             }
         }
     }
