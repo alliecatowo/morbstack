@@ -207,6 +207,29 @@ extension FocusedValues {
     }
 }
 
+/// The selected container's two record commands, published by the Containers route.
+///
+/// Both live in the toolbar's secondary-action area, which the system is free to
+/// overflow away at a narrow width — the same exposure `RouteMaintenanceCommand` exists
+/// to close. `canOpenTerminal` is `ContainerTerminalAvailability`'s answer, so the menu
+/// item's enablement can never disagree with the toolbar button's.
+struct ContainerRecordCommands {
+    let canOpenTerminal: Bool
+    let openTerminal: () -> Void
+    let runCommand: () -> Void
+}
+
+private struct ContainerRecordCommandsKey: FocusedValueKey {
+    typealias Value = ContainerRecordCommands
+}
+
+extension FocusedValues {
+    var containerRecordCommands: ContainerRecordCommands? {
+        get { self[ContainerRecordCommandsKey.self] }
+        set { self[ContainerRecordCommandsKey.self] = newValue }
+    }
+}
+
 /// The menu bar's own commands, and with them every keyboard shortcut in the app.
 ///
 /// Shortcuts live here rather than on the views they act on so that they work from
@@ -219,6 +242,7 @@ struct MorbCommands: Commands {
     @Binding var isCLISetupPresented: Bool
     @FocusedValue(\.routeRefreshAction) private var routeRefreshAction
     @FocusedValue(\.routeMaintenanceCommand) private var routeMaintenanceCommand
+    @FocusedValue(\.containerRecordCommands) private var containerRecordCommands
     @FocusedValue(\.imageArchiveExportAction) private var imageArchiveExportAction
     @FocusedValue(\.imageArchiveImportAction) private var imageArchiveImportAction
     @FocusedValue(\.runLocalImageAction) private var runLocalImageAction
@@ -300,6 +324,25 @@ struct MorbCommands: Commands {
                 .disabled(!canSuspendEngine)
             Button("Stop Engine") { Task { await model.engineAction(.stop) } }
                 .disabled(!canStopEngine)
+        }
+
+        // The selected container's own commands, alongside Image's and Compose's. Both
+        // items are also in the route's toolbar and its contextual menu; this is the
+        // copy that survives toolbar overflow and carries the keyboard shortcut.
+        CommandMenu("Container") {
+            Button("Open Terminal") {
+                containerRecordCommands?.openTerminal()
+            }
+            // ⌃⌘T rather than ⌘T: ⌘T is the system's Show Fonts equivalent and is the
+            // shortcut a person's muscle memory reaches for in a browser tab, neither of
+            // which should collide with opening a shell inside a container.
+            .keyboardShortcut("t", modifiers: [.control, .command])
+            .disabled(containerRecordCommands?.canOpenTerminal != true)
+
+            Button("Run Command…") {
+                containerRecordCommands?.runCommand()
+            }
+            .disabled(containerRecordCommands == nil)
         }
 
         CommandMenu("Image") {
