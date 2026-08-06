@@ -380,7 +380,7 @@ final class TrackBHighlightMappingTests: XCTestCase {
     /// A single out-of-bounds character offset here is a crash in the real window.
     func testFixtureCorpusHighlightMappingStaysInBounds() {
         let lines = ShotLogs.apiLog(now: Date(timeIntervalSince1970: 1_772_000_000))
-            .map(TrackBRenderedLine.init)
+            .map { TrackBRenderedLine($0) }
         for needle in ["e", "er", "error", "READY", "🎉", "stripe refused"] {
             for line in lines {
                 let spans = TrackBLogFilter.matchSpans(of: needle, in: line.plain)

@@ -119,6 +119,7 @@ struct StacksRootView: View {
 
     let model: AppModel
 
+    @Environment(\.openWindow) private var openWindow
     @State private var metadata = TrackDComposeMetadata()
     @State private var query = ""
     @State private var selection: StackOutlineID?
@@ -484,6 +485,9 @@ struct StacksRootView: View {
             Button("View Logs") {
                 revealContainerLogs(for: service)
             }
+            if let project = stack.project {
+                Button("View Merged Project Logs") { openProjectLogs(for: project) }
+            }
             if canRemove(service) {
                 Divider()
                 Button("Remove Service…", role: .destructive) { removalTarget = service }
@@ -808,6 +812,9 @@ struct StacksRootView: View {
                     Button("View Logs") {
                         revealContainerLogs(for: service)
                     }
+                    if let project = stack.project {
+                        Button("View Merged Project Logs") { openProjectLogs(for: project) }
+                    }
                     if externalStackOperationsAreAvailable,
                         let url = service.ports.compactMap(\.url).first
                     {
@@ -822,13 +829,19 @@ struct StacksRootView: View {
         }
     }
 
-    /// Stacks only knows that a container bears a Compose project label; it has not
-    /// requested or assembled a project transcript. Keep this as a selected-container
-    /// handoff so the Containers log document retains its own explicit tail, follow,
-    /// filter, stream, and bounded-retention scope.
+    /// One service's own transcript stays a selected-container handoff, so the
+    /// Containers log document keeps its explicit tail, follow, filter, stream and
+    /// bounded-retention scope.
     @MainActor
     private func revealContainerLogs(for service: ContainerSummary) {
         TrackDAppBridge.reveal(containerID: service.id, in: model, showingLogs: true)
+    }
+
+    /// The whole project's merged transcript, in its own window. See
+    /// `ComposeProjectLogsView` for why this is a window and not a pane here.
+    @MainActor
+    private func openProjectLogs(for project: String) {
+        openWindow(id: MorbWindowID.projectLogs, value: project)
     }
 
     @ViewBuilder
@@ -888,10 +901,21 @@ struct StacksRootView: View {
                     : fixtureStackOperationMessage)
             }
 
+            if let project = stack.project {
+                Divider()
+                // Reading a project's merged output is not a lifecycle operation and is
+                // available whatever state its services are in — a stopped service's
+                // history is often the reason someone opens this.
+                Button("View Merged Project Logs", systemImage: "text.alignleft") {
+                    openProjectLogs(for: project)
+                }
+                .accessibilityIdentifier("stacks.projectLogs.open")
+                .help("Open one merged, per-service log document for \(stack.title)")
+            }
+
             if let project = stack.project,
                 let file = metadata.configFiles[project]?.first
             {
-                Divider()
                 Button("Copy Compose File Path") { MorbPasteboard.copy(file) }
             }
             Divider()

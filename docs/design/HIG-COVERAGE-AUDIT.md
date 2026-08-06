@@ -1060,3 +1060,55 @@ titlebar, toolbar, sidebar, material, inspector, focus, or Liquid Glass acceptan
   and dark at ordinary and narrow widths, confirm disabled-controls help and VoiceOver
   wording, attempt the unavailable routes, and verify that no host socket, process, or
   document panel is reached.
+
+### Compose-aggregated log document — 2026-08-05 (UX-2, UX-3)
+
+- **User task:** read one Compose project's services as a single stream, to follow a
+  request or a failure across services, while continuing to operate the project. Plus
+  two reading controls on every log document: wrap long lines, and follow a URL a
+  container printed.
+- **HIG/API read:** Apple [Windows](https://developer.apple.com/design/human-interface-guidelines/windows),
+  [Designing for macOS](https://developer.apple.com/design/human-interface-guidelines/designing-for-macos/),
+  [Menus](https://developer.apple.com/design/human-interface-guidelines/menus),
+  [Color](https://developer.apple.com/design/human-interface-guidelines/color) (colour is
+  never the only channel), SwiftUI
+  [`WindowGroup`](https://developer.apple.com/documentation/swiftui/windowgroup),
+  [`openWindow`](https://developer.apple.com/documentation/swiftui/environmentvalues/openwindow),
+  [`ContentUnavailableView`](https://developer.apple.com/documentation/swiftui/contentunavailableview),
+  [`OpenURLAction`](https://developer.apple.com/documentation/swiftui/openurlaction), and
+  Docker's [`container logs`](https://docs.docker.com/reference/cli/docker/container/logs/)
+  (`timestamps=1`, one daemon clock across a project's services).
+- **Native choice — why a window.** The merged transcript is a document watched over
+  time, not metadata about a selection. An inspector pane (340–520 pt) cannot hold a
+  timestamp, service and message column; a mode inside the container Logs tab would
+  describe a project underneath a single container's record; a sidebar destination would
+  make "logs of one project" a tenth resource category and replace the browser the
+  person is working in. `WindowGroup(id:for:)` keyed on the Compose project name is
+  non-modal, restorable, allows two projects side by side, and gives the document its
+  own title. Entry points are the Stacks project menus and the Containers project group
+  header context menu — the two places in the app that address a whole project.
+- **Ordering (correctness, not cosmetics):** lines merge on the timestamp dockerd
+  recorded, held in a short reorder window and released as the longest ripe sorted
+  prefix, so a slower stream's earlier line is never overtaken. A start-up priming phase
+  holds the document until every service has answered (or 2 s), which is what stops
+  "all of web, then all of api". A line with no engine timestamp inherits its own
+  service's last one; a service that never has timestamps falls back to arrival and
+  shows "—". A line delayed past the window is appended where it arrived with its true
+  timestamp rather than inserted into history. Nothing is ever re-ordered after display,
+  and IDs are assigned at release so display order and ID order are one sequence.
+- **Colour:** the service name is always drawn as text; the palette colours only that
+  column and never the message body, which stays the ANSI parser's. Slots come from the
+  existing appearance-tuned ANSI palette minus the greys, assigned by a stable FNV-1a
+  hash of the service name so a project's colours survive restarts.
+- **Links:** only literal `http`/`https` substrings are linked, so the visible text is
+  the destination character for character; credentials, non-web schemes, bidi-carrying
+  lines and non-ASCII continuations are refused; nothing auto-opens, and a destination
+  on this Mac or this LAN gets a confirmation naming the full URL.
+- **Evidence:** 55 new unit tests (merge ordering incl. the slow-stream, no-timestamp
+  and late-line cases; palette stability; hidden-service scope; the linkifier's accept,
+  reject and hostile sets), full suite 1061 passing. **No visual evidence.** This lane
+  could not hold the machine lane, so the new window has never been seen: its title,
+  toolbar-free chrome, default size, restoration behaviour, the service column width at
+  narrow widths, the horizontal scroller when wrap is off, and link appearance in light
+  and dark all remain unverified and must be reviewed with `--tour-fixtures` and Computer
+  Use before acceptance.

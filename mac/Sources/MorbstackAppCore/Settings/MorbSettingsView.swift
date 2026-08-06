@@ -18,6 +18,10 @@ enum TrackDPreferences {
     /// Suppresses only automatic first-run CLI presentation. The Morbstack app menu
     /// always offers a deliberate way to return to the same review sheet.
     static let firstRunCLISetupDeferred = "morb.firstRunCLISetupDeferred"
+    /// Whether log documents wrap long lines or scroll sideways (UX-3 / OrbStack #536).
+    /// A reading preference, so it persists and is shared by every log document rather
+    /// than being re-chosen per window.
+    static let logWrapsLines = "morb.logWrapsLines"
 }
 
 // MARK: - Root
