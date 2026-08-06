@@ -177,7 +177,7 @@ struct ContainerStatsTab: View {
 
                 selectedMetricContent(probe)
 
-                Text(sampleCadenceDescription(probe))
+                Text(sampleCadenceDescription)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(.top, 12)
@@ -297,13 +297,12 @@ struct ContainerStatsTab: View {
         return step * magnitude
     }
 
-    private func sampleCadenceDescription(_ probe: TrackBStatsProbe) -> String {
+    /// The interval only — how many readings and over what span is already stated once,
+    /// directly under the selected chart's own headline (`StatsChartSection.windowDescription`).
+    /// Restating the count here duplicated it three sections apart for no reader benefit.
+    private var sampleCadenceDescription: String {
         let seconds = Int(hub.minimumInterval)
-        let secondsLabel = "\(seconds) second\(seconds == 1 ? "" : "s")"
-        if probe.history.count < 2 {
-            return "Statistics update about every \(secondsLabel)."
-        }
-        return "Showing \(probe.history.count) reading\(probe.history.count == 1 ? "" : "s"), sampled about every \(secondsLabel)."
+        return "Statistics update about every \(seconds) second\(seconds == 1 ? "" : "s")."
     }
 
     private func subscribe() {
