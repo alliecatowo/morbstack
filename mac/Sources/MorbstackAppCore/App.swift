@@ -21,6 +21,10 @@ import SwiftUI
 /// because a `WindowGroup` with no identifier cannot be addressed.
 enum MorbWindowID {
     static let main = "morbstack.main"
+    /// One Compose project's merged log document. Presented per project value, so two
+    /// projects can be watched side by side. See `ComposeProjectLogsView` for why a
+    /// merged log is a window rather than a pane in the Stacks inspector.
+    static let projectLogs = "morbstack.projectLogs"
 }
 
 /// The app scene graph.
@@ -118,6 +122,32 @@ public struct MorbstackMainApp: App {
         // This still deliberately avoids `.unifiedCompact(showsTitle: false)`, whose
         // hidden title also suppresses the route subtitle.
         .windowToolbarStyle(.automatic)
+
+        // A Compose project's merged log is an auxiliary document window: non-modal, so
+        // the person can keep operating the project while watching it; one per project
+        // value; and wide enough for a timestamp, a service and a message column, which
+        // an inspector column is not. The value is the Compose project name — the same
+        // engine-facing reference the rest of the app addresses a project by — so macOS
+        // can restore the window, and `ComposeProjectLogsView` states the truth when the
+        // project it names no longer exists.
+        WindowGroup(id: MorbWindowID.projectLogs, for: String.self) { $project in
+            Group {
+                if let project {
+                    ComposeProjectLogsView(project: project, model: model)
+                } else {
+                    // Restoration can hand back a window with no value. An empty window
+                    // would be a mystery; this states what it is and what to do.
+                    ContentUnavailableView {
+                        Label("No Project Selected", systemImage: "square.stack.3d.up")
+                    } description: {
+                        Text("Open a merged log from a Compose project in Stacks or from a project group in Containers.")
+                    }
+                    .frame(minWidth: 480, minHeight: 320)
+                }
+            }
+            .preferredColorScheme(options.appearance)
+        }
+        .defaultSize(width: 980, height: 620)
 
         // `.window` rather than the default `.menu`: the popover is a laid-out SwiftUI
         // view with its own header, rows and footer, and `.menu` would try to render it

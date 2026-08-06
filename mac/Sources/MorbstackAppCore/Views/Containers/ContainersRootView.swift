@@ -87,6 +87,7 @@ struct ContainersRootView: View {
     let model: AppModel
 
     @Environment(\.openURL) private var openURL
+    @Environment(\.openWindow) private var openWindow
 
     init(
         model: AppModel,
@@ -390,6 +391,18 @@ struct ContainersRootView: View {
                             .monospacedDigit()
                     }
                     .help("Containers labelled with the Compose project \(project.name).")
+                    // The group header is the only place on this route that addresses a
+                    // whole project, so it is where the project-wide log document
+                    // belongs. Managing the project itself remains Stacks' job.
+                    .contextMenu {
+                        Button("View Merged Project Logs", systemImage: "text.alignleft") {
+                            openWindow(id: MorbWindowID.projectLogs, value: project.name)
+                        }
+                        .accessibilityIdentifier("containers.project.logs")
+                        Button("Open in Stacks") {
+                            TrackDAppBridge.reveal(.stacks, in: model)
+                        }
+                    }
                 }
                 .accessibilityIdentifier("containers.project.\(project.name)")
             }

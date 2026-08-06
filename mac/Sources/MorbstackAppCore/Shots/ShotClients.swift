@@ -72,14 +72,43 @@ final class ShotDockerClient: DockerClient, @unchecked Sendable {
     ///
     /// The stream yields deterministic lines. A live fixture window may choose to preload
     /// the store, but this endpoint remains useful to exercise normal log loading.
+    ///
+    /// `shopfront-api-1` gets the corpus verbatim — it is the container every existing
+    /// capture and the fixture diagnostics use. Every other container gets a
+    /// deterministic slice of it, offset in time, so the Compose-aggregated document has
+    /// several genuinely different, genuinely interleaved streams to merge instead of
+    /// four identical copies of one log arriving at the same instants.
     override func logs(
         id: String, follow: Bool = true, tail: Int = 500
     ) -> AsyncThrowingStream<LogLine, Error> {
-        let lines = logLines
+        let lines = Self.lines(logLines, for: id)
         return AsyncThrowingStream { continuation in
             for line in lines.suffix(tail) { continuation.yield(line) }
             if !follow { continuation.finish() }
         }
+    }
+
+    static func lines(_ corpus: [LogLine], for containerID: String) -> [LogLine] {
+        guard containerID != ShotFixtures.container("shopfront-api-1").id else { return corpus }
+        // A stable per-container seed: the same container always produces the same
+        // slice, so two fixture runs are comparable.
+        var seed: UInt64 = 0xcbf2_9ce4_8422_2325
+        for byte in containerID.utf8 {
+            seed ^= UInt64(byte)
+            seed = seed &* 0x100_0000_01b3
+        }
+        let stride = 3 + Int(seed % 4)
+        let shift = Double(seed % 900) / 1_000
+        return corpus.enumerated()
+            .filter { index, _ in index % stride == Int(seed % UInt64(stride)) }
+            .enumerated()
+            .map { position, element in
+                LogLine(
+                    id: position,
+                    text: element.element.text,
+                    stream: element.element.stream,
+                    timestamp: element.element.timestamp?.addingTimeInterval(shift))
+            }
     }
 
     /// Replays a fixture series as fast as the consumer will take it.
