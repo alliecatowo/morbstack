@@ -327,6 +327,28 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
         return _guestMorbinitVersion
     }
 
+    /// What the running guest reports it actually launched dockerd with, for
+    /// each of the three proxy fields (UX-18). Empty string means "dockerd
+    /// has no proxy of this kind this boot"; `nil` means no guest has
+    /// answered `info` yet, or the guest predates the field — those two
+    /// states must not be conflated, since the first is a real "off" and the
+    /// second is "unknown".
+    public var guestHTTPProxy: String? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _guestHTTPProxy
+    }
+    public var guestHTTPSProxy: String? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _guestHTTPSProxy
+    }
+    public var guestNoProxy: String? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _guestNoProxy
+    }
+
     /// Mirror of ``controlReady`` for cross-thread reads, guarded by ``stateLock``.
     private var _controlReadySnapshot = false
 
@@ -346,6 +368,14 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
     /// answered `info` on this boot — an initramfs old enough to omit the field
     /// predates every release that shipped one.
     private var _guestMorbinitVersion: String?
+
+    /// Last `http_proxy`/`https_proxy`/`no_proxy` values reported by the guest's
+    /// `info` reply — what dockerd was actually launched with, not merely what
+    /// the host asked for. See ``guestHTTPProxy`` for the empty-string-vs-`nil`
+    /// convention.
+    private var _guestHTTPProxy: String?
+    private var _guestHTTPSProxy: String?
+    private var _guestNoProxy: String?
 
     /// Last `rosetta` value reported by the guest: the share mounted *and* an
     /// interpreter was registered from it.
@@ -502,6 +532,20 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
         return plan
     }
 
+    /// Replaces every `morb.proxy=<value>` token's value with `<redacted>`,
+    /// for logging a boot command line that may otherwise carry a proxy URL's
+    /// embedded basic-auth credentials. Pure and static so it can be tested
+    /// without booting anything.
+    static func redactingProxyTokens(_ cmdline: String) -> String {
+        cmdline.split(separator: " ", omittingEmptySubsequences: false)
+            .map { token -> String in
+                token.hasPrefix(MorbGuestProxy.cmdlineKey + "=")
+                    ? "\(MorbGuestProxy.cmdlineKey)=<redacted>"
+                    : String(token)
+            }
+            .joined(separator: " ")
+    }
+
     /// Records the guest's share report. Safe from any thread.
     private func noteGuestShares(_ states: [String: MorbShares.GuestMountState]) {
         stateLock.lock()
@@ -567,6 +611,9 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
             _guestShareEventBridge = nil
             _guestShareEventBridgeContractVersion = nil
             _guestDiskResize = nil
+            _guestHTTPProxy = nil
+            _guestHTTPSProxy = nil
+            _guestNoProxy = nil
         }
         stateLock.unlock()
     }
@@ -620,6 +667,24 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
         guard let version else { return }
         stateLock.lock()
         if _probeGeneration == generation { _guestMorbinitVersion = version }
+        stateLock.unlock()
+    }
+
+    /// Records the guest's reported proxy environment. Each field is left
+    /// untouched when the guest omits it — an older initramfs not repeating
+    /// `info`'s proxy fields must not erase a prior report — but an empty
+    /// string, unlike `nil`, is recorded: it is the guest's positive
+    /// statement that dockerd has no proxy of that kind.
+    private func noteGuestProxy(
+        http: String?, https: String?, noProxy: String?, ifCurrent generation: Int
+    ) {
+        guard http != nil || https != nil || noProxy != nil else { return }
+        stateLock.lock()
+        if _probeGeneration == generation {
+            if let http { _guestHTTPProxy = http }
+            if let https { _guestHTTPSProxy = https }
+            if let noProxy { _guestNoProxy = noProxy }
+        }
         stateLock.unlock()
     }
 
@@ -2010,6 +2075,9 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
                     contractVersion: info.shareEventBridgeContractVersion,
                     ifCurrent: generation)
                 noteGuestDiskResize(info.diskResize, ifCurrent: generation)
+                noteGuestProxy(
+                    http: info.httpProxy, https: info.httpsProxy, noProxy: info.noProxy,
+                    ifCurrent: generation)
                 // A guest too old to report the field cannot tell us dockerd is up;
                 // treating "absent" as ready keeps this compatible rather than
                 // hanging for the whole boot budget against an older initramfs.
@@ -2121,12 +2189,29 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
         } else {
             bootMode = .disk
         }
-        let cmdline = try config.resolvedKernelCmdline(for: bootMode, shares: sharePlan.shares)
+        // The Mac's proxy configuration (UX-18), read fresh on every boot so a
+        // proxy that changed since the last start — a laptop moving between a
+        // corporate network and home — takes effect without an explicit
+        // config edit. `config.toml` overrides win; see `effectiveGuestProxy`.
+        let proxy = config.effectiveGuestProxy(host: HostProxyConfiguration.current())
+        let cmdline = try config.resolvedKernelCmdline(for: bootMode, shares: sharePlan.shares, proxy: proxy)
         bootLoader.commandLine = cmdline
         configuration.bootLoader = bootLoader
         log.info("boot mode \(bootMode.rawValue)"
             + (bootMode == .initramfs ? ", initrd \(initrdURL.path)" : "")
-            + ", cmdline \"\(cmdline)\"")
+            // Proxy tokens are redacted: a proxy URL can carry embedded
+            // basic-auth credentials, and the console log is not a secret
+            // store. Shares are plain paths and stay visible.
+            + ", cmdline \"\(Self.redactingProxyTokens(cmdline))\""
+            + (proxy.isEmpty ? "" : ", proxy configured for the guest"))
+        if proxy.pacOnly {
+            log.warn(
+                "the Mac's proxy is configured via PAC/auto-discovery"
+                    + (proxy.pacURLString.map { " (\($0))" } ?? "")
+                    + " — Morbstack cannot evaluate a PAC script, so no proxy is being passed "
+                    + "to the guest; set http_proxy/https_proxy in \(MorbPaths.configFile.path) "
+                    + "to work around this")
+        }
 
         // Serial console -> ~/.morbstack/logs/console.log
         configuration.serialPorts = [try makeConsolePort()]

@@ -112,6 +112,15 @@ public struct GuestReply: Codable, Equatable, Sendable {
     /// `/private/tmp` VirtioFS share. `nil` denotes an older guest that cannot prove
     /// this additional mount; callers must not treat absence as success.
     public var tmpAliasMounted: Bool?
+    /// What `supervisor::apply_proxy_env` actually put in dockerd's environment
+    /// this boot — present on `info` from guests that decode `morb.proxy=`
+    /// (UX-18). Empty string, not absent, means "dockerd has no proxy of this
+    /// kind"; `nil` means an older guest that predates the field. This is a
+    /// report of what was *launched*, so `morb doctor` can tell "the setting
+    /// reached the engine" apart from "we only set config.toml".
+    public var httpProxy: String?
+    public var httpsProxy: String?
+    public var noProxy: String?
     /// `true` when the guest mounted the host's Rosetta share *and* registered it
     /// with `binfmt_misc` — present on `info` from guests that do amd64 setup.
     ///
@@ -166,6 +175,9 @@ public struct GuestReply: Codable, Equatable, Sendable {
         case dockerDataOnDisk = "docker_data_on_disk"
         case shares
         case tmpAliasMounted = "tmp_alias_mounted"
+        case httpProxy = "http_proxy"
+        case httpsProxy = "https_proxy"
+        case noProxy = "no_proxy"
         case rosetta
         case binfmtAmd64 = "binfmt_amd64"
         case shareEventBridge = "share_event_bridge"
