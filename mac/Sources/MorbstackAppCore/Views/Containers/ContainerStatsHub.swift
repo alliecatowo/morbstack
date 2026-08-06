@@ -1,7 +1,7 @@
 // Copyright 2026 The Morbstack Authors.
 // Licensed under the Apache License, Version 2.0 (the "License").
 //
-// Live CPU and memory for the rows that are actually on screen.
+// Live CPU, memory, network and block I/O for the rows that are actually on screen.
 //
 // `/containers/{id}/stats` is one long-lived connection per container, so a naive
 // "subscribe on appear" over a hundred rows would open a hundred sockets and wake the
@@ -75,7 +75,8 @@ final class TrackBStatsProbe {
 
     var cpuSeries: [Double] { history.map(\.cpuPercent) }
     var memorySeries: [Double] { history.map { Double($0.memBytes) } }
-    var networkRates: [NetworkRateSample] { StatsSample.networkRates(in: history) }
+    var networkRates: [ByteRateSample] { StatsSample.networkRates(in: history) }
+    var blockIORates: [ByteRateSample] { StatsSample.blockIORates(in: history) }
 }
 
 /// Owns the stats streams and hands out probes.

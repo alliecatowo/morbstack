@@ -38,23 +38,45 @@ struct TrackBRenderedLine: Identifiable {
     /// `plain`, lowercased once, for the filter's hot loop.
     let lowered: String
     let attributed: AttributedString
+    /// Which service produced the line, in an aggregated document. `nil` for a
+    /// single-container transcript, where the whole document is one source.
+    let source: TrackBLogSource?
+    /// URLs found literally in the text. Empty for the overwhelming majority of lines.
+    let links: [TrackBLinkSpan]
 
-    init(_ line: LogLine) {
-        self.id = line.id
+    /// - Parameters:
+    ///   - id: overrides the per-stream ID Docker's assembler produced. An aggregated
+    ///     document must number its lines itself: two containers' streams each count
+    ///     from zero, and the find navigator requires IDs that ascend in *display*
+    ///     order across the whole document.
+    ///   - source: the service this line came from, in an aggregated document.
+    init(_ line: LogLine, id: Int? = nil, source: TrackBLogSource? = nil) {
+        self.id = id ?? line.id
         self.stream = line.stream
         self.timestamp = line.timestamp
+        self.source = source
 
         let spans = TrackBAnsi.spans(line.text)
-        self.plain = spans.count == 1 ? spans[0].text : spans.reduce(into: "") { $0 += $1.text }
+        let plain = spans.count == 1 ? spans[0].text : spans.reduce(into: "") { $0 += $1.text }
+        self.plain = plain
         self.lowered = plain.lowercased()
-        self.attributed = Self.render(spans: spans)
+        self.links = TrackBLogLinkifier.spans(in: plain)
+        self.attributed = Self.render(spans: spans, links: links)
     }
 
     /// Builds the attributed payload for one line. ANSI is the program's explicit
     /// presentation; standard error is a Docker source channel, not an error severity.
     /// The transcript presents the latter as labelled metadata instead of repainting
     /// every stderr message as a warning.
-    private static func render(spans: [TrackBAnsiSpan]) -> AttributedString {
+    ///
+    /// Links are baked in here, once, for the same reason everything else is: a row's
+    /// `body` must never re-scan text. Where a URL falls inside an ANSI-coloured run the
+    /// link presentation wins for those characters — a link that does not look like a
+    /// link is a worse outcome than a colour that does not survive, and the underlying
+    /// colour is still visible on the rest of the line.
+    private static func render(
+        spans: [TrackBAnsiSpan], links: [TrackBLinkSpan]
+    ) -> AttributedString {
         guard !spans.isEmpty else { return AttributedString("") }
 
         var result = AttributedString()
@@ -74,6 +96,18 @@ struct TrackBRenderedLine: Identifiable {
 
             piece.mergeAttributes(container)
             result.append(piece)
+        }
+
+        guard !links.isEmpty else { return result }
+        let characterCount = result.characters.count
+        for link in links {
+            // The spans were measured on the plain text, which is these spans joined, so
+            // the offsets line up by construction. The bounds check keeps a hypothetical
+            // divergence a missing link rather than a crash.
+            guard link.offset + link.length <= characterCount else { continue }
+            let start = result.index(result.startIndex, offsetByCharacters: link.offset)
+            let end = result.index(start, offsetByCharacters: link.length)
+            result[start..<end].link = link.url
         }
         return result
     }
@@ -120,12 +154,65 @@ final class TrackBLogStore {
     /// without an intermediate array copy per frame.
     private(set) var lines = TrackBRingBuffer<TrackBRenderedLine>(capacity: TrackBLogStore.capacity)
 
-    /// The filtered view of `lines`, recomputed only when the query or the content
-    /// changes. Empty and unused when no filter is active.
+    /// The displayed subset of `lines` — non-matching lines removed in filter mode,
+    /// hidden services removed in an aggregated document. Recomputed only when the
+    /// query, the hidden set, or the content changes; empty and unused when the whole
+    /// scrollback is on screen, which is the ordinary case.
     private(set) var filtered: [TrackBRenderedLine] = []
+
+    /// Container IDs whose lines are currently hidden.
+    ///
+    /// Only the Compose-aggregated document sets this: a per-service show/hide is a
+    /// scope on the same document, so it composes with find and filter rather than
+    /// being a third parallel mechanism. Hidden lines stay in the scrollback — showing
+    /// a service again must not require re-reading it from Docker.
+    var hiddenSources: Set<String> = [] {
+        didSet {
+            guard hiddenSources != oldValue else { return }
+            recomputeQuery()
+        }
+    }
+
+    var hasHiddenSources: Bool { !hiddenSources.isEmpty }
+
+    /// Whether the scrollback is being narrowed at all — by a filter, by a hidden
+    /// service, or both.
+    private var isNarrowed: Bool { isFiltering || hasHiddenSources }
+
+    /// Whether a line survives the current scope. Hiding is applied before matching, so
+    /// a match count never includes a line the person cannot see.
+    private func admits(_ line: TrackBRenderedLine) -> Bool {
+        if let source = line.source, hiddenSources.contains(source.containerID) { return false }
+        guard isFiltering else { return true }
+        return TrackBLogFilter.matches(line.lowered, needle: needle)
+    }
+
+    /// Whether a *visible* line matches the find query.
+    private func isFindMatch(_ line: TrackBRenderedLine) -> Bool {
+        guard isFinding else { return false }
+        if let source = line.source, hiddenSources.contains(source.containerID) { return false }
+        return TrackBLogFilter.matches(line.lowered, needle: needle)
+    }
 
     /// How many lines the current query matches.
     private(set) var matchCount: Int = 0
+
+    /// What the query field does: highlight in place (`.find`) or hide non-matching
+    /// lines (`.filter`). Find is the default — a destructive filter presented as the
+    /// only search is the competitor defect this store exists to avoid.
+    var mode: TrackBLogQueryMode = .find {
+        didSet {
+            guard mode != oldValue else { return }
+            currentMatchID = nil
+            recomputeQuery()
+        }
+    }
+
+    /// Ascending IDs of the lines the find query matches. Empty in filter mode.
+    private(set) var matchIDs: [Int] = []
+
+    /// The match Enter/Shift+Enter last stepped to, if it is still in the scrollback.
+    private(set) var currentMatchID: Int?
 
     private(set) var isStreaming = false
     private(set) var errorText: String?
@@ -141,13 +228,18 @@ final class TrackBLogStore {
         didSet {
             guard query != oldValue else { return }
             needle = TrackBLogFilter.normalize(query)
-            recomputeFilter()
+            currentMatchID = nil
+            recomputeQuery()
         }
     }
 
     private(set) var needle: String = ""
 
-    var isFiltering: Bool { !needle.isEmpty }
+    /// Whether non-matching lines are currently hidden.
+    var isFiltering: Bool { mode == .filter && !needle.isEmpty }
+
+    /// Whether matches are currently highlighted in place.
+    var isFinding: Bool { mode == .find && !needle.isEmpty }
 
     /// Lines waiting for the next flush.
     private var staged: [TrackBRenderedLine] = []
@@ -166,6 +258,8 @@ final class TrackBLogStore {
         lines.removeAll()
         filtered.removeAll()
         matchCount = 0
+        matchIDs.removeAll()
+        currentMatchID = nil
         errorText = nil
         isStreaming = true
         tail.jumpToBottom()
@@ -213,11 +307,47 @@ final class TrackBLogStore {
         self.lines.removeAll()
         filtered.removeAll()
         matchCount = 0
+        matchIDs.removeAll()
+        currentMatchID = nil
         errorText = nil
-        self.lines.append(contentsOf: lines.map(TrackBRenderedLine.init))
-        recomputeFilter()
+        self.lines.append(contentsOf: lines.map { TrackBRenderedLine($0) })
+        recomputeQuery()
         self.isStreaming = isStreaming
         tail.jumpToBottom()
+    }
+
+    // MARK: Hosted ingest
+
+    /// Takes over the document for a host that owns its own transport.
+    ///
+    /// The Compose-aggregated view has to merge several Docker streams before anything
+    /// can be shown, so it cannot use `start(client:containerID:)` — but every*thing*
+    /// downstream of ingest is identical, and reimplementing find, filter, follow,
+    /// eviction and export beside this class would guarantee the two drift. So the
+    /// aggregator owns the sockets and the ordering, and this store stays the one
+    /// implementation of what a log document *is*.
+    func beginHostedStream() {
+        stop()
+        lines.removeAll()
+        filtered.removeAll()
+        matchCount = 0
+        matchIDs.removeAll()
+        currentMatchID = nil
+        errorText = nil
+        isStreaming = true
+        tail.jumpToBottom()
+    }
+
+    /// Appends an already-ordered batch. The host has done the batching, so these go
+    /// straight into the scrollback rather than through the staging buffer.
+    func appendHosted(_ batch: [TrackBRenderedLine]) {
+        guard !batch.isEmpty else { return }
+        append(batch)
+    }
+
+    func finishHostedStream(error: Error?) {
+        isStreaming = false
+        if let error { errorText = TrackBErrorText.short(error) }
     }
 
     func clear() {
@@ -225,6 +355,8 @@ final class TrackBLogStore {
         staged.removeAll()
         filtered.removeAll()
         matchCount = 0
+        matchIDs.removeAll()
+        currentMatchID = nil
         tail.jumpToBottom()
     }
 
@@ -244,16 +376,27 @@ final class TrackBLogStore {
         guard !staged.isEmpty else { return }
         let batch = staged
         staged.removeAll(keepingCapacity: true)
+        append(batch)
+    }
+
+    /// Adds a batch to the scrollback and brings the derived views up to date.
+    private func append(_ batch: [TrackBRenderedLine]) {
         lines.append(contentsOf: batch)
 
-        guard isFiltering else { return }
-        // Only the new lines need testing; everything already in `filtered` still
-        // matches, minus whatever the ring just evicted.
+        guard isNarrowed || isFinding else { return }
+        // Only the new lines need testing; everything already computed still stands,
+        // minus whatever the ring just evicted — eviction forces a full recompute.
         if lines.droppedCount > 0 {
-            recomputeFilter()
-        } else {
-            let additions = TrackBLogFilter.filter(batch, needle: needle, lowered: \.lowered)
-            filtered.append(contentsOf: additions)
+            recomputeQuery()
+            return
+        }
+        if isNarrowed {
+            filtered.append(contentsOf: batch.filter(admits))
+        }
+        if isFinding {
+            matchIDs.append(contentsOf: batch.filter(isFindMatch).map(\.id))
+            matchCount = matchIDs.count
+        } else if isFiltering {
             matchCount = filtered.count
         }
     }
@@ -264,35 +407,104 @@ final class TrackBLogStore {
         if let error { errorText = TrackBErrorText.short(error) }
     }
 
-    private func recomputeFilter() {
-        guard isFiltering else {
+    private func recomputeQuery() {
+        if isNarrowed {
+            filtered = lines.elements.filter(admits)
+        } else {
             filtered.removeAll(keepingCapacity: true)
-            matchCount = 0
-            return
         }
-        filtered = TrackBLogFilter.filter(lines, needle: needle, lowered: \.lowered)
-        matchCount = filtered.count
+
+        if isFinding {
+            matchIDs = lines.elements.filter(isFindMatch).map(\.id)
+            matchCount = matchIDs.count
+        } else if isFiltering {
+            matchIDs.removeAll(keepingCapacity: true)
+            matchCount = filtered.count
+        } else {
+            matchIDs.removeAll(keepingCapacity: true)
+            matchCount = 0
+        }
+        // The ring may have evicted the line the person was parked on, or the query
+        // may no longer match it. A stale "current" would highlight the wrong line.
+        if let current = currentMatchID, !TrackBMatchNavigator.contains(current, in: matchIDs) {
+            currentMatchID = nil
+        }
+    }
+
+    // MARK: Find navigation
+
+    /// Steps to the next (or previous) matching line and returns its ID so the view
+    /// can scroll to it. Wraps at either end, exactly like the system find bar.
+    @discardableResult
+    func stepMatch(forward: Bool) -> Int? {
+        guard isFinding else { return nil }
+        currentMatchID = TrackBMatchNavigator.step(
+            from: currentMatchID, in: matchIDs, forward: forward)
+        return currentMatchID
+    }
+
+    /// The "3 of 47" readout. `nil` when find is inactive.
+    var matchPositionText: String? {
+        guard isFinding else { return nil }
+        guard !matchIDs.isEmpty else { return "No matches" }
+        if let current = currentMatchID,
+            let position = TrackBMatchNavigator.position(of: current, in: matchIDs)
+        {
+            return "\(position) of \(matchIDs.count)"
+        }
+        return "\(matchIDs.count) \(matchIDs.count == 1 ? "match" : "matches")"
     }
 
     // MARK: Output
 
     /// The lines the view should draw right now.
     var visibleLines: [TrackBRenderedLine] {
-        isFiltering ? filtered : lines.elements
+        isNarrowed ? filtered : lines.elements
     }
 
     var lastVisibleID: Int? {
-        isFiltering ? filtered.last?.id : lines.elements.last?.id
+        isNarrowed ? filtered.last?.id : lines.elements.last?.id
     }
 
     /// Plain text of everything currently visible, for copy and export.
+    ///
+    /// An aggregated document labels every line with its service: pasting a merged
+    /// transcript into an issue without saying which service said what would be worse
+    /// than useless.
     func exportText() -> String {
         TrackBLogExport.text(
             visibleLines,
             timestamp: \.timestamp,
             stream: \.stream,
             body: \.plain,
-            includeTimestamps: showsTimestamps)
+            includeTimestamps: showsTimestamps,
+            service: { $0.source?.service })
+    }
+
+    /// A frozen, provenance-bearing document of a Compose-aggregated transcript.
+    func exportProjectDocument(
+        project: String,
+        includedServices: [String],
+        hiddenServices: [String],
+        unavailableServices: [String],
+        capturedAt: Date = Date()
+    ) -> TrackBLogExport.Document {
+        TrackBLogExport.projectDocument(
+            project: project,
+            includedServices: includedServices,
+            hiddenServices: hiddenServices,
+            unavailableServices: unavailableServices,
+            lines: visibleLines,
+            bufferedLineCount: lines.elements.count,
+            droppedEarlierLineCount: lines.droppedCount,
+            initialTail: Self.initialTail,
+            searchQuery: isFiltering ? query : nil,
+            isStreaming: isStreaming,
+            capturedAt: capturedAt,
+            timestamp: \.timestamp,
+            stream: \.stream,
+            body: \.plain,
+            service: { $0.source?.service })
     }
 
     /// A frozen, provenance-bearing document of the visible client-side transcript.

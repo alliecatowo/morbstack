@@ -235,7 +235,7 @@ Ranked by impact per effort. Full rationale in [docs/COMPETITIVE-GAPS.md](docs/C
 | --- | --- | --- |
 | DIF-1 | Hot reload on by default + published watcher conformance matrix | `blocked` (EN-7) |
 | DIF-1a | **Synchronized shares on the live-share transport** — the correctness-mode alternative to the `fchmod`→`IN_ATTRIB` bridge (colima#1244 is that bridge's documented production failure) and the honest successor to the deleted `MorbShareSyncProtocol` (SP-5). Scope: (1) extend the existing authenticated vsock-2381 session (`MorbLiveShareTransport` ↔ `live_share_receiver.rs`) with content-bearing messages — per-file records carrying bytes + SHA-256, chunked, over the already-proven HMAC handshake; (2) guest writer in `morbinit` doing atomic tmp-write→fsync→rename into a real guest-local directory (ext4/virtio-blk data disk, **not** the virtiofs mount — the guest kernel has no btrfs), so watchers get real `IN_MODIFY`/`IN_CREATE`/`IN_DELETE`; (3) per-share opt-in surfaced in config/CLI (`liveSharePaths` still has no writer — EN-7); (4) guest-image rebuild + repin (guest lane). **Acceptance: a Go watcher using `air` rebuilds on host edits** — fsnotify treats `Chmod` as a distinct op, so `air` is precisely the case the current bridge cannot serve; chokidar/watchdog re-verified unbroken. See `docs/design/INERT-SUBSYSTEMS-DECISION.md` §1 and TECH-2 option (b). | `open` (needs guest lane + live engine; 1–2 wk) |
-| DIF-2 | Container `exec` + a real PTY in the app — no `exec` in `DockerClient.swift`, no PTY view; table stakes for both competitors | `open` |
+| DIF-2 | Container `exec` + a real PTY in the app — table stakes for both competitors. Transport, screen model, view and window shipped; `TerminalEmulator.feed`/`resize` and all of `TerminalKeyEncoding` were stubs returning nothing and are now implemented (141 unit tests incl. two fuzz soaks and a hostile-input suite). Reachable from the Containers contextual menu, the toolbar (`containers.openTerminal`), and the Container menu (⌃⌘T), disabled with a remedy for any non-running container. See [`docs/exec.md`](docs/exec.md). | `open` (code complete; **needs a machine-lane pass** — nobody has yet held a real shell against a running container) |
 | DIF-3 | Publish the benchmark harness; add `git-status-bindmount` and `npm-install-bindmount-vs-volume` | `open` |
 | DIF-4 | **Container domains via unprivileged mDNS** — mechanism decided in [`docs/design/DNS-DECISION.md`](docs/design/DNS-DECISION.md). Six steps, **~3–4 weeks, zero admin prompts**: (0) prove host→guest reachability at `192.168.64.x` on Wi-Fi/Ethernet/VPN — **hard gate**, fall back to `127.0.0.1` + high-port URLs if it fails; (1) mDNS registrar in `morbstackd` (`A` records only, `LocalOnly`, no advertised service type, conflict handling, Docker-event lifecycle); (2) name derivation wired to the existing `MorbLocalDomain.Name` validator (the loopback claim reconciler was deleted under SP-5; the registrar owns its own name→container index and duplicate rejection); (3) guest-side Host-header reverse proxy owning `:80`/`:443` inside the VM, pinned like every other guest binary, with listening-port auto-detection; (4) withdrawal paths (stop/remove, suspend, wake, VPN transition, hostile-`.local` detection); (5) `morb domain` CLI + inspector affordance. No wildcards — do not advertise them. | `open` |
 | DIF-5 | **HTTPS via a name-constrained local CA** — **~2–3 weeks after DIF-4**. CA key in the Keychain, ACL-restricted; per-name short-lived leaves; name constraints as defence in depth with honest browser-by-browser verification (Firefox has its own trust store). **Two things need a written ruling before code:** the trust installation is the one and only user password prompt in the whole domains feature, and if the proxy lives in the guest then leaf private keys live in the guest — recommended shape is issue-on-host, push over vsock, hold in guest tmpfs, CA key never leaves the host. | `blocked` (DIF-4) |
@@ -376,13 +376,223 @@ that doc's §8/§12 and are product decisions, not omissions.
 
 | ID | Ticket | Deliverable | State |
 | --- | --- | --- | --- |
-| UX-1 | **Context-preserving log search** — our `ContainerLogsTab` filter hides every non-matching line, which is OrbStack issue #2178 verbatim (their fix took until v2.2.0). We should not ship a bug a competitor already ate the complaints for. | Search becomes highlight-and-step: matches highlighted in place, Enter/Shift+Enter (or ⌘G/⇧⌘G) navigation, match count, surrounding context always visible. Filtering stays available as a second, explicitly-labelled mode. `Views/Containers/ContainerLogsTab.swift` + `ContainerLogStore.swift`. | `open` |
-| UX-2 | **Compose-aggregated log view** — the most-praised OrbStack log feature: one merged stream per project, colour-coded per service. Our `LogPipeline` already normalizes per-container lines; Stacks can only deep-link to one container's log today. | A per-project log document (entry from Stacks and from a grouped Containers list): merged by timestamp, per-service colour + name column, per-service show/hide, sharing UX-1's search. Reuses `LogPipeline`/`ContainerLogStore`; no new transport. | `open` |
-| UX-3 | **Log wrap toggle + clickable links** — OrbStack #536 documents the wrap want; Docker Desktop ships clickable links (VERIFIED). Small. | "Wrap Long Lines" toggle in the log options menu (persisted); URLs in log text rendered as tappable links via AttributedString link detection. | `open` |
-| UX-4 | **Container Files tab (read-first)** — both competitors browse a container's filesystem; we have nothing (bind-mount reveal is the host's own directory). Engine API carries it credential-free: `HEAD/GET /containers/{id}/archive`. | A Files tab in `ContainerDetailView`: directory browsing via archive stat/tar, file preview for text, "Save to Host…" for files/folders. **Write/upload is explicitly out of scope** — in-place edit of a running container's filesystem is a second decision with its own confirmation semantics. | `open` |
+| UX-1 | **Context-preserving log search** — our `ContainerLogsTab` filter hides every non-matching line, which is OrbStack issue #2178 verbatim (their fix took until v2.2.0). We should not ship a bug a competitor already ate the complaints for. | Shipped 2026-08-05: **Find** is the default mode — all lines stay visible, matches painted with the system `findHighlightColor` (current match full-strength + black text), "3 of 47" position readout, ⏎/⇧⏎ and ⌘G/⇧⌘G stepping with wrap, ⌘F focuses the field. **Filter** stays as the explicit second mode ("5 of 412 lines"). Pure logic (`TrackBMatchSpan`, `TrackBMatchNavigator`, store modes) unit-tested (18 new tests incl. a fixture-corpus highlight bounds test); end-to-end proven by XCUITest `testLogFindHighlightsInPlaceAndFilterStaysExplicit` against the real bundle. Evidence and the two defects fixed en route (animated-scroll main-thread wedge; bar overflow in the narrow inspector): UI-AUDIT **UI-049**. | `done` |
+| UX-2 | **Compose-aggregated log view** — the most-praised OrbStack log feature: one merged stream per project, colour-coded per service. Our `LogPipeline` already normalizes per-container lines; Stacks can only deep-link to one container's log today. | Shipped 2026-08-05 as a **separate document window** (`WindowGroup(id:for:)` keyed on the project name — an inspector column cannot hold a three-column streaming document, and a project is not a sidebar category; reasoning in `ComposeProjectLogsView.swift` and the HIG audit). Opened from the Stacks project/service menus and the Containers project group header. Merged on dockerd's timestamps with a reorder window plus a start-up priming phase, so a slow stream cannot invert causality; nothing is re-ordered after display. Per-service colour on the **name column only** (ANSI keeps the body), stable across restarts via FNV-1a. Per-service show/hide is a scope that composes with UX-1's find/filter. No new transport — one `client.logs` per service into the same `TrackBLogStore`, now shared with the container tab as `TrackBLogDocumentView`. 55 unit tests. **Visual review still owed** (machine lane). | `done` (visual acceptance pending) |
+| UX-3 | **Log wrap toggle + clickable links** — OrbStack #536 documents the wrap want; Docker Desktop ships clickable links (VERIFIED). Small. | Shipped 2026-08-05 on both log documents. **Wrap Long Lines** in the log options menu, persisted (`morb.logWrapsLines`) and shared by every log document; off means the surface scrolls sideways with `.bottomLeading` anchoring. **Links**: only literal `http`/`https` spans are linked, so the visible text is the destination character for character; credentials, non-web schemes (`file:`, `javascript:`, `data:`, app schemes), lines containing bidi overrides, and URLs continuing into non-ASCII are all refused; `NSDataDetector` was rejected because it invents `http://` for bare hosts. Nothing auto-opens, and a destination on this Mac or the LAN gets a confirmation naming the full URL. Search, copy and export read `plain`, so wrap cannot change a match or mangle copied text. | `done` (visual acceptance pending) |
+| UX-4 | **Container Files tab (read-first)** — both competitors browse a container's filesystem; we have nothing (bind-mount reveal is the host's own directory). Engine API carries it credential-free: `HEAD/GET /containers/{id}/archive`. | A Files tab in `ContainerDetailView`: directory browsing via archive stat/tar, file preview for text, "Save to Host…" for files/folders. **Write/upload is explicitly out of scope** — in-place edit of a running container's filesystem is a second decision with its own confirmation semantics. | `code complete, visual acceptance pending` — Files tab shipped (`ContainerFileArchive/Scan/TreeStore/FilesTab/ViewerSheet/Transfer.swift`), 37 unit tests, parser diffed against a real 40 MB engine archive. The engine has **no** one-level listing request, so a listing is a budgeted read of the whole subtree that reports what it finished; see the 2026-08-05 entry in `docs/design/HIG-COVERAGE-AUDIT.md`. Not yet seen in a real window. |
 | UX-5 | **Spike: registry discovery beyond Docker Hub — deliverable is a decision.** Docker Desktop's browsing is Hub-only because its UI is built around one vendor's account; we have no credential store to bias us. But only Hub has an anonymous *search* API; other registries offer anonymous manifest/tag browsing by name only. | A written ruling: does a "paste any public `registry/repo`, browse tags/platforms anonymously" surface earn a screen, and if so where (extend `PublicImageDiscoverySheet` vs pull sheet)? Must restate the boundary: the GUI never holds a credential; push and private pulls remain the CLI's job via the user's own `credsStore`. | `open` |
 | UX-6 | **Compose grouping in the container list** — Docker groups containers into collapsible Compose-project entries (VERIFIED); our list is flat and the project exists only as hidden search text. Respects the decided UI-011 outcome (keep `List` + inspector). | Collapsible project sections in `ContainersRootView`'s existing `List`: aggregate header row (n of m running, project lifecycle menu), ungrouped containers in a trailing section. Add "Copy `docker run` Command" to the container context menu in the same pass. | `open` |
 | UX-7 | **Spike: volume content browsing — deliverable is a decision.** Docker's Stored-data tab needs sign-in for export (a purely local file operation); OrbStack projects volumes into Finder. The Engine API has **no** volume-contents endpoint, so the mechanism is genuinely open. | A written ruling choosing between: throwaway helper-container mount (works today, pulls nothing if we ship a pinned busybox), a guest-agent path in `morbinit`, or waiting for DIF-7's Finder projection — with the read-only-vs-write boundary stated. Blocked-by: nothing (DIF-7 is related, not prerequisite). | `open` |
 | UX-8 | **Spike: image vulnerability surface — deliverable is a decision.** Scout ties scanning to a Docker account and repo quota; local `syft`/`grype` has neither. But `morb scan` currently tells users to run a script that does not exist (DOC-5) — the CLI promise must be kept before a GUI repeats it. | A written ruling: bundle syft/grype (sha256-pinned, per repo law) vs first-run fetch; then scope the Images-inspector surface (per-image CVE summary, grouped by package, expandable fixes). Blocked-by: DOC-5. | `blocked` (DOC-5) |
-| UX-9 | **Network + disk I/O series in Statistics** — OrbStack's Activity Monitor graphs CPU/memory/network/disk per container; our verified-accurate Stats tab charts CPU/memory only. The fields are already in the stats payload. | Two additional Swift Charts series (rx/tx, read/write) in `ContainerStatsTab`, same retention and tick discipline as the existing charts. | `open` |
-| UX-10 | **Menu-bar extra depth, kept lean** — OrbStack's extra does lifecycle, logs, terminal, ports, mounts, copy actions; ours shows engine state, running containers + CPU + stop, ports. | Per-container submenu gains "View Logs" (bridge exists: `TrackDAppBridge.reveal(showingLogs:)`) and copy name/ID; containers grouped by Compose project with a project stop/start; "Open Terminal" added when DIF-2 lands. It stays a menu, not a dashboard. | `open` (terminal item blocked-by DIF-2) |
+| UX-9 | **Network + disk I/O series in Statistics** — OrbStack's Activity Monitor graphs CPU/memory/network/disk per container; our verified-accurate Stats tab charts CPU/memory only. The fields are already in the stats payload. | Two additional Swift Charts series (rx/tx, read/write) in `ContainerStatsTab`, same retention and tick discipline as the existing charts. | `done` (network already shipped; `blkio_stats` newly decoded — guest-kernel evidence and the unverified part recorded in UI-FEATURE-GAP §9) |
+| UX-10 | **Menu-bar extra depth, kept lean** — OrbStack's extra does lifecycle, logs, terminal, ports, mounts, copy actions; ours shows engine state, running containers + CPU + stop, ports. | Per-container submenu gains "View Logs" (bridge exists: `TrackDAppBridge.reveal(showingLogs:)`) and copy name/ID; containers grouped by Compose project with a project stop/start; "Open Terminal" added when DIF-2 lands. It stays a menu, not a dashboard. | `done` for logs/restart/copy/grouping. **Project stop/start declined:** the Stacks route gates a bulk lifecycle behind a confirmation naming its exact scope, and a modal presented from a `MenuBarExtra` window dismisses the window that presented it — so the group header opens the project on Stacks (`TrackDAppBridge.reveal(composeProject:)`) instead of carrying a weaker copy of that action. Terminal still blocked-by DIF-2. |
+
+### Capability gaps, filed 2026-08-05
+
+UX-1..UX-10 came from a **screens** comparison ([UI-FEATURE-GAP.md](docs/audit/UI-FEATURE-GAP.md)).
+These come from the **capability** sweep that doc was missing —
+[CAPABILITY-GAP.md](docs/audit/CAPABILITY-GAP.md), 16 sections, ranked the same way: frequency ×
+cost, not novelty. UX-11..UX-13 are the resolutions of spikes UX-5, UX-7 and UX-8; each spike's
+reasoning stays in UI-FEATURE-GAP under its original heading.
+
+| ID | Ticket | Deliverable | State |
+| --- | --- | --- | --- |
+| UX-16 | **Disk space never returns to macOS** — `guest/morbinit/src/disk.rs:273`'s `discard=async` is dead code: the kata kernel has no btrfs (`architecture.md:183`), ext4 mounts with no `discard`, no `fstrim` anywhere in the tree, resize is grow-only. We reproduce Docker Desktop's single most-complained-about behaviour. DIFFERENTIATION Tier B and TECHNOLOGY-AUDIT Bet 8 flatly contradict each other here; TECHNOLOGY-AUDIT is right. | Run TECH-3 first: does virtio-blk translate a guest discard into hole-punching on the raw file? If yes, `-o discard` or periodic `fstrim` plus a user-visible reclaim readout. If no, scope compact-by-copy. Either way one honest statement of current behaviour ships immediately, ahead of the fix. | `open` |
+| UX-18 | **No proxy support at all** — grep for `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`/`socks` across `guest/morbinit/src`, `MorbstackKit` and `morb` returns zero hits. OrbStack inherits macOS proxy settings for free; Docker gates SOCKS5 and Kerberos/NTLM behind Business. Disqualifying on a corporate network. | Inherit the Mac's configured proxy into dockerd's environment by default (`supervisor.rs` already builds that environment), with a `config.toml` override and an off switch, plus a `morb doctor` check that says whether containers are actually using it. Corporate CA injection is a separate later commit. | `open` |
+| UX-21 | **Our own docs call our strongest capabilities `absent`** — eleven rows tabulated in CAPABILITY-GAP §16. COMPETITIVE-GAPS says Testcontainers and Dev Containers were "never tested" (ECOSYSTEM-MATRIX has four languages plus the Dev Containers CLI passing zero-config), VS Code/JetBrains `absent` (a built `.vsix` with a hijacked-stream exec terminal ships in `integrations/vscode/`), pinned kubectl "not in the repo" (`fetch_kubectl` pins v1.36.2), and "no exec, no PTY anywhere" (`Terminal/` exists with tests). An advantage nobody can see is not shipping. | One reconciliation pass over COMPETITIVE-GAPS, DIFFERENTIATION, `integrations/jetbrains/README.md`, `integrations/shell/_morb`, `docs/architecture.md` and `docs/parity.md` #18, each row checked against the code that overtook it. Audit docs keep their findings and get dated resolution notes; current-behaviour docs are simply corrected. | `open` |
+| UX-22 | **Migration only points inward** — `MorbMigrate` has the transactions, helper-container volume reads and a checksum `verify`, and no way out. OrbStack has no data path out either (their #2517 is open), so this is a differentiator, and it is the answer to "what if I want to leave". | `morb migrate --to <runtime\|socket>` reusing the same transactions and verification, plus `morb export --all` writing a directory a stock `docker load` restores. Then one README line above the fold: leaving is one command, and it is tested. | `open` |
+| UX-11 | **Anonymous registry reference resolver** — resolves spike UX-5. OCI Distribution defines no portable search, so a multi-registry search surface needs five vendor APIs, four of them credentialed; `RegistryImageDiscovery.swift` already encodes that refusal in its types. Tag and manifest browsing *is* anonymous everywhere, and answers "does this tag have an arm64 manifest" **before** the pull — `TrackCImageArchitecture.swift` only answers it after. | `RegistryReferenceResolver` in MorbstackKit beside `RegistryImageDiscovery.swift`: parse a reference, anonymous bearer exchange, first page of tags plus the tag's platform list. Bounded body, no redirects, no ambient config, fixture-tested. Pull-sheet disclosure is commit two. The GUI never holds a credential. | `open` |
+| UX-12 | **Read-only volume content browser** — resolves spike UX-7. The mechanism was never closed: `MorbFeatures/VolumeArchiveExport.swift` and `MorbMigrate/HelperContainer.swift:117` already read volume bytes through a **stopped** `:ro` helper and `/containers/{id}/archive`. Browsing is that same lifecycle with a `HEAD` and a different `path`. A guest agent was rejected — it widens exactly the surface OPS-8 just narrowed. DIF-7 (Finder) is a successor, not a prerequisite. | `VolumeContentBrowser` in MorbFeatures sharing the helper lifecycle (create → read → always remove): one bounded directory listing from the `HEAD …/archive` stat header plus tar enumeration, tested against a recorded tar and header with no engine running. The Volumes-inspector surface is commit two. Write is out of scope. | `open` |
+| UX-13 | **Image vulnerability surface** — resolves spike UX-8. `morb scan` is already a complete local pipeline (export → syft → announced-then-fetched grype DB → scan) with both tools' phone-home defaults disabled by hand. Only the binaries and the screen are missing. Bundling ~100 MB buys nothing — the grype DB makes a download unavoidable anyway — and adds two nested helpers to the signing order CLAUDE.md §1.1 calls a landmine. | A Vulnerabilities section in the Images inspector: severity counts grouped by package, expandable to fixed-in, the DB build date, and "scanned on this Mac, nothing uploaded". A real `ContentUnavailableView` when the tools are absent — no disabled placeholder. No severity column in the images table. | `blocked` (needs the first-run `scripts/fetch-scan-tools.sh`) |
+| UX-14 | **Publish the benchmark harness and the watcher matrix** — we measure 1.79 s cold boot and 0% idle CPU (ENGINE-MATRIX §10); Docker publishes no macOS startup figure at all and OrbStack's benchmarks page is v0.17.0 from August 2023 with its figures locked inside images. `MorbBench` is missing only the two workloads people actually compare. | Add `git-status-bindmount` and `npm-install-bindmount-vs-volume` to `MorbBench/Benchmarks/`; publish which file watchers the `IN_ATTRIB` live-share bridge satisfies; put the cold-boot number and the one-command harness in the README's first screenful, so the claim arrives with the way to check it. | `open` |
+| UX-17 | **Drive the memory balloon** — `VMManager.swift:2136` attaches a `VZVirtioTraditionalMemoryBalloonDeviceConfiguration` and nothing in `mac/Sources` ever sets `targetVirtualMachineMemorySize`. The device is configured and inert. | A slow-timer balloon target tracking the guest's working set. This covers the busy-all-day case that 5-minute auto-suspend cannot. Do not put "dynamic memory" in any user-facing copy until it is measured. | `open` |
+| UX-19 | **SSH agent forwarding** — no `SSH_AUTH_SOCK` handling anywhere, but `DockerHijackDetection.isHijackCandidate` nominates any `Upgrade` request, so buildx's `--ssh` session plausibly already passes through. Verify before building. | Commit one is evidence, not code: parity-tester proof that `docker buildx build --ssh default` works against a private repo, recorded in `docs/parity.md`. Commit two is the Docker-compatible `/run/host-services/ssh-auth.sock` runtime path, so a copied Compose file does not silently fail. | `open` |
+| UX-15 | **Surface the guest-reachable container address** — Docker documents plainly that it "can't route traffic to Linux containers"; OrbStack's routable IPs are a headline feature. DIF-4 step 0 already mandates proving host→guest reachability at `192.168.64.x`, so this is half a day on top of work we are doing anyway. | When DIF-4's gate passes, show the container's guest-reachable address in the inspector and in `morb status --json` — before domains land, since the address is the useful half. | `open` (after DIF-4 step 0) |
+| TECH-4 | **Three independent tar readers, and they have already drifted** — `mac/Sources/MorbstackAppCore/Views/Containers/ContainerFileArchive.swift` (`ContainerTarHeaderReader`, general streaming reader for arbitrary in-container paths), `mac/Sources/MorbFeatures/VolumeContentBrowser.swift` (`TarChildWalker`, immediate children of the fixed `/data` mount) and `mac/Sources/MorbMigrate/TarLite.swift` (full-file, regular entries only). This is not theoretical: the base-256 numeric field had an overflow guard in one and not the other, and a GNU long-name NUL-termination bug in the second would have made **every real-world long-name entry silently vanish from a listing** — neither could have happened with one reader. A third reader means a fourth is coming. | Promote the shared primitives into `MorbstackKit`, which all three already depend on: ustar checksum (both unsigned and historical-signed), octal and base-256 numeric decode with the overflow refusal, PAX extended-header parsing, GNU `L`/`K` long name and link handling, `cString` NUL truncation. Leave the *policies* where they are — entry budgets, root-membership rules and payload capture genuinely differ per caller and should not be unified. Note the dependency direction: `MorbFeatures` is a dependency of `MorbstackAppCore`, so the shared code cannot live in either; `MorbstackKit` is the only common base. Port each reader's tests to the shared implementation rather than deleting them. | `open` |
+| CLI-9 | **Shell completions promise a command we do not have, and omit seven we do** — `integrations/shell/_morb` is missing `disk`, `ports`, `diagnose`, `service`, `install-cli`, `uninstall-cli` and `export`; `morb.bash` and `morb.fish` are almost certainly the same. Worse, its `debug` description reads "Open a toolbox shell in a container, even a distroless one" while `mac/Sources/morb/main.swift:48` says the command "does not open a shell yet". That is help text promising behaviour the implementation does not have — the exact thing CLAUDE.md §1.8 forbids. `docs/DIFFERENTIATION.md` predicted "stale by 7 commands" and was exactly right, which means we knew. | One pass over all three completion files against the real subcommand list in `main.swift`, plus a check that keeps them from drifting again — a test or a `mise run check` step that diffs the completions against the parser's own command table, so the next added subcommand fails the gate rather than silently going missing. Fix `debug`'s description to say what it does today. | `open` |
+| DOC-7 | **kubectl is opt-in, so a normal build cannot port-forward** — `fetch_kubectl` pins v1.36.2 against a sha256 sidecar and `mise-tasks/app` stages and signs it, but it is behind `--host-kubectl-only` and is not fetched by default. A stock `mise run app` therefore produces a bundle where the selected-Pod port-forward is simply unavailable. The COMPETITIVE-GAPS row said "not in the repo", which was wrong in a way that hid the real gap. | Decide: fetch it by default (it is pinned and verified, so the cost is download size) or state the unavailability at the point of failure rather than letting the affordance look broken. Either is fine; the current silence is not. | `open` |
+| UX-20 | **`kubectl top` fails without saying why** — `guest/morbinit/src/k8s.rs:442` disables metrics-server for boot speed. That is a defensible trade; the confusing error is not. | An honest message naming the trade, and an offer of the Kubernetes route's own resource data instead. | `open` |
+
+## Taste — pass 1 of the taste loop, filed 2026-08-05
+
+From [docs/audit/TASTE-REVIEW.md](docs/audit/TASTE-REVIEW.md) (commit `de17215`, real-window
+captures in `artifacts/taste/`). Every ticket is marked `LAW` (follows from
+[docs/design/DECISIONS.md](docs/design/DECISIONS.md), not negotiable) or `TASTE` (opinion).
+Ranked by screen improvement per unit of work. Pass 2 re-captures after these land and judges
+whether each change actually improved the screen.
+
+| ID | Ticket | Deliverable | State |
+| --- | --- | --- | --- |
+| TASTE-1 | **`TASTE` Stacks shows almost nothing about a live project** — one collapsed disclosure row in ~850 pt of void; the project inspector has 4 rows, one of which is "Compose files — Not reported". Weakest screen in the app (review F1). | Project rows expand by default (at minimum when ≤3 projects exist); service rows show status/image/ports inline; project inspector gains the per-service breakdown the model already has ("0 of 3 services running" proves it knows). Blocked-by: nothing. | `done` (list landed; the inspector breakdown was demoted by it — pass 2 folds the residual "Compose files — Not reported" row into TASTE-12) |
+| TASTE-2 | **`TASTE` Two grouping idioms on the Containers list** — `shopdemo` is a lowercase section header while `Kubernetes-Managed` is a disclosure row with icon + count, and the five ungrouped containers have no header, so "shopdemo" floats mid-list. Group headers also say nothing about state (review, "verdict on the new Compose grouping" — the grouping itself is a keeper). | One idiom for every group (disclosure row with trailing count, matching Kubernetes-Managed); project headers carry "n of m running" per UX-6's original deliverable; ungrouped containers get an anchor (leading position with a header, or an explicit "Standalone" group). Blocked-by: nothing. | `done` (pass 2: the anchor need dissolved once groups became chevroned rows — correctly not added) |
+| TASTE-3 | **`TASTE` Containers rows hide the image** — at 1600 pt a row is name, ~900 pt of nothing, status. Search promises "Name, image, or project" but the image appears nowhere in the list; `lonely` and `netA` are indistinguishable without selecting them (review F2). | Image reference as secondary text (subtitle or dimmed middle column) and ports for running containers. The right handful is name, image, ports, status — the `docker ps` muscle memory this list replaces. Blocked-by: nothing. | `done` (pass 2: ports and narrow behaviour unverified — no published-port container and no narrow capture in the evidence set; verify in the next capture session) |
+| TASTE-4 | **`TASTE` Absence stated up to five times** — Volumes inspector says "no disk scan yet" as three "Not reported" rows plus two footnote paragraphs, while the table shows the same fact as two em-dash columns; milder cases on Images and Networks (review F3). | State an absence once: one labeled row, at most one footnote per pane, and the footnote must say what changes the state ("Run a Disk scan to populate usage"). Pure subtraction — no new UI. Blocked-by: nothing (independent of the filed label-clipping defect). | `done` |
+| TASTE-5 | **`TASTE` Images "In use" column is an em-dash 26 times out of 26** — a column whose every value is the same non-value teaches the eye to skip columns (review F4). | Populate it the way Volumes' usage columns fill after a Disk scan, or drop the column and leave the fact to the inspector. Blocked-by: nothing. | `open` |
+| TASTE-6 | **`TASTE` Disk inspector leaks the recovery state machine** — "Recovery Phase — host-grown", "Saved Target", "the guest filesystem still needs verified proof", "reviewed growth transaction" printed as user copy (review F5). | One human status line ("Disk growth is paused until the guest filesystem check completes"); internal detail rows behind a disclosure. Blocked-by: nothing. | `done` |
+| TASTE-7 | **`TASTE` Migration inspector is a wall** — ~17 rows + 4 footnotes in one scroll, three zero-value eligibility rows, defensive copy; and Morbstack lists itself among migration *sources* (review F6). | Collapse zero rows to one line when the source reports no volumes; one sentence per footnote; badge Morbstack as the destination or remove it from the source table. Blocked-by: nothing. | `open` |
+| TASTE-8 | **`TASTE` Long identifiers fight trailing alignment in the container Overview** — full digests, image refs, and multi-sentence Ports copy in a ~300 pt trailing value column; nine section headers where half hold 1–2 rows (review F7). Composition issue independent of the filed clipping bug. | Stack long identifiers label-above-value full-width (the Volumes "Guest Mount Point" pattern), middle-truncated and copyable; merge Identity/Lifecycle/Configuration into one group; demote the Ports explanation to a one-line footnote. Blocked-by: the clipping fix (same file, coordinate to avoid churn). | `open` |
+| TASTE-9 | **`TASTE` Unit-and-word sweep** — Networks "Containers" column mixes "3" with "None" (a count column says 0); Builds inspector filler row "Storage — Included in deduplicated total"; Statistics states its sampling cadence twice (review F8). | One pass fixing all three; no layout changes. Blocked-by: nothing. | `open` |
+| TASTE-10 | **`TASTE` Disk inspector states one capacity five ways** — "Apparent — 77.31 GB", "Current Raw Capacity — 77.31 GB", "Configured Capacity — 77.31 GB", "Capacity State — Matches configuration", and the summary sentence "The existing disk matches the configured capacity." Three labels for one number across two adjacent sections, then a row and a sentence for one state; and when readiness is unreported but the pending action is Stop Engine, the lead sentence ("Morbstack has not checked yet whether this disk can grow…") never names the remedy the button under it offers (pass 2, exposed by the TASTE-6 fix). | Merge the two capacity sections into one story: show "Configured Capacity" only when it differs from current; suppress `diskCapacity.summary` when the Capacity State row already says it (`matchesConfiguration`); when the action is Stop Engine, lead with the stop-engine sentence. Pure subtraction. Blocked-by: nothing. | `open` |
+| TASTE-11 | **`TASTE` One predicate, two rows in the Volumes Identity section** — "Volume — Anonymous" and "Prune — Eligible" are both computed from `isAnonymousVolumeName`; the second restates the first, and "Eligible" reads as a safety verdict directly above "Usage — Not scanned yet", where usage is exactly what is unknown (pass 2, found in the pane TASTE-4 cleaned). | Keep "Volume — Anonymous/Named"; delete the "Prune" row and leave the prune consequence where it already costs something — the Remove button's caption. Blocked-by: nothing. | `open` |
+| TASTE-12 | **`TASTE` The absence sweep stopped at Volumes** — Images inspector still says "Reported use — Not reported" plus a remedy-free footnote ("Docker did not report container usage for this image."), the Stacks project inspector still carries "Compose files — Not reported", and the app now has two vocabularies for one category of absence: "Not scanned yet" (Volumes) vs "Not reported" (Images) (pass 2). | Apply the TASTE-4 pattern to Images and the Stacks project inspector: one row per absence, at most one footnote, footnote names what changes the state; one vocabulary — "Not scanned yet" where a scan is the remedy, "Not reported" only where Docker genuinely has no answer. Coordinate with TASTE-5 so the "In use" column and the inspector speak the same words. Blocked-by: nothing. | `open` |
+
+## UI-051 · Right-side controls should be swallowed by the inspector · `done`
+
+**The user has asked for this three times.** *"I preferred it when these get swallowed by the slide
+over just like the left one."* The left sidebar absorbs its toggle pill as it slides; they called
+that "fantastic", unprompted, twice. The right side does not — the `+`, the inspector toggle and the
+search field sit in a separate strip and stay put while the inspector animates, which is what makes
+the right edge read as a detached panel.
+
+**Mechanism found, do not re-derive it.** An agent got most of the way before dying at a session
+limit. What it established:
+
+- `.searchable(placement: .toolbar)` declared on the route root, with the trailing cluster declared
+  **immediately before `DefaultToolbarItem(kind: .search)`**, anchors that cluster against the
+  inspector divider — and the system then carries it with the inspector's own slide. No custom
+  animation involved, which is the right shape: the system already does this, we were placing the
+  items where it could not.
+- Verified in a real window: the search field does move into the inspector region.
+
+**Why it was reverted rather than kept:**
+
+1. **The inspector toggle button disappeared entirely.** Trading a visible control for an animation
+   is not a fix. `InspectorCommands()` still offers it in the View menu, so it is not unreachable,
+   but a toolbar affordance vanishing is a worse defect than the one being fixed.
+2. The Volumes half removed `ToolbarItem(id:)` from several items, which **destroys accessibility
+   identifiers**. Those 243 identifiers are an API the XCUITest suite queries by; see
+   `docs/design/ACCESSIBILITY-IDENTIFIERS.md`. Any version of this fix keeps every identifier
+   byte-identical.
+3. Its comments were mid-edit fragments referring to a `VolumesRootView` shape that no longer
+   existed after the revert.
+
+### 2026-08-05: the recorded mechanism does not reproduce. Do not try it a fourth time.
+
+Four toolbar variants were built, signed, launched and captured on Volumes at 1600×1000 dark, with
+the trailing cluster mounted on the inspector content exactly as the note above describes:
+
+| Variant | Result |
+| --- | --- |
+| `trailingCommandItems` alone (committed shape) | baseline |
+| `trailingCommandItems` then `DefaultToolbarItem(kind: .search)` | **byte-identical**, 138306 B |
+| `DefaultToolbarItem(kind: .search)` then `trailingCommandItems` | **byte-identical**, 138306 B |
+| `ToolbarSpacer(.flexible)` before the secondary-action group | **byte-identical**, 138306 B |
+
+Byte-identical PNGs of the same window. Declaration order inside `ToolbarContent` is inert here:
+the system resolves the trailing run by `placement:`, and `.primaryAction` / `.secondaryAction` /
+`.automatic` are each placed against the window, not against the inspector. `DefaultToolbarItem`
+and `ToolbarSpacer` do not override that. The earlier session's "verified in a real window" was
+observing something that is true without the change — see the measurement below.
+
+**What is actually happening**, from the open/closed pair (inspector 268 pt wide):
+
+| Element | Inspector open | Inspector closed | Δ |
+| --- | --- | --- | --- |
+| trash + share group | 745–815 | 880–950 | 135 pt |
+| `+` + inspector toggle | 1005–1080 | 1072–1145 | 67 pt |
+| search field | 1270–1590 | 1270–1590 | **0** |
+
+So the two glass groups are **centred in the content region** — they slide by half the inspector's
+width, which is why they drift without ever arriving anywhere. The search field never moves at all:
+it is anchored to the window's right edge and the inspector slides *under* it, which is the whole
+of the earlier "the search field does move into the inspector region" claim. Three islands
+distributed across the bar, one of them overlapping the inspector, is exactly the "detached panel"
+the user is reacting to, and it is also the *"top toolbar seperation was a net negative"* report.
+
+**To finish:** the framing "put custom items in the inspector's toolbar section" appears to have no
+public API behind it — `NavigationSplitView` owns the sidebar toggle specially and there is no
+`.inspectorToggle` counterpart. Before writing any more code, establish with a **stock-SwiftUI probe
+containing zero Morbstack code** (the technique that settled the Tahoe chrome question) whether any
+declaration can place a custom item trailing-of-search. If none can, this ticket becomes a different
+one: stop the groups being centred, so the right side reads as one cluster against the inspector
+edge instead of three islands. Keep the toggle. Keep every identifier byte-identical.
+
+### 2026-08-05: closed as the second ticket. One placement, not one animation.
+
+The stock-SwiftUI probe settled the original framing: **no custom item can be placed trailing of
+the search field**, AppKit renders it before search regardless of declaration order, and the search
+field is pinned to the window's right edge with the inspector sliding *under* it. "Make the cluster
+travel with the inspector" is not expressible in SwiftUI today. Do not try it a fifth time.
+
+What the probe did expose is ours. In stock SwiftUI, buttons at `.primaryAction`/`.automatic` form
+one packed group adjacent to the search field; a `.secondaryAction` item is centred in the *content*
+region instead. Every route mixed the two, so the trailing edge was two or three islands that each
+drifted a different distance whenever the inspector moved. **The fix is one line per item:** every
+trailing item is `.primaryAction`.
+
+Measured on Volumes at 1600×1000 dark, real window via `capture-window.sh`, x-ranges of the glyph
+runs (the glass fill is too subtle over the toolbar to threshold reliably; capsule edges sit ~8 pt
+outside each range):
+
+| | before | after |
+| --- | --- | --- |
+| trash + share | 745–814 | 1085–1154 |
+| `+` + inspector toggle | 1005–1078 | 1175–1248 |
+| search field | 1267–1591 | 1267–1591 |
+| gap, last glyph to search | 189 pt | 19 pt |
+| drift when the inspector toggles | 135 pt / 67 pt | **0 pt / 0 pt** |
+
+The inspector-closed capture is byte-position identical to the inspector-open one: the cluster is
+now anchored with the search field rather than centred in a region that changes width. That is the
+whole of the complaint — the right side stops rearranging itself.
+
+Changed: Volumes, Networks, Images, Builds, Stacks, Containers, Kubernetes, Migration. Disk was
+already `.primaryAction` + `.automatic` and is untouched (its scan is identical before and after).
+
+Two details worth keeping:
+
+- **`ToolbarSpacer(.fixed)` on Volumes, Networks and Images only.** Those three have a bare
+  destructive trash button that would otherwise share one glass capsule with "create". The spacer
+  renders — verified, two adjacent capsules — and is the API Apple names for this
+  (`docs/design/tahoe/HIG-FINDINGS.md`: "glass grouping is automatic; use `ToolbarSpacer` to control
+  it"). The other routes bury their destructive command inside a `Menu`, so they get one capsule.
+- **Overflow still behaves** despite `.secondaryAction` being the documented overflow placement.
+  At 1100 pt every control is present; at 900 pt on Images — six trailing items, the worst case —
+  the system collapses the search field to its glyph and keeps all six. Nothing clipped, no control
+  lost, and the `.focusedSceneValue(\.routeMaintenanceCommand, …)` menu mirrors are unchanged.
+
+Every `ToolbarItem(id:)` and `.accessibilityIdentifier` is byte-identical to the previous commit
+(diffed mechanically). `mise run check` exit 0: 1009 Swift, 260 Rust, 0 failures.
+
+**Honest read:** better, not merely different, but it is a smaller win than the ticket's title
+promises. The controls no longer scatter or drift, and Kubernetes and Builds got a real bonus — with
+the secondary items out of the way their `.principal` pickers are now actually centred. But nothing
+is "swallowed by the inspector": the cluster sits *beside* the search field, and the search field
+still floats over the inspector column. If the user's objection is specifically the overlap, this
+does not fix it and nothing in SwiftUI will.
+
+### 2026-08-06: it *was* expressible. `.toolbarPrincipal` is the answer. Closed.
+
+The paragraph above was wrong, and wrong in the way that matters — it declared a platform limit
+from two failed attempts rather than from the API surface. The user pushed back:
+
+> "I dont want it being handpicked, i want native search bar, and I feel it has to have native way
+> to be in middle? … or have search bar unpinned and be inside the right slide out then collapse to
+> icon on the slide in"
+
+An eleven-variant stock-SwiftUI probe (`ToolProbe.swift`, zero Morbstack code, one variant per
+declaration shape) found it on the first sweep:
+
+**`.searchable(placement: .toolbarPrincipal)`.**
+
+Search moves out of the trailing run into the centre region. The action pills sit immediately left
+of it, and — this is the part every previous attempt was chasing — `.primaryAction` items then land
+at the **far right, inside the inspector column**. Measured in the probe at 1600 pt: search
+470–1125, trash/share 400–465, `+` and inspector toggle 1520–1580, with the inspector beginning at
+1332. The earlier finding stands and is simply beside the point: nothing can be placed trailing of a
+`.toolbar`-placed search field, because `.toolbarPrincipal` moves search out of that run entirely.
+
+Applied to all eight routes that have a search field. Disk has none. **Migration has none either** —
+earlier notes listed it; there was nothing there to change.
+
+The one genuine unknown was the two routes that already put a `Picker` at `.principal`. Answer, from
+a real window: **Builds shows them sequentially** — picker left of centre, search to its right, no
+collision and no overlap. Kubernetes could not be observed, because that route is separately broken
+end to end (`77ea35a` fixed it assuming RSA client keys where k3s issues ECDSA; a second fault
+remains) and the code path that mounts search never renders.
+
+**The other half of the ask is not available to us, and this is a fact about the SDK rather than a
+judgement.** `.searchToolbarBehavior(.minimize)` — the collapse-to-a-glyph behaviour — is
+`@available(macOS, unavailable)` in the macOS 26.4 SDK. It does not compile. Do not add it, and do
+not hand-roll an imitation: the whole point of keeping `.searchable` is that ⌘F, the Search menu
+item, suggestions and scopes come with it.

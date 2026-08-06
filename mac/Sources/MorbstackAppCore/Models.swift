@@ -976,6 +976,12 @@ struct StatsSample: Sendable, Hashable {
     /// Cumulative bytes sent across all interfaces the engine reports. `nil` means the
     /// stats response did not contain a complete transmit counter, not zero traffic.
     var networkTransmittedBytes: Int64? = nil
+    /// Cumulative bytes read from block devices, summed over every device the engine
+    /// listed. `nil` means the engine listed no device at all — which is not the same
+    /// fact as a device that reports zero bytes.
+    var blockReadBytes: Int64? = nil
+    /// Cumulative bytes written to block devices, summed the same way.
+    var blockWrittenBytes: Int64? = nil
     var ts: Date
 
     static let empty = StatsSample(cpuPercent: 0, memBytes: 0, memLimit: 0, ts: .distantPast)
@@ -987,17 +993,46 @@ struct StatsSample: Sendable, Hashable {
     }
 
     /// Derives interval throughput from Docker's cumulative interface counters.
+    static func networkRates(in samples: [StatsSample]) -> [ByteRateSample] {
+        byteRates(in: samples, inbound: \.networkReceivedBytes, outbound: \.networkTransmittedBytes)
+    }
+
+    /// Derives interval throughput from Docker's cumulative block-device counters.
+    static func blockIORates(in samples: [StatsSample]) -> [ByteRateSample] {
+        byteRates(in: samples, inbound: \.blockReadBytes, outbound: \.blockWrittenBytes)
+    }
+
+    /// Turns a pair of cumulative byte counters into per-second rates.
     ///
-    /// A counter that goes backwards is a reset, not a negative transfer. Omitting that
-    /// interval preserves the distinction between an unavailable reading and no traffic.
-    static func networkRates(in samples: [StatsSample]) -> [NetworkRateSample] {
+    /// Docker reports totals since the container started, never throughput. Plotting a
+    /// total as though it were a rate draws a line that rises forever and looks entirely
+    /// plausible, so every rule below exists to keep a derived number from outliving the
+    /// evidence for it:
+    ///
+    ///   * the first sample has no predecessor and therefore no interval at all;
+    ///   * a non-positive elapsed time has no defined rate — the engine timestamps two
+    ///     documents identically often enough to matter, and dividing by zero would
+    ///     produce an infinity that poisons the axis;
+    ///   * a counter that went backwards is a **reset** (a restarted container starts
+    ///     from zero), not a negative transfer, so that direction reports nothing for
+    ///     that one interval and resumes at the next;
+    ///   * a direction whose counter is missing on either side reports nothing, because
+    ///     "the engine did not say" and "nothing moved" are different facts;
+    ///   * an interval with nothing to say in *either* direction is dropped entirely,
+    ///     which is what keeps a container with no interfaces from rendering as a
+    ///     container with idle interfaces.
+    static func byteRates(
+        in samples: [StatsSample],
+        inbound: (StatsSample) -> Int64?,
+        outbound: (StatsSample) -> Int64?
+    ) -> [ByteRateSample] {
         guard samples.count > 1 else { return [] }
 
         return zip(samples, samples.dropFirst()).enumerated().compactMap { offset, pair in
             let previous = pair.0
             let current = pair.1
             let elapsed = current.ts.timeIntervalSince(previous.ts)
-            guard elapsed > 0 else { return nil }
+            guard elapsed > 0, elapsed.isFinite else { return nil }
 
             func rate(from oldCounter: Int64?, to newCounter: Int64?) -> Double? {
                 guard let oldCounter, let newCounter,
@@ -1007,29 +1042,35 @@ struct StatsSample: Sendable, Hashable {
                 return value.isFinite && value >= 0 ? value : nil
             }
 
-            let received = rate(from: previous.networkReceivedBytes, to: current.networkReceivedBytes)
-            let transmitted = rate(from: previous.networkTransmittedBytes, to: current.networkTransmittedBytes)
-            guard received != nil || transmitted != nil else { return nil }
+            let into = rate(from: inbound(previous), to: inbound(current))
+            let outOf = rate(from: outbound(previous), to: outbound(current))
+            guard into != nil || outOf != nil else { return nil }
 
-            return NetworkRateSample(
+            return ByteRateSample(
                 sequence: offset + 1,
                 timestamp: current.ts,
-                receivedBytesPerSecond: received,
-                transmittedBytesPerSecond: transmitted)
+                inboundBytesPerSecond: into,
+                outboundBytesPerSecond: outOf)
         }
     }
 }
 
 /// One rate interval truthfully derived from two Docker stats documents.
 ///
-/// Docker reports cumulative bytes per interface, rather than throughput. This model is
-/// deliberately optional per direction so a missing/reset counter never becomes a
-/// plausible-looking zero in the inspector chart or its textual table.
-struct NetworkRateSample: Identifiable, Sendable, Hashable {
+/// Docker reports cumulative bytes — per interface for the network, per block device for
+/// disk — rather than throughput. This model is deliberately optional per direction so a
+/// missing or reset counter never becomes a plausible-looking zero in the inspector chart
+/// or its textual table.
+///
+/// "Inbound" and "outbound" are the two directions the Engine counts in: bytes received
+/// and bytes sent for the network, bytes read and bytes written for disk. One type
+/// serves both because the derivation is identical and the axis, tick and reset
+/// discipline must not be allowed to drift between the two charts.
+struct ByteRateSample: Identifiable, Sendable, Hashable {
     let sequence: Int
     let timestamp: Date
-    let receivedBytesPerSecond: Double?
-    let transmittedBytesPerSecond: Double?
+    let inboundBytesPerSecond: Double?
+    let outboundBytesPerSecond: Double?
 
     var id: Int { sequence }
 }
@@ -1270,12 +1311,36 @@ enum Wire {
         var tx_bytes: Int64?
     }
 
+    /// One `(device, operation)` pair from `blkio_stats`. Docker emits several
+    /// operations per device — on cgroup v1 `Read`, `Write`, `Sync`, `Async`,
+    /// `Discard` **and** `Total` — so a caller that sums the array indiscriminately
+    /// counts the same bytes two or three times over.
+    struct BlkioStatEntry: Codable, Sendable {
+        var major: Int64?
+        var minor: Int64?
+        var op: String?
+        var value: Int64?
+    }
+
+    /// The block-I/O section of `/containers/{id}/stats`.
+    ///
+    /// Only `io_service_bytes_recursive` is modelled, and that is a statement about
+    /// the engine rather than about this app: on a cgroup v2 host — which is every
+    /// Morbstack guest — dockerd's `statsV2` fills exactly this one array, from the
+    /// kernel's `io.stat` `rbytes`/`wbytes`, and leaves `io_serviced_recursive`,
+    /// `io_queue_recursive`, `io_time_recursive` and the rest empty. Decoding those
+    /// would model fields that are structurally always absent.
+    struct BlkioStats: Codable, Sendable {
+        var io_service_bytes_recursive: [BlkioStatEntry]?
+    }
+
     struct Stats: Codable, Sendable {
         var read: String?
         var cpu_stats: CPUStats?
         var precpu_stats: CPUStats?
         var memory_stats: MemoryStats?
         var networks: [String: NetworkStats]?
+        var blkio_stats: BlkioStats?
     }
 
     struct PullProgress: Codable, Sendable {

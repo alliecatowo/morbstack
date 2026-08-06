@@ -418,7 +418,7 @@ struct KubernetesRootView: View {
             }
         }
 
-        ToolbarItem(id: "kubernetes.refresh", placement: .secondaryAction) {
+        ToolbarItem(id: "kubernetes.refresh", placement: .primaryAction) {
             Button {
                 Task { await refreshCluster() }
             } label: {
@@ -430,7 +430,7 @@ struct KubernetesRootView: View {
             .disabled(!model.engine.isRunning)
         }
 
-        ToolbarItem(id: "kubernetes.actions", placement: .secondaryAction) {
+        ToolbarItem(id: "kubernetes.actions", placement: .primaryAction) {
             Menu {
                 if status.enabled {
                     Button("Disable Kubernetes…", role: .destructive) {
@@ -812,7 +812,6 @@ struct KubernetesRootView: View {
                 resourceTable
                     .inspector(isPresented: $showsInspector) {
                         inspector
-                            .inspectorColumnWidth(min: 280, ideal: 340, max: 460)
                             // See the note on `VolumesRootView`: the trailing
                             // commands and search ride the inspector's toolbar
                             // region and remain present while the inspector is
@@ -820,8 +819,13 @@ struct KubernetesRootView: View {
                             .toolbar { trailingCommandItems }
                             .searchable(
                                 text: $query,
-                                placement: .toolbar,
+                                placement: .toolbarPrincipal,
                                 prompt: "Search \(resource.rawValue.lowercased())")
+                            // Must be the outermost modifier on the inspector's
+                            // content — see the note in `ContainersRootView`:
+                            // applied beneath `.toolbar`/`.searchable` its
+                            // preferred width was silently discarded.
+                            .inspectorColumnWidth(min: 280, ideal: 340, max: 460)
                     }
             }
         }

@@ -45,6 +45,32 @@ app — is thin, native Swift glue.
   embedded browser — see "The five differentiation domains" in
   [`docs/architecture.md`](docs/architecture.md).
 
+## What it looks like
+
+Real windows, captured off a running engine — not mockups, not offscreen
+renders. [**The full gallery**](docs/gallery/) covers every route that has been
+photographed, and names the ones that haven't.
+
+[![Containers, grouped by Compose project](docs/gallery/containers-compose-grouping.png)](docs/gallery/)
+
+Sixteen containers, eight of them Kubernetes' own `k8s_POD_*` scaffolding — and
+the scaffolding is one collapsed row, not eight rows of 60-character names
+burying the containers you started. Compose projects group under their own name.
+Nothing on this screen is custom chrome: a `NavigationSplitView`, a system list,
+and real `docker ps` data.
+
+[![Images](docs/gallery/images.png)](docs/gallery/)
+
+A real `Table` with sortable columns and a real `.inspector`, not a hand-drawn
+grid. Architecture is a first-class field, so an `amd64` image is flagged before
+you run it rather than after `exec format error`.
+
+[![Disk](docs/gallery/disk.png)](docs/gallery/)
+
+The number that matters is the pair: the VM disk reserves **77.31 GB** and
+actually occupies **7.46 GB** on APFS. Most "why is Docker eating my disk"
+confusion is one of those two figures shown alone.
+
 ## Status: pre-release (milestone M0)
 
 Morbstack is not yet something you run containers with day to day. There
@@ -125,16 +151,21 @@ succeeds where Docker Desktop fails synchronously, for example).
 
 ## Native-window validation
 
-The repository deliberately does not publish synthetic inner-content screenshots as
-evidence of the native UI. A headless SwiftUI/AppKit image cannot represent the macOS
-window frame, traffic lights, unified toolbar, sidebar material, inspector, focus, or
-Liquid Glass composition that WindowServer owns.
+Every image in [`docs/gallery/`](docs/gallery/) is a real window, captured by
+[`scripts/capture-window.sh`](scripts/capture-window.sh), which asks WindowServer for one
+window's own composited content — so the frame, traffic lights, unified toolbar, sidebar
+material, inspector and Liquid Glass in those files are the real thing, and nothing else on
+the desktop can leak into the frame.
 
-`swift run MorbShots` validates deterministic fixture data only; it writes no images.
-For a visual review, launch the fixture-backed app in a real window and inspect it with
-Computer Use in both appearances and at normal/narrow widths. The repository also carries
-a macOS XCUITest host for repeatable accessibility and screenshot evidence; macOS must
-authorize Xcode Helper under Accessibility before it can drive the app. See
+The repository deliberately does **not** publish synthetic inner-content screenshots as
+evidence of the native UI. A headless SwiftUI/AppKit image cannot represent any of the
+chrome above, and this project has been misled by one before. `swift run MorbShots`
+validates deterministic fixture data only; it writes no images.
+
+For a visual review, launch the app in a real window and inspect it with Computer Use in
+both appearances and at normal/narrow widths. The repository also carries a macOS XCUITest
+host for repeatable accessibility and screenshot evidence; macOS must authorize Xcode Helper
+under Accessibility before it can drive the app. See
 [`docs/development/codex.md`](docs/development/codex.md).
 
 ## Requirements
@@ -165,10 +196,11 @@ mise run test                 # runs the Swift and Rust test suites
 See "Running" below for the full walkthrough from there to a working
 `docker run`.
 
-**A DMG and a Homebrew cask are not available yet.** Packaging and
-signed releases are tracked separately — see
-[`docs/RELEASING.md`](docs/RELEASING.md) once it exists. Nothing on this
-page should be read as "download a build"; there isn't one yet.
+**A DMG and a Homebrew cask are not available yet.** Packaging and signed
+releases are tracked as REL-1 through REL-5 in [`TASKS.md`](TASKS.md); the
+blocker is notarization, and an unnotarized DMG is Gatekeeper-blocked for
+everyone except whoever built it. Nothing on this page should be read as
+"download a build"; there isn't one yet.
 
 ## Running
 
@@ -313,6 +345,10 @@ Rancher Desktop) is in [`docs/comparison.md`](docs/comparison.md).
 
 ## Documentation
 
+[`docs/README.md`](docs/README.md) is the full index. The short list:
+
+- [`docs/gallery/`](docs/gallery/) — real captures of every route that has
+  one, and an honest list of the ones that don't.
 - [`docs/architecture.md`](docs/architecture.md) — how the pieces fit and
   why the load-bearing decisions were made that way.
 - [`docs/sharing.md`](docs/sharing.md) — file sharing: the same-path

@@ -131,8 +131,9 @@ mise run guest-image              # cross-compile morbinit + assemble the initra
 mise run run-daemon                # build, sign, and run morbstackd in the foreground
 ```
 
-See [`README.md`](README.md) "Running" for the full walkthrough, including
-the `DOCKER_HOST` step and the one-time `docker compose` plugin symlink.
+See [`README.md`](README.md) "Running" for the full walkthrough, including the
+consented `morb install-cli` transaction that puts `docker`, Compose and Buildx
+on `PATH` and registers the `morbstack` context.
 
 **If you're iterating on `morbstackd` outside of `mise run run-daemon`**: a
 plain `swift build` re-signs `morbstackd` ad-hoc and silently strips the

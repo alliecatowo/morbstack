@@ -24,6 +24,7 @@ private final class ScriptedShellClient: DockerClient, @unchecked Sendable {
     private let lock = NSLock()
     private var scripts: [String: Scripted] = [:]
     private var _calls: [[String]] = []
+    private var _probedContainerIDs: [String] = []
 
     init() {
         super.init(socketPath: "/dev/null/terminal-shell-resolution-fixture.sock")
@@ -33,6 +34,12 @@ private final class ScriptedShellClient: DockerClient, @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return _calls
+    }
+
+    var probedContainerIDs: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return _probedContainerIDs
     }
 
     func script(_ candidate: String, exitCode: Int?) {
@@ -50,6 +57,7 @@ private final class ScriptedShellClient: DockerClient, @unchecked Sendable {
     override func executeContainerCommand(id: String, command: [String]) async throws -> DockerExecResult {
         lock.lock()
         _calls.append(command)
+        _probedContainerIDs.append(id)
         let scripted = command.first.flatMap { scripts[$0] }
         lock.unlock()
 
@@ -160,5 +168,29 @@ final class TerminalShellResolutionTests: XCTestCase {
         let outcome = await TerminalShellResolution.resolve(client: client, containerID: "c1")
 
         XCTAssertEqual(outcome, .found(shell: "/bin/sh"))
+    }
+
+    /// Every probe addresses the container the person selected, not the first one in the
+    /// list. The route hands `ContainerSummary.id` straight through, so this is the seam
+    /// where "Open Terminal on the selected row" would silently become "on some row".
+    func testEveryProbeAddressesTheRequestedContainer() async {
+        let client = ScriptedShellClient()
+        client.script("/bin/bash", exitCode: 127)
+        client.script("/bin/sh", exitCode: 0)
+
+        _ = await TerminalShellResolution.resolve(client: client, containerID: "deadbeefcafe")
+
+        XCTAssertEqual(client.probedContainerIDs, ["deadbeefcafe", "deadbeefcafe"])
+    }
+
+    /// The probe is noninteractive and allocates nothing: it must never be the thing
+    /// that leaves a TTY-less shell sitting in the container.
+    func testTheProbeIsABoundedNoninteractiveCommand() async {
+        let client = ScriptedShellClient()
+        client.script("/bin/bash", exitCode: 0)
+
+        _ = await TerminalShellResolution.resolve(client: client, containerID: "c1")
+
+        XCTAssertEqual(client.calls, [["/bin/bash", "-c", "exit 0"]])
     }
 }

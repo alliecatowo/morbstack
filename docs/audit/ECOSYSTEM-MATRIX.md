@@ -6,6 +6,20 @@ Date: 2026-08-04. Engine: the running dev daemon (`dist/Morbstack.app`,
 29.7.1**, ApiVersion 1.55, **MinAPIVersion 1.40** (stock upstream default —
 verified via `curl --unix-socket ... /version`; Morbstack does not modify it).
 
+> **Superseded 2026-08-05 (UX-21), for the MinAPIVersion line only.** That
+> reading was true of the daemon this pass ran against and is false of the
+> daemon shipped since. This document was committed at 13:26 on 2026-08-04;
+> **nine minutes later**, PROTO-7 (`cfde3b7`) took the mitigation this file
+> recommends below and shipped it: `guest/morbinit/src/supervisor.rs:191-192`
+> now sets `DOCKER_MIN_API_VERSION=1.24` **unconditionally** in dockerd's
+> environment — deliberately not behind a toggle, because the failure it
+> prevents is silent. Verified live in that commit by probing downward until it
+> broke: `/v1.23/info` → 400 (upstream's real hard floor), `/v1.24/info` → 200,
+> `/v1.32/info` → 200 (was 400), negotiation for modern clients unchanged at
+> 1.55. So Morbstack **does** modify the floor now, and does so to widen it.
+> Everything else in the header still describes the run. The two claims never
+> overlapped in time; there is no live contradiction to resolve.
+
 All probes ran through `scripts/ecosystem-acceptance.sh` with
 `MORBSTACK_HOME=/Users/allie/.morbstack`, which creates a scratch
 `DOCKER_CONFIG`, proves a throwaway context reaches the engine, then hands the
@@ -364,3 +378,13 @@ Caveats that remain true:
   about competing conventional sockets.
 - testcontainers-java ≤1.20.x still fails against any engine-29 daemon (API
   floor, documented above); zero-config discovery does not change that.
+
+  > **No longer true of Morbstack, 2026-08-05 (UX-21).** It remains true of
+  > *any other* stock engine-29 daemon, which is the point. PROTO-7 (`cfde3b7`,
+  > 2026-08-04) sets `DOCKER_MIN_API_VERSION=1.24` in the guest
+  > (`guest/morbinit/src/supervisor.rs:192`) and the `/v1.32/info` probe that
+  > docker-java ≤3.4.0 uses for discovery now returns 200. That inverts the
+  > finding into an advantage: Morbstack is the engine-29 distribution the
+  > ≤1.20.x installed base works against, while Docker Desktop is insulated
+  > only until it moves off engine 27. Not re-run through this file's Java
+  > probe, so it is the commit's live evidence, not this document's.

@@ -94,8 +94,16 @@ are the actual content rather than decoration.
 - Do not add a second background on top of `NavigationSplitView` detail content. Let the
   window and its semantic system surfaces resolve light/dark/key/inactive appearance.
 - Do not tint normal toolbar controls or construct pill-shaped toolbar buttons. Use
-  symbol-only `Button`s with a label for accessibility; place one primary action at the
-  trailing edge and low-frequency actions in `.secondaryAction` so macOS owns overflow.
+  symbol-only `Button`s with a label for accessibility, and let the system group them.
+- **On a route with an inspector, put every trailing item in `.primaryAction`.**
+  Measured on Volumes at 1600×1000 (UI-051): a `.secondaryAction` item is centred in
+  the *content* region, so it drifts by half the inspector's width on every toggle
+  (135 pt) and lands nowhere in particular, while `.primaryAction`/`.automatic` items
+  right-align against the search field and do not move at all. Mixing the two is what
+  produced the "three detached islands" the user reported. Narrow windows still behave:
+  at 900 pt the search field collapses to its glyph and six primary items all survive.
+  Use `ToolbarSpacer(.fixed)` — not a different placement — to break the glass between
+  a bare destructive button and a constructive one.
 - If a floating presentation is genuinely needed (for example a command palette), use
   a system sheet/panel/popover and a single, availability-gated Liquid Glass treatment
   only at that navigation layer. Nothing nested inside gets another glass or material.

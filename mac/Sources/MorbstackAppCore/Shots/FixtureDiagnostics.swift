@@ -34,6 +34,22 @@ enum FixtureDiagnostics {
         let taggedImages = Set(images.flatMap(\.repoTags).filter { $0 != "<none>:<none>" })
         let runningContainerNames = Set(containers.filter(\.isRunning).map(\.displayName))
 
+        /// A cumulative counter that goes backwards inside one fixture series would be
+        /// a restart the fixture never modelled, and the rate derivation would
+        /// correctly drop the interval — silently thinning a chart nobody meant to thin.
+        let countersAreMonotonic = stats.allSatisfy { entry in
+            zip(entry.samples, entry.samples.dropFirst()).allSatisfy { previous, current in
+                func rises(_ old: Int64?, _ new: Int64?) -> Bool {
+                    guard let old, let new else { return old == nil && new == nil }
+                    return new >= old
+                }
+                return rises(previous.networkReceivedBytes, current.networkReceivedBytes)
+                    && rises(previous.networkTransmittedBytes, current.networkTransmittedBytes)
+                    && rises(previous.blockReadBytes, current.blockReadBytes)
+                    && rises(previous.blockWrittenBytes, current.blockWrittenBytes)
+            }
+        }
+
         let imageBytes = images.reduce(Int64.zero) { $0 + $1.size }
         let volumeBytes = volumes.reduce(Int64.zero) { $0 + ($1.size ?? 0) }
         let firstInspectIsJSON: Bool
@@ -97,6 +113,19 @@ enum FixtureDiagnostics {
                             && !entry.samples.isEmpty
                             && entry.samples.allSatisfy { $0.cpuPercent >= 0 && $0.memBytes >= 0 && $0.memLimit > 0 }
                     }),
+            // Docker reports network and block I/O as cumulative counters, and reports
+            // *no* counter at all for a container with no interfaces or no block
+            // device it has touched. Both facts have to exist in the fixtures, because
+            // "unreported" and "zero" are different states of the Statistics tab and a
+            // fixture set that only ever produces one of them cannot show the other.
+            Check(
+                name: "counter coverage",
+                detail: "cumulative counters are monotonic, and both reported and unreported cases exist",
+                passed: countersAreMonotonic
+                    && stats.contains { $0.samples.contains { $0.networkReceivedBytes != nil } }
+                    && stats.contains { $0.samples.allSatisfy { $0.networkReceivedBytes == nil } }
+                    && stats.contains { $0.samples.contains { $0.blockReadBytes != nil } }
+                    && stats.contains { $0.samples.allSatisfy { $0.blockReadBytes == nil } }),
         ]
     }
 }

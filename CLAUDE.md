@@ -66,9 +66,20 @@ Morbstack appends `data/run/docker.sock`. Prefer something like
 - Run the daemon in the foreground (`morbstackd --foreground`) in a backgrounded
   tool call you own, not detached with `nohup`/`&` and forgotten. A detached
   daemon outlives your session and the next agent inherits a stale engine.
-- Kill by the **PID you started**. Never `pkill -f morbstackd`, never
-  `killall`. Another agent (or the user's own running app) is very likely holding
-  a daemon you did not start.
+- Never `pkill -f morbstackd`, never `killall`. A blind sweep takes out an engine
+  another agent — or the user's own running app — is actively holding.
+- **A stale daemon IS fair game.** Confirm what it is first (`ps -o
+  pid,lstart,etime,command -p <pid>`, `pgrep -fl morbstackd`, `lsof -nP
+  -iTCP:<port> -sTCP:LISTEN`), check no live agent is using it, then kill it by
+  that exact PID. This is standing user authorization, given 2026-08-05: *"you
+  can always kill old morbdaemons to get it going, how do we know we didnt break
+  shit otherwise."* An hours-old daemon is worse than no daemon — it silently
+  serves a build that predates your change, and every runtime claim you make
+  against it is about code that is no longer in the tree. That has already
+  produced a full set of "verified" results here that were all pre-fix.
+- After killing one, **restart from the current build** and say in your report
+  which observations came from before the restart and which from after. Do not
+  fold the two into one list.
 - Same for the app: launch `dist/Morbstack.app`, don't `killall MorbstackApp`.
 
 ### 1.5 `mise run app` does NOT rebuild the guest image
@@ -192,8 +203,14 @@ Caveats worth knowing:
 
 ## 5. Known-bad state to be aware of
 
-- There is **no git remote** and CI has never executed. `.github/workflows/ci.yml`
-  is real but unproven. Do not assume "it passed CI".
-- `swift test` currently fails: several tests bind **real host ports** (5353 is
-  owned by mDNSResponder on any normal Mac) and several assert stale
-  expectations. See `docs/audit/REPO-AUDIT.md` for the current list.
+- The remote is `git@github.com:alliecatowo/morbstack.git` and **CI does execute**
+  — check it rather than guessing: `gh run list --limit 5`, `gh run view <id>
+  --log-failed`. This entry used to say there was no remote and CI had never run;
+  that was true until 2026-08-04 and false after, and agents were acting on it.
+  The README's CI badge still points at a `morbstack/morbstack` org that does not
+  own this repo, so the badge is broken and is not evidence of anything.
+- `swift test` used to fail on tests that bound **real host ports** (5353 is owned
+  by mDNSResponder on any normal Mac) and on stale expectations. As of 2026-08-05
+  `mise run check` is green — 1009 Swift, 260 Rust, 0 failures. Treat a red suite
+  as a regression to investigate, not as the expected state.
+  `docs/audit/REPO-AUDIT.md` holds the historical list.

@@ -21,6 +21,10 @@ import SwiftUI
 /// because a `WindowGroup` with no identifier cannot be addressed.
 enum MorbWindowID {
     static let main = "morbstack.main"
+    /// One Compose project's merged log document. Presented per project value, so two
+    /// projects can be watched side by side. See `ComposeProjectLogsView` for why a
+    /// merged log is a window rather than a pane in the Stacks inspector.
+    static let projectLogs = "morbstack.projectLogs"
 }
 
 /// The app scene graph.
@@ -119,6 +123,32 @@ public struct MorbstackMainApp: App {
         // hidden title also suppresses the route subtitle.
         .windowToolbarStyle(.automatic)
 
+        // A Compose project's merged log is an auxiliary document window: non-modal, so
+        // the person can keep operating the project while watching it; one per project
+        // value; and wide enough for a timestamp, a service and a message column, which
+        // an inspector column is not. The value is the Compose project name — the same
+        // engine-facing reference the rest of the app addresses a project by — so macOS
+        // can restore the window, and `ComposeProjectLogsView` states the truth when the
+        // project it names no longer exists.
+        WindowGroup(id: MorbWindowID.projectLogs, for: String.self) { $project in
+            Group {
+                if let project {
+                    ComposeProjectLogsView(project: project, model: model)
+                } else {
+                    // Restoration can hand back a window with no value. An empty window
+                    // would be a mystery; this states what it is and what to do.
+                    ContentUnavailableView {
+                        Label("No Project Selected", systemImage: "square.stack.3d.up")
+                    } description: {
+                        Text("Open a merged log from a Compose project in Stacks or from a project group in Containers.")
+                    }
+                    .frame(minWidth: 480, minHeight: 320)
+                }
+            }
+            .preferredColorScheme(options.appearance)
+        }
+        .defaultSize(width: 980, height: 620)
+
         // `.window` rather than the default `.menu`: the popover is a laid-out SwiftUI
         // view with its own header, rows and footer, and `.menu` would try to render it
         // as a list of menu items and mangle it.
@@ -177,6 +207,29 @@ extension FocusedValues {
     }
 }
 
+/// The selected container's two record commands, published by the Containers route.
+///
+/// Both live in the toolbar's secondary-action area, which the system is free to
+/// overflow away at a narrow width — the same exposure `RouteMaintenanceCommand` exists
+/// to close. `canOpenTerminal` is `ContainerTerminalAvailability`'s answer, so the menu
+/// item's enablement can never disagree with the toolbar button's.
+struct ContainerRecordCommands {
+    let canOpenTerminal: Bool
+    let openTerminal: () -> Void
+    let runCommand: () -> Void
+}
+
+private struct ContainerRecordCommandsKey: FocusedValueKey {
+    typealias Value = ContainerRecordCommands
+}
+
+extension FocusedValues {
+    var containerRecordCommands: ContainerRecordCommands? {
+        get { self[ContainerRecordCommandsKey.self] }
+        set { self[ContainerRecordCommandsKey.self] = newValue }
+    }
+}
+
 /// The menu bar's own commands, and with them every keyboard shortcut in the app.
 ///
 /// Shortcuts live here rather than on the views they act on so that they work from
@@ -189,6 +242,7 @@ struct MorbCommands: Commands {
     @Binding var isCLISetupPresented: Bool
     @FocusedValue(\.routeRefreshAction) private var routeRefreshAction
     @FocusedValue(\.routeMaintenanceCommand) private var routeMaintenanceCommand
+    @FocusedValue(\.containerRecordCommands) private var containerRecordCommands
     @FocusedValue(\.imageArchiveExportAction) private var imageArchiveExportAction
     @FocusedValue(\.imageArchiveImportAction) private var imageArchiveImportAction
     @FocusedValue(\.runLocalImageAction) private var runLocalImageAction
@@ -270,6 +324,25 @@ struct MorbCommands: Commands {
                 .disabled(!canSuspendEngine)
             Button("Stop Engine") { Task { await model.engineAction(.stop) } }
                 .disabled(!canStopEngine)
+        }
+
+        // The selected container's own commands, alongside Image's and Compose's. Both
+        // items are also in the route's toolbar and its contextual menu; this is the
+        // copy that survives toolbar overflow and carries the keyboard shortcut.
+        CommandMenu("Container") {
+            Button("Open Terminal") {
+                containerRecordCommands?.openTerminal()
+            }
+            // ⌃⌘T rather than ⌘T: ⌘T is the system's Show Fonts equivalent and is the
+            // shortcut a person's muscle memory reaches for in a browser tab, neither of
+            // which should collide with opening a shell inside a container.
+            .keyboardShortcut("t", modifiers: [.control, .command])
+            .disabled(containerRecordCommands?.canOpenTerminal != true)
+
+            Button("Run Command…") {
+                containerRecordCommands?.runCommand()
+            }
+            .disabled(containerRecordCommands == nil)
         }
 
         CommandMenu("Image") {
@@ -680,11 +753,18 @@ struct DetailHost: View {
         // opened. Doing it here rather than inside the screen keeps the rule ("the
         // expensive endpoint is fetched only when it is being looked at") in the same
         // file as the decision not to include it in the ordinary refresh.
-        .task(id: model.selection) {
+        //
+        // The id includes `engine.isRunning`: a route selected at launch (restored
+        // state, or `--tour-select`) mounts before the first engine-status round trip
+        // lands, so a plain `model.selection` id fires this task once while
+        // `isRunning` is still false and never retries — the route then shows an
+        // empty state even though the engine comes up moments later. Folding the
+        // engine flag into the id makes the flip from false to true re-run the task.
+        .task(id: "\(model.selection)|\(model.engine.isRunning)") {
             guard model.selection == .disk else { return }
             await model.refreshDisk()
         }
-        .task(id: model.selection) {
+        .task(id: "\(model.selection)|\(model.engine.isRunning)") {
             guard model.selection == .builds else { return }
             await model.refreshBuildCache()
         }

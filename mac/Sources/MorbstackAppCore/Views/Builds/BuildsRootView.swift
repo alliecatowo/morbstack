@@ -573,16 +573,9 @@ struct BuildsRootView: View {
                     ? "Choose BuildKit cache or Buildx history"
                     : "Buildx history is unavailable in developer fixture data")
         }
-        if !inspectorIsMounted {
-            // The inspector-less empty screens still need the trailing commands in
-            // the window toolbar; when a table is on screen they ride the inspector
-            // content instead — see `VolumesRootView.trailingCommandItems`.
-            trailingCommandItems
-        }
         // One semantic options menu instead of three loose glyphs — refresh, the
-        // builder sheet, and the infrequent destructive prune stay together and the
-        // system owns their overflow.
-        ToolbarItem(id: "builds.options", placement: .secondaryAction) {
+        // builder sheet, and the infrequent destructive prune stay together.
+        ToolbarItem(id: "builds.options", placement: .primaryAction) {
             Menu {
                 Button("Refresh", systemImage: "arrow.clockwise") {
                     Task { await refreshCurrentScope() }
@@ -612,6 +605,15 @@ struct BuildsRootView: View {
             .accessibilityIdentifier("builds.options")
             .accessibilityLabel("Build options")
             .help("Refresh, builder, and cleanup options")
+        }
+        // No `ToolbarSpacer` here, unlike Volumes/Networks/Images: this route's
+        // destructive command is an item *inside* the options menu, not a bare
+        // trash button that would sit in the same capsule as "build".
+        if !inspectorIsMounted {
+            // The inspector-less empty screens still need the trailing commands in
+            // the window toolbar; when a table is on screen they ride the inspector
+            // content instead — see `VolumesRootView.trailingCommandItems`.
+            trailingCommandItems
         }
     }
 
@@ -722,12 +724,18 @@ struct BuildsRootView: View {
             }
             .inspector(isPresented: $showsInspector) {
                 detailPane
-                    .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
                     // See the note on `VolumesRootView`: the trailing commands and
                     // search ride the inspector's toolbar region and remain present
                     // while the inspector is closed.
                     .toolbar { trailingCommandItems }
-                    .searchable(text: $query, placement: .toolbar, prompt: searchPrompt)
+                    .searchable(text: $query, placement: .toolbarPrincipal, prompt: searchPrompt)
+                    // `.inspectorColumnWidth` must be the outermost modifier on the
+                    // inspector's content — applied beneath `.toolbar`/`.searchable`
+                    // its preferred width was silently discarded and every route
+                    // fell back to the system default (~270pt), clipping every
+                    // value regardless of the min/ideal/max declared here. Verified
+                    // empirically against the real window 2026-08-06.
+                    .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
             }
         }
     }
@@ -844,10 +852,12 @@ struct BuildsRootView: View {
                 }
                 .inspector(isPresented: $showsInspector) {
                     historyDetailPane
-                        .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
                         // See the note on `VolumesRootView`.
                         .toolbar { trailingCommandItems }
-                        .searchable(text: $query, placement: .toolbar, prompt: searchPrompt)
+                        .searchable(text: $query, placement: .toolbarPrincipal, prompt: searchPrompt)
+                        // See the note above this pattern's other use in this file:
+                        // must be outermost or its width is silently discarded.
+                        .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
                 }
             }
         }

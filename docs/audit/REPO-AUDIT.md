@@ -6,6 +6,14 @@
 > `--userland-proxy-path` hook, host port-lease listener in
 > `GuestPortLease.swift`). Findings left unchanged as dated evidence; see
 > `docs/design/PATCH-FREE-PUBLISH-ALL.md`.
+>
+> **Extended 2026-08-05:** the same deletion moots §"CI/CD" item 4 below, the hard
+> `docker buildx` preflight in the guest-image job. There is no patched engine to build,
+> so `mise run guest-image` needs neither Docker nor buildx — it fetches the pinned,
+> hash-verified upstream `dockerd` like every other third-party guest asset. That
+> preflight and `build-engine.yml` are deleted; today's `.github/workflows/ci.yml`
+> runs `mise run guest-image` directly on a hosted macOS runner. Finding left unchanged
+> as dated evidence.
 
 Scope: architecture, code health, test reality, CI/CD, packaging, and the agent
 harness. Branch `code/native-content-continuation`, 273 commits, ~500 tracked

@@ -102,6 +102,18 @@ enum TrackDAppBridge {
         revealMainWindow()
         if showingLogs { showLogs?(containerID) }
     }
+
+    /// Selects a Compose project on the Stacks screen and brings the window forward.
+    ///
+    /// This is the menu bar's whole answer to project-level work. A Compose project's
+    /// lifecycle actions live on Stacks behind a confirmation that names how many
+    /// services it touches and what it deliberately does not do; the extra points at
+    /// that, rather than carrying a second, weaker copy of it.
+    static func reveal(composeProject: String, in model: AppModel) {
+        model.stackSelectionRequest = composeProject
+        model.selection = .stacks
+        revealMainWindow()
+    }
 }
 
 // MARK: - Well-known strings

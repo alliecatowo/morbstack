@@ -460,8 +460,8 @@ struct LogLineAssembler {
 
 // MARK: - Stats maths
 
-/// The CPU, memory, and network accounting from `docker stats`, isolated so it can be
-/// tested before it becomes a number or line in the inspector.
+/// The CPU, memory, network, and block-I/O accounting from `docker stats`, isolated so
+/// it can be tested before it becomes a number or line in the inspector.
 enum StatsMath {
 
     /// Container CPU as a percentage of one host core × the number of online cores.
@@ -528,14 +528,60 @@ enum StatsMath {
         return (received, transmitted)
     }
 
+    /// Totals Docker's cumulative block-device counters, read and written.
+    ///
+    /// **The double-counting trap.** `io_service_bytes_recursive` is a flat array of
+    /// `(major, minor, op, value)` rows, and the engine emits several operations per
+    /// device. On a cgroup v1 host that is `Read`, `Write`, `Sync`, `Async`, `Discard`
+    /// *and* `Total` — so summing the array is summing every byte two or three times.
+    /// Only `read` and `write` are taken, and the comparison is case-insensitive
+    /// because the two cgroup versions disagree about capitalization.
+    ///
+    /// **`nil` is a real answer.** An absent or empty array means the engine listed no
+    /// device, which is not the same fact as a device that reports zero bytes, and the
+    /// two must not render identically. Presence is tracked per direction: a direction
+    /// with at least one matching row has a total, even when that total is zero.
+    ///
+    /// **What our own guest reports.** Every Morbstack guest runs cgroup v2, and
+    /// dockerd's `statsV2` populates this one array from the kernel's `io.stat`
+    /// (`rbytes` → `read`, `wbytes` → `write`), leaving every other `blkio_stats` array
+    /// empty. The pinned guest kernel — kata-containers 3.28.0, Linux 6.18.15 — carries
+    /// `CONFIG_BLK_CGROUP=y`, `CONFIG_BLK_CGROUP_RWSTAT=y` and `CONFIG_CGROUP_WRITEBACK=y`
+    /// in its embedded `.config`, so `io.stat` exists and buffered writes are charged
+    /// back to the originating cgroup. But `io.stat` lists a device only once that
+    /// cgroup has actually moved bytes over it, so an idle container legitimately
+    /// produces an empty array — which is exactly why the empty case is a distinct,
+    /// non-alarming state in the inspector rather than a flat zero line or an error.
+    static func blockIOTotals(_ stats: Wire.Stats) -> (read: Int64?, written: Int64?) {
+        guard let entries = stats.blkio_stats?.io_service_bytes_recursive, !entries.isEmpty else {
+            return (nil, nil)
+        }
+
+        var read: Int64?
+        var written: Int64?
+        for entry in entries {
+            guard let op = entry.op?.lowercased(), op == "read" || op == "write" else { continue }
+            guard let value = entry.value, value >= 0 else { return (nil, nil) }
+
+            let running = (op == "read" ? read : written) ?? 0
+            let sum = running.addingReportingOverflow(value)
+            guard !sum.overflow else { return (nil, nil) }
+            if op == "read" { read = sum.partialValue } else { written = sum.partialValue }
+        }
+        return (read, written)
+    }
+
     static func sample(_ stats: Wire.Stats, now: Date = Date()) -> StatsSample {
         let network = networkTotals(stats)
+        let block = blockIOTotals(stats)
         return StatsSample(
             cpuPercent: cpuPercent(stats),
             memBytes: memoryBytes(stats),
             memLimit: stats.memory_stats?.limit ?? 0,
             networkReceivedBytes: network.received,
             networkTransmittedBytes: network.transmitted,
+            blockReadBytes: block.read,
+            blockWrittenBytes: block.written,
             ts: stats.read.flatMap(LogLineAssembler.parseRFC3339) ?? now)
     }
 
@@ -1508,6 +1554,114 @@ class DockerClient: @unchecked Sendable {
         if afterColon.contains("/") { return (trimmed, "latest") }  // registry port, not a tag
         if afterColon.isEmpty { return (String(trimmed[trimmed.startIndex..<colon]), "latest") }
         return (String(trimmed[trimmed.startIndex..<colon]), String(afterColon))
+    }
+
+    // MARK: - Container filesystem
+
+    /// Stats one path inside a container with `HEAD /containers/{id}/archive`.
+    ///
+    /// The whole answer is one response header, so this is cheap enough to call while
+    /// somebody types a path. It works on a **stopped** container — `docker cp`
+    /// semantics do not require a running process — which is the reason the Files tab
+    /// does not need an exec, a shell, or anything present in the image.
+    ///
+    /// - Throws: ``DockerClientError/http(status:message:)`` with 404 when the path is
+    ///   not there, and ``DockerClientError/decoding(_:)`` when the engine answered
+    ///   without the stat header it documents.
+    func containerPathStat(id: String, path: String) async throws -> ContainerPathStat {
+        let target =
+            "/containers/\(id)/archive?path=" + MinimalHTTP.percentEncodeQueryValue(path)
+        let head = try await run { try self.sendForHead(method: "HEAD", path: self.url(target)) }
+        guard (200..<300).contains(head.statusCode) else {
+            throw DockerClientError.http(
+                status: head.statusCode,
+                message: head.statusCode == 404
+                    ? "the engine could not find \(path) in this container"
+                    : "engine returned HTTP \(head.statusCode)")
+        }
+        guard let raw = head.headers["x-docker-container-path-stat"],
+              let stat = ContainerPathStat.decode(headerValue: raw)
+        else {
+            throw DockerClientError.decoding("the engine did not describe \(path)")
+        }
+        return stat
+    }
+
+    /// Streams `GET /containers/{id}/archive?path=…`, which is a tar of the whole
+    /// subtree at `path`.
+    ///
+    /// The caller gets a handle rather than an `AsyncSequence` because the interesting
+    /// operation on this stream is **stopping it**: a listing that has read its budget,
+    /// a preview that has the first two megabytes it wanted, or a person who pressed
+    /// Stop all need the connection shut down mid-archive without draining the rest.
+    func containerArchive(
+        id: String,
+        path: String,
+        onBody: @escaping @Sendable (Data) -> Void,
+        onFinish: @escaping @Sendable (Error?) -> Void
+    ) -> ContainerArchiveHandle {
+        let box = ContainerArchiveHandle()
+        let target =
+            "/containers/\(id)/archive?path=" + MinimalHTTP.percentEncodeQueryValue(path)
+        let handle = stream(method: "GET", path: target, onBody: onBody, onFinish: onFinish)
+        box.attach(handle)
+        return box
+    }
+
+    /// Sends a bodyless request and returns only the response head.
+    ///
+    /// Separate from `send` because a `HEAD` response carries header fields that
+    /// describe a body that will never arrive: framing the absent body is exactly the
+    /// wrong thing to do, and waiting for it is how this would hang.
+    private func sendForHead(
+        method: String,
+        path: String,
+        timeout: TimeInterval = 15
+    ) throws -> HTTPResponseHead {
+        let connection = try DockerConnection(socketPath: socketPath, timeout: 5)
+        defer { connection.close() }
+        try connection.write(MinimalHTTP.request(method: method, path: path, closeWhenDone: true))
+
+        var raw = Data()
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            let chunk = try connection.read()
+            if chunk.isEmpty { break }
+            raw.append(chunk)
+            if let parsed = try MinimalHTTP.parseHead(raw) { return parsed.head }
+            // A head that never terminates is a wedged peer, not a large document.
+            if raw.count > 64 * 1024 { break }
+        }
+        throw DockerClientError.engineUnreachable("the engine closed the connection without replying")
+    }
+}
+
+/// A cancellable archive read.
+///
+/// Wraps the private connection handle so a caller outside this file can stop a stream
+/// it started, and so a stop that arrives before the connection is even open is still
+/// honoured rather than silently lost.
+final class ContainerArchiveHandle: @unchecked Sendable {
+
+    private let lock = NSLock()
+    private var target: DockerConnectionHandle?
+    private var cancelled = false
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        let handle = target
+        target = nil
+        lock.unlock()
+        handle?.cancel()
+    }
+
+    fileprivate func attach(_ handle: DockerConnectionHandle) {
+        lock.lock()
+        let alreadyCancelled = cancelled
+        if !alreadyCancelled { target = handle }
+        lock.unlock()
+        if alreadyCancelled { handle.cancel() }
     }
 }
 

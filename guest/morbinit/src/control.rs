@@ -343,6 +343,17 @@ pub struct ControlContext {
     /// by Docker; this is only an admission fact for a macOS `/tmp` bind source.
     /// Additive so a host can reject rather than guess when an older guest omits it.
     pub tmp_alias_mounted: bool,
+    /// What `supervisor::apply_proxy_env` actually put in dockerd's
+    /// environment this boot, decoded from the kernel command line by
+    /// `guest_proxy::parse_cmdline` (UX-18). Empty string, not absent, means
+    /// "dockerd has no proxy of this kind" — this is a *report of what was
+    /// launched*, not of the host's intent, so `morb doctor` can tell "the
+    /// setting reached the engine" from "it did not" rather than merely
+    /// echoing config.toml back. Additive fields — hosts that predate them
+    /// ignore them.
+    pub http_proxy: String,
+    pub https_proxy: String,
+    pub no_proxy: String,
     /// The Kubernetes subsystem: the enable gate, the persistence fact, and
     /// the monitor's cached cluster snapshot.
     ///
@@ -419,6 +430,9 @@ pub fn handle_request(payload: &[u8], ctx: &ControlContext) -> (Vec<u8>, bool) {
                 ),
                 ("shares", Value::Str(ctx.shares.clone())),
                 ("tmp_alias_mounted", Value::Bool(ctx.tmp_alias_mounted)),
+                ("http_proxy", Value::Str(ctx.http_proxy.clone())),
+                ("https_proxy", Value::Str(ctx.https_proxy.clone())),
+                ("no_proxy", Value::Str(ctx.no_proxy.clone())),
                 (
                     "share_event_bridge",
                     Value::Str(SHARE_EVENT_BRIDGE_CAPABILITY.to_string()),
@@ -830,6 +844,9 @@ mod tests {
                 crate::shares::MountState::Mounted,
             )]),
             tmp_alias_mounted: false,
+            http_proxy: String::new(),
+            https_proxy: String::new(),
+            no_proxy: String::new(),
             // Nothing is installed on the macOS test host, so this reports
             // `not-installed` — which is exactly the state a fresh guest is in
             // and the one the protocol tests want to pin.
@@ -936,6 +953,31 @@ mod tests {
         assert_eq!(
             fields.get("disk_resize"),
             Some(&Value::Str("ready".to_string()))
+        );
+        // No proxy in `test_ctx()`, so `info` reports the empty-string sentinel
+        // rather than omitting the fields — an older host that never sends a
+        // `morb.proxy=` argument must be told "nothing was configured", not
+        // left guessing why the keys are missing.
+        assert_eq!(fields.get("http_proxy"), Some(&Value::Str(String::new())));
+        assert_eq!(fields.get("https_proxy"), Some(&Value::Str(String::new())));
+        assert_eq!(fields.get("no_proxy"), Some(&Value::Str(String::new())));
+    }
+
+    #[test]
+    fn info_reports_the_proxy_dockerd_was_launched_with() {
+        let mut ctx = test_ctx();
+        ctx.http_proxy = "http://proxy.corp:8080".to_string();
+        ctx.no_proxy = "localhost,.corp".to_string();
+        let (resp, _) = handle_request(br#"{"type":"info"}"#, &ctx);
+        let fields = jsonlite::parse(std::str::from_utf8(&resp).unwrap()).unwrap();
+        assert_eq!(
+            fields.get("http_proxy"),
+            Some(&Value::Str("http://proxy.corp:8080".to_string()))
+        );
+        assert_eq!(fields.get("https_proxy"), Some(&Value::Str(String::new())));
+        assert_eq!(
+            fields.get("no_proxy"),
+            Some(&Value::Str("localhost,.corp".to_string()))
         );
     }
 
@@ -1249,6 +1291,9 @@ mod tests {
             binfmt: crate::binfmt::BinfmtStatus::disabled(),
             shares: String::new(),
             tmp_alias_mounted: false,
+            http_proxy: String::new(),
+            https_proxy: String::new(),
+            no_proxy: String::new(),
             k8s: Arc::new(crate::k8s::K8sState::from_disk(true)),
             shutdown: Arc::new(ShutdownSignal::new()),
         });

@@ -5,6 +5,16 @@ Status: one-time comparison, written 2026-08-02 against Morbstack git HEAD
 versions, and vendor claims below as accurate as of the access date on each
 citation and nothing later.
 
+> **Refreshed 2026-08-05, §6 only.** Three "broken or absent today" bullets —
+> no bundled Docker client, no buildx out of the box, no zero-config socket
+> discovery — described a Morbstack that no longer exists: the bundled
+> toolchain (`docker` 29.7.1 / `docker-compose` v5.3.1 / `docker-buildx`
+> v0.36.0) and `morb install-cli` landed after this document was written.
+> Because `README.md` links here as "the full comparison matrix," those three
+> were rewritten in place rather than left as dated evidence; each now states
+> what is implemented and what release evidence is still missing. Everything
+> else on this page is still as of 2026-08-02.
+
 ## 1. Purpose, method, and an honesty statement
 
 This document compares Morbstack against six things developers actually
@@ -339,36 +349,55 @@ of what its docs say.
   absence recorded in [parity.md #18-19](parity.md). The next parity pass
   must verify both DNS resolution and a real Mac-side connection before
   this comparison calls the feature a measured PASS.
-- **No zero-config socket discovery.** A user must manually export
-  `DOCKER_HOST` or run `docker context create`. Testcontainers, most IDE
-  Docker integrations, and `docker-py`'s default client all try
-  conventional socket paths first and will simply fail to find Morbstack
-  out of the box ([parity.md #17](parity.md)).
-- **Morbstack does not install a Docker client. Every product in this
-  document does.** This is the single largest gap in the list and it is
-  structural rather than cosmetic. Installing Docker Desktop, OrbStack,
-  Podman Desktop or Rancher Desktop gives a user a working `docker` (or
-  `podman`) command; installing Morbstack today gives them a daemon and a
-  `morb` CLI and nothing to drive the engine with. Every demonstration of
-  Morbstack to date has silently borrowed Docker Desktop's client — on the
-  development machine, `/usr/local/bin/docker` is a symlink into
-  `/Applications/Docker.app`. On a Mac that has never had Docker, nothing
-  works. "Drop-in replacement" has to include the install path, and until
-  the client toolchain is bundled and put on `PATH` by a consented
-  first-run flow (tracked as the first gate on milestone L1 in
-  [`docs/roadmap.md`](roadmap.md)), Morbstack is honestly an add-on to a
-  Docker Desktop install rather than a replacement for one.
-- **`docker build`/`docker buildx` does not work out of the box.** The
-  modern default build path (BuildKit-by-default since Docker 23+) fails
-  with a stock Docker CLI until a `docker-buildx` binary is in
-  `~/.docker/cli-plugins/`. A pinned, hash-verified darwin/arm64 buildx is
-  now fetched by `scripts/fetch-guest-assets.sh` into `dist/host-bin/`,
-  but fetching is not installing: nothing places it where the Docker CLI's
-  plugin resolver looks, so the user still does it by hand. The underlying
-  engine-side BuildKit is fully functional once the client plugin exists,
-  including multi-platform builds and cache mounts
-  ([parity.md #13-14](parity.md)) — but "the engine works" is not the same
-  claim as "buildx ships," and it does not ship yet.
+- **Zero-config socket discovery works, but only after a consented
+  install step.** *Rewritten 2026-08-05; the original bullet said there was
+  none.* `morb install-cli` (and the app's first-run sheet, which calls the
+  same `MorbCliInstallation.install`) registers a `morbstack` Docker context
+  and links `~/.docker/run/docker.sock` — the per-user conventional path
+  Testcontainers Node/Go/Java probe and the context `docker-py` and the Dev
+  Containers CLI read. With no Docker-related environment variables at all,
+  all four Testcontainers languages ran real Postgres suites against server
+  29.7.1 ([`audit/ECOSYSTEM-MATRIX.md`](audit/ECOSYSTEM-MATRIX.md),
+  zero-config rerun; design in
+  [`design/ZERO-CONFIG-DISCOVERY.md`](design/ZERO-CONFIG-DISCOVERY.md)).
+  Two honest limits remain: nothing is claimed until a user has run that
+  step, and on a machine where Docker Desktop already owns the conventional
+  socket Morbstack **defers** rather than stomping it, so context-blind
+  tools keep finding Desktop. [parity.md #17](parity.md) is a dated **FAIL**
+  from the 2026-08-02 audit and stays one until a rebuilt-guest pass re-runs
+  it; it is not a statement about the current implementation.
+- **Morbstack installs a Docker client; what it has not done is prove that
+  install on a stranger's Mac.** *Rewritten 2026-08-05; the original bullet
+  said no client was installed at all, which was the single largest gap in
+  this list when it was written.* The app bundle now carries pinned,
+  hash-verified upstream `docker` 29.7.1, `docker-compose` v5.3.1 and
+  `docker-buildx` v0.36.0 under `Contents/Resources/host-bin/` with a
+  `TOOLCHAIN.plist` recording SHA-256 and source SHA-256 per tool, and
+  `morb install-cli` links them into `~/.morbstack/bin` plus the Docker CLI
+  plugins directory, adds one managed `PATH` block, and registers the
+  context — printing the whole plan first and refusing to replace any file
+  it does not own (`mac/Sources/morb/main.swift`,
+  `MorbstackKit/MorbCliInstallation.swift`,
+  [`first-run.md`](first-run.md)). What is still missing is *evidence*, not
+  code: nobody has completed the clean-profile matrix on an account that has
+  never had Docker ([`clean-profile-acceptance.md`](clean-profile-acceptance.md)
+  CP-01–CP-07), and the DMG is not notarized, so Gatekeeper still blocks
+  every user but the author. Until CP-01–CP-07 pass, treat single-path
+  install as implemented-but-unproven rather than as a shipped claim.
+- **`docker build`/`docker buildx` works out of the box after
+  `morb install-cli`.** *Rewritten 2026-08-05; the original bullet said
+  nothing placed buildx where the plugin resolver looks.* The pinned,
+  hash-verified darwin/arm64 buildx is both fetched
+  (`scripts/fetch-guest-assets.sh --host-cli` → `dist/host-bin/cli-plugins/`)
+  and installed: `MorbCliPlugins` links `docker-buildx` and `docker-compose`
+  into the Docker CLI's own per-user plugin directory
+  (`$DOCKER_CONFIG/cli-plugins`, normally `~/.docker/cli-plugins`), treating
+  any non-Morbstack file there as a blocking conflict it preserves rather
+  than overwrites. The engine-side BuildKit was already fully functional,
+  multi-platform builds and cache mounts included
+  ([parity.md #13-14](parity.md)) — #13's **FAIL** is the dated 2026-08-02
+  result and is superseded in source, pending the same CP-04 clean-profile
+  evidence as the bullet above.
 - **Bare `/tmp` bind sources need a fresh VM confirmation.** When the
   `/private/tmp` VirtioFS share is live, the guest now aliases `/tmp` to it
   so the two source spellings select the same Mac files. If a custom config

@@ -49,6 +49,7 @@ mod datagram;
 mod dial;
 mod disk;
 mod dns;
+mod guest_proxy;
 mod jsonlite;
 mod k8s;
 mod live_share;
@@ -160,6 +161,11 @@ fn run_linux(args: &[String]) {
             // Nor does it mount anything, so it has no shares to report.
             shares: String::new(),
             tmp_alias_mounted: false,
+            // Nor does anything here start dockerd, so no proxy environment
+            // was ever handed to it.
+            http_proxy: String::new(),
+            https_proxy: String::new(),
+            no_proxy: String::new(),
             // Reads whatever the disk says, so `--serve-control` can be
             // pointed at a guest image to inspect its persisted k8s state —
             // but nothing here supervises the services, so an `enable` through
@@ -206,6 +212,12 @@ fn real_init() {
     // every container sees the aliased /tmp from its very first bind mount.
     let tmp_alias_mounted = mounts::alias_tmp_to_shared_private_tmp(&share_results);
     let share_report = shares::encode_report(&share_results);
+
+    // The Mac's proxy configuration, same transport and same reason as the
+    // shares just above: dockerd is started by the supervisor further down,
+    // long before the vsock control channel can exist, so its environment
+    // has to be decided from what PID 1 was handed on the command line.
+    let advertised_proxy_env = mounts::advertised_proxy_env();
 
     // After `early_mounts`, which is what puts /dev/vda on /dev in the first
     // place, and before the supervisor, whose reaper would race the mkfs
@@ -286,11 +298,14 @@ fn real_init() {
     let binfmt_status = binfmt::setup();
 
     supervisor::prepare_runtime_dirs();
-    let services = supervisor::apply_dns_flags(
-        supervisor::default_services(docker_data_on_disk),
-        split_dns_ready,
-        guest_dns_fallback_ip,
-        host_gateway_ip,
+    let services = supervisor::apply_proxy_env(
+        supervisor::apply_dns_flags(
+            supervisor::default_services(docker_data_on_disk),
+            split_dns_ready,
+            guest_dns_fallback_ip,
+            host_gateway_ip,
+        ),
+        &advertised_proxy_env,
     );
     // Captured before the table is handed to the supervisor: the host needs
     // it in `info`, and `dial.rs`'s ECONNREFUSED diagnostic is only accurate
@@ -336,6 +351,13 @@ fn real_init() {
         binfmt: binfmt_status,
         shares: share_report,
         tmp_alias_mounted,
+        // What `apply_proxy_env` actually put on dockerd's command line —
+        // not merely what the host asked for, so a guest that (for whatever
+        // reason) never reached that call still reports the empty string
+        // rather than a claim nothing here can back up.
+        http_proxy: advertised_proxy_env.http.clone().unwrap_or_default(),
+        https_proxy: advertised_proxy_env.https.clone().unwrap_or_default(),
+        no_proxy: advertised_proxy_env.no_proxy.clone().unwrap_or_default(),
         k8s: Arc::clone(&k8s_state),
         shutdown: Arc::clone(&shutdown),
     });
