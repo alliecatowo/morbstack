@@ -638,11 +638,6 @@ struct VolumeSummary: Identifiable, Sendable, Hashable {
     /// reported. That is not evidence that a volume is unused, and it must never make
     /// the volume eligible for a bulk destructive operation.
     var isUnused: Bool { refCount == 0 }
-
-    var usageStatus: String {
-        guard let refCount else { return "Usage unreported" }
-        return refCount == 0 ? "Unused" : "In use"
-    }
 }
 
 struct NetworkSummary: Identifiable, Sendable, Hashable {

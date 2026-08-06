@@ -446,11 +446,11 @@ final class TrackCResourceListTests: XCTestCase {
         // The Engine omits usage data unless it was asked for, so a nil refCount
         // means "unknown", not "zero". Offering an unknown-usage volume for deletion
         // would be offering to delete data that may well be in use — so it stays out
-        // of the plan, and the row says "Usage unreported" rather than showing an
+        // of the plan, and the row says "Not scanned yet" rather than showing an
         // unused dot. The two must keep agreeing.
         let mystery = volume("no_usage_data", size: 10, refCount: nil)
         XCTAssertFalse(mystery.isUnused)
-        XCTAssertEqual(mystery.usageStatus, "Usage unreported")
+        XCTAssertEqual(TrackCVolumeInspector.referenceRowValue(for: mystery.refCount), "Not scanned yet")
         XCTAssertEqual(TrackCVolumeList.unusedPlan([mystery]).items.map(\.id), [])
     }
 
