@@ -27,6 +27,24 @@ enum Formatters {
         byteFormatter.string(fromByteCount: max(0, bytes))
     }
 
+    /// `1.2 MB/s`. The same units as ``bytesString(_:)`` with a rate suffix, so a
+    /// throughput reading and the cumulative total it was derived from are comparable
+    /// at a glance instead of being scaled by two different conventions.
+    static func byteRateString(_ bytesPerSecond: Double) -> String {
+        bytesString(clampedByteCount(bytesPerSecond)) + "/s"
+    }
+
+    /// A `Double` byte quantity as an `Int64` the byte formatter can take.
+    ///
+    /// `Int64(_:)` traps on a non-finite or out-of-range `Double` rather than
+    /// saturating, and a value large enough to do that can only come from a corrupt
+    /// counter — clamping is the difference between a wrong number on screen and a
+    /// crashed inspector.
+    static func clampedByteCount(_ value: Double) -> Int64 {
+        guard value.isFinite else { return 0 }
+        return Int64(min(max(0, value).rounded(), 9_223_372_036_854_775_000))
+    }
+
     // MARK: - Dates
 
     private static let relativeFormatter: RelativeDateTimeFormatter = {

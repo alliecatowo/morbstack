@@ -460,8 +460,8 @@ struct LogLineAssembler {
 
 // MARK: - Stats maths
 
-/// The CPU, memory, and network accounting from `docker stats`, isolated so it can be
-/// tested before it becomes a number or line in the inspector.
+/// The CPU, memory, network, and block-I/O accounting from `docker stats`, isolated so
+/// it can be tested before it becomes a number or line in the inspector.
 enum StatsMath {
 
     /// Container CPU as a percentage of one host core × the number of online cores.
@@ -528,14 +528,60 @@ enum StatsMath {
         return (received, transmitted)
     }
 
+    /// Totals Docker's cumulative block-device counters, read and written.
+    ///
+    /// **The double-counting trap.** `io_service_bytes_recursive` is a flat array of
+    /// `(major, minor, op, value)` rows, and the engine emits several operations per
+    /// device. On a cgroup v1 host that is `Read`, `Write`, `Sync`, `Async`, `Discard`
+    /// *and* `Total` — so summing the array is summing every byte two or three times.
+    /// Only `read` and `write` are taken, and the comparison is case-insensitive
+    /// because the two cgroup versions disagree about capitalization.
+    ///
+    /// **`nil` is a real answer.** An absent or empty array means the engine listed no
+    /// device, which is not the same fact as a device that reports zero bytes, and the
+    /// two must not render identically. Presence is tracked per direction: a direction
+    /// with at least one matching row has a total, even when that total is zero.
+    ///
+    /// **What our own guest reports.** Every Morbstack guest runs cgroup v2, and
+    /// dockerd's `statsV2` populates this one array from the kernel's `io.stat`
+    /// (`rbytes` → `read`, `wbytes` → `write`), leaving every other `blkio_stats` array
+    /// empty. The pinned guest kernel — kata-containers 3.28.0, Linux 6.18.15 — carries
+    /// `CONFIG_BLK_CGROUP=y`, `CONFIG_BLK_CGROUP_RWSTAT=y` and `CONFIG_CGROUP_WRITEBACK=y`
+    /// in its embedded `.config`, so `io.stat` exists and buffered writes are charged
+    /// back to the originating cgroup. But `io.stat` lists a device only once that
+    /// cgroup has actually moved bytes over it, so an idle container legitimately
+    /// produces an empty array — which is exactly why the empty case is a distinct,
+    /// non-alarming state in the inspector rather than a flat zero line or an error.
+    static func blockIOTotals(_ stats: Wire.Stats) -> (read: Int64?, written: Int64?) {
+        guard let entries = stats.blkio_stats?.io_service_bytes_recursive, !entries.isEmpty else {
+            return (nil, nil)
+        }
+
+        var read: Int64?
+        var written: Int64?
+        for entry in entries {
+            guard let op = entry.op?.lowercased(), op == "read" || op == "write" else { continue }
+            guard let value = entry.value, value >= 0 else { return (nil, nil) }
+
+            let running = (op == "read" ? read : written) ?? 0
+            let sum = running.addingReportingOverflow(value)
+            guard !sum.overflow else { return (nil, nil) }
+            if op == "read" { read = sum.partialValue } else { written = sum.partialValue }
+        }
+        return (read, written)
+    }
+
     static func sample(_ stats: Wire.Stats, now: Date = Date()) -> StatsSample {
         let network = networkTotals(stats)
+        let block = blockIOTotals(stats)
         return StatsSample(
             cpuPercent: cpuPercent(stats),
             memBytes: memoryBytes(stats),
             memLimit: stats.memory_stats?.limit ?? 0,
             networkReceivedBytes: network.received,
             networkTransmittedBytes: network.transmitted,
+            blockReadBytes: block.read,
+            blockWrittenBytes: block.written,
             ts: stats.read.flatMap(LogLineAssembler.parseRFC3339) ?? now)
     }
 

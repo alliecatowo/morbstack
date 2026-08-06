@@ -173,6 +173,32 @@ verified accurate against `docker stats` (UI-AUDIT "genuinely good" §2). Delta:
 series — the fields are already in the stats payload. → **UX-9**. An `orb top` clone is cruft for us;
 the menu-bar extra already shows per-container CPU.
 
+**Update (UX-9, 2026-08-05).** Network was already decoded and charted; the missing field was
+`blkio_stats`, which nothing in the app read. What we established about it on our own guest, since
+the honest outcome depends on whether the kernel accounts block I/O at all:
+
+- The pinned guest kernel — kata-containers 3.28.0, Linux 6.18.15, the `vmlinux` at
+  `$MORBSTACK_HOME/data/kernel/` — carries `CONFIG_BLK_CGROUP=y`, `CONFIG_BLK_CGROUP_RWSTAT=y`,
+  `CONFIG_BLK_DEV_THROTTLING=y` and `CONFIG_CGROUP_WRITEBACK=y`. Read directly out of the image's
+  embedded `IKCFG` blob, not inferred. So `io.stat` exists, and buffered writes are charged back to
+  the originating cgroup rather than to a flusher thread.
+- The pinned guest `dockerd` (29.7.1, `dist/guest-bin/dockerd`) exports
+  `github.com/moby/moby/v2/daemon.(*Daemon).statsV2` alongside `statsV1`, and the cgroup v2 metrics
+  type it consumes (`containerd/cgroups/v3/cgroup2/stats.IOEntry`, with `Rbytes`/`Wbytes`) has no
+  equivalent of v1's other blkio arrays. On our guests, therefore, **only**
+  `io_service_bytes_recursive` is ever populated; `io_serviced_recursive` and the rest are
+  structurally empty and are deliberately not modelled.
+- **The caveat that shapes the UI:** cgroup v2's `io.stat` lists a device only once that cgroup has
+  moved bytes over it, so an idle container legitimately yields an empty array — indistinguishable
+  from an engine that does not account block I/O at all. The Disk tab therefore states the Engine's
+  listing rule ("lists a block device only after a container reads from or writes to it, and it
+  listed none for this container") rather than claiming a cause it cannot know, and never renders
+  the empty case as a flat zero line.
+- **Not verified:** no live container was run for this ticket (machine lane held elsewhere), so the
+  claim that our guests do in practice emit non-empty `io_service_bytes_recursive` under real I/O
+  is a kernel-config and binary-symbol inference, not an observation. Confirming it is one
+  `docker run --rm alpine dd if=/dev/zero of=/x bs=1M count=64` away for whoever next holds the lane.
+
 ## 10. Menu-bar extra — verdict: **build** (stay lean)
 
 OrbStack's does container/project lifecycle, logs, terminal, open-in-browser, ports, mounts, machine
