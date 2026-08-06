@@ -263,6 +263,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn emit_produces_exactly_the_json_the_host_decoder_expects() {
+        // The anchor for every `emit` caller, including the ~15 reply tests in
+        // `control.rs`. Those all decode with `parse`, so `emit` was pinned only
+        // against this crate's own reader: verified by switching `emit` to single
+        // quotes (with `parse` and `escape_into` relaxed to match) — all 260 guest
+        // tests still passed, while the host's Foundation JSONSerialization would have
+        // rejected every MRB0 reply the guest sent. Field order is part of the
+        // contract's observable output, so this is a whole-string comparison.
+        assert_eq!(
+            emit(&[
+                ("type", Value::Str("pong".to_string())),
+                ("uptime_ms", Value::Int(1234)),
+                ("ok", Value::Bool(true)),
+                ("neg", Value::Int(-7)),
+            ]),
+            r#"{"type":"pong","uptime_ms":1234,"ok":true,"neg":-7}"#
+        );
+        assert_eq!(emit(&[]), "{}");
+        assert_eq!(
+            emit(&[("msg", Value::Str("a\"b\\c\nd".to_string()))]),
+            r#"{"msg":"a\"b\\c\nd"}"#
+        );
+    }
+
+    #[test]
     fn round_trips_simple_object() {
         let encoded = emit(&[
             ("type", Value::Str("pong".to_string())),
