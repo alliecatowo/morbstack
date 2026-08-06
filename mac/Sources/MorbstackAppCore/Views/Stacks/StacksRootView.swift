@@ -123,6 +123,9 @@ struct StacksRootView: View {
     @State private var query = ""
     @State private var selection: StackOutlineID?
     @State private var showsInspector = true
+    /// Projects the person has deliberately collapsed. Absence means expanded, so a
+    /// newly discovered project arrives open rather than hidden.
+    @State private var collapsedProjects: Set<String> = []
     /// Compose files are supporting metadata, not equal-weight inspector facts.
     @State private var composeFilesExpanded = false
     @State private var busyProjects: Set<String> = []
@@ -535,19 +538,103 @@ struct StacksRootView: View {
         }
     }
 
+    /// One row, whether it is a project or one of its services.
+    ///
+    /// A service carries its image and status for the same reason the Containers
+    /// list does: without them the row is a name and nothing else, and "is this
+    /// running, and what is it" are the two questions the screen exists to answer.
+    /// A project carries the count it already knows.
+    @ViewBuilder
+    private func stackRow(_ row: StackOutlineRow) -> some View {
+        HStack(spacing: 12) {
+            Label {
+                Text(row.displayName)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            } icon: {
+                Image(systemName: row.service.map { stateSymbol(for: $0) } ?? "square.stack.3d.up")
+                    .foregroundStyle(row.service.map { stateColor(for: $0) } ?? .secondary)
+                    .accessibilityHidden(true)
+            }
+            .layoutPriority(2)
+
+            if let service = row.service {
+                Text(service.image)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .layoutPriority(1)
+            }
+
+            Spacer(minLength: 8)
+
+            if let service = row.service {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    Text(service.statusDisplay(at: context.date))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                .layoutPriority(2)
+            } else if let count = row.children?.count {
+                Text(runningSummary(row.children ?? []))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                    .accessibilityLabel("\(count) services")
+            }
+        }
+        .tag(row.id)
+        .help(row.service.map { $0.status.isEmpty ? $0.state : $0.status } ?? "Compose project")
+        // Row identity is the engine-facing reference, per
+        // docs/design/ACCESSIBILITY-IDENTIFIERS.md: a project's Compose
+        // project name, or a service's unique Docker container name. Unchanged by
+        // the move from OutlineGroup to DisclosureGroup.
+        .accessibilityIdentifier(
+            "stacks.row.\(row.service?.displayName ?? row.projectName ?? row.displayName)")
+    }
+
+    /// "2 of 3 running" — the fact a collapsed project most needs to carry, because
+    /// it is the reason someone would expand it.
+    private func runningSummary(_ services: [StackOutlineRow]) -> String {
+        let all = services.compactMap(\.service)
+        let running = all.filter(\.isRunning).count
+        return "\(running) of \(all.count) running"
+    }
+
+    /// Projects a person has deliberately collapsed. Absence means expanded, so a
+    /// newly discovered project arrives open.
+    ///
+    /// `OutlineGroup` collapses everything by default, which made the whole route a
+    /// list of closed bars: a running three-service project rendered as one row in
+    /// an otherwise empty window, and the services — the only thing on this screen
+    /// anybody came to see — were a click away with no indication they existed.
+    /// A Compose project's *services are its content*, not a detail of it.
+    private func projectExpansion(_ project: String) -> Binding<Bool> {
+        Binding(
+            get: { !collapsedProjects.contains(project) },
+            set: { expanded in
+                if expanded {
+                    collapsedProjects.remove(project)
+                } else {
+                    collapsedProjects.insert(project)
+                }
+            })
+    }
+
     private var outline: some View {
         List(selection: $selection) {
-            OutlineGroup(visibleRows, children: \.children) { row in
-                Label(
-                    row.displayName,
-                    systemImage: row.service.map { stateSymbol(for: $0) } ?? "square.stack.3d.up")
-                    .tag(row.id)
-                    .help(row.service.map { $0.status.isEmpty ? $0.state : $0.status } ?? "Compose project")
-                    // Row identity is the engine-facing reference, per
-                    // docs/design/ACCESSIBILITY-IDENTIFIERS.md: a project's Compose
-                    // project name, or a service's unique Docker container name.
-                    .accessibilityIdentifier(
-                        "stacks.row.\(row.service?.displayName ?? row.projectName ?? row.displayName)")
+            ForEach(visibleRows) { row in
+                if let services = row.children, let project = row.projectName {
+                    DisclosureGroup(isExpanded: projectExpansion(project)) {
+                        ForEach(services) { service in
+                            stackRow(service)
+                        }
+                    } label: {
+                        stackRow(row)
+                    }
+                } else {
+                    stackRow(row)
+                }
             }
         }
         .contextMenu(forSelectionType: StackOutlineID.self) { ids in
@@ -996,6 +1083,18 @@ struct StacksRootView: View {
     private func isProjectBusy(for service: ContainerSummary) -> Bool {
         guard let project = service.composeProject else { return false }
         return busyProjects.contains(project)
+    }
+
+    /// Mirrors `ContainersRootView.stateColor`. Duplicated deliberately rather than
+    /// hoisted: both are three lines, and the alternative is a shared "UI helpers"
+    /// file that becomes a dumping ground. If a third route needs it, hoist then.
+    private func stateColor(for service: ContainerSummary) -> Color {
+        if service.isUnhealthy || service.state == "dead" { return .red }
+        switch service.state {
+        case "running": return .green
+        case "paused", "restarting": return .orange
+        default: return .secondary
+        }
     }
 
     private func stateSymbol(for service: ContainerSummary) -> String {

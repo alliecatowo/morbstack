@@ -24,6 +24,14 @@ Kubernetes' own scaffolding into a single **Kubernetes-Managed** row. Before thi
 actually care about. The running/stopped dot, the relative uptime and the project heading are doing
 all the work; there is no custom chrome on this screen at all.
 
+### Stacks
+
+![Stacks](stacks.png)
+
+A Compose project's services *are* its content, so projects open by default and the header carries
+the fact you would expand it for — **0 of 3 running**. Each service shows its image and status, the
+same handful `docker ps` shows, so the screen answers "what is this and is it up" without a click.
+
 ### Images
 
 ![Images](images.png)
