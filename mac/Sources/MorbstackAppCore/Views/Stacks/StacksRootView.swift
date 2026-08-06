@@ -541,7 +541,7 @@ struct StacksRootView: View {
                     // search ride the inspector's toolbar region and remain present
                     // while the inspector is closed.
                     .toolbar { trailingCommandItems }
-                    .searchable(text: $query, placement: .toolbar, prompt: "Project, service, image")
+                    .searchable(text: $query, placement: .toolbarPrincipal, prompt: "Project, service, image")
             }
         }
     }

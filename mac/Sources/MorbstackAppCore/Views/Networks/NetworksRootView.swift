@@ -512,7 +512,7 @@ struct NetworksRootView: View {
                     // search ride the inspector's toolbar region and remain present
                     // while the inspector is closed.
                     .toolbar { trailingCommandItems }
-                    .searchable(text: $query, placement: .toolbar, prompt: "Name, driver, ID")
+                    .searchable(text: $query, placement: .toolbarPrincipal, prompt: "Name, driver, ID")
             }
         }
     }

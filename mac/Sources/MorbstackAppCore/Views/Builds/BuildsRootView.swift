@@ -729,7 +729,7 @@ struct BuildsRootView: View {
                     // search ride the inspector's toolbar region and remain present
                     // while the inspector is closed.
                     .toolbar { trailingCommandItems }
-                    .searchable(text: $query, placement: .toolbar, prompt: searchPrompt)
+                    .searchable(text: $query, placement: .toolbarPrincipal, prompt: searchPrompt)
             }
         }
     }
@@ -849,7 +849,7 @@ struct BuildsRootView: View {
                         .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
                         // See the note on `VolumesRootView`.
                         .toolbar { trailingCommandItems }
-                        .searchable(text: $query, placement: .toolbar, prompt: searchPrompt)
+                        .searchable(text: $query, placement: .toolbarPrincipal, prompt: searchPrompt)
                 }
             }
         }

@@ -377,7 +377,7 @@ struct ContainersRootView: View {
                     // search ride the inspector's toolbar region and remain present
                     // while the inspector is closed.
                     .toolbar { trailingCommandItems }
-                    .searchable(text: $search, placement: .toolbar, prompt: "Name, image, or project")
+                    .searchable(text: $search, placement: .toolbarPrincipal, prompt: "Name, image, or project")
             }
         }
     }

@@ -736,7 +736,7 @@ struct VolumesRootView: View {
                     .toolbar { trailingCommandItems }
                     .searchable(
                         text: $query,
-                        placement: .toolbar,
+                        placement: .toolbarPrincipal,
                         prompt: "Name, driver, label, or mount point")
             }
         }

@@ -820,7 +820,7 @@ struct KubernetesRootView: View {
                             .toolbar { trailingCommandItems }
                             .searchable(
                                 text: $query,
-                                placement: .toolbar,
+                                placement: .toolbarPrincipal,
                                 prompt: "Search \(resource.rawValue.lowercased())")
                     }
             }
