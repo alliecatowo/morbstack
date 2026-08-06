@@ -10,14 +10,27 @@
 //
 // The list groups rows by what Docker itself reports about them, in three tiers:
 // plain `docker run` containers stay loose at the top, each Compose project becomes a
-// native `Section` named by its `com.docker.compose.project` label, and
-// kubelet-created containers collapse into one `DisclosureGroup`. The Kubernetes tier
-// exists because a single enabled cluster adds nine-plus machine-named rows
-// (`k8s_POD_…`) that bury the containers a person started deliberately. Collapsed is
-// not hidden: the group row states its true count, expands on click, and expands
-// itself whenever a search is active so a match can never be concealed. Stacks remains
-// the route that *manages* Compose projects; the section header here is only the
-// grouping fact, the same way Docker Desktop and OrbStack present it.
+// `DisclosureGroup` named by its `com.docker.compose.project` label, and kubelet-created
+// containers collapse into one more. The Kubernetes tier exists because a single enabled
+// cluster adds nine-plus machine-named rows (`k8s_POD_…`) that bury the containers a
+// person started deliberately.
+//
+// **One grouping idiom, deliberately.** Compose projects were `Section`s while the
+// Kubernetes tier was a `DisclosureGroup`, so two things that are the same kind of thing
+// — a named collection of containers — looked and behaved differently on one screen: one
+// collapsed, one did not, and only one carried a count. `StacksRootView` reaches for
+// disclosure for the identical concept, so this is consistent within the screen and
+// across the app.
+//
+// Collapsed is not hidden. Every group row carries "n of m running" — the fact that
+// would make someone open it, where a bare count answers a question nobody asked — and
+// every group forces itself open while a search is active, because a match concealed
+// behind a disclosure reads as no match at all.
+//
+// Expansion state tracks what the person has deliberately COLLAPSED, so a project that
+// appears while the app is open arrives visible. Stacks remains the route that *manages*
+// Compose projects; the grouping here is only the fact, the same way Docker Desktop and
+// OrbStack present it.
 
 import Foundation
 import MorbstackKit
@@ -101,6 +114,7 @@ struct ContainersRootView: View {
     /// the group row still names its count, so nothing is silently hidden — and
     /// forced open while a search is active so a matching row can always be seen.
     @State private var isKubernetesGroupExpanded = false
+    @State private var collapsedProjects: Set<String> = []
 
     private var stoppedCount: Int {
         model.containers.filter { !$0.isRunning }.count
@@ -353,12 +367,29 @@ struct ContainersRootView: View {
                 containerRow(container)
             }
 
+            // One grouping idiom for the whole screen. A Compose project used to be a
+            // `Section` while the Kubernetes group below was a `DisclosureGroup`, so
+            // two things that are the same kind of thing — a named collection of
+            // containers — looked and behaved differently on one list: one could be
+            // collapsed, one could not, and only one carried a count. `StacksRootView`
+            // reaches for disclosure for the identical concept, so this is the shape
+            // that is consistent both within the screen and across the app.
             ForEach(grouped.projects, id: \.name) { project in
-                Section(project.name) {
+                DisclosureGroup(isExpanded: projectExpansion(project.name)) {
                     ForEach(project.containers) { container in
                         containerRow(container)
                     }
+                } label: {
+                    HStack {
+                        Label(project.name, systemImage: "square.stack.3d.up")
+                        Spacer(minLength: 12)
+                        Text(runningSummary(project.containers))
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                    .help("Containers labelled with the Compose project \(project.name).")
                 }
+                .accessibilityIdentifier("containers.project.\(project.name)")
             }
 
             if !grouped.kubernetes.isEmpty {
@@ -372,7 +403,7 @@ struct ContainersRootView: View {
                         // so the group visibly points at that screen.
                         Label("Kubernetes-Managed", systemImage: "helm")
                         Spacer(minLength: 12)
-                        Text("\(grouped.kubernetes.count) container\(grouped.kubernetes.count == 1 ? "" : "s")")
+                        Text(runningSummary(grouped.kubernetes))
                             .foregroundStyle(.secondary)
                             .monospacedDigit()
                     }
@@ -396,6 +427,31 @@ struct ContainersRootView: View {
     /// Forced open while searching; the person's own expand/collapse otherwise.
     private var kubernetesGroupExpansion: Binding<Bool> {
         search.isEmpty ? $isKubernetesGroupExpanded : .constant(true)
+    }
+
+    /// Compose projects the person has deliberately collapsed. Tracking collapse
+    /// rather than expansion means a project that appears while the app is open
+    /// arrives visible — the default is the useful one. Search forces every project
+    /// open, for the same reason the Kubernetes group opens: a match hidden behind a
+    /// disclosure reads as no match at all.
+    private func projectExpansion(_ project: String) -> Binding<Bool> {
+        guard search.isEmpty else { return .constant(true) }
+        return Binding(
+            get: { !collapsedProjects.contains(project) },
+            set: { expanded in
+                if expanded {
+                    collapsedProjects.remove(project)
+                } else {
+                    collapsedProjects.insert(project)
+                }
+            })
+    }
+
+    /// "2 of 3 running" — what a collapsed group most needs to carry, because it is
+    /// the reason someone would open it. A bare count ("3 containers") answers a
+    /// question nobody asked.
+    private func runningSummary(_ containers: [ContainerSummary]) -> String {
+        "\(containers.filter(\.isRunning).count) of \(containers.count) running"
     }
 
     /// The published host ports, as `docker ps` would list them, deduplicated and
