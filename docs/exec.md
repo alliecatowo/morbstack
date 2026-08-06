@@ -25,6 +25,31 @@ The window is a programmatic `NSWindowController`, not a SwiftUI scene, and it i
 marked non-restorable. A terminal session dies with its socket; relaunching the app
 must never resurrect a window attached to a shell that no longer exists.
 
+## Where it is reached from
+
+Three places, all reading the same enablement function
+(`Terminal/ContainerTerminalAvailability.swift`) so they cannot drift apart:
+
+* the Containers row's **contextual menu**, directly above Run Command — the two ways
+  to run something inside a container sit adjacent and differently named, so the
+  choice between them is made with both visible;
+* the **toolbar's secondary-action area** for the selected record
+  (`containers.openTerminal`), beside `containers.runCommand`;
+* the menu bar's **Container** menu, with ⌃⌘T. A command that exists only in the
+  toolbar becomes unreachable the moment the system overflows it away at a narrow
+  width.
+
+Not in `ContainerDetailView`. That view's own header states the rule it follows —
+"an information inspector, not a second hand-built application chrome" — and a
+command that opens a window is chrome.
+
+**A stopped container has no process namespace to enter.** `POST
+/containers/{id}/exec` refuses it, and so does the affordance: disabled, with
+`.help()` naming the single step that would make it work ("Start pg-main to open a
+terminal in it"), rather than an error after the click. `dead` is the state with no
+remedy, so its copy offers none. A `--tour-fixtures` window has no engine at all and
+is disabled for that reason instead.
+
 ## The transport: a hijacked exec
 
 `Terminal/DockerExecPTYSession.swift` performs the same exchange the Docker CLI does:
@@ -92,14 +117,62 @@ scrollback, double-click selects a word, triple-click a line.
 ## Shell choice, and the honest failure
 
 `Terminal/TerminalShellResolution.swift` probes `/bin/bash` then `/bin/sh` with a
-bounded noninteractive exec per candidate and starts the first that runs. A
-container with neither — a distroless image — gets a plain statement of that fact
-in the window, not a spinner and not a stack trace.
+bounded noninteractive exec per candidate (`<shell> -c "exit 0"`) and starts the
+first that runs. A container with neither — a distroless image — gets a plain
+statement of that fact in the window, naming the candidates it tried and pointing at
+Run Command for a binary the image does ship. No spinner, no stack trace, and no
+promise of a toolbox that does not exist.
 
-That typed outcome is deliberately the seam for the debug toolbox (`morb debug`,
-`docs/debug.md`): a toolbox that brings its own shell becomes a new resolution
-outcome feeding the same terminal, not a rewrite of it. The toolbox does not exist
-yet, and the terminal says so.
+That typed outcome remains the seam a debug toolbox would grow through
+(`docs/debug.md`): a toolbox that brings its own shell becomes a new resolution
+outcome feeding the same terminal, not a rewrite of it.
+
+## Untrusted input
+
+Everything arriving from the guest is bytes an attacker chose, if the container is
+theirs. `TerminalEmulator` is written to that assumption and
+`TerminalEmulatorHostileInputTests` is the executable form of this section.
+
+What is defended:
+
+* **`OSC 52` is not implemented and must not be.** It is the clipboard read/write
+  sequence: the write form would let a container replace what the person is about to
+  paste into a shell on their own machine; the read form would exfiltrate the
+  pasteboard through the container's own stdout. OSC dispatch is an allow-list
+  (`0`/`2` only) precisely so 52 falls into the discard branch.
+* **Window titles are sanitised.** `OSC 0`/`OSC 2` is attacker-controlled text that
+  reaches `NSWindow.title`. C0/C1/DEL are stripped (a `\n` corrupts anything that
+  later logs the title), bidi and invisible formatting controls are stripped (the
+  Trojan Source technique — text that reads as one thing and is another), and the
+  result is capped at 128 characters. The window's own `<name> — <shell>` prefix
+  always precedes it, so a container cannot make its window impersonate another.
+* **Replies never echo the guest's bytes.** DA1, DA2, DSR and CPR are fixed literals
+  plus coordinates the emulator computed itself.
+* **Every accumulator is bounded**, and a sequence past its bound is *abandoned*,
+  not truncated and executed: 128 bytes of CSI parameters, 4 KB of OSC/DCS payload,
+  `CSI b` (repeat) capped at one screenful.
+* **Every write clamps to the live grid** before touching storage; a fuzz soak and a
+  resize-under-load soak assert the grid stays rectangular and the cursor in bounds.
+* **DCS/APC/PM/SOS payloads are swallowed**, so a program's private data never
+  sprays across the screen as text.
+* **Mouse reporting is a deliberate non-feature.** Modes 1000–1006 are accepted and
+  discarded, so no pointer position is ever reported into the guest.
+* **Bracketed paste strips an embedded terminator** from the clipboard payload.
+  Without that, text carrying `ESC [201~` closes the fence early and the remainder
+  reaches the shell as typed input — a clipboard that can run a command.
+
+What is *not* defended, stated plainly:
+
+* A container **can** set the window title, within the sanitiser's limits. That is
+  the feature; the mitigation is the prefix and the cap, not prevention.
+* A container **can** emit whatever glyphs it likes, including ones that visually
+  imitate this app's own UI, inside the terminal's content area. Terminal emulators
+  do not solve this and neither does this one.
+* A container **can** ring the bell (`NSSound.beep()`) as often as it writes `0x07`.
+  There is no rate limit.
+* Selection and copy put the *rendered* text on the pasteboard. A container can
+  therefore influence what a person copies if they copy from its output — the same
+  exposure every terminal has, and the reason `⌘V` into a shell is bracketed.
 
 ## Teardown
 
@@ -111,7 +184,14 @@ readable and says what happened in one line at the bottom.
 
 ## Verified against a live engine
 
-*This section is filled in from the live matrix run; see the dated results below.*
+**Not yet.** As of 2026-08-05 the screen model, the key encoder, the transport, the
+shell probe, and the affordance's enablement are covered by 141 unit tests, and the
+fixture XCUITest asserts the disabled state. Nobody has yet held a real shell open
+against a running container: that needs the machine lane (`mise run app`, a signed
+bundle, a booted engine) and is the outstanding acceptance step for DIF-2. Until it
+happens, no claim in this document about *interactive* behaviour — typing latency,
+`vim` and `htop` under a real PTY, resize during a live window drag, SIGHUP on close
+— has been observed rather than reasoned about.
 
 ## Known limits
 
@@ -119,6 +199,12 @@ Stated, not hidden:
 
 * **No reflow on resize.** Narrowing the window truncates line storage at the new
   width (like xterm, unlike Terminal.app and iTerm2).
+* **No application keypad mode.** `ESC =` / `ESC >` are consumed and ignored, so the
+  numeric keypad always sends digits. Programs that assume DECKPAM get plain numbers.
+* **G2/G3 charsets are designable but unreachable** — there is no SS2/SS3 locking
+  shift, so only G0 and G1 (via `SO`/`SI`) select a charset.
+* **`ED 3` clears scrollback but `47`/`1047` alternate-screen entry always starts
+  blank**, where xterm's mode 47 retains the alternate buffer's previous content.
 * **No mouse reporting.** Programs that ask for xterm mouse modes (1000–1006) get
   no mouse events; `htop` is keyboard-only here, `vim` mouse selection falls back
   to the terminal's own selection.

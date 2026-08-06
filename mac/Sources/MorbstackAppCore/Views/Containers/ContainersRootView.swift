@@ -151,6 +151,7 @@ struct ContainersRootView: View {
                     title: "Remove Stopped Containers…",
                     isEnabled: stoppedCount > 0 && !isPruning,
                     perform: { isShowingPruneConfirmation = true }))
+            .focusedSceneValue(\.containerRecordCommands, containerRecordCommands)
             .toolbar { toolbarContent }
             .confirmationDialog(
                 removalTarget.map { "Remove “\($0.displayName)”?" } ?? "Remove container?",
@@ -249,6 +250,22 @@ struct ContainersRootView: View {
                 }
             }
 
+            // An interactive shell is the most-reached-for command on a running
+            // container, so it sits with the record's other commands in macOS's managed
+            // secondary-action area. Unlike Run Command it cannot explain itself in a
+            // sheet first — it opens a window onto a live process — so the precondition
+            // is carried by the control: disabled, with `.help()` naming the one step
+            // that would make it work.
+            ToolbarItem(id: "containers.openTerminal", placement: .secondaryAction) {
+                Button("Open Terminal", systemImage: "apple.terminal") {
+                    openTerminal(for: selected)
+                }
+                .accessibilityIdentifier("containers.openTerminal")
+                .accessibilityLabel("Open a terminal in \(selected.displayName)")
+                .help(terminalHelp(for: selected))
+                .disabled(!terminalIsAvailable(for: selected))
+            }
+
             // A selected-record command belongs in macOS's managed secondary-action
             // area, not in every list row or a hand-built command bar. The sheet itself
             // explains why a stopped selection cannot execute before it can reach Docker.
@@ -258,7 +275,7 @@ struct ContainersRootView: View {
                 }
                 .accessibilityIdentifier("containers.runCommand")
                 .accessibilityLabel("Run command in \(selected.displayName)")
-                .help("Run a noninteractive command in \(selected.displayName)")
+                .help("Run one noninteractive command in \(selected.displayName) and keep its output")
             }
         }
 
@@ -461,6 +478,13 @@ struct ContainersRootView: View {
             Button(action.title) { perform(action, on: container.id) }
         }
         Divider()
+        // The two ways to run something inside a container sit together, adjacent and
+        // differently named, so the difference between them is visible at the point of
+        // choosing rather than discovered afterwards: one opens a live shell, one
+        // returns a finite result document.
+        Button("Open Terminal", systemImage: "apple.terminal") { openTerminal(for: container) }
+            .disabled(!terminalIsAvailable(for: container))
+            .help(terminalHelp(for: container))
         Button("Run Command…", systemImage: "terminal") { commandTarget = container }
         Divider()
         Button("Copy Name") { MorbPasteboard.copy(container.displayName) }
@@ -550,6 +574,40 @@ struct ContainersRootView: View {
         case "paused", "restarting": return .orange
         default: return .secondary
         }
+    }
+
+    // MARK: Terminal
+
+    private func terminalIsAvailable(for container: ContainerSummary) -> Bool {
+        ContainerTerminalAvailability.isAvailable(
+            for: container, permitsExternalOperations: model.permitsExternalOperations)
+    }
+
+    private func terminalHelp(for container: ContainerSummary) -> String {
+        ContainerTerminalAvailability.helpText(
+            for: container, permitsExternalOperations: model.permitsExternalOperations)
+    }
+
+    /// Every terminal opens its own window and its own hijacked socket; several shells
+    /// into one container are legitimate, so this deliberately does not deduplicate.
+    /// The guard is a backstop — all three call sites are already disabled when it would
+    /// fail — for the case where the container stops between the menu opening and the
+    /// click landing.
+    private func openTerminal(for container: ContainerSummary) {
+        guard terminalIsAvailable(for: container) else { return }
+        ContainerTerminalWindowController.open(for: container, client: model.client)
+    }
+
+    /// Published so the Container menu can carry the same two record commands. A command
+    /// that exists only in the toolbar becomes unreachable the moment the system
+    /// overflows it away at a narrow width — the same reason `routeMaintenanceCommand`
+    /// exists.
+    private var containerRecordCommands: ContainerRecordCommands? {
+        guard let selected else { return nil }
+        return ContainerRecordCommands(
+            canOpenTerminal: terminalIsAvailable(for: selected),
+            openTerminal: { openTerminal(for: selected) },
+            runCommand: { commandTarget = selected })
     }
 
     // MARK: Intents

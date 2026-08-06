@@ -399,6 +399,25 @@ final class MorbstackFixtureUITests: XCTestCase {
         XCTAssertTrue(saveTranscript.isEnabled)
     }
 
+    /// An interactive terminal opens its own hijacked socket outside `DockerClient`, so
+    /// a fixture window — which has no engine behind it — must not offer one. The
+    /// affordance is present and disabled rather than absent: the capability is real,
+    /// and hiding it would teach the reader it does not exist.
+    func testOpenTerminalIsPresentAndDisabledInFixtureMode() throws {
+        let app = try launchFixture(appearance: .light)
+        try assertFixtureMarker("shopfront-api-1", in: app)
+
+        let container = automationElement("containers.row.shopfront-api-1", in: app)
+        XCTAssertTrue(container.waitForExistence(timeout: 10))
+        container.click()
+
+        let openTerminal = app.buttons["containers.openTerminal"]
+        XCTAssertTrue(openTerminal.waitForExistence(timeout: 10))
+        // The identifier addresses it; the label is the user-facing contract.
+        XCTAssertTrue(waitForLabel("Open a terminal in shopfront-api-1", on: openTerminal))
+        XCTAssertFalse(openTerminal.isEnabled, "a fixture window has no engine to attach a shell to")
+    }
+
     /// VM capacity comes from local Morbstack state, not fixture Docker data. Its
     /// potentially destructive growth controls must therefore remain absent while the
     /// developer fixture banner is active.

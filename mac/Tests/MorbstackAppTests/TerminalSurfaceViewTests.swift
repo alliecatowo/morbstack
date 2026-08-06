@@ -291,4 +291,117 @@ final class TerminalSurfaceViewTests: XCTestCase {
         XCTAssertGreaterThan(size.width, 0)
         XCTAssertGreaterThan(size.height, 0)
     }
+
+    // MARK: The wire bytes themselves
+
+    /// The tests above assert that `terminalKeyDownBytes` *routes* through
+    /// `TerminalKeyEncoding`; these assert what that encoder actually emits. They are
+    /// deliberately hardcoded sequences rather than round-trips through the same
+    /// function under test — a table that agrees with itself proves nothing, and these
+    /// bytes are a contract with every program running inside the container.
+
+    private func bytes(_ key: TerminalKey, application: Bool = false) -> String {
+        String(decoding: TerminalKeyEncoding.bytes(for: key, applicationCursorKeys: application), as: UTF8.self)
+    }
+
+    func testArrowKeysFollowDECCKM() {
+        // The difference between arrows working in vim and printing letters.
+        XCTAssertEqual(bytes(.up), "\u{1B}[A")
+        XCTAssertEqual(bytes(.down), "\u{1B}[B")
+        XCTAssertEqual(bytes(.right), "\u{1B}[C")
+        XCTAssertEqual(bytes(.left), "\u{1B}[D")
+
+        XCTAssertEqual(bytes(.up, application: true), "\u{1B}OA")
+        XCTAssertEqual(bytes(.down, application: true), "\u{1B}OB")
+        XCTAssertEqual(bytes(.right, application: true), "\u{1B}OC")
+        XCTAssertEqual(bytes(.left, application: true), "\u{1B}OD")
+    }
+
+    func testHomeAndEndFollowDECCKMButPagingKeysDoNot() {
+        XCTAssertEqual(bytes(.home), "\u{1B}[H")
+        XCTAssertEqual(bytes(.end), "\u{1B}[F")
+        XCTAssertEqual(bytes(.home, application: true), "\u{1B}OH")
+        XCTAssertEqual(bytes(.end, application: true), "\u{1B}OF")
+
+        // The VT220 tilde keys are not cursor keys; DECCKM must not touch them.
+        for application in [false, true] {
+            XCTAssertEqual(bytes(.insert, application: application), "\u{1B}[2~")
+            XCTAssertEqual(bytes(.delete, application: application), "\u{1B}[3~")
+            XCTAssertEqual(bytes(.pageUp, application: application), "\u{1B}[5~")
+            XCTAssertEqual(bytes(.pageDown, application: application), "\u{1B}[6~")
+        }
+    }
+
+    func testFunctionKeysUseTheHistoricalNumbering() {
+        XCTAssertEqual(bytes(.function(1)), "\u{1B}OP")
+        XCTAssertEqual(bytes(.function(4)), "\u{1B}OS")
+        // The gaps at 16 and 22 are real; terminfo has carried them since the VT220.
+        XCTAssertEqual(bytes(.function(5)), "\u{1B}[15~")
+        XCTAssertEqual(bytes(.function(6)), "\u{1B}[17~")
+        XCTAssertEqual(bytes(.function(10)), "\u{1B}[21~")
+        XCTAssertEqual(bytes(.function(11)), "\u{1B}[23~")
+        XCTAssertEqual(bytes(.function(12)), "\u{1B}[24~")
+        XCTAssertTrue(TerminalKeyEncoding.bytes(for: .function(99), applicationCursorKeys: false).isEmpty)
+    }
+
+    func testReturnSendsCarriageReturnAndBackspaceSendsDEL() {
+        // CR, not LF: the container's line discipline converts it. LF here breaks
+        // `read -r` and several shells' line editing.
+        XCTAssertEqual(TerminalKeyEncoding.bytes(for: .enter, applicationCursorKeys: false), Data([0x0D]))
+        // DEL, not BS: what a Mac keyboard sends and what `stty erase` expects.
+        XCTAssertEqual(TerminalKeyEncoding.bytes(for: .backspace, applicationCursorKeys: false), Data([0x7F]))
+        XCTAssertEqual(TerminalKeyEncoding.bytes(for: .tab, applicationCursorKeys: false), Data([0x09]))
+        XCTAssertEqual(TerminalKeyEncoding.bytes(for: .escape, applicationCursorKeys: false), Data([0x1B]))
+        XCTAssertEqual(bytes(.backTab), "\u{1B}[Z")
+    }
+
+    func testControlFoldsLettersToTheC0Range() {
+        XCTAssertEqual(TerminalKeyEncoding.bytes(forCharacter: "c", control: true), Data([0x03]))
+        XCTAssertEqual(TerminalKeyEncoding.bytes(forCharacter: "C", control: true), Data([0x03]))
+        XCTAssertEqual(TerminalKeyEncoding.bytes(forCharacter: "d", control: true), Data([0x04]))
+        XCTAssertEqual(TerminalKeyEncoding.bytes(forCharacter: "z", control: true), Data([0x1A]))
+        XCTAssertEqual(TerminalKeyEncoding.bytes(forCharacter: "a", control: true), Data([0x01]))
+    }
+
+    func testControlFoldsThePunctuationAndDigitAliases() {
+        XCTAssertEqual(TerminalKeyEncoding.bytes(forCharacter: "@", control: true), Data([0x00]))
+        XCTAssertEqual(TerminalKeyEncoding.bytes(forCharacter: " ", control: true), Data([0x00]))
+        XCTAssertEqual(TerminalKeyEncoding.bytes(forCharacter: "[", control: true), Data([0x1B]))
+        XCTAssertEqual(TerminalKeyEncoding.bytes(forCharacter: "\\", control: true), Data([0x1C]))
+        XCTAssertEqual(TerminalKeyEncoding.bytes(forCharacter: "?", control: true), Data([0x7F]))
+        XCTAssertEqual(TerminalKeyEncoding.bytes(forCharacter: "6", control: true), Data([0x1E]))
+    }
+
+    func testAnUnmappedControlCombinationSendsTheLiteralCharacter() {
+        // Swallowing it would silently eat a keystroke the person deliberately typed.
+        XCTAssertEqual(TerminalKeyEncoding.bytes(forCharacter: "é", control: true), Data("é".utf8))
+    }
+
+    func testPlainCharacterEncodesAsUTF8() {
+        XCTAssertEqual(TerminalKeyEncoding.bytes(forCharacter: "漢", control: false), Data("漢".utf8))
+    }
+
+    // MARK: Paste
+
+    func testPasteNormalisesNewlinesToCarriageReturn() {
+        let data = TerminalKeyEncoding.pasteData("one\ntwo\r\nthree", bracketed: false)
+        XCTAssertEqual(String(decoding: data, as: UTF8.self), "one\rtwo\rthree")
+    }
+
+    func testBracketedPasteIsFenced() {
+        let data = TerminalKeyEncoding.pasteData("ls", bracketed: true)
+        XCTAssertEqual(String(decoding: data, as: UTF8.self), "\u{1B}[200~ls\u{1B}[201~")
+    }
+
+    /// The documented bracketed-paste escape: text carrying the *terminator* would close
+    /// the fence early, and everything after it would reach the shell as typed input —
+    /// i.e. a clipboard that can run a command. Clipboard contents are untrusted (they
+    /// routinely come off a web page), so the payload is neutralised, not trusted.
+    func testBracketedPasteStripsAnEmbeddedTerminator() {
+        let hostile = "safe\u{1B}[201~\rrm -rf /\r"
+        let data = TerminalKeyEncoding.pasteData(hostile, bracketed: true)
+        let text = String(decoding: data, as: UTF8.self)
+        XCTAssertEqual(text, "\u{1B}[200~safe\rrm -rf /\r\u{1B}[201~")
+        XCTAssertEqual(text.components(separatedBy: "\u{1B}[201~").count - 1, 1, "exactly one terminator, at the end")
+    }
 }
