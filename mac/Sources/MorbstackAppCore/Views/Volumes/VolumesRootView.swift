@@ -211,6 +211,60 @@ enum TrackCVolumeInspector {
         return .inconsistent(reported: reportedReferenceCount, listed: listedReferences)
     }
 
+    /// The single row that answers "what is using this volume". Docker's own
+    /// `In use` / `Unused` wording is derived from this same count, so printing both
+    /// states one fact twice; the count is the one that also carries how many.
+    static func referenceRowValue(for reportedReferenceCount: Int?) -> String {
+        guard let reportedReferenceCount else { return unscannedValue }
+        return reportedReferenceCount == 1 ? "1 container" : "\(reportedReferenceCount) containers"
+    }
+
+    /// True when Docker reported neither number. Both rows would then carry the same
+    /// non-value, so the section collapses them into one and the footnote names what a
+    /// scan would fill in — the absence is stated once instead of twice.
+    static func usageIsUnscanned(size: Int64?, reportedReferenceCount: Int?) -> Bool {
+        size == nil && reportedReferenceCount == nil
+    }
+
+    /// Shown wherever a number would be if the Disk scan had run. Deliberately not
+    /// "Not reported", "Unknown" or an em dash: those read as "Docker has no answer",
+    /// when the truth is that nobody has asked it yet and the reader can.
+    static let unscannedValue = "Not scanned yet"
+
+    /// At most one footnote for the Storage and Use section, or none.
+    ///
+    /// Docker fills a volume's `UsageData` only when something asks it to — the Disk
+    /// route's scan — so a missing size and a missing reference count are the same
+    /// fact, and the section says it once and names what changes it. When both numbers
+    /// are real, the rows already state agreement; a footnote earns its space only by
+    /// reporting a disagreement the rows cannot show.
+    static func usageFootnote(
+        size: Int64?,
+        reportedReferenceCount: Int?,
+        evidence: TrackCVolumeUsageEvidence
+    ) -> String? {
+        switch (size, reportedReferenceCount) {
+        case (nil, nil):
+            return "Size and container references come from the Disk scan. Open Disk to compute them."
+        case (nil, _):
+            return "Sizes come from the Disk scan. Open Disk to compute them."
+        case (_, nil):
+            return "Container references come from the Disk scan. Open Disk to compute them."
+        default:
+            break
+        }
+        switch evidence {
+        case .unreported, .unused, .matches:
+            return nil
+        case .incomplete(let reported, let listed):
+            return
+                "Docker reports \(reported) container \(reported == 1 ? "reference" : "references"), but \(listed) name\(listed == 1 ? " is" : "s are") in the current inventory."
+        case .inconsistent(let reported, let listed):
+            return
+                "The current container inventory lists \(listed) mounts, while Docker reports \(reported) references. Refresh before removing this volume."
+        }
+    }
+
     static func removalConsequence(for volume: VolumeSummary) -> String {
         switch volume.refCount {
         case 0:
@@ -731,7 +785,7 @@ struct VolumesRootView: View {
                 .monospacedDigit()
         } else if volume.refCount == nil {
             Text("—")
-                .accessibilityLabel("Usage unreported")
+                .accessibilityLabel(TrackCVolumeInspector.unscannedValue)
                 .help("Usage comes from the Disk scan. Open Disk to compute it.")
         } else {
             Text("Unused")
@@ -813,11 +867,19 @@ struct VolumesRootView: View {
                 }
 
                 Section("Storage and Use") {
-                    LabeledContent("Size", value: volume.size.map(Formatters.bytesString) ?? "Not reported")
-                    LabeledContent("Docker Usage", value: volume.usageStatus)
-                    LabeledContent("Docker References") {
-                        Text(volume.refCount.map { "\($0) container\($0 == 1 ? "" : "s")" } ?? "Not reported")
-                            .monospacedDigit()
+                    if TrackCVolumeInspector.usageIsUnscanned(
+                        size: volume.size, reportedReferenceCount: volume.refCount)
+                    {
+                        LabeledContent("Usage", value: TrackCVolumeInspector.unscannedValue)
+                    } else {
+                        LabeledContent(
+                            "Size",
+                            value: volume.size.map(Formatters.bytesString)
+                                ?? TrackCVolumeInspector.unscannedValue)
+                        LabeledContent("Used By") {
+                            Text(TrackCVolumeInspector.referenceRowValue(for: volume.refCount))
+                                .monospacedDigit()
+                        }
                     }
                     LabeledContent("Guest Mount Point") {
                         Text(volume.mountpoint.isEmpty ? "Not reported" : volume.mountpoint)
@@ -827,13 +889,18 @@ struct VolumesRootView: View {
                             .truncationMode(.middle)
                     }
 
-                    if volume.size == nil {
-                        Text("Docker did not report this volume’s disk usage.")
+                    // One footnote at most. Absence is already stated by the rows; this
+                    // exists to name the remedy, or to report a disagreement the rows
+                    // cannot show. See TrackCVolumeInspector.usageFootnote.
+                    if let footnote = TrackCVolumeInspector.usageFootnote(
+                        size: volume.size,
+                        reportedReferenceCount: volume.refCount,
+                        evidence: usageEvidence)
+                    {
+                        Text(footnote)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-
-                    usageEvidenceText(usageEvidence)
                 }
 
                 if !references.isEmpty {
@@ -903,32 +970,6 @@ struct VolumesRootView: View {
                 "No Volume Selected",
                 systemImage: "externaldrive",
                 description: Text("Select a volume to see its guest mount point and what is using it."))
-        }
-    }
-
-    @ViewBuilder
-    private func usageEvidenceText(_ evidence: TrackCVolumeUsageEvidence) -> some View {
-        switch evidence {
-        case .unreported:
-            Text("Docker did not report a usage count. This volume is not treated as unused.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        case .unused:
-            Text("Docker reports that no containers reference this volume.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        case .matches:
-            EmptyView()
-        case .incomplete(let reported, let listed):
-            Text(
-                "Docker reports \(reported) container \(reported == 1 ? "reference" : "references"), but \(listed) name\(listed == 1 ? " is" : "s are") in the current inventory.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        case .inconsistent(let reported, let listed):
-            Text(
-                "The current container inventory lists \(listed) mounts, while Docker reports \(reported) references. Refresh before removing this volume.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
     }
 
