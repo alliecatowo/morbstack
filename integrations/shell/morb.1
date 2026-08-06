@@ -1,4 +1,11 @@
-.Dd August 2, 2026
+.\" Man page for the `morb` CLI (Morbstack).
+.\"
+.\" DO NOT hand-edit the COMMANDS section's `.It Cm <name>` entries without
+.\" also updating mac/Sources/morb/main.swift. ShellCompletionDriftTests
+.\" (mac/Tests/MorbstackKitTests/ShellCompletionDriftTests.swift) fails the
+.\" build when the set of commands documented here differs from the command
+.\" table `morb`'s parser dispatches on.
+.Dd August 5, 2026
 .Dt MORB 1
 .Os
 .Sh NAME
@@ -17,13 +24,39 @@
 .Op Fl -force
 .Op Fl -json
 .Nm
+.Cm diagnose
+.Op Fl -output Ar directory
+.Op Fl -json
+.Nm
+.Cm disk
+.Op Cm status | Cm grow Ar GiB
+.Op Fl -json
+.Nm
+.Cm ports Op Cm check
+.Op Fl -tcp Ar port
+.Op Fl -udp Ar port
+.Op Fl -json
+.Nm
 .Cm rosetta
 .Op Cm status | install
 .Op Fl -print-plan
 .Op Fl -json
 .Nm
 .Cm k8s
-.Op Cm status | enable | disable
+.Op Cm status | enable | disable | diagnose
+.Op Fl -json
+.Nm
+.Cm k8s Cm describe
+.Cm pod Ar namespace Ar name | Cm node Ar name
+.Op Fl -json
+.Nm
+.Cm k8s Cm port-forward
+.Cm start Ar namespace Ar pod Ar uid Ar pod-port
+.Op Fl -container Ar name
+.Op Fl -local-port Ar port
+.Nm
+.Cm k8s Cm port-forward
+.Cm status | Cm cancel Ar lease
 .Op Fl -json
 .Nm
 .Cm k8s Cm kubeconfig
@@ -37,13 +70,55 @@
 .Op Fl -force
 .Op Fl -json
 .Nm
-.Cm install-cli-plugins
-.Op Fl -force
-.Op Fl -print-plan
+.Cm service
+.Op Cm status | enable | disable | settings
 .Op Fl -json
 .Nm
-.Cm mcp | migrate | bench | scan | debug
+.Cm install-cli
+.Op Fl -make-default
+.Op Fl -print-plan
+.Op Fl -force
+.Op Fl -json
+.Nm
+.Cm uninstall-cli | install-cli-plugins
+.Op Fl -print-plan
+.Op Fl -force
+.Op Fl -json
+.Nm
+.Cm mcp
+.Cm serve | permissions
+.Op Fl -allow Ar permission
+.Nm
+.Cm mcp Cm init
+.Op Fl -force
+.Nm
+.Cm migrate
+.Op Cm detect | config | plan | run | images | volumes | verify
 .Op Ar ...
+.Nm
+.Cm bench
+.Op Cm list | run | history | compare
+.Op Ar ...
+.Nm
+.Cm scan
+.Op Fl -check | Fl -offline | Fl -sbom-only | Fl -all
+.Op Fl -sbom Ar path
+.Op Fl -fail-on Ar severity
+.Op Ar image
+.Nm
+.Cm export
+.Cm image | volume
+.Ar name
+.Fl -output Ar path
+.Op Fl -replace
+.Nm
+.Cm debug
+.Cm check
+.Op Fl -manifest Ar path
+.Nm
+.Cm debug
+.Op Cm plan
+.Ar container
 .Sh DESCRIPTION
 .Nm
 is the command-line client for
@@ -55,8 +130,20 @@ that runs a single Linux virtual machine on macOS via
 and forwards the Docker Engine API out of it.
 Most subcommands talk to
 .Nm morbstackd
-over a local Unix-domain socket; a few
-.Pq Cm shares , Cm rosetta status , Cm doctor , Cm context
+over a local Unix-domain socket; many
+.Po
+.Cm shares ,
+.Cm rosetta status ,
+.Cm doctor ,
+.Cm diagnose ,
+.Cm disk status ,
+.Cm ports ,
+.Cm context ,
+.Cm service ,
+.Cm install-cli ,
+.Cm uninstall-cli ,
+.Cm install-cli-plugins
+.Pc
 answer from host-side state alone and never require the daemon to be
 running.
 .Pp
@@ -66,6 +153,7 @@ Commands that need the VM running
 .Cm stop ,
 .Cm suspend ,
 .Cm resume ,
+.Cm disk grow ,
 .Cm k8s enable ,
 .Cm k8s disable ,
 .Cm k8s kubeconfig
@@ -89,23 +177,24 @@ of starting one just to ask it a question.
 .Cm mcp ,
 .Cm migrate ,
 .Cm bench ,
-.Cm scan
+.Cm scan ,
+.Cm export
 and
 .Cm debug
 are each implemented in their own Swift module
-.Pq MorbMCP , MorbMigrate , MorbBench , MorbScan
+.Pq Sy MorbMCP , MorbMigrate , MorbBench , MorbScan , MorbExport
 that
 .Nm
 dispatches to with the remaining command-line arguments and the global
 .Fl -json
 flag, and nothing else.
-Their own argument grammar, sub-subcommands, and exit codes are defined
-in those modules, not in
+Their argument grammar and exit codes are defined in those modules, not
+in
 .Nm Ns 's
-own argument parser, and are intentionally not enumerated in this manual
-beyond the one-line summary each gets in
-.Sx COMMANDS
-below.
+own parser; their subcommands and flags are documented below all the
+same, read out of those modules rather than out of
+.Nm morb --help ,
+which never reaches them.
 .Sh COMMANDS
 .Bl -tag -width Ds
 .It Cm status
@@ -120,14 +209,14 @@ Accepts
 .Fl -force
 to stop without first asking the guest to shut down cleanly.
 .It Cm suspend
-Save the VM to disk and free the memory and CPU it was using.
-On a host where save/restore is unsupported this behaves like
-.Cm stop
-and the containers do not survive it; the daemon reports this via a note
-in the response.
+Release the VM's memory.
+On a host that cannot restore saved state this stops cleanly instead, and
+the containers do not survive it; the daemon reports that via a note in
+the response.
 .It Cm resume
-Restore a VM previously put down with
-.Cm suspend .
+Start a VM previously put down with
+.Cm suspend ,
+cold-booting it when the saved state cannot be restored.
 .It Cm shares
 List the shared host paths configured in
 .Pa config.toml
@@ -172,6 +261,25 @@ May start the daemon and the VM.
 .It Cm k8s Cm disable
 Stop the cluster.
 The installed payload and its on-disk state are left in place.
+.It Cm k8s Cm diagnose
+Report real cluster recovery guidance without changing anything.
+.It Cm k8s Cm describe
+Read one selected resource through Morbstack's local Kubernetes API:
+.Cm describe pod Ar namespace Ar name
+or
+.Cm describe node Ar name .
+Nothing else is enumerated or listed.
+.It Cm k8s Cm port-forward
+Manage the one selected-Pod loopback TCP lease.
+.Cm start Ar namespace Ar pod Ar uid Ar pod-port
+opens it and accepts
+.Fl -container Ar name
+and
+.Fl -local-port Ar port ;
+.Cm status
+shows the current lease;
+.Cm cancel Ar lease
+cancels only that exact lease.
 .It Cm k8s Cm kubeconfig
 Write a kubeconfig for the Morbstack cluster to
 .Pa ~/.morbstack/kubeconfig .
@@ -222,18 +330,110 @@ that flag only lifts the refusal to replace another
 non-default context.
 Refuses to run if the context is not already registered
 .Pq run Cm context create No first .
-.It Cm install-cli-plugins
-Symlink
+.It Cm service Op Cm status
+Show whether Morbstack's per-user background LaunchAgent is registered,
+whether it still needs approval in Login Items, and whether the control
+socket is being answered.
+This is the default when
+.Cm service
+is given no subcommand.
+.Cm service enable
+registers the signed app's LaunchAgent;
+.Cm service disable
+unregisters it without stopping a manually started daemon;
+.Cm service settings
+opens System Settings > Login Items.
+.Cm service
+takes exactly one action word and no flags of its own.
+.It Cm diagnose
+Collect a redacted, reviewable support bundle from host metadata,
+sanitized
+.Cm doctor
+checks, and bounded tails of Morbstack-owned text logs.
+Never starts the daemon and never contacts the VM.
+.Fl -output Ar directory
+writes it below an absolute or
+.Pa ~/
+directory instead of the default location.
+Review
+.Pa README.txt
+and
+.Pa report.json
+inside the bundle before sharing it.
+.It Cm disk Op Cm status
+Show the VM disk image path, its configured and current capacity, and
+whether a safe growth is possible.
+This is the default when
+.Cm disk
+is given no subcommand, and it is answerable without the daemon.
+.It Cm disk Cm grow Ar GiB
+Grow an existing disk to an explicit positive target in GiB and verify
+the guest filesystem afterwards.
+Morbstack never shrinks a disk; a smaller target is a hard error, as is
+a target that does not match a pending growth recovery.
+.It Cm ports Op Cm check
+Check whether one or more loopback endpoints are currently free, before
+a
+.Cm docker run -p .
+Takes
+.Fl -tcp Ar port
+and
+.Fl -udp Ar port ,
+repeatably, and requires at least one.
+.Cm check
+is the only subcommand and is also the default.
+The result is a point-in-time snapshot of 127.0.0.1, never a
+reservation, and it neither starts nor contacts the daemon.
+Exits 2 if any checked endpoint is unavailable.
+.It Cm install-cli
+The complete per-user CLI setup: symlink the bundled
+.Pa docker ,
 .Pa docker-compose
 and
 .Pa docker-buildx
-CLI plugin binaries into
-.Pa ~/.docker/cli-plugins
-so plain
-.Cm docker compose
+into
+.Pa ~/.morbstack/bin
 and
-.Cm docker buildx
-work.
+.Pa ~/.docker/cli-plugins ,
+register the
+.Dq morbstack
+docker context, and create the per-user discovery socket.
+Host-only: it never starts a VM or touches Docker data.
+Accepts
+.Fl -print-plan
+to preview,
+.Fl -force
+to apply the printed plan without the prompt, and
+.Fl -make-default
+to put
+.Pa ~/.morbstack/bin
+before an existing
+.Pa docker
+in the login profile's PATH.
+.It Cm uninstall-cli
+Remove only what
+.Cm install-cli
+owns: Morbstack's own symlinks, the exact managed PATH block, the
+user-owned discovery socket link, and the
+.Dq morbstack
+context when it still points at Morbstack's socket.
+It does not remove
+.Pa Morbstack.app ,
+.Pa ~/.morbstack/data ,
+images, volumes, or another Docker installation.
+Accepts
+.Fl -print-plan
+and
+.Fl -force .
+.It Cm install-cli-plugins
+Legacy: symlink only
+.Pa docker-compose
+and
+.Pa docker-buildx
+into
+.Pa ~/.docker/cli-plugins .
+.Cm install-cli
+is the current command and does this as part of its own plan.
 Accepts
 .Fl -print-plan
 to preview without acting, and
@@ -246,34 +446,163 @@ executable or under a
 checkout.
 .It Cm mcp
 Model Context Protocol server; read-only unless explicitly granted more.
+.Cm mcp serve
+runs the server over stdin/stdout;
+.Cm mcp init
+writes
+.Pa ~/.morbstack/mcp.toml
+as an empty read-only-by-default profile and accepts
+.Fl -force
+to replace an existing one;
+.Cm mcp permissions
+prints every tool's effective permission and where that decision came
+from.
+.Cm serve
+and
+.Cm permissions
+accept
+.Fl -allow Ar permission ,
+repeatably, granting a tool name, a group, or an argument guard.
+.Cm mcp serve
+rejects
+.Fl -json :
+it already speaks JSON-RPC on stdout.
 Implemented in the
 .Sy MorbMCP
-module; see
-.Sx DESCRIPTION
-for what that means for this manual's coverage of it.
+module.
 .It Cm migrate
 Import images, volumes and configuration from another container runtime.
+.Cm detect
+.Pq the default
+surveys local runtimes and
+.Cm config
+inspects the Docker CLI configuration; both are read-only and take no
+flags.
+.Cm plan
+derives a read-only comparison
+.Pq Fl -from , Fl -filter , Fl -all ;
+.Cm run
+imports an explicitly selected image set
+.Po
+.Fl -from ,
+.Fl -image ,
+.Fl -all-images ,
+.Fl -dry-run ,
+.Fl -yes
+.Pc ;
+.Cm images
+and
+.Cm volumes
+copy in bulk
+.Po
+.Fl -from ,
+.Fl -filter ,
+.Fl -all
+.Pq images only ,
+.Fl -overwrite
+.Pq volumes only, and always rejected ,
+.Fl -dry-run ,
+.Fl -yes
+.Pc ;
+.Cm verify
+compares the two engines
+.Po
+.Fl -from ,
+.Fl -images ,
+.Fl -volumes ,
+.Fl -report ,
+.Fl -yes
+.Pc .
+Option values are passed as
+.Ar --name value ,
+never
+.Ar --name=value .
 Implemented in the
 .Sy MorbMigrate
-module; see
-.Sx DESCRIPTION .
+module.
 .It Cm bench
 Run the open benchmark suite and report the numbers.
+.Cm list
+shows published targets and implementation status;
+.Cm history
+.Op Fl -limit Ar count
+shows saved runs;
+.Cm compare Ar baseline Ar candidate
+compares two saved runs by path, id,
+.Cm latest
+or
+.Cm previous .
+.Cm run
+is the only subcommand that measures anything and accepts
+.Fl -only Ar names ,
+.Fl -runs Ar count ,
+.Fl -window Ar seconds
+and
+.Fl -dry-run .
 Implemented in the
 .Sy MorbBench
-module; see
-.Sx DESCRIPTION .
+module.
 .It Cm scan
-SBOM and CVE scan an image, entirely on this machine.
+SBOM and CVE scan a local image, entirely on this machine: the image is
+exported through the Engine socket, an SBOM is generated with
+.Xr syft 1 ,
+and the SBOM is scanned with
+.Xr grype 1 .
+Image and SBOM data are never uploaded.
+Takes one local image reference plus
+.Fl -check ,
+.Fl -offline ,
+.Fl -sbom-only ,
+.Fl -sbom Ar path ,
+.Fl -fail-on Ar severity
+and
+.Fl -all .
+.Fl -check
+reports the local prerequisites only and contacts neither the engine nor
+the network.
 Implemented in the
 .Sy MorbScan
-module; see
-.Sx DESCRIPTION .
+module.
+.It Cm export
+Write an already-local image or named-volume archive to a user-selected
+file.
+.Cm export image Ar reference Fl -output Ar path
+saves one image through a single
+.Pa GET /images/get ;
+.Cm export volume Ar name Fl -output Ar path
+archives one existing local-driver volume through one owned, stopped,
+read-only helper container and never pulls the helper image.
+.Fl -output
+is required and its parent directory must already exist; an existing
+file is refused unless
+.Fl -replace
+is explicit.
+Implemented in the
+.Sy MorbExport
+module.
 .It Cm debug
-Open a toolbox shell in a container, even a distroless one that has no
-shell of its own.
-Implemented in its own module; see
-.Sx DESCRIPTION .
+Inspect whether Morbstack can safely offer a toolbox session for a
+container.
+It does
+.Em not
+open a shell.
+.Cm debug check
+.Op Fl -manifest Ar path
+reads one local toolbox descriptor and contacts neither Docker nor a
+network;
+.Cm debug Op Cm plan
+.Ar container
+issues one read-only container-inspect request and then lists the exact
+actions it did not perform.
+A toolbox shell for a distroless container is not implemented, and
+Morbstack deliberately does not present a plain
+.Cm docker exec
+as one: no pinned and verified toolbox asset, network-consent policy,
+isolated-session policy, or full-duplex terminal bridge exists yet.
+Both forms exit 2, because neither can make a toolbox available.
+Implemented in the
+.Sy MorbScan
+module.
 .It Cm version
 Print the CLI version, and the daemon's version if it can be reached.
 Never fails just because nothing is running.
@@ -308,16 +637,19 @@ read, so
 and
 .Nm morb status --json
 are identical — and this holds even for
-.Cm mcp , migrate , bench , scan
+.Cm mcp , migrate , bench , scan , export
 and
 .Cm debug ,
-whose other arguments are otherwise opaque to this manual.
+which receive the flag as a separate parameter rather than as an
+argument.
+.Cm mcp serve
+is the one command that rejects it outright.
 .It Fl -force
 Skip a confirmation prompt, with a command-dependent meaning:
 .Bl -tag -width "reset-disk, install-cli-plugins"
 .It Cm stop
 Skip asking the guest to shut down cleanly first.
-.It Cm reset-disk , context create , install-cli-plugins
+.It Cm reset-disk , context create , install-cli , uninstall-cli , install-cli-plugins , mcp init
 Skip the interactive
 .Dq are you sure
 prompt.
@@ -329,15 +661,6 @@ It only lifts the refusal to replace another explicit non-default
 context.
 .It Cm k8s kubeconfig Fl -merge
 Skip that merge's confirmation prompt.
-This is accepted and honored by the parser but, as of this writing, is
-not mentioned by
-.Nm morb --help Ns 's
-own OPTIONS text, which only documents
-.Fl -force
-for
-.Cm reset-disk , context create , context use
-and
-.Cm stop .
 .El
 .Pp
 On every other command
@@ -363,10 +686,26 @@ directly for an unattended install.
 .It Fl -print-plan
 Print the exact steps a command would take and exit without taking them.
 Valid for
-.Cm rosetta install
+.Cm rosetta install ,
+.Cm install-cli ,
+.Cm uninstall-cli
 and
 .Cm install-cli-plugins
 only.
+.It Fl -make-default
+Valid only for
+.Cm install-cli .
+Add
+.Pa ~/.morbstack/bin
+to the login profile's PATH ahead of an existing
+.Pa docker ,
+instead of leaving that one first.
+.It Fl -output Ar directory
+Valid only for
+.Cm diagnose .
+Write the support bundle below this directory, which must be absolute or
+begin with
+.Pa ~/ .
 .It Fl -merge
 Valid only for
 .Cm k8s kubeconfig .
@@ -404,7 +743,19 @@ works identically to
 but is not listed in
 .Nm morb --help Ns 's
 own OPTIONS section.
+Because of this, the modules that
+.Nm
+dispatches to are never reached by
+.Fl -help ;
+use the bare word
+.Cm help
+instead
+.Pq Nm morb mcp help , Nm morb migrate help , Nm morb bench help , Nm morb scan help , Nm morb export help , Nm morb debug help .
 .El
+.Pp
+Every other flag documented above belongs to exactly one command or
+subcommand and is listed with it in
+.Sx COMMANDS .
 .Sh ENVIRONMENT
 .Nm Ns 's
 own argument parser and command dispatch
@@ -412,23 +763,15 @@ own argument parser and command dispatch
 do not read any environment variables directly; every path it uses
 itself comes from a fixed, compiled-in location under
 .Pa ~/.morbstack .
-No
-.Ev MORBSTACK_HOME
-or equivalent override is consulted at that layer.
 .Cm context Ns 's
-subcommands do honor the docker CLI's own
+subcommands, and the context work
+.Cm install-cli
+and
+.Cm uninstall-cli
+do, honor the docker CLI's own
 .Ev DOCKER_CONFIG
 convention for locating the docker config directory
-.Pq default Pa ~/.docker ,
-per that command's own implementation.
-Whether
-.Cm mcp , migrate , bench , scan
-or
-.Cm debug
-read any environment variables is not knowable from
-.Nm Ns 's
-own source; each is implemented in a separate module outside the scope
-this manual could verify.
+.Pq default Pa ~/.docker .
 .Sh FILES
 .Bl -tag -width "~/.morbstack/run/morbstackd.sock"
 .It Pa ~/.morbstack/run/docker.sock
@@ -443,12 +786,24 @@ Unix-domain control socket
 uses to talk to
 .Nm morbstackd
 (newline-delimited JSON).
+.It Pa ~/.morbstack/bin
+Where
+.Cm install-cli
+symlinks the bundled
+.Pa docker .
+.It Pa ~/.morbstack/mcp.toml
+The Model Context Protocol permission profile, created by
+.Cm mcp init
+and explained by
+.Cm mcp permissions .
 .It Pa ~/.morbstack/kubeconfig
 Kubeconfig written by
 .Cm k8s kubeconfig .
 .It Pa ~/.morbstack/data/disk.img
 The Docker data disk image; deleted by
-.Cm reset-disk .
+.Cm reset-disk ,
+inspected and grown by
+.Cm disk .
 .It Pa ~/.morbstack/config.toml
 Host-side configuration, including
 .Cm shared_paths
@@ -462,8 +817,10 @@ The user's own kubectl config, edited only by
 and only after asking and taking a timestamped backup.
 .It Pa ~/.docker/cli-plugins
 Where
+.Cm install-cli
+and
 .Cm install-cli-plugins
-symlinks
+symlink
 .Pa docker-compose
 and
 .Pa docker-buildx .
@@ -492,37 +849,42 @@ flag combination
 .Pq e.g. Cm rosetta install Fl -force ,
 a cancelled confirmation prompt, a check that
 .Cm doctor
-reports unhealthy, or a daemon-reported failure.
+reports unhealthy, an unavailable endpoint reported by
+.Cm ports ,
+or a daemon-reported failure.
 .El
 .Pp
-This is the convention
-.Nm Ns 's
-own code documents and follows for every command it parses directly.
-.Cm mcp , migrate , bench , scan
-and
 .Cm debug
-each return whatever exit code their own module computes, which
-.Nm
-merely forwards unchanged; that code was not verified here to follow the
-same 0/1/2 convention.
+returns 2 for every successful invocation as well: it reports that no
+toolbox is available, which is never a success.
 .Sh EXAMPLES
 .Bl -tag -width Ds
 .It Boot the VM and check on it
 .Dl morb start
 .Dl morb status
+.It Set the docker CLI up once, for this user only
+.Dl morb install-cli --print-plan
+.Dl morb install-cli
 .It Run a container through the relayed Docker socket
 .Dl DOCKER_HOST=unix://$HOME/.morbstack/run/docker.sock docker run --rm hello-world
+.It Check a host port is free before publishing it
+.Dl morb ports check --tcp 8080 --udp 5353
+.It Inspect and grow the VM disk
+.Dl morb disk status
+.Dl morb disk grow 120
+.It Collect a redacted support bundle
+.Dl morb diagnose --output ~/Desktop
 .It Preview a Rosetta install without doing it
 .Dl morb rosetta install --print-plan
 .It Bring up the local Kubernetes cluster and use it
 .Dl morb k8s enable
 .Dl morb k8s kubeconfig --merge --switch-context
 .Dl kubectl get nodes
-.It Point the docker CLI at Morbstack with a zero-config context
-.Dl morb context create
-.Dl morb context use
-.It Get docker-compose and docker-buildx working as CLI plugins
-.Dl morb install-cli-plugins
+.It Scan a local image without uploading anything
+.Dl morb scan --check
+.Dl morb scan --fail-on high myimage:latest
+.It Archive an image to a file
+.Dl morb export image myimage:latest --output ~/Desktop/myimage.tar
 .It Get machine-readable status for scripting
 .Dl morb status --json
 .It Start over with an empty Docker data disk
@@ -533,7 +895,9 @@ same 0/1/2 convention.
 .Xr docker 1 ,
 .Xr docker-buildx 1 ,
 .Xr docker-compose 1 ,
+.Xr grype 1 ,
 .Xr kubectl 1 ,
+.Xr syft 1 ,
 .Xr softwareupdate 8
 .Sh AUTHORS
 .Nm

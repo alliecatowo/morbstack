@@ -189,6 +189,24 @@ jobs:
           command -v shellcheck >/dev/null 2>&1 || brew install shellcheck
           shellcheck scripts/*.sh scripts/git-hooks/pre-commit
           shellcheck --shell=bash mise-tasks/*
+          shellcheck integrations/shell/morb.bash
+
+      # The other two completions are not shell dialects shellcheck knows, so
+      # they get their own interpreter's parser instead. `zsh` and `bash` are
+      # always present on a macOS runner; `fish` is not, and its check is
+      # skipped rather than faked. What each file *declares* is checked by
+      # ShellCompletionDriftTests in the Swift suite — this step only proves
+      # they parse.
+      - name: Shell completions parse
+        run: |
+          set -euo pipefail
+          bash -n integrations/shell/morb.bash
+          zsh -n integrations/shell/_morb
+          if command -v fish >/dev/null 2>&1; then
+            fish --no-execute integrations/shell/morb.fish
+          else
+            echo "note: fish not installed; morb.fish was not parse-checked" >&2
+          fi
 
   # ---------------------------------------------------------------------
   # The bootable guest image: cross-compiles morbinit for
