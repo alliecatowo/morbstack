@@ -187,6 +187,37 @@ final class GuestControlTests: XCTestCase {
         XCTAssertNil(legacy.diskResize)
     }
 
+    /// UX-17: the balloon policy's only input. A real sample decodes as real
+    /// numbers; an older guest, and the guest's own explicit `-1` "unavailable"
+    /// sentinel, must both collapse to `nil` — never a value a caller could
+    /// mistake for a real reading.
+    func testInfoDecodesTheMemorySample() throws {
+        let current = try JSONDecoder().decode(
+            GuestReply.self,
+            from: Data(#"{"type":"info","mem_total_kb":8137368,"mem_available_kb":6234112}"#.utf8))
+        XCTAssertEqual(current.memTotalKB, 8_137_368)
+        XCTAssertEqual(current.memAvailableKB, 6_234_112)
+
+        let legacy = try JSONDecoder().decode(
+            GuestReply.self, from: Data(#"{"type":"info","kernel":"6.1"}"#.utf8))
+        XCTAssertNil(legacy.memTotalKB, "an absent field must not decode as 0")
+        XCTAssertNil(legacy.memAvailableKB)
+
+        let sentinel = try JSONDecoder().decode(
+            GuestReply.self,
+            from: Data(#"{"type":"info","mem_total_kb":-1,"mem_available_kb":-1}"#.utf8))
+        XCTAssertNil(sentinel.memTotalKB, "the guest's own -1 sentinel must read as no sample")
+        XCTAssertNil(sentinel.memAvailableKB)
+
+        // Half a sample (should never happen, but the sentinel logic must not
+        // half-trust it) is also "no sample."
+        let half = try JSONDecoder().decode(
+            GuestReply.self,
+            from: Data(#"{"type":"info","mem_total_kb":8137368,"mem_available_kb":-1}"#.utf8))
+        XCTAssertNil(half.memTotalKB)
+        XCTAssertNil(half.memAvailableKB)
+    }
+
     func testDiskResizeSuccessReplyUsesTheStrictProofSchema() throws {
         let proof = try GuestControl.decodeDiskResizeReply(Data(#"""
             {"type":"disk_resize","device":"/dev/vda","mount_point":"/var/lib/docker",

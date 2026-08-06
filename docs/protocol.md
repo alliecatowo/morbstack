@@ -64,7 +64,7 @@ guest; replies are guest -> host.
 | host->guest | `ping`     | *(none)*                                     | Liveness check |
 | guest->host | `pong`     | `uptime_ms: int`                             | Reply to `ping` |
 | host->guest | `info`     | *(none)*                                     | Request static guest facts |
-| guest->host | `info`     | `morbinit_version: string`, `kernel: string`, `docker_ready: bool`, `docker_data_on_disk: bool`, `userland_proxy: bool`, `shares: string`, `disk_resize: string` | Reply to `info` request; `disk_resize` is additive capability state |
+| guest->host | `info`     | `morbinit_version: string`, `kernel: string`, `docker_ready: bool`, `docker_data_on_disk: bool`, `userland_proxy: bool`, `shares: string`, `disk_resize: string`, `mem_total_kb: int`, `mem_available_kb: int` | Reply to `info` request; `disk_resize` is additive capability state; `mem_total_kb`/`mem_available_kb` are read fresh every request, not boot-time facts |
 | host->guest | `clock_sync` | `unix_nanos: int`                          | Push host wall-clock time |
 | guest->host | `ok`       | *(none)*                                     | Generic success reply (used for `clock_sync`, `shutdown`) |
 | host->guest | `shutdown` | *(none)*                                     | Request orderly guest shutdown |
@@ -112,6 +112,24 @@ send. Both are exposed to CLI/daemon consumers: `morb doctor`'s
 disk-persistence check and the `docker_data_on_disk` field in `morb
 status`'s JSON output (see `mac/Sources/MorbstackKit/Daemon.swift`).
 
+`mem_total_kb` and `mem_available_kb` (UX-17) are the guest kernel's own
+`MemTotal`/`MemAvailable` estimate from `/proc/meminfo` at the moment of the
+request, in kB — `MemAvailable`, not `MemFree`, because it is the kernel's
+own reclaim-aware estimate (free pages plus page cache/slab that can be
+dropped without swapping), which is the number a memory-balloon driver needs
+before it can safely ask the guest to give memory back. Unlike every other
+`info` field, this is **not** a boot-time fact frozen once — `morbinit`
+re-reads `/proc/meminfo` on every `info` request, because memory pressure is
+the one thing here that changes second to second. `-1` on both fields is the
+explicit "unavailable" sentinel (a real reading is always non-negative):
+either a non-Linux `--serve-control` dev build, or the one `/proc/meminfo`
+read failed. The host's `GuestReply` decoder
+(`mac/Sources/MorbstackKit/GuestControl.swift`) surfaces both as `Int64?`,
+`nil` for a guest that predates the fields *or* reports the `-1` sentinel —
+either way, "no sample," never a guessed value. Consumed by
+``MemoryBalloonPolicy`` to drive the memory-balloon device's
+`targetVirtualMachineMemorySize`; see `docs/design/MEMORY-BALLOON.md`.
+
 `disk_resize` is an additive capability for the future **stop-only,
 grow-only** expansion transaction. The current guest reports `"unavailable"`.
 Although the initramfs stages btrfs/e2fs utilities, there is no current control
@@ -136,7 +154,7 @@ Info:
 
 ```
 host -> guest: MRB0 + length + {"type":"info"}
-guest -> host: MRB0 + length + {"type":"info","morbinit_version":"0.1.0-m0","kernel":"6.18.15","docker_ready":true,"docker_data_on_disk":true,"userland_proxy":true}
+guest -> host: MRB0 + length + {"type":"info","morbinit_version":"0.1.0-m0","kernel":"6.18.15","docker_ready":true,"docker_data_on_disk":true,"userland_proxy":true,"mem_total_kb":8137368,"mem_available_kb":6234112}
 ```
 
 Clock sync:

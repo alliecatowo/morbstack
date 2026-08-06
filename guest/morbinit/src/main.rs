@@ -54,6 +54,7 @@ mod k8s;
 mod live_share;
 mod live_share_receiver;
 mod log;
+mod meminfo;
 mod mounts;
 mod net;
 mod netaddr;

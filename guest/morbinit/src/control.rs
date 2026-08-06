@@ -402,6 +402,19 @@ pub fn handle_request(payload: &[u8], ctx: &ControlContext) -> (Vec<u8>, bool) {
             (body.into_bytes(), false)
         }
         "info" => {
+            // Read fresh on every request, unlike the boot-time facts below: memory
+            // pressure is the one thing in this reply that changes second to
+            // second, and the host's balloon policy (UX-17) needs the current
+            // sample, not whatever was true at boot. -1 is the explicit
+            // "unavailable" sentinel (a real reading is always >= 0): either this
+            // is a non-Linux `--serve-control` dev build, or the one
+            // `/proc/meminfo` read failed. The host's `GuestReply` decoder treats
+            // anything other than two consistent non-negative values as "no
+            // sample" and changes nothing rather than acting on a guess.
+            let (mem_total_kb, mem_available_kb) = match crate::meminfo::read() {
+                Some(info) => (info.total_kb as i64, info.available_kb as i64),
+                None => (-1, -1),
+            };
             let body = jsonlite::emit(&[
                 ("type", Value::Str("info".to_string())),
                 ("morbinit_version", Value::Str(ctx.version.to_string())),
@@ -431,6 +444,8 @@ pub fn handle_request(payload: &[u8], ctx: &ControlContext) -> (Vec<u8>, bool) {
                     "disk_resize",
                     Value::Str(DISK_RESIZE_CAPABILITY.to_string()),
                 ),
+                ("mem_total_kb", Value::Int(mem_total_kb)),
+                ("mem_available_kb", Value::Int(mem_available_kb)),
             ]);
             (body.into_bytes(), false)
         }
@@ -937,6 +952,11 @@ mod tests {
             fields.get("disk_resize"),
             Some(&Value::Str("ready".to_string()))
         );
+        // Always present, and always the -1 sentinel on this non-Linux test
+        // build — `meminfo::read()` is `None` off Linux, and `handle_request`
+        // must still emit both fields rather than omitting them.
+        assert_eq!(fields.get("mem_total_kb"), Some(&Value::Int(-1)));
+        assert_eq!(fields.get("mem_available_kb"), Some(&Value::Int(-1)));
     }
 
     #[test]
