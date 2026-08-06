@@ -256,6 +256,7 @@ performance target with no implementation behind it.
   > before it saves (`mac/Sources/MorbstackAppCore/Settings/TrackDSharingSettings.swift:95,179-198`).
   > `sharedPaths` (T7) is the half still standing: same screen, "Open
   > config.toml" only (lines 43, 56).
+
 - **Volume browsing.** Full Finder mounting (FSKit) is a large project with
   hard consistency and durability semantics. A *read-only browser* inside the
   app, on top of the existing archive/export machinery, gets 80% of the value
