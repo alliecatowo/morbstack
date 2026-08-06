@@ -169,7 +169,18 @@ final class PortForwardingTests: XCTestCase {
             }}}
             """.utf8)
 
-        XCTAssertEqual(DockerPortPublicationPreflight.inspectContainerCreate(body: create), .allowed)
+        // `availability:` is not optional decoration here. Without it this call takes
+        // the default probe, which really binds 0.0.0.0:8080 *and* [::]:8080 — so the
+        // test asserted against whatever else happened to be listening on the machine.
+        // It failed intermittently for a week for exactly that reason, and a run with
+        // a listener held on 8080 reproduces it every time:
+        //   rejected(… "Bind for 0.0.0.0:8080/tcp failed: port is already allocated")
+        // This test is about parsing and policy, so it uses the file's hermetic probe
+        // like every other parsing test here.
+        XCTAssertEqual(
+            DockerPortPublicationPreflight.inspectContainerCreate(
+                body: create, availability: Self.alwaysAvailable),
+            .allowed)
         XCTAssertEqual(
             DockerPortPublicationPreflight.explicitTCPBindings(in: create),
             [DockerExplicitTCPPortBinding(hostIP: "0.0.0.0", hostPort: 8080, containerPort: 80)])
@@ -684,6 +695,41 @@ final class PortForwardingTests: XCTestCase {
     }
 
     // MARK: - Datagram dial
+
+    /// The anchor for the round trip below, and for the Rust side's
+    /// `datagram::the_frame_header_is_a_four_byte_big_endian_length`.
+    ///
+    /// `writeFrame` and `readFrame` are only ever composed with each other, so
+    /// reversing the byte order in both passes every other test here — verified: with
+    /// the length swapped to little-endian on both sides, this file's round-trip test
+    /// still passed. The only sibling that noticed was
+    /// `testDatagramDialRejectsAFrameLargerThanUDPPermits`, and it noticed by
+    /// *blocking forever* (its `[0,1,0,0]` header reads as 256 under little-endian, so
+    /// `readFrame` waits for a payload that never arrives) — which surfaces as a CI
+    /// timeout, not a test failure. Pin the bytes instead.
+    func testDatagramDialFrameHeaderIsAFourByteBigEndianLength() throws {
+        var sockets: [Int32] = [-1, -1]
+        guard socketpair(AF_UNIX, SOCK_STREAM, 0, &sockets) == 0 else {
+            throw XCTSkip("socketpair failed: \(String(cString: strerror(errno)))")
+        }
+        defer {
+            close(sockets[0])
+            close(sockets[1])
+        }
+
+        // 258 = 0x0102 — the discriminating case. A little-endian writer emits
+        // 02 01 00 00 here; big-endian emits 00 00 01 02.
+        let payload = Data(repeating: 0x41, count: 258)
+        XCTAssertTrue(DatagramDial.writeFrame(fd: sockets[1], datagram: payload))
+
+        var header = [UInt8](repeating: 0, count: 4)
+        XCTAssertEqual(read(sockets[0], &header, 4), 4)
+        XCTAssertEqual(header, [0x00, 0x00, 0x01, 0x02])
+
+        var body = [UInt8](repeating: 0, count: 258)
+        XCTAssertEqual(read(sockets[0], &body, 258), 258)
+        XCTAssertEqual(Data(body), payload)
+    }
 
     func testDatagramDialPreambleAndFramingPreservePacketBoundaries() throws {
         XCTAssertEqual(String(decoding: DatagramDial.preamble(guestPort: 5353), as: UTF8.self), "UDP 5353\n")

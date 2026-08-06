@@ -26,42 +26,74 @@ enum TerminalKey: Equatable, Sendable {
 
 enum TerminalKeyEncoding {
 
-    private static let escape: UInt8 = 0x1B
+    // The tables below are xterm's, from "XTerm Control Sequences" (Thomas E. Dickey,
+    // ctlseqs.txt) — sections "PC-Style Function Keys" for the arrows/editing keys and
+    // "VT220-Style Function Keys" for F1–F12 — plus DEC STD 070's DECCKM (private mode
+    // 1), which is what flips the cursor keys between CSI and SS3 introducers.
+    //
+    // Two byte-level notes that are easy to get wrong and expensive to get wrong:
+    //   * F5–F12 skip the numbers 16 and 22. That is not a typo, it is the historical
+    //     VT220 keypad numbering, and off-by-one here silently mis-reports keys.
+    //   * Backspace sends DEL (0x7F), not BS (0x08). That is xterm's default
+    //     `backarrowKey: false` and matches `stty erase ^?` on macOS and Linux.
+
+    /// ESC, the introducer for every sequence below.
+    private static let esc: UInt8 = 0x1B
+    /// `ESC [` — CSI, the 7-bit control sequence introducer.
+    private static let csi: [UInt8] = [0x1B, 0x5B]
+    /// `ESC O` — SS3, the single-shift used for application-mode cursor and F1–F4.
+    private static let ss3: [UInt8] = [0x1B, 0x4F]
 
     /// The byte sequence one special key sends. `applicationCursorKeys` is the
     /// emulator's live DECCKM state — `SS3 A` versus `CSI A` is exactly the difference
     /// between arrows working and printing letters inside vim.
     static func bytes(for key: TerminalKey, applicationCursorKeys: Bool) -> Data {
+        /// Cursor and Home/End take SS3 under DECCKM and CSI otherwise; everything
+        /// else is CSI regardless.
+        func cursor(_ final: UInt8) -> Data {
+            Data((applicationCursorKeys ? ss3 : csi) + [final])
+        }
+        /// The `CSI <number> ~` editing-keypad form.
+        func tilde(_ number: Int) -> Data {
+            Data(csi + Array(String(number).utf8) + [0x7E])
+        }
+
         switch key {
-        // The cursor and Home/End cluster is the whole point of DECCKM: under it the
-        // introducer is `SS3` (`ESC O`), otherwise `CSI` (`ESC [`). The final byte is
-        // identical either way.
-        case .up: return cursorSequence("A", applicationCursorKeys)
-        case .down: return cursorSequence("B", applicationCursorKeys)
-        case .right: return cursorSequence("C", applicationCursorKeys)
-        case .left: return cursorSequence("D", applicationCursorKeys)
-        case .home: return cursorSequence("H", applicationCursorKeys)
-        case .end: return cursorSequence("F", applicationCursorKeys)
+        case .up: return cursor(0x41) // A
+        case .down: return cursor(0x42) // B
+        case .right: return cursor(0x43) // C
+        case .left: return cursor(0x44) // D
+        case .home: return cursor(0x48) // H
+        case .end: return cursor(0x46) // F
 
-        // The editing/paging keys are VT220 tilde sequences and are *not* affected by
-        // DECCKM — a common bug, and the reason these are a separate branch.
-        case .insert: return tildeSequence(2)
-        case .delete: return tildeSequence(3)
-        case .pageUp: return tildeSequence(5)
-        case .pageDown: return tildeSequence(6)
+        case .insert: return tilde(2)
+        case .delete: return tilde(3) // forward delete, not backspace
+        case .pageUp: return tilde(5)
+        case .pageDown: return tilde(6)
 
-        case .escape: return Data([escape])
-        case .tab: return Data([0x09])
-        case .backTab: return csi("Z")
-        // CR, not LF. A terminal in its normal (ICRNL) configuration sends carriage
-        // return for Return; the line discipline in the container turns it into a
-        // newline. Sending `\n` here makes some shells and every `read -r` misbehave.
-        case .enter: return Data([0x0D])
-        // DEL (0x7F), not BS (0x08) — what macOS keyboards send and what the default
-        // `stty erase` inside a Linux container expects.
-        case .backspace: return Data([0x7F])
+        case .escape: return Data([esc])
+        case .tab: return Data([0x09]) // HT
+        case .backTab: return Data(csi + [0x5A]) // CSI Z
+        case .enter: return Data([0x0D]) // CR, never LF
+        case .backspace: return Data([0x7F]) // DEL, see note above
 
-        case .function(let number): return functionKey(number)
+        case .function(let n):
+            // F1–F4 are SS3 P/Q/R/S; F5–F12 are CSI <n> ~ with 16 and 22 skipped.
+            switch n {
+            case 1: return Data(ss3 + [0x50]) // P
+            case 2: return Data(ss3 + [0x51]) // Q
+            case 3: return Data(ss3 + [0x52]) // R
+            case 4: return Data(ss3 + [0x53]) // S
+            case 5: return tilde(15)
+            case 6: return tilde(17)
+            case 7: return tilde(18)
+            case 8: return tilde(19)
+            case 9: return tilde(20)
+            case 10: return tilde(21)
+            case 11: return tilde(23)
+            case 12: return tilde(24)
+            default: return Data() // no such key on a VT220 keypad
+            }
         }
     }
 
@@ -69,106 +101,41 @@ enum TerminalKeyEncoding {
     /// (⌃C → 0x03, ⌃@ → 0x00), otherwise UTF-8. Returns nil for combinations that send
     /// nothing.
     static func bytes(forCharacter character: Character, control: Bool) -> Data? {
-        guard control else {
-            let utf8 = Data(String(character).utf8)
-            return utf8.isEmpty ? nil : utf8
-        }
-        if let folded = controlByte(for: character) { return Data([folded]) }
-        // An unmapped Control combination (⌃é, ⌃F1) is not an error and not a NUL — the
-        // literal character is what xterm sends, and swallowing it would silently eat a
-        // keystroke the person deliberately typed.
         let utf8 = Data(String(character).utf8)
-        return utf8.isEmpty ? nil : utf8
+        guard control else { return utf8.isEmpty ? nil : utf8 }
+
+        // ⌃ with a non-ASCII character has no C0 meaning and sends nothing at all,
+        // rather than leaking the bare character to the process.
+        guard let ascii = character.asciiValue else { return nil }
+
+        switch ascii {
+        case 0x3F: return Data([0x7F]) // ⌃? → DEL
+        case 0x2F: return Data([0x1F]) // ⌃/ → US, by convention rather than by masking
+        case 0x20, 0x40...0x5F, 0x61...0x7A:
+            // Space, @ A–Z [ \ ] ^ _, and a–z all fold by masking off the top three
+            // bits: ⌃@ → 0x00, ⌃C → 0x03, ⌃[ → 0x1B (ESC), ⌃_ → 0x1F.
+            return Data([ascii & 0x1F])
+        default:
+            // Digits and punctuation with no C0 counterpart send the plain character,
+            // which is what xterm does for ⌃1.
+            return utf8
+        }
     }
 
     /// A paste, fenced with `ESC [200~` … `ESC [201~` when the program asked for
     /// bracketed paste. CR-normalised: terminals paste `\r`, not `\n`.
     static func pasteData(_ text: String, bracketed: Bool) -> Data {
-        let normalized = normalizeNewlines(text)
-        guard bracketed else { return Data(normalized.utf8) }
-        // Security: a paste whose own bytes contain the bracketed-paste *terminator*
-        // would close the fence early and hand the remainder to the shell as typed
-        // input — the documented bracketed-paste escape. The payload is neutralised by
-        // removing the terminator rather than by trusting the clipboard, because
-        // clipboard contents are as untrusted as anything else that came off a web page.
-        let fenced = normalized.replacingOccurrences(of: "\u{1B}[201~", with: "")
-        return csi("200~") + Data(fenced.utf8) + csi("201~")
-    }
-
-    // MARK: Sequence builders
-
-    private static func csi(_ tail: String) -> Data {
-        Data([escape, UInt8(ascii: "[")]) + Data(tail.utf8)
-    }
-
-    private static func ss3(_ tail: String) -> Data {
-        Data([escape, UInt8(ascii: "O")]) + Data(tail.utf8)
-    }
-
-    private static func cursorSequence(_ final: String, _ applicationCursorKeys: Bool) -> Data {
-        applicationCursorKeys ? ss3(final) : csi(final)
-    }
-
-    private static func tildeSequence(_ number: Int) -> Data {
-        csi("\(number)~")
-    }
-
-    /// F1–F4 are `SS3 P`…`SS3 S` (the VT100 PF keys); F5–F12 are tilde sequences with
-    /// the historical gaps at 16 and 22 that every real terminfo entry carries.
-    private static func functionKey(_ number: Int) -> Data {
-        switch number {
-        case 1: return ss3("P")
-        case 2: return ss3("Q")
-        case 3: return ss3("R")
-        case 4: return ss3("S")
-        case 5: return tildeSequence(15)
-        case 6: return tildeSequence(17)
-        case 7: return tildeSequence(18)
-        case 8: return tildeSequence(19)
-        case 9: return tildeSequence(20)
-        case 10: return tildeSequence(21)
-        case 11: return tildeSequence(23)
-        case 12: return tildeSequence(24)
-        default: return Data()
-        }
-    }
-
-    // MARK: Control folding
-
-    /// The C0 fold. Letters are case-insensitive (⇧⌃C is still 0x03); the punctuation
-    /// and digit aliases are xterm's, and they matter — ⌃[ is the only way to type
-    /// Escape on some layouts and ⌃? is the erase character.
-    private static func controlByte(for character: Character) -> UInt8? {
-        guard let ascii = character.asciiValue else { return nil }
-        switch ascii {
-        case UInt8(ascii: "a")...UInt8(ascii: "z"):
-            return ascii - UInt8(ascii: "a") + 1
-        case UInt8(ascii: "A")...UInt8(ascii: "Z"):
-            return ascii - UInt8(ascii: "A") + 1
-        case UInt8(ascii: "@"), UInt8(ascii: " "), UInt8(ascii: "2"):
-            return 0x00
-        case UInt8(ascii: "["), UInt8(ascii: "3"):
-            return 0x1B
-        case UInt8(ascii: "\\"), UInt8(ascii: "4"):
-            return 0x1C
-        case UInt8(ascii: "]"), UInt8(ascii: "5"):
-            return 0x1D
-        case UInt8(ascii: "^"), UInt8(ascii: "6"):
-            return 0x1E
-        case UInt8(ascii: "_"), UInt8(ascii: "7"), UInt8(ascii: "/"):
-            return 0x1F
-        case UInt8(ascii: "?"), UInt8(ascii: "8"):
-            return 0x7F
-        default:
-            return nil
-        }
-    }
-
-    /// CRLF and LF both become a bare CR: a terminal has no notion of a line feed on
-    /// input, and a pasted `\n` would reach the shell as ⌃J rather than as Return.
-    static func normalizeNewlines(_ text: String) -> String {
-        text
+        // A pasted line ending must arrive as CR. Feeding LF to a shell's line editor
+        // is not the same keystroke and readline will not treat it as Enter.
+        let normalized = text
             .replacingOccurrences(of: "\r\n", with: "\r")
             .replacingOccurrences(of: "\n", with: "\r")
+
+        guard bracketed else { return Data(normalized.utf8) }
+
+        var data = Data(csi + Array("200~".utf8))
+        data.append(contentsOf: normalized.utf8)
+        data.append(contentsOf: csi + Array("201~".utf8))
+        return data
     }
 }

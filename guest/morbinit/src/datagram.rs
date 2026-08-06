@@ -325,6 +325,30 @@ mod tests {
     }
 
     #[test]
+    fn the_frame_header_is_a_four_byte_big_endian_length() {
+        // The anchor for the round trip below. `write_frame` and `read_frame` are only
+        // ever composed with each other, so a matched pair of `to_le_bytes` /
+        // `from_le_bytes` passes every other test in this module while silently
+        // breaking `docker run -p 53:53/udp` against the Mac side
+        // (`mac/Sources/MorbstackKit/DatagramDial.swift`, which speaks big-endian).
+        // Verified: with both sides swapped to little-endian, all 260 guest tests
+        // still passed. Keep a literal here so that stops being true.
+        let mut encoded = Vec::new();
+        write_frame(&mut encoded, b"hi").unwrap();
+        assert_eq!(encoded, vec![0x00, 0x00, 0x00, 0x02, b'h', b'i']);
+
+        let mut empty = Vec::new();
+        write_frame(&mut empty, b"").unwrap();
+        assert_eq!(empty, vec![0x00, 0x00, 0x00, 0x00]);
+
+        // 258 = 0x0102, which is the byte order's discriminating case: a
+        // little-endian writer would emit 02 01 00 00 here.
+        let mut wide = Vec::new();
+        write_frame(&mut wide, &[0u8; 258]).unwrap();
+        assert_eq!(&wide[..4], &[0x00, 0x00, 0x01, 0x02]);
+    }
+
+    #[test]
     fn frame_round_trip_preserves_boundaries_and_empty_datagrams() {
         let mut encoded = Vec::new();
         write_frame(&mut encoded, b"one").unwrap();
