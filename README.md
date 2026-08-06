@@ -24,6 +24,10 @@ app — is thin, native Swift glue.
 ![macOS 26+](https://img.shields.io/badge/macOS-26%2B-lightgrey)
 ![Apple Silicon](https://img.shields.io/badge/arch-Apple%20Silicon-lightgrey)
 
+- **1.79 s cold boot, 0 % idle CPU — and you can check it yourself.**
+  `morb bench run` is the same one-command harness that produced those
+  numbers; it measures your own machine rather than asking you to trust
+  ours. Full run and methodology: [`docs/audit/ENGINE-MATRIX.md`](docs/audit/ENGINE-MATRIX.md) §10.
 - **Free forever**, Apache-2.0 — no license nags, no seat count, no
   "personal use only."
 - **No account.** Nothing to sign in to, nothing phoning home to gate a
