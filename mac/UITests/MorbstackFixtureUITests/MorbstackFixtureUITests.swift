@@ -850,4 +850,90 @@ final class MorbstackFixtureUITests: XCTestCase {
         }
         return standardized
     }
+
+    // MARK: - Temporary verification probes (2026-08-05, machine-lane audit)
+    //
+    // These two deliberately launch WITHOUT --tour-fixtures: both claims under test are
+    // about real engine data reaching the real window. They mutate nothing; they click
+    // sidebar rows and the inspector toggle and write full-window screenshots to
+    // MORB_PROBE_DIR. Delete after the audit.
+
+    func testProbeVolumeUsageAppearsAfterTheDiskScan() throws {
+        let app = XCUIApplication(url: try appBundleURL())
+        app.launchArguments = [
+            "--appearance", "dark",
+            "--window-size", "1100x800",
+            "-ApplePersistenceIgnoreState", "YES",
+            "-AppleLanguages", "(en)",
+            "-AppleLocale", "en_US",
+        ]
+        app.launch()
+        launchedApp = app
+        XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 25))
+
+        try selectSidebarRoute("Volumes", in: app)
+        Thread.sleep(forTimeInterval: 8)
+        probeShot(app, "t4-volumes-cold")
+
+        try selectSidebarRoute("Disk", in: app)
+        Thread.sleep(forTimeInterval: 20)
+        probeShot(app, "t4-disk")
+
+        try selectSidebarRoute("Volumes", in: app)
+        Thread.sleep(forTimeInterval: 10)
+        probeShot(app, "t4-volumes-after-disk")
+        Thread.sleep(forTimeInterval: 4)
+        probeShot(app, "t4-volumes-after-disk-settled")
+    }
+
+    func testProbeToolbarClusterAcrossInspectorToggle() throws {
+        let app = XCUIApplication(url: try appBundleURL())
+        app.launchArguments = [
+            "--appearance", "dark",
+            "--window-size", "1100x800",
+            "-ApplePersistenceIgnoreState", "YES",
+            "-AppleLanguages", "(en)",
+            "-AppleLocale", "en_US",
+        ]
+        app.launch()
+        launchedApp = app
+        XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 25))
+        Thread.sleep(forTimeInterval: 8)
+
+        let window = app.windows.firstMatch
+        let row = automationElement("containers.row.payments-integration-gateway-canary", in: app)
+        if row.waitForExistence(timeout: 20) { row.click() }
+        Thread.sleep(forTimeInterval: 3)
+        probeShot(app, "u51-containers-open")
+
+        let toggle = window.buttons["containers.inspector"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        toggle.click()
+        Thread.sleep(forTimeInterval: 3)
+        probeShot(app, "u51-containers-closed")
+        toggle.click()
+        Thread.sleep(forTimeInterval: 3)
+        probeShot(app, "u51-containers-reopened")
+
+        try selectSidebarRoute("Images", in: app)
+        Thread.sleep(forTimeInterval: 5)
+        probeShot(app, "u51-images-open")
+        let imagesToggle = window.buttons["images.inspector"]
+        if imagesToggle.waitForExistence(timeout: 10) {
+            imagesToggle.click()
+            Thread.sleep(forTimeInterval: 3)
+            probeShot(app, "u51-images-closed")
+        }
+
+        try selectSidebarRoute("Volumes", in: app)
+        Thread.sleep(forTimeInterval: 5)
+        probeShot(app, "u51-volumes-open")
+        let volumesToggle = window.buttons["volumes.inspector"]
+        if volumesToggle.waitForExistence(timeout: 10) {
+            volumesToggle.click()
+            Thread.sleep(forTimeInterval: 3)
+            probeShot(app, "u51-volumes-closed")
+        }
+    }
+
 }
