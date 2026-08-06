@@ -395,9 +395,9 @@ struct NetworksRootView: View {
     // MARK: Toolbar
 
     /// The trailing commands, mounted on the inspector content while the inspector
-    /// is available so the system carries them with the inspector's edge, and in the
-    /// window toolbar only on the inspector-less empty screen — see the note on
-    /// `VolumesRootView.trailingCommandItems`.
+    /// is available and in the window toolbar only on the inspector-less empty
+    /// screen — see the note on `VolumesRootView.trailingCommandItems`, including
+    /// why every trailing item here is `.primaryAction`.
     @ToolbarContentBuilder
     private var trailingCommandItems: some ToolbarContent {
         ToolbarItem(id: "networks.create", placement: .primaryAction) {
@@ -432,10 +432,7 @@ struct NetworksRootView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        if model.networks.isEmpty {
-            trailingCommandItems
-        }
-        ToolbarItem(id: "networks.removeUnused", placement: .secondaryAction) {
+        ToolbarItem(id: "networks.removeUnused", placement: .primaryAction) {
             if busy {
                 ProgressView()
                     .controlSize(.small)
@@ -457,12 +454,18 @@ struct NetworksRootView: View {
             }
         }
         if isChangingNetworkMembership {
-            ToolbarItem(id: "networks.membershipProgress", placement: .secondaryAction) {
+            ToolbarItem(id: "networks.membershipProgress", placement: .primaryAction) {
                 ProgressView()
                     .controlSize(.small)
                     .accessibilityIdentifier("networks.membershipProgress")
                     .accessibilityLabel("Updating network membership")
             }
+        }
+        // Keeps the destructive prune out of "create"'s capsule — see
+        // `VolumesRootView.toolbarContent`.
+        ToolbarSpacer(.fixed)
+        if model.networks.isEmpty {
+            trailingCommandItems
         }
     }
 

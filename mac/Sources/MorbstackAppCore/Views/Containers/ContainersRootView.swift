@@ -263,10 +263,12 @@ struct ContainersRootView: View {
                 }
             }
 
-            // A selected-record command belongs in macOS's managed secondary-action
-            // area, not in every list row or a hand-built command bar. The sheet itself
-            // explains why a stopped selection cannot execute before it can reach Docker.
-            ToolbarItem(id: "containers.runCommand", placement: .secondaryAction) {
+            // A selected-record command belongs in the system toolbar, not in every
+            // list row or a hand-built command bar. The sheet itself explains why a
+            // stopped selection cannot execute before it can reach Docker. It rides
+            // the same `.primaryAction` run as everything else trailing — see
+            // `VolumesRootView.trailingCommandItems` for why (UI-051).
+            ToolbarItem(id: "containers.runCommand", placement: .primaryAction) {
                 Button("Run Command…", systemImage: "terminal") {
                     commandTarget = selected
                 }
@@ -279,7 +281,7 @@ struct ContainersRootView: View {
         // This is a semantic collection-options menu, not a second, manually managed
         // overflow. It keeps filtering, refresh, and the infrequent prune operation
         // together while the selected record's commands stay with that record.
-        ToolbarItem(id: "containers.options", placement: .secondaryAction) {
+        ToolbarItem(id: "containers.options", placement: .primaryAction) {
             Menu {
                 Picker("Show", selection: $scope) {
                     ForEach(ContainerScope.allCases) { item in

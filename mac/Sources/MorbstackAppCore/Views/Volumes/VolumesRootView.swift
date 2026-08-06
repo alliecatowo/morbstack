@@ -595,12 +595,16 @@ struct VolumesRootView: View {
     // MARK: Toolbar
 
     /// The trailing commands — create, and the inspector toggle — declared once and
-    /// mounted in one of two places. While the inspector is open they are declared on
-    /// its content, which puts them in the inspector's own toolbar section so the
-    /// system slides them in and out *with* the inspector — the same absorb behavior
-    /// the sidebar toggle gets on the leading edge. When the inspector is closed they
-    /// return to the window toolbar's trailing region so both commands stay reachable.
-    /// Identifiers are identical in both mounts.
+    /// mounted on whichever content is on screen, so they survive the no-volumes
+    /// state where the inspector is not mounted at all. Identifiers are identical in
+    /// both mounts.
+    ///
+    /// Everything trailing is `.primaryAction`. That is load-bearing (UI-051): the
+    /// system right-aligns the whole primary run against the search field, so the
+    /// commands sit as one cluster on the inspector's edge and do not move when the
+    /// inspector opens. `.secondaryAction` items are instead centred in the content
+    /// region and slide by half the inspector's width on every toggle, which is what
+    /// made the right side read as detached islands. Measured at 1600×1000.
     @ToolbarContentBuilder
     private var trailingCommandItems: some ToolbarContent {
         ToolbarItem(id: "volumes.create", placement: .primaryAction) {
@@ -636,12 +640,7 @@ struct VolumesRootView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        if model.volumes.isEmpty {
-            // The inspector is not mounted on the no-volumes screen, so the trailing
-            // commands need their ordinary window-toolbar home here.
-            trailingCommandItems
-        }
-        ToolbarItem(id: "volumes.removeUnused", placement: .secondaryAction) {
+        ToolbarItem(id: "volumes.removeUnused", placement: .primaryAction) {
             if let removalProgress {
                 ProgressView()
                     .controlSize(.small)
@@ -662,7 +661,7 @@ struct VolumesRootView: View {
                         : "Review and remove \(unusedCount) unused volume\(unusedCount == 1 ? "" : "s")")
             }
         }
-        ToolbarItem(id: "volumes.export", placement: .secondaryAction) {
+        ToolbarItem(id: "volumes.export", placement: .primaryAction) {
             Button {
                 chooseVolumeArchiveDestination()
             } label: {
@@ -673,6 +672,17 @@ struct VolumesRootView: View {
             .accessibilityLabel("Export selected volume")
             .help(volumeArchiveExportHelp)
             .disabled(!canExportSelectedVolume)
+        }
+        // Breaks the glass so the destructive prune is not in the same capsule as
+        // "create". Apple: glass grouping is automatic, `ToolbarSpacer` is how you
+        // control it (HIG "Toolbars", macOS 26). Verified to render: the trailing
+        // run draws as two adjacent capsules, not one.
+        ToolbarSpacer(.fixed)
+        if model.volumes.isEmpty {
+            // The inspector is not mounted on the no-volumes screen, so the trailing
+            // commands need their ordinary window-toolbar home here — declared after
+            // the spacer so the empty screen keeps the populated screen's grouping.
+            trailingCommandItems
         }
     }
 

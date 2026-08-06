@@ -418,7 +418,7 @@ struct KubernetesRootView: View {
             }
         }
 
-        ToolbarItem(id: "kubernetes.refresh", placement: .secondaryAction) {
+        ToolbarItem(id: "kubernetes.refresh", placement: .primaryAction) {
             Button {
                 Task { await refreshCluster() }
             } label: {
@@ -430,7 +430,7 @@ struct KubernetesRootView: View {
             .disabled(!model.engine.isRunning)
         }
 
-        ToolbarItem(id: "kubernetes.actions", placement: .secondaryAction) {
+        ToolbarItem(id: "kubernetes.actions", placement: .primaryAction) {
             Menu {
                 if status.enabled {
                     Button("Disable Kubernetes…", role: .destructive) {

@@ -433,7 +433,7 @@ whether each change actually improved the screen.
 | TASTE-11 | **`TASTE` One predicate, two rows in the Volumes Identity section** — "Volume — Anonymous" and "Prune — Eligible" are both computed from `isAnonymousVolumeName`; the second restates the first, and "Eligible" reads as a safety verdict directly above "Usage — Not scanned yet", where usage is exactly what is unknown (pass 2, found in the pane TASTE-4 cleaned). | Keep "Volume — Anonymous/Named"; delete the "Prune" row and leave the prune consequence where it already costs something — the Remove button's caption. Blocked-by: nothing. | `open` |
 | TASTE-12 | **`TASTE` The absence sweep stopped at Volumes** — Images inspector still says "Reported use — Not reported" plus a remedy-free footnote ("Docker did not report container usage for this image."), the Stacks project inspector still carries "Compose files — Not reported", and the app now has two vocabularies for one category of absence: "Not scanned yet" (Volumes) vs "Not reported" (Images) (pass 2). | Apply the TASTE-4 pattern to Images and the Stacks project inspector: one row per absence, at most one footnote, footnote names what changes the state; one vocabulary — "Not scanned yet" where a scan is the remedy, "Not reported" only where Docker genuinely has no answer. Coordinate with TASTE-5 so the "In use" column and the inspector speak the same words. Blocked-by: nothing. | `open` |
 
-## UI-051 · Right-side controls should be swallowed by the inspector · `open`
+## UI-051 · Right-side controls should be swallowed by the inspector · `done`
 
 **The user has asked for this three times.** *"I preferred it when these get swallowed by the slide
 over just like the left one."* The left sidebar absorbs its toggle pill as it slides; they called
@@ -503,3 +503,55 @@ containing zero Morbstack code** (the technique that settled the Tahoe chrome qu
 declaration can place a custom item trailing-of-search. If none can, this ticket becomes a different
 one: stop the groups being centred, so the right side reads as one cluster against the inspector
 edge instead of three islands. Keep the toggle. Keep every identifier byte-identical.
+
+### 2026-08-05: closed as the second ticket. One placement, not one animation.
+
+The stock-SwiftUI probe settled the original framing: **no custom item can be placed trailing of
+the search field**, AppKit renders it before search regardless of declaration order, and the search
+field is pinned to the window's right edge with the inspector sliding *under* it. "Make the cluster
+travel with the inspector" is not expressible in SwiftUI today. Do not try it a fifth time.
+
+What the probe did expose is ours. In stock SwiftUI, buttons at `.primaryAction`/`.automatic` form
+one packed group adjacent to the search field; a `.secondaryAction` item is centred in the *content*
+region instead. Every route mixed the two, so the trailing edge was two or three islands that each
+drifted a different distance whenever the inspector moved. **The fix is one line per item:** every
+trailing item is `.primaryAction`.
+
+Measured on Volumes at 1600×1000 dark, real window via `capture-window.sh`:
+
+| | before | after |
+| --- | --- | --- |
+| trash + share | 745–815 | 1077–1163 |
+| `+` + inspector toggle | 1005–1080 | 1167–1250 |
+| search field | 1267–1591 | 1267–1591 |
+| gap, cluster to search | 187 pt | 17 pt |
+| drift when the inspector toggles | 135 pt / 67 pt | **0 pt / 0 pt** |
+
+The inspector-closed capture is byte-position identical to the inspector-open one: the cluster is
+now anchored with the search field rather than centred in a region that changes width. That is the
+whole of the complaint — the right side stops rearranging itself.
+
+Changed: Volumes, Networks, Images, Builds, Stacks, Containers, Kubernetes, Migration. Disk was
+already `.primaryAction` + `.automatic` and is untouched (its scan is identical before and after).
+
+Two details worth keeping:
+
+- **`ToolbarSpacer(.fixed)` on Volumes, Networks and Images only.** Those three have a bare
+  destructive trash button that would otherwise share one glass capsule with "create". The spacer
+  renders — verified, two adjacent capsules — and is the API Apple names for this
+  (`docs/design/tahoe/HIG-FINDINGS.md`: "glass grouping is automatic; use `ToolbarSpacer` to control
+  it"). The other routes bury their destructive command inside a `Menu`, so they get one capsule.
+- **Overflow still behaves** despite `.secondaryAction` being the documented overflow placement.
+  At 1100 pt every control is present; at 900 pt on Images — six trailing items, the worst case —
+  the system collapses the search field to its glyph and keeps all six. Nothing clipped, no control
+  lost, and the `.focusedSceneValue(\.routeMaintenanceCommand, …)` menu mirrors are unchanged.
+
+Every `ToolbarItem(id:)` and `.accessibilityIdentifier` is byte-identical to the previous commit
+(diffed mechanically). `mise run check` exit 0: 1009 Swift, 260 Rust, 0 failures.
+
+**Honest read:** better, not merely different, but it is a smaller win than the ticket's title
+promises. The controls no longer scatter or drift, and Kubernetes and Builds got a real bonus — with
+the secondary items out of the way their `.principal` pickers are now actually centred. But nothing
+is "swallowed by the inspector": the cluster sits *beside* the search field, and the search field
+still floats over the inspector column. If the user's objection is specifically the overlap, this
+does not fix it and nothing in SwiftUI will.

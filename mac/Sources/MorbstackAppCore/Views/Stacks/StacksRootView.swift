@@ -334,7 +334,7 @@ struct StacksRootView: View {
         // contextual menu below.  Utility work — refresh and the Compose file editor —
         // shares one semantic options menu so the toolbar stays at a handful of
         // stable groups instead of a row of loose glyphs.
-        ToolbarItem(id: "stacks.options", placement: .secondaryAction) {
+        ToolbarItem(id: "stacks.options", placement: .primaryAction) {
             Menu {
                 Button("Refresh", systemImage: "arrow.clockwise") {
                     Task { await model.refreshAll() }
@@ -383,11 +383,11 @@ struct StacksRootView: View {
                         .help("\(action.title) \(service.composeService ?? service.displayName)")
                     }
                 }
-                ToolbarItem(id: "stacks.actions", placement: .secondaryAction) {
+                ToolbarItem(id: "stacks.actions", placement: .primaryAction) {
                     selectionActionsMenu(service: service, stack: stack)
                 }
             } else if busyProjects.contains(stack.id) {
-                ToolbarItem(id: "stacks.project-progress", placement: .secondaryAction) {
+                ToolbarItem(id: "stacks.project-progress", placement: .primaryAction) {
                     ProgressView()
                         .controlSize(.small)
                         .accessibilityIdentifier("stacks.project-progress")
@@ -395,7 +395,7 @@ struct StacksRootView: View {
                         .help("Updating \(stack.title)")
                 }
             } else {
-                ToolbarItem(id: "stacks.project-actions", placement: .secondaryAction) {
+                ToolbarItem(id: "stacks.project-actions", placement: .primaryAction) {
                     projectActionsMenu(for: stack)
                 }
             }

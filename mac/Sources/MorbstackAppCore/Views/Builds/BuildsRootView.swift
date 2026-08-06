@@ -573,16 +573,9 @@ struct BuildsRootView: View {
                     ? "Choose BuildKit cache or Buildx history"
                     : "Buildx history is unavailable in developer fixture data")
         }
-        if !inspectorIsMounted {
-            // The inspector-less empty screens still need the trailing commands in
-            // the window toolbar; when a table is on screen they ride the inspector
-            // content instead — see `VolumesRootView.trailingCommandItems`.
-            trailingCommandItems
-        }
         // One semantic options menu instead of three loose glyphs — refresh, the
-        // builder sheet, and the infrequent destructive prune stay together and the
-        // system owns their overflow.
-        ToolbarItem(id: "builds.options", placement: .secondaryAction) {
+        // builder sheet, and the infrequent destructive prune stay together.
+        ToolbarItem(id: "builds.options", placement: .primaryAction) {
             Menu {
                 Button("Refresh", systemImage: "arrow.clockwise") {
                     Task { await refreshCurrentScope() }
@@ -612,6 +605,15 @@ struct BuildsRootView: View {
             .accessibilityIdentifier("builds.options")
             .accessibilityLabel("Build options")
             .help("Refresh, builder, and cleanup options")
+        }
+        // No `ToolbarSpacer` here, unlike Volumes/Networks/Images: this route's
+        // destructive command is an item *inside* the options menu, not a bare
+        // trash button that would sit in the same capsule as "build".
+        if !inspectorIsMounted {
+            // The inspector-less empty screens still need the trailing commands in
+            // the window toolbar; when a table is on screen they ride the inspector
+            // content instead — see `VolumesRootView.trailingCommandItems`.
+            trailingCommandItems
         }
     }
 

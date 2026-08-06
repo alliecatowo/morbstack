@@ -506,13 +506,10 @@ struct ImagesRootView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        if model.images.isEmpty {
-            trailingCommandItems
-        }
-        ToolbarItem(id: "images.pruneDangling", placement: .secondaryAction) {
+        ToolbarItem(id: "images.pruneDangling", placement: .primaryAction) {
             pruneDanglingButton
         }
-        ToolbarItem(id: "images.explorePublic", placement: .secondaryAction) {
+        ToolbarItem(id: "images.explorePublic", placement: .primaryAction) {
             Button {
                 showingPublicImageDiscovery = true
             } label: {
@@ -525,7 +522,7 @@ struct ImagesRootView: View {
         // Import and export are two document operations in one small, native Menu.
         // Grouping them keeps the toolbar from accumulating unrelated one-off glyphs;
         // the full commands remain discoverable in the Image menu and inspector.
-        ToolbarItem(id: "images.archive", placement: .secondaryAction) {
+        ToolbarItem(id: "images.archive", placement: .primaryAction) {
             Menu {
                 Button("Load Image Archive…") {
                     chooseImageArchiveForLoading()
@@ -545,7 +542,7 @@ struct ImagesRootView: View {
             .accessibilityLabel("Image archive actions")
             .help(imageArchiveMenuHelp)
         }
-        ToolbarItem(id: "images.runLocal", placement: .secondaryAction) {
+        ToolbarItem(id: "images.runLocal", placement: .primaryAction) {
             Button {
                 runLocalImageAction?()
             } label: {
@@ -558,6 +555,12 @@ struct ImagesRootView: View {
                     ? "Select a local image while the engine is running"
                     : "Create and start one container using the selected local image")
             .disabled(runLocalImageAction == nil)
+        }
+        // Keeps the destructive dangling-prune out of "pull"'s capsule — see
+        // `VolumesRootView.toolbarContent`.
+        ToolbarSpacer(.fixed)
+        if model.images.isEmpty {
+            trailingCommandItems
         }
     }
 
