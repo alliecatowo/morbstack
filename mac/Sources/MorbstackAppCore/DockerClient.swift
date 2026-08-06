@@ -905,6 +905,18 @@ class DockerClient: @unchecked Sendable {
             .reduce(Int64(0)) { $0 + max(0, int64($1["Size"]) - int64($1["SharedSize"])) }
         let reclaimableImageBytes = max(0, imagesTotalBytes - inUseUniqueImageBytes)
 
+        // `/images/json` reports `-1` ("not requested") for `Containers` on every engine
+        // this app has been tested against, but this endpoint already needs the real
+        // count for the reclaimable-bytes filter above. Keep it, keyed by image ID, so
+        // the Images screen can show it the same way Volumes shows scanned usage.
+        var imageUsage: [String: Int] = [:]
+        for image in images {
+            guard let id = image["Id"] as? String else { continue }
+            let containers = int64(image["Containers"])
+            guard containers >= 0 else { continue }
+            imageUsage[id] = Int(containers)
+        }
+
         let volumes = object["Volumes"] as? [[String: Any]] ?? []
         var volumeBytes: Int64 = 0
         var reclaimableVolumeBytes: Int64 = 0
@@ -952,7 +964,8 @@ class DockerClient: @unchecked Sendable {
             containersTotal: containerBytes,
             reclaimable: reclaimableImageBytes + reclaimableVolumeBytes + reclaimableCacheBytes + reclaimableContainerBytes,
             imagesReclaimable: reclaimableImageBytes,
-            volumeUsage: volumeUsage)
+            volumeUsage: volumeUsage,
+            imageUsage: imageUsage)
     }
 
     /// Every BuildKit cache record `/system/df` knows about.

@@ -418,6 +418,7 @@ final class AppModel {
         if let newVolumes { volumes = newVolumes }
         if let newNetworks { networks = newNetworks }
         mergeVolumeUsageFromDisk()
+        mergeImageUsageFromDisk()
 
         resolvePendingTourContainer()
 
@@ -458,6 +459,7 @@ final class AppModel {
         if let usage = await fetch({ try await self.client.diskUsage() }) {
             disk = usage
             mergeVolumeUsageFromDisk()
+            mergeImageUsageFromDisk()
         }
     }
 
@@ -471,6 +473,19 @@ final class AppModel {
             guard let data = usage[volumes[index].name] else { continue }
             if volumes[index].size == nil { volumes[index].size = data.size }
             if volumes[index].refCount == nil { volumes[index].refCount = data.refCount }
+        }
+    }
+
+    /// `GET /images/json` reports `Containers` as `-1` on every engine this app has
+    /// been tested against, so the "In use" column comes from the most recent
+    /// `/system/df` scan instead — the same pattern as `mergeVolumeUsageFromDisk()`.
+    /// Only fills a still-unreported (`< 0`) count: a scan is a point-in-time fact and
+    /// must never overwrite whatever `refreshAll()` most recently learned directly.
+    private func mergeImageUsageFromDisk() {
+        guard let usage = disk?.imageUsage, !usage.isEmpty else { return }
+        for index in images.indices {
+            guard images[index].containersUsing < 0, let count = usage[images[index].id] else { continue }
+            images[index].containersUsing = count
         }
     }
 

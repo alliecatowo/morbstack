@@ -892,12 +892,15 @@ struct ImagesRootView: View {
 
     @ViewBuilder
     private func usageCell(_ image: ImageSummary) -> some View {
-        // `-1` is the engine declining to say, which is not the same as zero and should
-        // not be rendered as a confident "unused".
+        // `-1` means `/images/json` didn't carry a count and the Disk scan hasn't
+        // filled it in yet (`AppModel.mergeImageUsageFromDisk`) — not the same fact as
+        // zero, and it must not render as a confident "unused". Same vocabulary as the
+        // Volumes "In use" column, which has the identical two-source shape.
         if image.containersUsing < 0 {
             Text("—")
                 .foregroundStyle(.tertiary)
-                .accessibilityLabel("Container usage not reported")
+                .accessibilityLabel(TrackCImageInspector.unscannedValue)
+                .help("In-use counts come from the Disk scan. Open Disk to compute them.")
         } else if image.containersUsing == 0 {
             Text("0")
                 .monospacedDigit()

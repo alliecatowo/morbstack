@@ -812,6 +812,13 @@ struct DiskUsage: Sendable, Equatable {
     /// `GET /volumes` never reports usage, so this is the only size source the
     /// Volumes screen has; it is merged into ``VolumeSummary`` after a Disk scan.
     var volumeUsage: [String: VolumeUsageData] = [:]
+    /// Per-image container count from the same `/system/df` scan, keyed by image ID.
+    /// `GET /images/json` reports `Containers` as `-1` ("not requested") on every engine
+    /// this app has been tested against; `/system/df` already computes the real count
+    /// internally to size its reclaimable-images total, so it is the only source the
+    /// Images screen has. Merged into ``ImageSummary`` after a Disk scan, the same as
+    /// `volumeUsage`.
+    var imageUsage: [String: Int] = [:]
 
     struct VolumeUsageData: Sendable, Equatable {
         var size: Int64?
