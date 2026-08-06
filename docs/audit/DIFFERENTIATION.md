@@ -212,11 +212,22 @@ performance target with no implementation behind it.
   app, on top of the existing archive/export machinery, gets 80% of the value
   for 10% of the risk. `docs/competitive-capability-roadmap.md:100` already
   sequences it this way; agree.
-- **Disk reclaim.** `discard=async` is already on the guest mount
-  (`guest/morbinit/src/disk.rs:269-273`), so a `docker system prune` →
-  `fstrim` → host sparse-file release path is more plumbing than research.
-  Being the container tool whose disk *gives space back* is a small, memorable
-  win against the incumbent's most-complained-about behaviour.
+- **Disk reclaim.** Corrected 2026-08-06 (TECH-3/UX-16) — this bullet
+  previously claimed `discard=async` was "already on the guest mount", which
+  was wrong in our own favour. `disk.rs:271-275` puts `discard=async` on the
+  **btrfs arm only**, and the shipped kata kernel has no btrfs
+  (`docs/architecture.md:183`; regression-tested at `disk.rs:1299-1302`), so
+  the option is dead code: the guest actually mounts ext4 with no `discard`,
+  there is no `fstrim` anywhere in the tree, and resize is grow-only. Disk
+  space genuinely never returns to macOS today — Docker Desktop's own
+  most-complained-about behaviour, reproduced faithfully. Before any plumbing
+  work: the open, undocumented-by-Apple question is whether
+  `VZDiskImageStorageDeviceAttachment` even translates a guest `discard` into
+  hole-punching on the raw file at all. See
+  `docs/design/DISK-RECLAIM-DECISION.md` for the experiment and its verdict.
+  If discard passes through, this is close to "more plumbing than research"
+  after all; if it does not, the honest scope is compact-by-copy, which is
+  not free.
 - **Fix the leaks in what exists.** `scripts/fetch-scan-tools.sh` referenced
   five times and absent; shell completions stale by 7 commands and factually
   wrong about `debug`; JetBrains "integration" is a README. Each is under a day

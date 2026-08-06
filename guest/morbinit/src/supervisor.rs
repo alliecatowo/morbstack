@@ -45,8 +45,11 @@ pub struct ServiceSpec {
     pub name: &'static str,
     pub path: &'static str,
     pub args: Vec<String>,
-    /// Extra environment variables, layered on top of `GUEST_PATH`.
-    pub env: Vec<(&'static str, &'static str)>,
+    /// Extra environment variables, layered on top of `GUEST_PATH`. The value
+    /// is owned rather than `&'static str` because it can come from the
+    /// kernel command line at boot (proxy settings — see `apply_proxy_env`),
+    /// not only from string literals baked into this file.
+    pub env: Vec<(&'static str, String)>,
     /// An optional on/off switch, checked on every tick.
     ///
     /// `None` — the overwhelming majority — means "always supposed to be
@@ -320,8 +323,11 @@ pub fn default_services(docker_data_on_disk: bool) -> Vec<ServiceSpec> {
             path: "/usr/local/bin/dockerd",
             args: dockerd_args,
             env: vec![
-                (DOCKER_RAMDISK_ENV, "1"),
-                (DOCKER_MIN_API_VERSION_ENV, DOCKER_MIN_API_VERSION),
+                (DOCKER_RAMDISK_ENV, "1".to_string()),
+                (
+                    DOCKER_MIN_API_VERSION_ENV,
+                    DOCKER_MIN_API_VERSION.to_string(),
+                ),
             ],
             gate: None,
         },
@@ -382,6 +388,33 @@ pub fn apply_dns_flags(
             dockerd.args.push("--host-gateway-ip".to_string());
             dockerd.args.push(ip.to_string());
         }
+    }
+    services
+}
+
+/// Layers the Mac's HTTP/HTTPS proxy onto dockerd's environment, decoded from
+/// the kernel command line by `guest_proxy::parse_cmdline` (UX-18).
+///
+/// A separate function rather than an extra parameter on `default_services`
+/// itself, for the same reason `apply_dns_flags` is: `default_services`'s
+/// five existing call sites (four of them tests) stay untouched rather than
+/// growing a parameter they would all have to thread through as
+/// `&ProxyEnv::default()`.
+///
+/// This is what makes `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` reach `docker
+/// pull`: dockerd's own outbound registry client uses
+/// `net/http.ProxyFromEnvironment`, which reads its process environment, not
+/// any config file. No-op (services returned unchanged) if `services` has no
+/// `dockerd` entry or `proxy_env` carries nothing.
+pub fn apply_proxy_env(
+    mut services: Vec<ServiceSpec>,
+    proxy_env: &crate::guest_proxy::ProxyEnv,
+) -> Vec<ServiceSpec> {
+    if proxy_env.is_empty() {
+        return services;
+    }
+    if let Some(dockerd) = services.iter_mut().find(|s| s.name == "dockerd") {
+        dockerd.env.extend(proxy_env.env_vars());
     }
     services
 }
@@ -549,7 +582,7 @@ impl Platform for SystemPlatform {
         match Command::new(spec.path)
             .args(&spec.args)
             .env("PATH", GUEST_PATH)
-            .envs(spec.env.iter().copied())
+            .envs(spec.env.iter().map(|(k, v)| (*k, v.as_str())))
             .spawn()
         {
             Ok(child) => StartOutcome::Started {
@@ -1990,6 +2023,48 @@ mod tests {
     }
 
     #[test]
+    fn apply_proxy_env_adds_the_proxy_vars_to_dockerd_only() {
+        let proxy_env = crate::guest_proxy::ProxyEnv {
+            http: Some("http://proxy.corp:8080".to_string()),
+            https: None,
+            no_proxy: Some("localhost,.corp".to_string()),
+        };
+        let services = apply_proxy_env(default_services(true), &proxy_env);
+        let dockerd = services.iter().find(|s| s.name == "dockerd").unwrap();
+        assert!(dockerd
+            .env
+            .iter()
+            .any(|(k, v)| *k == "HTTP_PROXY" && v == "http://proxy.corp:8080"));
+        assert!(dockerd
+            .env
+            .iter()
+            .any(|(k, v)| *k == "http_proxy" && v == "http://proxy.corp:8080"));
+        assert!(dockerd
+            .env
+            .iter()
+            .any(|(k, v)| *k == "NO_PROXY" && v == "localhost,.corp"));
+        assert!(!dockerd.env.iter().any(|(k, _)| *k == "HTTPS_PROXY"));
+        // Still carries the pre-existing DOCKER_RAMDISK/DOCKER_MIN_API_VERSION
+        // env — this layers on top, it does not replace.
+        assert!(dockerd.env.iter().any(|(k, _)| *k == DOCKER_RAMDISK_ENV));
+        // containerd never sees dockerd's proxy environment.
+        let containerd = services.iter().find(|s| s.name == "containerd").unwrap();
+        assert!(containerd.env.is_empty());
+    }
+
+    #[test]
+    fn apply_proxy_env_is_a_no_op_with_nothing_configured() {
+        let before = default_services(true);
+        let after = apply_proxy_env(
+            default_services(true),
+            &crate::guest_proxy::ProxyEnv::default(),
+        );
+        let before_env = &before.iter().find(|s| s.name == "dockerd").unwrap().env;
+        let after_env = &after.iter().find(|s| s.name == "dockerd").unwrap().env;
+        assert_eq!(before_env, after_env);
+    }
+
+    #[test]
     fn dockerd_pins_the_default_bridge_that_hosts_the_primary_dns_endpoint() {
         for on_disk in [true, false] {
             let args = dockerd_args(on_disk);
@@ -2081,7 +2156,7 @@ mod tests {
                     .env
                     .iter()
                     .find(|(k, _)| *k == DOCKER_RAMDISK_ENV)
-                    .map(|(_, v)| *v),
+                    .map(|(_, v)| v.as_str()),
                 Some("1")
             );
         }
@@ -2102,7 +2177,7 @@ mod tests {
                     .env
                     .iter()
                     .find(|(k, _)| *k == DOCKER_MIN_API_VERSION_ENV)
-                    .map(|(_, v)| *v),
+                    .map(|(_, v)| v.as_str()),
                 Some("1.24")
             );
         }

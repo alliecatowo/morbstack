@@ -799,6 +799,14 @@ public final class Daemon {
                 // A readiness report only. In particular it does not turn a larger
                 // configured value into a host file resize while `status` is read.
                 "disk_resize": .object(diskResize.ipcFields),
+                // What the running guest reports it actually launched dockerd
+                // with (UX-18) — `null` while no guest has answered `info` on
+                // this boot, distinct from the empty string the guest itself
+                // sends for "no proxy of this kind". `morb doctor` compares
+                // this against what the *next* boot would configure.
+                "guest_http_proxy": vm.guestHTTPProxy.map { AnyCodableValue.string($0) } ?? .null,
+                "guest_https_proxy": vm.guestHTTPSProxy.map { AnyCodableValue.string($0) } ?? .null,
+                "guest_no_proxy": vm.guestNoProxy.map { AnyCodableValue.string($0) } ?? .null,
             ])
 
         case "shares":
