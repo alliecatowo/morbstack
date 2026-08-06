@@ -1496,6 +1496,114 @@ class DockerClient: @unchecked Sendable {
         if afterColon.isEmpty { return (String(trimmed[trimmed.startIndex..<colon]), "latest") }
         return (String(trimmed[trimmed.startIndex..<colon]), String(afterColon))
     }
+
+    // MARK: - Container filesystem
+
+    /// Stats one path inside a container with `HEAD /containers/{id}/archive`.
+    ///
+    /// The whole answer is one response header, so this is cheap enough to call while
+    /// somebody types a path. It works on a **stopped** container — `docker cp`
+    /// semantics do not require a running process — which is the reason the Files tab
+    /// does not need an exec, a shell, or anything present in the image.
+    ///
+    /// - Throws: ``DockerClientError/http(status:message:)`` with 404 when the path is
+    ///   not there, and ``DockerClientError/decoding(_:)`` when the engine answered
+    ///   without the stat header it documents.
+    func containerPathStat(id: String, path: String) async throws -> ContainerPathStat {
+        let target =
+            "/containers/\(id)/archive?path=" + MinimalHTTP.percentEncodeQueryValue(path)
+        let head = try await run { try self.sendForHead(method: "HEAD", path: self.url(target)) }
+        guard (200..<300).contains(head.statusCode) else {
+            throw DockerClientError.http(
+                status: head.statusCode,
+                message: head.statusCode == 404
+                    ? "the engine could not find \(path) in this container"
+                    : "engine returned HTTP \(head.statusCode)")
+        }
+        guard let raw = head.headers["x-docker-container-path-stat"],
+              let stat = ContainerPathStat.decode(headerValue: raw)
+        else {
+            throw DockerClientError.decoding("the engine did not describe \(path)")
+        }
+        return stat
+    }
+
+    /// Streams `GET /containers/{id}/archive?path=…`, which is a tar of the whole
+    /// subtree at `path`.
+    ///
+    /// The caller gets a handle rather than an `AsyncSequence` because the interesting
+    /// operation on this stream is **stopping it**: a listing that has read its budget,
+    /// a preview that has the first two megabytes it wanted, or a person who pressed
+    /// Stop all need the connection shut down mid-archive without draining the rest.
+    func containerArchive(
+        id: String,
+        path: String,
+        onBody: @escaping @Sendable (Data) -> Void,
+        onFinish: @escaping @Sendable (Error?) -> Void
+    ) -> ContainerArchiveHandle {
+        let box = ContainerArchiveHandle()
+        let target =
+            "/containers/\(id)/archive?path=" + MinimalHTTP.percentEncodeQueryValue(path)
+        let handle = stream(method: "GET", path: target, onBody: onBody, onFinish: onFinish)
+        box.attach(handle)
+        return box
+    }
+
+    /// Sends a bodyless request and returns only the response head.
+    ///
+    /// Separate from `send` because a `HEAD` response carries header fields that
+    /// describe a body that will never arrive: framing the absent body is exactly the
+    /// wrong thing to do, and waiting for it is how this would hang.
+    private func sendForHead(
+        method: String,
+        path: String,
+        timeout: TimeInterval = 15
+    ) throws -> HTTPResponseHead {
+        let connection = try DockerConnection(socketPath: socketPath, timeout: 5)
+        defer { connection.close() }
+        try connection.write(MinimalHTTP.request(method: method, path: path, closeWhenDone: true))
+
+        var raw = Data()
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            let chunk = try connection.read()
+            if chunk.isEmpty { break }
+            raw.append(chunk)
+            if let parsed = try MinimalHTTP.parseHead(raw) { return parsed.head }
+            // A head that never terminates is a wedged peer, not a large document.
+            if raw.count > 64 * 1024 { break }
+        }
+        throw DockerClientError.engineUnreachable("the engine closed the connection without replying")
+    }
+}
+
+/// A cancellable archive read.
+///
+/// Wraps the private connection handle so a caller outside this file can stop a stream
+/// it started, and so a stop that arrives before the connection is even open is still
+/// honoured rather than silently lost.
+final class ContainerArchiveHandle: @unchecked Sendable {
+
+    private let lock = NSLock()
+    private var target: DockerConnectionHandle?
+    private var cancelled = false
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        let handle = target
+        target = nil
+        lock.unlock()
+        handle?.cancel()
+    }
+
+    fileprivate func attach(_ handle: DockerConnectionHandle) {
+        lock.lock()
+        let alreadyCancelled = cancelled
+        if !alreadyCancelled { target = handle }
+        lock.unlock()
+        if alreadyCancelled { handle.cancel() }
+    }
 }
 
 // MARK: Interactive exec
