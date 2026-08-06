@@ -202,6 +202,22 @@ final class ContainerFileBrowserTests: XCTestCase {
         XCTAssertEqual(parsed.size, huge)
     }
 
+    func testReaderRefusesABase256SizeOverflowRatherThanWrapping() throws {
+        // The same malformed field, byte for byte, that `TarChildWalkerTests` and
+        // `TarLiteTests` also refuse (see TECH-4) — worth proving here too, now that
+        // all three readers share one decoder, `TarFormat.numericField`, instead of
+        // each carrying (or, in one real case, not carrying) its own overflow guard.
+        let block = TarFixture.headerBlock(
+            name: "huge.bin", typeflag: "0", mode: 0o644, size: -1, base256Size: true)
+        var reader = ContainerTarHeaderReader()
+        XCTAssertThrowsError(try reader.feed(Data(block))) { error in
+            guard case ContainerTarHeaderReader.Failure.malformedArchive(let reason) = error else {
+                return XCTFail("expected a malformed-archive failure, got \(error)")
+            }
+            XCTAssertTrue(reason.contains("length"))
+        }
+    }
+
     func testReaderStopsRatherThanInventEntriesWhenTheStreamDesyncs() {
         var archive = TarFixture.entry(name: "etc/", typeflag: "5", mode: 0o755)
         // Corrupt a byte inside the name so the checksum no longer matches.

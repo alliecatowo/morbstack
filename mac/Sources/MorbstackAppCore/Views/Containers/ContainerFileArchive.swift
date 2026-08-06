@@ -25,6 +25,7 @@
 // never sanitised into something else — if it does not land strictly beneath it.
 
 import Foundation
+import MorbstackKit
 
 // MARK: - Kinds
 
@@ -75,6 +76,23 @@ enum ContainerFileKind: String, Equatable, Sendable {
     /// string. Showing either as "the size of this thing" would be a confident number
     /// that means something else, so callers ask before formatting one.
     var sizeIsContentLength: Bool { self == .regularFile }
+
+    /// This app's own vocabulary for a tar entry's kind is the same set MorbstackKit's
+    /// shared typeflag mapping produces — the cases below are a 1:1 relabeling, not a
+    /// second decision about what a typeflag means.
+    init(_ kind: TarEntryKind) {
+        switch kind {
+        case .directory: self = .directory
+        case .regularFile: self = .regularFile
+        case .symbolicLink: self = .symbolicLink
+        case .hardLink: self = .hardLink
+        case .characterDevice: self = .characterDevice
+        case .blockDevice: self = .blockDevice
+        case .fifo: self = .fifo
+        case .socket: self = .socket
+        case .unknown: self = .unknown
+        }
+    }
 }
 
 // MARK: - The stat header
@@ -393,51 +411,20 @@ struct ContainerTarHeaderReader {
             // that changes a listing, so it is read and dropped.
             return
         case .gnuLongName:
-            pendingName = Self.cString(collected.bytes[...])
+            pendingName = TarFormat.cString(collected.bytes)
         case .gnuLongLink:
-            pendingLinkName = Self.cString(collected.bytes[...])
+            pendingLinkName = TarFormat.cString(collected.bytes)
         case .paxExtended:
-            for (key, value) in Self.parsePaxRecords(collected.bytes) {
-                switch key {
-                case "path": pendingName = value
-                case "linkpath": pendingLinkName = value
-                case "size": pendingSize = Int64(value)
-                case "mtime": pendingModified = Self.paxTime(value)
+            for record in TarFormat.parsePaxRecords(collected.bytes) {
+                switch record.key {
+                case "path": pendingName = record.value
+                case "linkpath": pendingLinkName = record.value
+                case "size": pendingSize = Int64(record.value)
+                case "mtime": pendingModified = TarFormat.paxTime(record.value)
                 default: continue
                 }
             }
         }
-    }
-
-    /// PAX records are `"%d %s=%s\n"`, where the decimal prefix is the length of the
-    /// whole record including itself.
-    static func parsePaxRecords(_ bytes: [UInt8]) -> [(String, String)] {
-        var records: [(String, String)] = []
-        var index = 0
-        while index < bytes.count {
-            guard let space = bytes[index...].firstIndex(of: UInt8(ascii: " ")) else { break }
-            let digits = String(decoding: bytes[index..<space], as: UTF8.self)
-            guard let length = Int(digits), length > 0,
-                  index + length <= bytes.count, space + 1 <= index + length
-            else { break }
-            var end = index + length
-            // The record ends in a newline; tolerate its absence rather than dropping
-            // the record.
-            if end > space + 1, bytes[end - 1] == UInt8(ascii: "\n") { end -= 1 }
-            let body = String(decoding: bytes[(space + 1)..<end], as: UTF8.self)
-            if let equals = body.firstIndex(of: "=") {
-                records.append(
-                    (String(body[body.startIndex..<equals]), String(body[body.index(after: equals)...])))
-            }
-            index += length
-        }
-        return records
-    }
-
-    /// PAX times are decimal seconds since the epoch, optionally fractional.
-    static func paxTime(_ value: String) -> Date? {
-        guard let seconds = Double(value), seconds.isFinite else { return nil }
-        return Date(timeIntervalSince1970: seconds)
     }
 
     struct ParsedHeader: Equatable {
@@ -458,20 +445,20 @@ struct ContainerTarHeaderReader {
         }
 
         let magic = String(decoding: block[257..<262], as: UTF8.self)
-        var name = cString(block[0..<100])
+        var name = TarFormat.cString(block[0..<100])
         if magic == "ustar" {
-            let prefix = cString(block[345..<500])
+            let prefix = TarFormat.cString(block[345..<500])
             if !prefix.isEmpty { name = prefix + "/" + name }
         }
-        guard let size = numericField(block[124..<136]), size >= 0 else {
+        guard let size = TarFormat.numericField(block[124..<136]), size >= 0 else {
             throw Failure.malformedArchive("an entry declared an unreadable length")
         }
-        let mode = numericField(block[100..<108]).map { UInt16(truncatingIfNeeded: $0) } ?? 0
-        let mtime = numericField(block[136..<148]).map { Date(timeIntervalSince1970: TimeInterval($0)) }
+        let mode = TarFormat.numericField(block[100..<108]).map { UInt16(truncatingIfNeeded: $0) } ?? 0
+        let mtime = TarFormat.numericField(block[136..<148]).map { Date(timeIntervalSince1970: TimeInterval($0)) }
 
         return ParsedHeader(
             name: name,
-            linkName: cString(block[157..<257]),
+            linkName: TarFormat.cString(block[157..<257]),
             size: size,
             permissions: mode & 0o7777,
             modified: mtime,
@@ -482,55 +469,11 @@ struct ContainerTarHeaderReader {
     /// interpretation. A mismatch means the reader has lost the stream, which is a real
     /// failure rather than something to paper over with a best guess.
     static func checksumMatches(_ block: [UInt8]) -> Bool {
-        guard block.count == blockSize, let declared = numericField(block[148..<156]) else {
-            return false
-        }
-        var unsigned = 0
-        var signed = 0
-        for (index, byte) in block.enumerated() {
-            let value = (148..<156).contains(index) ? UInt8(ascii: " ") : byte
-            unsigned += Int(value)
-            signed += Int(Int8(bitPattern: value))
-        }
-        return declared == Int64(unsigned) || declared == Int64(signed)
-    }
-
-    /// Tar numerics are NUL/space-padded ASCII octal, except when the high bit of the
-    /// first byte is set — then the field is big-endian base 256, which is how sizes
-    /// above 8 GB and times after 2242 are written.
-    static func numericField(_ field: ArraySlice<UInt8>) -> Int64? {
-        guard let first = field.first else { return nil }
-        if first & 0x80 != 0 {
-            var value = Int64(first & 0x7F)
-            for byte in field.dropFirst() {
-                guard value <= (Int64.max >> 8) else { return nil }
-                value = (value << 8) | Int64(byte)
-            }
-            return value
-        }
-        let text = String(decoding: field, as: UTF8.self)
-            .trimmingCharacters(in: CharacterSet(charactersIn: " \0"))
-        if text.isEmpty { return 0 }
-        guard text.allSatisfy({ $0.isASCII && ("0"..."7").contains($0) }) else { return nil }
-        return Int64(text, radix: 8)
-    }
-
-    static func cString(_ field: ArraySlice<UInt8>) -> String {
-        let end = field.firstIndex(of: 0) ?? field.endIndex
-        return String(decoding: field[field.startIndex..<end], as: UTF8.self)
+        TarFormat.checksumMatches(block)
     }
 
     static func kind(forTypeflag typeflag: UInt8) -> ContainerFileKind {
-        switch typeflag {
-        case 0, UInt8(ascii: "0"), UInt8(ascii: "7"): return .regularFile
-        case UInt8(ascii: "1"): return .hardLink
-        case UInt8(ascii: "2"): return .symbolicLink
-        case UInt8(ascii: "3"): return .characterDevice
-        case UInt8(ascii: "4"): return .blockDevice
-        case UInt8(ascii: "5"): return .directory
-        case UInt8(ascii: "6"): return .fifo
-        default: return .unknown
-        }
+        ContainerFileKind(TarFormat.kind(forTypeflag: typeflag))
     }
 }
 
