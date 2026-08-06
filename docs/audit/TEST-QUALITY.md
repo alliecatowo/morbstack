@@ -100,6 +100,15 @@ either. This is the whole container terminal screen. Because `feed` is what sets
 encoder fixed in 1.1 can never actually reach its DECCKM or bracketed-paste branches at
 runtime. Ticket in the report; too large to fix here.
 
+**2026-08-06 correction, found while merging this audit into `swarm/cleanup`: stale.**
+This worktree forked before DIF-2 landed on `swarm/cleanup`. `feed(_:)` is
+`for byte in data { consume(byte) }` and `resize(columns:rows:)` is implemented against
+a real ground/escape/CSI/OSC/string state machine; `mac/Tests/MorbstackAppTests/TerminalEmulatorTests.swift`
+exists with a full VT contract suite. Both `applicationCursorKeys` and `bracketedPaste`
+are live, so 1.1's encoder does reach its DECCKM and bracketed-paste branches at runtime.
+Left in place rather than deleted so this audit's history stays legible; do not read the
+paragraph above as current.
+
 ### 1.3 `Formatters.bytesString` is pinned nowhere in the suite
 
 **Files:** `mac/Tests/MorbstackAppTests/ModelTests.swift`

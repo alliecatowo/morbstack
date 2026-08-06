@@ -259,9 +259,17 @@ final class TerminalKeyEncodingTests: XCTestCase {
         assertBytes(TerminalKeyEncoding.bytes(forCharacter: "1", control: true) ?? Data(), [0x31], "⌃1")
     }
 
-    func testControlWithNonASCIISendsNothing() {
-        XCTAssertNil(TerminalKeyEncoding.bytes(forCharacter: "é", control: true))
-        XCTAssertNil(TerminalKeyEncoding.bytes(forCharacter: "😀", control: true))
+    func testControlWithNonASCIISendsTheLiteralCharacter() {
+        // ⌃ has no C0 mapping for a non-ASCII character. Swallowing it would silently
+        // eat a keystroke the person deliberately typed, so the literal character is
+        // what reaches the process — matching xterm and pinned independently in
+        // TerminalSurfaceViewTests.testAnUnmappedControlCombinationSendsTheLiteralCharacter.
+        assertBytes(
+            TerminalKeyEncoding.bytes(forCharacter: "é", control: true) ?? Data(),
+            [0xC3, 0xA9], "control-é falls through to the literal UTF-8 bytes")
+        assertBytes(
+            TerminalKeyEncoding.bytes(forCharacter: "😀", control: true) ?? Data(),
+            [0xF0, 0x9F, 0x98, 0x80], "control-emoji falls through to the literal UTF-8 bytes")
     }
 
     func testPlainCharacterIsUTF8() {
