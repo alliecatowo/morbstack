@@ -1,12 +1,13 @@
 # Documentation index
 
-Forty-odd documents accumulated here with no entry point, which the repo audit called out as its own
-finding. This is the entry point. **Start here, not with a directory listing.**
+Eighty-odd documents accumulated here with no entry point, which the repo audit called out as its
+own finding. This is the entry point. **Start here, not with a directory listing.**
 
 ## If you are new
 
 | You want to | Read |
 | --- | --- |
+| See what it actually looks like | [gallery/](gallery/) — real WindowServer captures, per route |
 | Understand what Morbstack is and how it works | [architecture.md](architecture.md) |
 | Build and run it | [build.md](build.md), then `CLAUDE.md` in the repo root for the landmines |
 | Know what is actually done versus claimed | [../TASKS.md](../TASKS.md) — the ticket board |
@@ -36,14 +37,21 @@ silently merged the first two and that is how three headline features shipped ha
 ## By subject
 
 **How it works** — [architecture.md](architecture.md) · [protocol.md](protocol.md) ·
-[build.md](build.md) · [background-service.md](background-service.md) · [first-run.md](first-run.md)
+[build.md](build.md) · [background-service.md](background-service.md) ·
+[first-run.md](first-run.md) ·
+[design/PATCH-FREE-PUBLISH-ALL.md](design/PATCH-FREE-PUBLISH-ALL.md) — why `docker run -P` works on
+stock upstream `dockerd`, through its own `--userland-proxy-path` hook, with no engine patch. Read
+this before believing any older document that mentions a Moby patch.
 
 **Docker compatibility** — [parity.md](parity.md) · [compat.md](compat.md) ·
 [docker-engine-compatibility-inventory.md](docker-engine-compatibility-inventory.md) ·
 [dynamic-port-allocation.md](dynamic-port-allocation.md) ·
 [fixed-udp-port-publication-design.md](fixed-udp-port-publication-design.md) ·
 [clean-profile-acceptance.md](clean-profile-acceptance.md) ·
-[ecosystem-acceptance.md](ecosystem-acceptance.md)
+[ecosystem-acceptance.md](ecosystem-acceptance.md) ·
+[design/ZERO-CONFIG-DISCOVERY.md](design/ZERO-CONFIG-DISCOVERY.md) — how Testcontainers and Dev
+Containers find Morbstack with nothing configured, and why silent fallback to another daemon was the
+bug worth fixing
 
 **Features** — [builds.md](builds.md) · [k8s.md](k8s.md) · [exec.md](exec.md) ·
 [shares.md](shares.md) · [sharing.md](sharing.md) · [live-share-bridge.md](live-share-bridge.md) ·
@@ -53,7 +61,10 @@ silently merged the first two and that is how three headline features shipped ha
 [compose-source-validation.md](compose-source-validation.md) ·
 [compose-environment-secrets-inspection.md](compose-environment-secrets-inspection.md)
 
-**Design** — [design/](design/), led by [design/DECISIONS.md](design/DECISIONS.md) and
+**Design** — [design/README.md](design/README.md) gives the reading order; it is led by
+[design/DECISIONS.md](design/DECISIONS.md),
+[design/NATIVE-MACOS-PLAYBOOK.md](design/NATIVE-MACOS-PLAYBOOK.md),
+[design/HIG-COVERAGE-AUDIT.md](design/HIG-COVERAGE-AUDIT.md),
 [design/tahoe/HIG-FINDINGS.md](design/tahoe/HIG-FINDINGS.md) (verbatim-fetched Apple guidance) and
 [design/ACCESSIBILITY-IDENTIFIERS.md](design/ACCESSIBILITY-IDENTIFIERS.md)
 
@@ -61,7 +72,25 @@ silently merged the first two and that is how three headline features shipped ha
 [comparison.md](comparison.md) · [audit/COMPETITOR-UI-RESEARCH.md](audit/COMPETITOR-UI-RESEARCH.md) ·
 [audit/UI-FEATURE-GAP.md](audit/UI-FEATURE-GAP.md)
 
-**Audits** — [audit/](audit/). [audit/MASTER-AUDIT.md](audit/MASTER-AUDIT.md) is the entry point.
+**Audits** — [audit/](audit/). [audit/MASTER-AUDIT.md](audit/MASTER-AUDIT.md) is the entry point, but
+it is dated 2026-08-03 and its companion table does not list anything written since. The rest:
+
+| Audit | Asks |
+| --- | --- |
+| [audit/ARCHITECTURE-AUDIT.md](audit/ARCHITECTURE-AUDIT.md) | is the structure right and will it hold — protocol contract, concurrency, module graph. States up front that fail-open analysis was **not** covered. |
+| [audit/TECHNOLOGY-AUDIT.md](audit/TECHNOLOGY-AUDIT.md) | are the platform bets sound. Bet 6 was decided by TECH-1; see the dated note in that section. |
+| [audit/TASTE-REVIEW.md](audit/TASTE-REVIEW.md) | is the UI *good*, as opposed to not broken. Every finding marked LAW or TASTE. Companion to the defect register in [audit/UI-AUDIT.md](audit/UI-AUDIT.md). |
+| [audit/INPUT-VALIDATION-REVIEW.md](audit/INPUT-VALIDATION-REVIEW.md) | can a hostile message off a socket hurt us — line-by-line over the guest wire parsers, the MCP server, and every process-spawning site. Names what it did not review. |
+| [audit/ECOSYSTEM-MATRIX.md](audit/ECOSYSTEM-MATRIX.md) | do Testcontainers and Dev Containers work, run live against the dev daemon. |
+| [audit/PROXY-FRAMING.md](audit/PROXY-FRAMING.md) | the fail-open preflight defect, its fix, and the streaming paths the fix could have broken. |
+| [audit/CONCURRENCY-PROTOCOL-FIXES.md](audit/CONCURRENCY-PROTOCOL-FIXES.md) | what CONC-2..5 / PROTO-1..7 / MOD-4 actually changed, including which races no unit test can reproduce. |
+| [audit/ENGINE-MATRIX.md](audit/ENGINE-MATRIX.md) | the first full runtime run against a rebuilt guest. Dated evidence; its publish-all sections describe a deleted mechanism. |
+| [audit/BUILD-REPAIR.md](audit/BUILD-REPAIR.md) | every compile error on a branch of never-compiled commits, and every place intent had to be inferred. |
+
+Five of them ([MASTER-AUDIT](audit/MASTER-AUDIT.md), [PRODUCT-AUDIT](audit/PRODUCT-AUDIT.md),
+[TECHNOLOGY-AUDIT](audit/TECHNOLOGY-AUDIT.md), [ENGINE-MATRIX](audit/ENGINE-MATRIX.md),
+[PROXY-FRAMING](audit/PROXY-FRAMING.md)) carry a dated staleness note about the deleted Moby patch.
+Believe the note, not the finding it sits above.
 
 **Publishing** — [PUBLISHING.md](PUBLISHING.md)
 

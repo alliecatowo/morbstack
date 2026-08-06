@@ -71,7 +71,7 @@ WSL competitor. Compete there deliberately or not at all; do not drift into it.
 | --- | --- | --- | --- |
 | Stock `docker` CLI works with zero setup | both | bundled toolchain, docker 29.7.1 / compose v5.3.1 / buildx v0.36.0, SHA-pinned | `runs-here` |
 | `docker run -p` in all forms | both | fixed/dynamic/UDP/ranges; ambiguity preflight bug just fixed | matrix in progress |
-| `docker run -P` | both | patched Moby allocator; first execution today | in progress |
+| `docker run -P` | both | stock dockerd through its own `--userland-proxy-path` hook — no engine patch (TECH-1); `docker run -P nginx:alpine` served `curl` HTTP 200 in 4.3 ms against a rebuilt guest ([design/PATCH-FREE-PUBLISH-ALL.md](design/PATCH-FREE-PUBLISH-ALL.md)) | `runs-here` |
 | Compose | both | 3-service healthcheck-chained stack up in 12.9 s incl. a BuildKit build | `runs-here` |
 | BuildKit / buildx | both | bundled, real build verified | `runs-here` |
 | Bind mounts that serve the *host's* files | both | `435d09f` fail-closed fix, first runtime check in progress | verifying |
