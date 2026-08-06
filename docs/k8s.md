@@ -158,17 +158,20 @@ still revalidates the exact live namespace/name/UID and requested running
 container before and after helper readiness; a reused Pod name cannot be
 adopted.
 
-The source tree now records the exact Darwin arm64 `kubectl` release that a
-future coordinator may use, and can hash-verify it if a release pipeline
-*explicitly* stages it at the private bundle path
-`Contents/Resources/host-bin/kubernetes/kubectl`. The artifact is not fetched
-by default and is absent from the current app, so this source boundary is
-unavailable in the shipped bundle. A missing, symlinked, non-executable, or
-hash-mismatched helper is an explicit unavailable result; it will not fall
-back to `PATH`, a user-installed `kubectl`, `KUBECONFIG`, or `~/.kube/config`.
-Without the verified helper, the explicit daemon/CLI boundary fails as
-unavailable before it creates a listener, child process, credential material,
-or practical port-forward capability. It has no PATH fallback.
+The source tree records the exact Darwin arm64 `kubectl` release the
+coordinator uses, and `scripts/fetch-guest-assets.sh` fetches and
+hash-verifies it by default (`--host-kubectl-only` to fetch just it), landing
+it at the private bundle path
+`Contents/Resources/host-bin/kubernetes/kubectl`. It is already
+sha256-pinned and sidecar-verified before it ever touches disk, same as
+every other host asset here, so it is no longer withheld by default. A
+bundle assembled from an older or partial asset cache can still be missing
+it, though; a missing, symlinked, non-executable, or hash-mismatched helper
+remains an explicit unavailable result, and it will not fall back to `PATH`,
+a user-installed `kubectl`, `KUBECONFIG`, or `~/.kube/config`. Without the
+verified helper, the explicit daemon/CLI boundary fails as unavailable
+before it creates a listener, child process, credential material, or
+practical port-forward capability. It has no PATH fallback.
 
 The daemon will accept a request only for the exact Pod identity supplied by
 the selected CLI operation: its namespace, DNS-style name, and current
