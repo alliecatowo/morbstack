@@ -745,13 +745,19 @@ struct DiskRootView: View {
                 } else {
                     LabeledContent("Current Raw Capacity", value: "No disk image")
                 }
-                LabeledContent("Configured Capacity") {
-                    Text(Formatters.bytesString(diskCapacity.configuredBytes))
-                        .monospacedDigit()
+                if TrackCDiskGrowthPresentation.showsConfiguredCapacityRow(
+                    currentBytes: diskCapacity.currentBytes, configuredBytes: diskCapacity.configuredBytes)
+                {
+                    LabeledContent("Configured Capacity") {
+                        Text(Formatters.bytesString(diskCapacity.configuredBytes))
+                            .monospacedDigit()
+                    }
                 }
                 LabeledContent("Capacity State", value: capacityStateTitle(diskCapacity.state))
-                Text(diskCapacity.summary)
-                    .foregroundStyle(.secondary)
+                if TrackCDiskGrowthPresentation.showsCapacitySummary(for: diskCapacity.state) {
+                    Text(diskCapacity.summary)
+                        .foregroundStyle(.secondary)
+                }
 
                 if let inspectionError = diskCapacity.inspectionError {
                     Text(inspectionError)
@@ -798,6 +804,14 @@ struct DiskRootView: View {
                         }
                     }
                     .accessibilityIdentifier("disk.growthDetails")
+                } else if diskGrowthAction == .stopEngine {
+                    // The engine can be running and needing a guest resize before
+                    // Morbstack ever gets a readiness diagnostic back from it — the
+                    // fallback case below would then lead with "has not checked yet"
+                    // directly above a Stop Engine button it never mentions. Name the
+                    // remedy the button actually offers instead.
+                    Text("Stop the engine to grow the disk. Resizing a disk the VM is running from is not safe.")
+                        .foregroundStyle(.secondary)
                 } else {
                     Text("Morbstack has not checked yet whether this disk can grow. It checks again before any growth you confirm.")
                         .foregroundStyle(.secondary)

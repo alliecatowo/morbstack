@@ -202,6 +202,25 @@ enum TrackCDiskGrowthPresentation {
             return "The guest proof was saved before final cleanup. Retrying re-verifies the saved target; Morbstack will not shrink the disk."
         }
     }
+
+    /// Whether the Configured Capacity row earns its place next to Current Raw
+    /// Capacity: only when it names a different byte count. When the two agree, the
+    /// Capacity State row already says "Matches configuration" — a third row with the
+    /// same number would be the same fact stated a third time. A missing `currentBytes`
+    /// (no disk image yet) has nothing to compare against, so Configured Capacity is
+    /// the only number on screen and always shows.
+    static func showsConfiguredCapacityRow(currentBytes: Int64?, configuredBytes: Int64) -> Bool {
+        guard let currentBytes else { return true }
+        return currentBytes != configuredBytes
+    }
+
+    /// Whether `MorbDiskCapacity.Status.summary` earns its place under the Capacity
+    /// State row. `.matchesConfiguration`'s summary ("The existing disk matches the
+    /// configured capacity") restates that row's own two-word title in a sentence;
+    /// every other state's summary says something the title alone cannot.
+    static func showsCapacitySummary(for state: MorbDiskCapacity.State) -> Bool {
+        state != .matchesConfiguration
+    }
 }
 
 // MARK: - Prune previews
