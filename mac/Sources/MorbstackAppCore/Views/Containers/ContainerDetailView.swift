@@ -8,7 +8,7 @@
 import SwiftUI
 
 enum TrackBDetailTab: String, CaseIterable, Identifiable {
-    case overview, logs, stats, inspect
+    case overview, logs, files, stats, inspect
 
     var id: String { rawValue }
 
@@ -16,6 +16,7 @@ enum TrackBDetailTab: String, CaseIterable, Identifiable {
         switch self {
         case .overview: return "Overview"
         case .logs: return "Logs"
+        case .files: return "Files"
         case .stats: return "Statistics"
         case .inspect: return "Inspect"
         }
@@ -25,6 +26,7 @@ enum TrackBDetailTab: String, CaseIterable, Identifiable {
         switch self {
         case .overview: return "info.circle"
         case .logs: return "text.alignleft"
+        case .files: return "folder"
         case .stats: return "waveform.path.ecg"
         case .inspect: return "curlybraces"
         }
@@ -42,6 +44,7 @@ struct ContainerDetailView: View {
     @State private var details: TrackBInspectDetails?
     @State private var inspectError: String?
     @State private var isLoadingInspect = false
+    @State private var filesStore = ContainerFileTreeStore()
 
     private let preloadedLogs: TrackBLogStore?
 
@@ -88,6 +91,15 @@ struct ContainerDetailView: View {
             .accessibilityIdentifier("containers.detail.tab.logs")
 
             Tab(
+                TrackBDetailTab.files.title,
+                systemImage: TrackBDetailTab.files.symbol,
+                value: .files)
+            {
+                tabBody(for: .files)
+            }
+            .accessibilityIdentifier("containers.detail.tab.files")
+
+            Tab(
                 TrackBDetailTab.stats.title,
                 systemImage: TrackBDetailTab.stats.symbol,
                 value: .stats)
@@ -132,6 +144,11 @@ struct ContainerDetailView: View {
                 })
         case .logs:
             ContainerLogsTab(container: container, client: model.client, preloadedStore: preloadedLogs)
+        case .files:
+            // The tree lives with the detail view rather than with the tab, so flipping
+            // between tabs does not re-read the container's filesystem — a root listing
+            // can be hundreds of megabytes off the socket.
+            ContainerFilesTab(container: container, client: model.client, store: filesStore)
         case .stats:
             ContainerStatsTab(
                 container: container,

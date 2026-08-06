@@ -148,6 +148,64 @@ replacement Theme, Design, Style, or Appearance rendering module.
 | `Views/Containers/**` | Tables, inspector, forms, logs/text, context menus, toolbar/search, Charts, progress, unavailable states, destructive actions | Native rewrite staged — partial dark real-window evidence recorded; broader verification pending | Main list/detail is table + inspector. Statistics is read-only: CPU/memory history plus network and disk throughput use real `/containers/{id}/stats` values, with `LabeledContent`, Swift Charts, Audio Graphs, and exact sample tables. Network and disk are the same measurement on different cumulative counters and share one section, one axis discipline and one accessibility descriptor (`ByteRateSection`), so the two charts cannot drift apart. Throughput is derived only from complete monotonic counters over real elapsed time: the first sample has no interval, a zero-length interval has no rate, a counter that went backwards is a reset that omits one interval rather than a negative transfer, and a direction the Engine did not report stays `nil` instead of becoming a plausible zero. An Engine that lists no interfaces, and one that lists no block device, each get a `ContentUnavailableView` stating what the Engine reported — the disk one states the Engine's listing rule rather than diagnosing a cause the payload cannot distinguish. Stopped, priming, missing, and reset data use system unavailable/progress states rather than placeholder values or a start action. The recorded dark Computer Use pass covers selecting one stopped container and its Overview inspector; it does not verify statistics, logs, lifecycle changes, menus, or destructive actions. Light/narrow, keyboard/accessibility, XCUITest, and those real-engine workflows remain pending. |
 | `Views/Images/**` | Tables, inspector, local filtering, public repository discovery, pull/tag sheets, image archive export, bounded local-image run, destructive image actions | Native source implementation — partial dark real-window evidence recorded; broader verification pending | **User task:** inspect the local Docker image inventory; separately discover a public repository without initiating a pull; give one selected immutable local image an additional repository/tag alias; or create and start one container from an explicitly selected already-local image. **HIG/API read:** [Lists and tables](https://developer.apple.com/design/human-interface-guidelines/lists-and-tables), [Toolbars](https://developer.apple.com/design/human-interface-guidelines/toolbars), [Search fields](https://developer.apple.com/design/human-interface-guidelines/search-fields), [Menus](https://developer.apple.com/design/human-interface-guidelines/menus), [Sheets](https://developer.apple.com/design/human-interface-guidelines/sheets), [Alerts](https://developer.apple.com/design/human-interface-guidelines/alerts), [Form](https://developer.apple.com/documentation/swiftui/form), [DisclosureGroup](https://developer.apple.com/documentation/swiftui/disclosuregroup), [ContentUnavailableView](https://developer.apple.com/documentation/swiftui/contentunavailableview), [LabeledContent](https://developer.apple.com/documentation/swiftui/labeledcontent), and [NSSavePanel](https://developer.apple.com/documentation/appkit/nsopenpanel); Docker [image tag](https://docs.docker.com/reference/cli/docker/image/tag/) and [image remove](https://docs.docker.com/reference/cli/docker/image/rm/). The local path is a sortable selected-record `Table` plus the system inspector at `340/400/460`; the bordered table style remains a narrow system-only visual hypothesis pending current-bundle Computer Use review. The inspector is an automatic `Form`: architecture is a scalar `LabeledContent`, a consequential mismatch receives one concise Compatibility section, and secondary Repo Tags use a count-labelled `DisclosureGroup` collapsed on selection. It has no duplicate command buttons, cards, custom materials, or manual layout. Pull Image is the first, truthful local-empty-state action; Refresh is secondary. Tag Image is a document-modal system `Form` that names the selected immutable ID separately from repository and tag, then sends only Docker's local tag request; it cannot pull, push, authenticate, browse an account, or contact a registry. Selected-record archive, run, copy, tag, and removal commands live in the Image inspector/context menu or selection-aware toolbar. Removal is explicitly confirmed and always calls Docker by immutable ID without force: the app never removes containers or references behind the person's back, and preserves Docker's exact current dependent-container/additional-tag refusal in a system alert. `.searchable` filters only local images. Public discovery stays a separate explicit system sheet, with no typed remote search, automatic pull, custom registry, credential, custom glass, card, or material behavior. The recorded dark Computer Use pass covers local-image table/selection/inspector and an opened then dismissed Pull sheet; it does **not** cover public discovery, local-image run, tag, or removal. Light/dark/narrow, keyboard/focus/VoiceOver, contrast/transparency/motion, toolbar overflow, XCUITest, archive/run/remove/tag/pull workflows, and real Docker evidence remain pending. |
 
+### 2026-08-05 Container Files tab (UX-4)
+
+**User task:** find out what is actually on a container's filesystem — running or stopped —
+read one text file, and get a file or a folder out onto this Mac. This is browsing a real
+parent/child hierarchy, selecting a record, reading a document, and exporting; it is not
+editing, and nothing in the tab implies it will be.
+
+**HIG/API read:**
+[Outline views](https://developer.apple.com/design/human-interface-guidelines/outline-views),
+[Lists and tables](https://developer.apple.com/design/human-interface-guidelines/lists-and-tables),
+[DisclosureGroup](https://developer.apple.com/documentation/swiftui/disclosuregroup),
+[ContentUnavailableView](https://developer.apple.com/documentation/swiftui/contentunavailableview),
+[LabeledContent](https://developer.apple.com/documentation/swiftui/labeledcontent),
+[Form](https://developer.apple.com/documentation/swiftui/form),
+[Sheets](https://developer.apple.com/design/human-interface-guidelines/sheets),
+[Menus](https://developer.apple.com/design/human-interface-guidelines/menus),
+[Progress indicators](https://developer.apple.com/design/human-interface-guidelines/progress-indicators),
+[NSSavePanel](https://developer.apple.com/documentation/appkit/nssavepanel); Docker Engine
+`HEAD/GET /containers/{id}/archive` and [docker cp](https://docs.docker.com/reference/cli/docker/container/cp/).
+
+**Semantic choice.** A `List` of system `DisclosureGroup`s with system selection, a system
+`Form`/`LabeledContent` strip for the selected entry, a document sheet for a file's text, a
+`Menu` for the folder-level commands, `ContentUnavailableView` for every empty/unavailable
+state, and `NSSavePanel` for export. No custom disclosure layout, no cards, no material, no
+second Finder. The single deviation is an `AnyView` at the recursion point of the row view,
+because a self-referential SwiftUI `View` cannot infer its own opaque type; flattening the
+tree into manually indented rows with a hand-drawn triangle was the alternative and is the
+anti-pattern this table's hierarchy row names.
+
+**What the engine really does, verified against Docker 29.7.1 / API 1.55 on 2026-08-05.**
+`HEAD …/archive?path=X` answers with `X-Docker-Container-Path-Stat` (base64 JSON: `name`,
+`size`, `mode` as a Go `os.FileMode`, `mtime`, `linkTarget`) and works on a **stopped**
+container. `GET` on the same path returns the whole subtree as one tar and carries the same
+stat header. Entry names are rebased on the requested path's base: `/etc` yields `etc/…`,
+`/` yields `/…`, a single file yields its bare name. There is **no** one-level listing
+request, so listing a folder means reading everything inside it — 40 MB in 0.9 s for
+`alpine:3.20`'s root over the Unix socket. That is why the scan is budgeted (512 MB /
+200,000 entries), reports its bytes live, can be stopped, and — when it stops early — states
+which directories it nevertheless finished rather than presenting a partial listing as a
+complete one.
+
+**Truthfulness rules this tab holds.** A directory's 4096 and a symlink's target length are
+never shown as content sizes; sizes are engine bytes through `Formatters.bytesString`. An
+unstated fact reads "Not reported", never `0` and never an em dash. Every incomplete listing
+names an action. Every tar entry name is untrusted: it is rebased and *rejected* — never
+repaired — if it does not land strictly beneath the requested path, and the count of
+rejections is shown. A folder export writes the engine's archive verbatim rather than
+extracting it, so no container-authored path can address anything on the host. The selected
+entry's footer states that the path is inside the container and not reachable in Finder.
+
+**Evidence.** 37 unit tests (`mac/Tests/MorbstackAppTests/ContainerFileBrowserTests.swift`),
+including real header blocks and stat headers captured from a live engine; the parser was
+additionally diffed against Python `tarfile` over a real 40 MB `path=/` response — 2,460
+entries, identical paths, kinds and sizes, zero rejections. **No visual evidence yet:** the
+tab has not been seen in a real window. Light/dark/narrow, keyboard/focus/VoiceOver,
+XCUITest, and Computer Use review of the current bundle all remain pending behind the
+machine lane.
+
 ### 2026-08-03 Local-image Run form expansion
 
 **User task:** create and start one container from the already selected immutable local
