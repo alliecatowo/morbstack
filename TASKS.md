@@ -560,3 +560,39 @@ the secondary items out of the way their `.principal` pickers are now actually c
 is "swallowed by the inspector": the cluster sits *beside* the search field, and the search field
 still floats over the inspector column. If the user's objection is specifically the overlap, this
 does not fix it and nothing in SwiftUI will.
+
+### 2026-08-06: it *was* expressible. `.toolbarPrincipal` is the answer. Closed.
+
+The paragraph above was wrong, and wrong in the way that matters — it declared a platform limit
+from two failed attempts rather than from the API surface. The user pushed back:
+
+> "I dont want it being handpicked, i want native search bar, and I feel it has to have native way
+> to be in middle? … or have search bar unpinned and be inside the right slide out then collapse to
+> icon on the slide in"
+
+An eleven-variant stock-SwiftUI probe (`ToolProbe.swift`, zero Morbstack code, one variant per
+declaration shape) found it on the first sweep:
+
+**`.searchable(placement: .toolbarPrincipal)`.**
+
+Search moves out of the trailing run into the centre region. The action pills sit immediately left
+of it, and — this is the part every previous attempt was chasing — `.primaryAction` items then land
+at the **far right, inside the inspector column**. Measured in the probe at 1600 pt: search
+470–1125, trash/share 400–465, `+` and inspector toggle 1520–1580, with the inspector beginning at
+1332. The earlier finding stands and is simply beside the point: nothing can be placed trailing of a
+`.toolbar`-placed search field, because `.toolbarPrincipal` moves search out of that run entirely.
+
+Applied to all eight routes that have a search field. Disk has none. **Migration has none either** —
+earlier notes listed it; there was nothing there to change.
+
+The one genuine unknown was the two routes that already put a `Picker` at `.principal`. Answer, from
+a real window: **Builds shows them sequentially** — picker left of centre, search to its right, no
+collision and no overlap. Kubernetes could not be observed, because that route is separately broken
+end to end (`77ea35a` fixed it assuming RSA client keys where k3s issues ECDSA; a second fault
+remains) and the code path that mounts search never renders.
+
+**The other half of the ask is not available to us, and this is a fact about the SDK rather than a
+judgement.** `.searchToolbarBehavior(.minimize)` — the collapse-to-a-glyph behaviour — is
+`@available(macOS, unavailable)` in the macOS 26.4 SDK. It does not compile. Do not add it, and do
+not hand-roll an imitation: the whole point of keeping `.searchable` is that ⌘F, the Search menu
+item, suggestions and scopes come with it.
