@@ -143,6 +143,14 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
     /// Interval between guest-control probes while waiting for boot.
     private static let controlProbeInterval: useconds_t = 250_000
 
+    /// How often the memory-balloon policy (UX-17) re-evaluates the guest's
+    /// reported working set. Deliberately much slower than the 30 s idle-check
+    /// timer in `Daemon.swift`: memory need moves far slower than connection
+    /// activity, and the policy's own step limits and hysteresis mean nothing
+    /// useful could happen on a faster cadence anyway. See
+    /// `docs/design/MEMORY-BALLOON.md`.
+    private static let memoryBalloonInterval: TimeInterval = 30 * 60
+
     /// The serial queue that owns the `VZVirtualMachine`.
     private let queue = DispatchQueue(label: "dev.morbstack.vm", qos: .userInitiated)
 
@@ -171,6 +179,19 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
     /// the *current* VM object. Replaced wholesale when a new VM is built.
     private var guestListeners: [UInt32: (VZVirtioSocketListener, GuestVsockAcceptDelegate)] = [:]
     private var consoleHandle: FileHandle?
+
+    /// The VM's actual configured memory size for the current boot, captured in
+    /// ``buildConfiguration()`` — the memory-balloon policy's ceiling, and the value
+    /// its target implicitly starts at (an undriven `VZVirtioTraditionalMemoryBalloonDevice`
+    /// grants the guest everything it was configured with). Queue-confined, UX-17.
+    private var bootedMemoryBytes: UInt64 = 0
+    /// The last target this manager set on the balloon device this boot, or `nil`
+    /// before the first evaluation — which ``evaluateMemoryBalloon()`` treats as
+    /// ``bootedMemoryBytes`` (the undriven starting point). Queue-confined.
+    private var memoryBalloonTargetBytes: UInt64?
+    /// Slow-timer driver for the memory balloon; running only while the guest is
+    /// control-ready. Queue-confined. See ``startMemoryBalloonTimerIfNeeded()``.
+    private var memoryBalloonTimer: DispatchSourceTimer?
 
     private let stateLock = NSLock()
     private var _state: VMState = .stopped
@@ -616,6 +637,108 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
             _guestNoProxy = nil
         }
         stateLock.unlock()
+        // UX-17: the balloon policy only makes sense against a guest that is known
+        // usable on the *current* boot. Starting/stopping here — the one place a
+        // boot's readiness flips in either direction — means every caller of
+        // `invalidateControlReadiness()`/the `.ready` probe outcome gets this for
+        // free instead of needing its own reminder to manage the timer.
+        if ready {
+            startMemoryBalloonTimerIfNeeded()
+        } else {
+            stopMemoryBalloonTimer()
+        }
+    }
+
+    /// Starts the slow-timer memory-balloon evaluator (UX-17) if it is not already
+    /// running. Must run on ``queue``, same as every other call in ``setControlReady(_:)``.
+    ///
+    /// Resets the tracked target to `nil` — treated by ``evaluateMemoryBalloon()`` as
+    /// ``bootedMemoryBytes``, the undriven starting point — so a fresh boot always
+    /// begins from "the guest has everything it was configured with" rather than
+    /// inheriting a previous boot's shrunk target.
+    private func startMemoryBalloonTimerIfNeeded() {
+        guard memoryBalloonTimer == nil else { return }
+        memoryBalloonTargetBytes = nil
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(
+            deadline: .now() + VMManager.memoryBalloonInterval,
+            repeating: VMManager.memoryBalloonInterval)
+        timer.setEventHandler { [weak self] in
+            self?.evaluateMemoryBalloon()
+        }
+        memoryBalloonTimer = timer
+        timer.resume()
+    }
+
+    /// Stops the memory-balloon evaluator. Safe to call when it was never started.
+    private func stopMemoryBalloonTimer() {
+        memoryBalloonTimer?.cancel()
+        memoryBalloonTimer = nil
+    }
+
+    /// One slow-timer tick: samples the guest's `/proc/meminfo` off `queue`, asks
+    /// ``MemoryBalloonPolicy`` what the target should be, and — only when it actually
+    /// changes — applies it back on `queue`. Must run on `queue`.
+    private func evaluateMemoryBalloon() {
+        guard state == .running, controlReady else { return }
+        let generation = probeGeneration
+        let previousTarget = memoryBalloonTargetBytes ?? bootedMemoryBytes
+        let configuredBytes = bootedMemoryBytes
+
+        probeQueue.async { [weak self] in
+            guard let self else { return }
+            let sample = self.sampleGuestMemory()
+            let configuration = MemoryBalloonPolicy.Configuration(configuredBytes: configuredBytes)
+            guard let target = MemoryBalloonPolicy.nextTarget(
+                previousTargetBytes: previousTarget, sample: sample, configuration: configuration)
+            else { return }
+            self.queue.async { [weak self] in
+                guard let self else { return }
+                // The same staleness guard `beginControlProbe` uses (CONC-2): a boot
+                // that ended or was superseded between the sample above and this
+                // callback must not have a stale evaluation write to its balloon —
+                // or, worse, to a newer boot's.
+                guard self.probeGeneration == generation, self.state == .running, self.controlReady
+                else { return }
+                self.applyMemoryBalloonTarget(target)
+            }
+        }
+    }
+
+    /// Blocking: connects to the guest control channel and returns a
+    /// ``MemoryBalloonPolicy/Sample`` if a usable `info` reply arrived. `nil` covers
+    /// every failure uniformly (unreachable guest, timeout, an older guest that does
+    /// not report the fields, or the wire's own `-1` sentinel already collapsed by
+    /// ``GuestReply``) — the policy already treats "no sample" as "change nothing",
+    /// so this does not need to distinguish the reasons.
+    ///
+    /// - Important: never call from ``queue``; it blocks on a vsock round trip.
+    private func sampleGuestMemory() -> MemoryBalloonPolicy.Sample? {
+        switch connectVsockBlocking(port: MorbVsockPorts.guestControl, timeout: 3) {
+        case .failure:
+            return nil
+        case .success(let fd):
+            let control = GuestControl(fd: fd)
+            defer { control.closeOwnedDescriptor() }
+            guard let info = try? control.info(timeout: 5),
+                  let totalKB = info.memTotalKB, let availableKB = info.memAvailableKB
+            else { return nil }
+            return MemoryBalloonPolicy.Sample(totalKB: totalKB, availableKB: availableKB)
+        }
+    }
+
+    /// Writes a new balloon target and records it. Must run on `queue`, with the
+    /// generation/state guard from ``evaluateMemoryBalloon()`` already satisfied by
+    /// the caller.
+    private func applyMemoryBalloonTarget(_ bytes: UInt64) {
+        guard let vm = virtualMachine,
+              let balloon = vm.memoryBalloonDevices.first as? VZVirtioTraditionalMemoryBalloonDevice
+        else { return }
+        balloon.targetVirtualMachineMemorySize = bytes
+        memoryBalloonTargetBytes = bytes
+        log.info(
+            "memory balloon target -> \(bytes / (1024 * 1024)) MiB "
+                + "(of \(bootedMemoryBytes / (1024 * 1024)) MiB configured)")
     }
 
     /// Records that `morbinit` answered on this boot. Safe from any thread.
@@ -2170,6 +2293,12 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
         configuration.memorySize = min(
             max(requestedMemory, VZVirtualMachineConfiguration.minimumAllowedMemorySize),
             VZVirtualMachineConfiguration.maximumAllowedMemorySize)
+        // Captured for the memory-balloon policy (UX-17): its ceiling must match what
+        // Virtualization.framework actually granted, not the raw `config.toml` value
+        // the two clamps above may have adjusted. `buildConfiguration()` runs on
+        // `queue` for every boot and restore, so this write is queue-confined like
+        // every other VM-state field here.
+        bootedMemoryBytes = configuration.memorySize
 
         // Directory sharing. Planned before the boot loader because the share map
         // travels to the guest on the kernel command line: morbinit reads
@@ -2216,7 +2345,11 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
         // Serial console -> ~/.morbstack/logs/console.log
         configuration.serialPorts = [try makeConsolePort()]
 
-        // Entropy and ballooning.
+        // Entropy and ballooning. The balloon device itself is just attached here;
+        // `evaluateMemoryBalloon()` is what actually drives its
+        // `targetVirtualMachineMemorySize` once the guest is control-ready (UX-17,
+        // docs/design/MEMORY-BALLOON.md) — an undriven device grants the guest
+        // everything configured below, which is `bootedMemoryBytes`.
         configuration.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
         configuration.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
 
@@ -2432,10 +2565,16 @@ public enum MorbVsockPorts {
     public static let datagramDial: UInt32 = 2378
     /// Bounded host-to-guest shared-file event receiver.
     public static let liveShareReceiver: UInt32 = 2381
-    /// Host-side port-lease channel — the registry's one **guest-initiated**
-    /// entry. The guest's userland-proxy wrapper (`morbstack-docker-proxy`,
+    /// Host-side port-lease channel — one of two **guest-initiated**
+    /// entries. The guest's userland-proxy wrapper (`morbstack-docker-proxy`,
     /// which stock dockerd execs per published port) connects out to the host
     /// on this port, asks for the Mac endpoint, and holds the connection for
     /// the proxy process's lifetime; EOF releases the Mac listener.
     public static let hostPortLease: UInt32 = 2382
+    /// Host-side SSH-agent forward channel (UX-19) — the registry's other
+    /// **guest-initiated** entry. The guest's `/run/host-services/ssh-auth.sock`
+    /// listener connects out to the host on this port per accepted local
+    /// connection; see ``SSHAgentForward``. Off by default
+    /// (``MorbConfig/sshAgentForwarding``).
+    public static let sshAgentForward: UInt32 = 2383
 }

@@ -307,7 +307,23 @@ public enum K8s {
                 } else {
                     recommendedAction = .none
                     summary = "Kubernetes is ready and reachable through Morbstack’s local API forward."
-                    guidance = "No recovery action is required. Inspect cluster resources or use the generated kubeconfig."
+                    // `kubectl top` calls the metrics.k8s.io aggregated API, and the
+                    // k3s service is started with `--disable=metrics-server` — a
+                    // deliberate boot-speed trade (see guest/morbinit/src/k8s.rs and
+                    // docs/k8s.md "Why this shape"). Left unstated, the only thing a
+                    // user sees is kubectl's own "error: Metrics API not available",
+                    // which reads like a broken cluster rather than a documented
+                    // default (UX-20). Name the trade, give the exact command to
+                    // reverse it, and point at data that already exists without it:
+                    // cri-dockerd creates every Pod as an ordinary container on the
+                    // same shared Docker engine, so `docker stats` already reports
+                    // live CPU/memory for them today.
+                    guidance = "No recovery action is required. metrics-server is off by default to keep "
+                        + "cluster boot fast, so `kubectl top` fails until you install it "
+                        + "(kubectl apply -f "
+                        + "https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml); "
+                        + "for live CPU/memory right now, `docker stats` already reports every Pod’s "
+                        + "containers, since this cluster’s Pods run on the same Docker engine."
                 }
             }
         }

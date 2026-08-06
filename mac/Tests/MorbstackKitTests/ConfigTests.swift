@@ -87,6 +87,32 @@ final class ConfigTests: XCTestCase {
         XCTAssertTrue(parsed.toTOML().contains("allow_lan_port_publishing = false"))
     }
 
+    func testSSHAgentForwardingDefaultsToOff() throws {
+        // A real security boundary (UX-19), not a convenience default: forwarding
+        // the host's SSH agent into every container must never happen because
+        // somebody merely installed Morbstack.
+        XCTAssertFalse(MorbConfig().sshAgentForwarding)
+        let parsed = try MorbConfig.parse("")
+        XCTAssertFalse(parsed.sshAgentForwarding)
+    }
+
+    func testSSHAgentForwardingRoundTrips() throws {
+        let original = MorbConfig(sshAgentForwarding: true)
+        let parsed = try MorbConfig.parse(original.toTOML())
+        XCTAssertTrue(parsed.sshAgentForwarding)
+        XCTAssertTrue(parsed.toTOML().contains("ssh_agent_forwarding = true"))
+
+        let off = try MorbConfig.parse(MorbConfig(sshAgentForwarding: false).toTOML())
+        XCTAssertFalse(off.sshAgentForwarding)
+    }
+
+    func testSSHAgentForwardingChangeIsDetected() {
+        let off = MorbConfig(sshAgentForwarding: false)
+        let on = MorbConfig(sshAgentForwarding: true)
+        XCTAssertEqual(MorbConfig.changedKeys(from: off, to: on), [.sshAgentForwarding])
+        XCTAssertEqual(MorbConfig.changedKeys(from: off, to: off), [])
+    }
+
     func testRoundTripOfCustomConfiguration() throws {
         let original = MorbConfig(
             cpus: 6,
