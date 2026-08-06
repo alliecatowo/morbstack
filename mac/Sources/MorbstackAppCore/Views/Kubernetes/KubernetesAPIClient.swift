@@ -132,6 +132,13 @@ private struct KubernetesAPIConfiguration {
     let certificateAuthority: Data
     let clientCertificate: Data
     let clientKey: Data
+    /// k3s (and most modern issuers) hand out ECDSA client keys by default; only
+    /// older setups issue RSA. Read from the PEM header rather than assuming one
+    /// algorithm — assuming RSA here previously made every real k3s cluster's
+    /// client key fail `SecKeyCreateWithData` and the whole route report a
+    /// generic "kubeconfig … cannot be used for a TLS-authenticated connection"
+    /// even though the file and the cluster were both fine.
+    let clientKeyType: CFString
 
     init(kubeconfigURL: URL) throws {
         guard FileManager.default.fileExists(atPath: kubeconfigURL.path) else {
@@ -190,6 +197,7 @@ private struct KubernetesAPIConfiguration {
         else {
             throw K8sResourceAccessError.malformedKubeconfig
         }
+        clientKeyType = KubernetesPEM.keyType(from: key)
         certificateAuthority = authorityDER
         clientCertificate = certificateDER
         clientKey = keyDER
@@ -209,7 +217,7 @@ private struct KubernetesAPICredential {
             let key = SecKeyCreateWithData(
                 configuration.clientKey as CFData,
                 [
-                    kSecAttrKeyType: kSecAttrKeyTypeRSA,
+                    kSecAttrKeyType: configuration.clientKeyType,
                     kSecAttrKeyClass: kSecAttrKeyClassPrivate,
                 ] as CFDictionary,
                 nil),
@@ -293,6 +301,19 @@ private enum KubernetesPEM {
             .filter { !$0.hasPrefix("-----") }
             .joined()
         return Data(base64Encoded: payload)
+    }
+
+    /// The client key's algorithm, read from its PEM header. `-----BEGIN EC
+    /// PRIVATE KEY-----` (SEC1) is what k3s issues by default; `-----BEGIN RSA
+    /// PRIVATE KEY-----` (PKCS#1) is the older shape some other issuers still
+    /// use. Unrecognised or unlabeled (PKCS#8 `-----BEGIN PRIVATE KEY-----`)
+    /// data defaults to EC, since that is the actual default for every
+    /// Morbstack-generated kubeconfig today; a mismatch fails fast in
+    /// `SecKeyCreateWithData` rather than silently misreading key bytes.
+    static func keyType(from data: Data) -> CFString {
+        guard let text = String(data: data, encoding: .utf8) else { return kSecAttrKeyTypeEC }
+        if text.contains("-----BEGIN RSA PRIVATE KEY-----") { return kSecAttrKeyTypeRSA }
+        return kSecAttrKeyTypeEC
     }
 }
 
