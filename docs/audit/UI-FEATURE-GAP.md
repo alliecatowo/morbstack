@@ -7,6 +7,14 @@ writing — two agents are actively editing `MorbstackAppCore`, so "we have" cla
 not permanence guarantees. Engine-level capability ranking is
 [../COMPETITIVE-GAPS.md](../COMPETITIVE-GAPS.md); this file is about **screens**.
 
+**Its companion is [CAPABILITY-GAP.md](CAPABILITY-GAP.md)**, written the same day against the same
+evidence standard, covering the other half: bind-mount performance, domains and DNS, routable
+container IPs, disk reclaim, proxies, SSH agent forwarding, Kubernetes depth, the Testcontainers /
+Dev Containers / IDE / CI story, and migration in *and* out. Read them together — several verdicts
+here (§5 terminal, §6 volumes, §7 scanning, §11 domains and machines) depend on capability-level
+work ranked over there, and §16 of that file lists the places this repo's own documents now
+contradict the code.
+
 **The standard for every verdict** (user's words: *"set the bar as if they can do it we can do it
 better for free and without as much overhead and cruft"*):
 
@@ -94,6 +102,55 @@ credential store — and `MorbDockerContext.swift` goes out of its way to *prese
   the user's `credsStore`. This is a boundary to write down and defend, not a gap to close.
 - **Org/team views, RAM, IAM** — skip (see §12).
 
+### UX-5 resolved (2026-08-05) — **build differently, and it is not a screen**
+
+**Decision: build an anonymous *reference resolver*, wired into the existing pull path. Do not
+build a second search surface. Do not build a registry browser route.**
+
+The spike's real question was "does multi-registry discovery earn a screen". It does not, and the
+reason is in the protocol rather than in our taste. OCI Distribution defines no registry-wide
+search; Hub's `hub.docker.com/v2/search/repositories/` is a *vendor* API, and every other vendor's
+equivalent needs either a token (GitHub package search), an SDK (ECR Public), or a bespoke endpoint
+(quay). `RegistryImageDiscovery.swift` already encodes exactly this judgement in the type system:
+the `RegistryImageSearchRequest.Scope.ociRepository` case exists as a typed provider boundary and is
+**rejected before a connection is opened**, with the reasoning written into the source. That was
+right and stays.
+
+But the *portable* half of the OCI Distribution API is genuinely anonymous on every public registry:
+`GET /v2/<repo>/tags/list` and `GET /v2/<repo>/manifests/<ref>` with an image-index `Accept` header,
+reached through the spec's own anonymous bearer dance (`401` → `WWW-Authenticate: Bearer
+realm=…,service=…,scope=…` → fetch the realm → use the token). That token is anonymous, scoped to
+one pull, and stored nowhere — it is not a credential, and the boundary survives.
+
+**What that buys is a question we currently answer too late.** `TrackCImageArchitecture.swift`
+reports platform compatibility only for images that are *already local*, and
+`PublicImageDiscoverySheet.swift` cannot tell you whether a repository has an `arm64` manifest
+before you spend the pull. On Apple silicon that is the single most common pull surprise. Answering
+"which tags exist, and which platforms does this tag have" *before* the pull is a better feature
+than browsing, and Docker Desktop structurally cannot ship it because its registry UI is built
+around one vendor's account.
+
+**Rejected alternatives, and why:**
+
+1. *A generic multi-registry search screen.* Five providers, five auth stories, five rate-limit
+   stories, and four of the five require a credential. Fails the product identity constraint on
+   its own before it fails on effort.
+2. *Reading the user's `~/.docker/config.json` `auths`/`credsStore` to browse private repositories.*
+   This is the GUI holding a credential by proxy. It also puts a read path into a file
+   `MorbDockerContext.swift` goes out of its way to only ever touch surgically (CLAUDE.md §1.2).
+   Refused as identity, not as scope.
+3. *Skip entirely.* Rejected: the platform question is real and daily, and we already built a
+   column for it — one route too late.
+
+**Boundary, restated where users see it, not only here:** the GUI never holds a credential; push and
+private pulls stay with the `docker` CLI and the user's own `credsStore`.
+
+**First commit:** `RegistryReferenceResolver` in `MorbstackKit`, beside `RegistryImageDiscovery.swift`
+and inheriting its discipline (bounded body, no redirects, no ambient config, explicit request only):
+parse a reference, perform the anonymous token exchange, return the first page of tags plus the
+selected tag's platform list. Pure networking with recorded-fixture tests, no UI. The disclosure in
+the pull sheet is commit two. → new ticket **UX-11**.
+
 ## 4. Container list — verdict: **build** (grouping), decided (columns)
 
 **Them.** Docker groups containers by **Compose project into collapsible entries** (VERIFIED);
@@ -138,6 +195,60 @@ container with the volume mounted vs a guest-agent path in `morbinit` vs waiting
 projection) have different costs and different honesty. This project's rule: decide before
 implementing. → **UX-7 (spike → decision)**
 
+### UX-7 resolved (2026-08-05) — **build, read-only; the mechanism is already shipped code**
+
+**Decision: build a read-only volume browser on the helper-container/archive mechanism this repo
+already runs in production. Do not write a guest agent. Do not wait for DIF-7.**
+
+The spike framed the mechanism as open. It is not — we chose it twice already and both choices are
+live:
+
+- `mac/Sources/MorbFeatures/VolumeArchiveExport.swift` creates **one stopped, read-only helper**
+  with the volume at `/data:ro`, streams `GET /containers/<helper>/archive?path=/data`, and refuses
+  to publish anything while an owned helper is still known to exist. Its result type records the
+  exact five-request shape as user-facing evidence.
+- `mac/Sources/MorbMigrate/HelperContainer.swift:117` (`createMounted`) does the same for migration,
+  with the comment that says it outright: the Engine API has no "read a volume" endpoint, only "read
+  a path inside a container", and `docker cp` semantics work on a **created-but-never-started**
+  container — so no image content, entrypoint, or running process is involved.
+
+Browsing is that same lifecycle with a different `path` and a `HEAD` alongside the `GET`:
+`HEAD /containers/{id}/archive?path=…` returns the base64 `X-Docker-Container-Path-Stat` header
+(name, size, mode, mtime, link target), and a `GET` on a directory returns a tar whose entries can
+be enumerated without extracting. Zero new transport, zero new protocol verbs, and it inherits an
+error taxonomy and a cleanup discipline that already survived review.
+
+**Rejected alternatives, and why:**
+
+1. *A guest-agent path in `morbinit`.* A new control-protocol verb, a new authorization surface, and
+   a second route to volume bytes that must be kept in agreement with the Engine-API route forever.
+   The guest protocol surface was just narrowed and input-validated (OPS-8); widening it to
+   re-implement an endpoint dockerd already exposes is the wrong direction.
+2. *Waiting for DIF-7's Finder projection.* Finder projection is an FSKit filesystem with real
+   consistency, durability and unmount semantics — [DIFFERENTIATION.md](DIFFERENTIATION.md) Tier B
+   already calls it "a large project with hard consistency and durability semantics" and sequences a
+   read-only in-app browser ahead of it. Blocking browsing behind it trades a week for a quarter.
+   When DIF-7 lands, the browser is a second door to the same bytes, not wasted work.
+3. *Bundling a pinned busybox so a volume is browsable on a machine with no local images.* Deferred,
+   not refused. It adds a fetched asset to pin and defend for an edge case whose honest empty state
+   already exists (`VolumeArchiveExportError.helperImageUnavailable`). Revisit only if that state
+   turns out to be common in practice.
+
+**The read/write boundary:** read-only, and read-only *at the mount* (`:ro`), not merely by
+convention in the UI. Writing into a volume via `PUT /archive` is a separate decision with worse
+failure semantics than export ever had — a half-written archive is a bad file the user can delete;
+a half-written volume is corrupt state they cannot undo.
+
+**One thing to fix that is a sentence, not a ticket:** Docker requires **sign-in** to export a
+volume — a purely local file operation — and we do it with no account
+(`VolumeArchiveExportWorkflow.swift`). The sheet's copy today states what the export will *not* do.
+It should also state what it costs elsewhere. An advantage nobody can see is not shipping.
+
+**First commit:** `VolumeContentBrowser` in `MorbFeatures` beside `VolumeArchiveExport.swift`,
+sharing its helper lifecycle (create → read → always remove, on every error path) and returning one
+bounded directory listing; tested against a recorded tar and a recorded stat header, with no engine
+required. The Volumes-inspector surface is commit two. → new ticket **UX-12**.
+
 ## 7. Images — verdict: **build differently** (scanning), small build (layer detail)
 
 **Them.** Docker: Local + Hub tabs, In-use/Unused/Dangling filters, detail with history, layers,
@@ -154,6 +265,55 @@ its clearest — `syft`/`grype` locally. But `morb scan` currently references a 
 not exist (DOC-5): **the CLI promise must be kept before any GUI surface repeats it.** Decision
 needed on bundling vs first-run fetch (both sha256-pinned per repo law), then an Images-inspector
 surface. → **UX-8 (spike → decision, after DOC-5)**
+
+### UX-8 resolved (2026-08-05) — **build; first-run fetch, not bundling; and DOC-5 is commit one**
+
+**What `morb scan` already does**, read from `mac/Sources/MorbScan/`, not remembered:
+
+| Step | Code | What it actually is |
+| --- | --- | --- |
+| Get the image out of the guest | `ScanEngine.exportImage` | streams `GET /images/{ref}/get` to `~/.morbstack/scan/tmp`, caller owns cleanup on every error path |
+| SBOM | `ScanEngine.runSyft` | `syft scan docker-archive:<tar> -o json` |
+| Database | `ScanEngine.ensureDatabase` | the **only** network call, announced on its own line before it happens, into `~/.morbstack/scan/grype-db` — deliberately *not* grype's shared `~/Library/Caches/grype/db` |
+| Scan | `ScanEngine.runGrype` | `grype sbom:<path> -o json`, `GRYPE_DB_AUTO_UPDATE=false` |
+| Phone-home | `ScanToolEnvironment.base` | `SYFT_CHECK_FOR_APP_UPDATE=false`, `GRYPE_CHECK_FOR_APP_UPDATE=false` — both tools' own defaults are `true`; these were turned off after reading their config docs, and the source says so |
+| `--offline` | `ScanToolEnvironment.forScan` | cached DB, age gate and update-check gate off, age printed either way |
+
+No account, no quota, nothing uploaded, and the one moment a byte leaves the machine is announced.
+Scout structurally cannot say that. **The feature is not missing; only its binaries and its screen
+are.** `scripts/fetch-scan-tools.sh` — referenced by `ToolLocator.missingToolMessage` and by
+`ScanCLI --help` — still does not exist (DOC-5, re-confirmed against `ls scripts/` on 2026-08-05).
+
+**Decision 1 — first-run fetch, sha256-pinned, into `dist/host-bin/`. Not bundled.**
+
+syft and grype are ~100 MB of Go binaries between them, and the artefact that decides whether a scan
+is *useful* — grype's vulnerability database, a couple of hundred MB — is stale within a day and has
+to be fetched regardless. Bundling the binaries inflates the DMG for every user, including the
+majority who never open the panel, to save a download the database makes unavoidable anyway.
+Fetch-and-pin is also simply the house pattern: `scripts/fetch-guest-assets.sh` does it nine times,
+two of them with double verification, and `ToolLocator.candidateDirectories()` already prefers
+`dist/host-bin` over `PATH` so the pinned copy beats whatever a developer's Homebrew had that week.
+
+*Rejected — bundling.* Beyond the megabytes: two more nested executables inside a signed bundle
+whose inside-out signing order is a documented landmine (CLAUDE.md §1.1). Real risk, no benefit.
+*Rejected — a hosted scanning API.* That is Scout. It needs an account or becomes one.
+*Rejected — leaving scanning CLI-only.* Tempting, and wrong: the "free is structural" claim is
+invisible in a CLI that a Docker Desktop refugee never runs, and the Images route already has the
+inspector to put it in.
+
+**Decision 2 — a Vulnerabilities section in the Images inspector. Not a route, not a badge column.**
+Severity counts, grouped by package, expandable to the fixed-in version; the database's build date
+and "scanned on this Mac, nothing uploaded" stated on the panel itself. When the tools are absent it
+shows a real `ContentUnavailableView` carrying the same one-sentence remedy the CLI prints — never a
+disabled button (§1.8). A severity column in the images *table* is refused for the first ship: it
+would imply every image has been scanned, and scanning a large image is a minutes-long operation
+with a several-hundred-MB prerequisite. Scans stay explicit and per-image.
+
+**First commit: `scripts/fetch-scan-tools.sh`** — syft and grype `darwin-arm64` release archives,
+verified against both their published `checksums.txt` sidecars and a pin in the script, into
+`dist/host-bin/`, with a `dist/host-bin/PROVENANCE.txt` entry; the same shape as this repo's
+`fetch_kubectl`. That closes DOC-5 and makes every sentence `ToolLocator` already prints true.
+The inspector section is commit two. → new ticket **UX-13** (DOC-5 stays its own ticket).
 
 ## 8. Builds — verdict: **skip for now** (record why)
 

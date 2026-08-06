@@ -70,7 +70,14 @@ bug worth fixing
 
 **Competitive position** — [COMPETITIVE-GAPS.md](COMPETITIVE-GAPS.md) ·
 [comparison.md](comparison.md) · [audit/COMPETITOR-UI-RESEARCH.md](audit/COMPETITOR-UI-RESEARCH.md) ·
-[audit/UI-FEATURE-GAP.md](audit/UI-FEATURE-GAP.md)
+[audit/UI-FEATURE-GAP.md](audit/UI-FEATURE-GAP.md) ·
+[audit/CAPABILITY-GAP.md](audit/CAPABILITY-GAP.md)
+
+The last two are companions and should be read together: **UI-FEATURE-GAP** is the delta in
+**screens**, **CAPABILITY-GAP** is the delta in **capabilities** — performance, networking, disk,
+proxies, integrations, migration — whether or not any of it is visible in a window. Both rank their
+findings by what changes a user's day, and both record skip verdicts as product decisions rather
+than omissions.
 
 **Audits** — [audit/](audit/). [audit/MASTER-AUDIT.md](audit/MASTER-AUDIT.md) is the entry point, but
 it is dated 2026-08-03 and its companion table does not list anything written since. The rest:
