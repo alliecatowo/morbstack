@@ -66,9 +66,20 @@ Morbstack appends `data/run/docker.sock`. Prefer something like
 - Run the daemon in the foreground (`morbstackd --foreground`) in a backgrounded
   tool call you own, not detached with `nohup`/`&` and forgotten. A detached
   daemon outlives your session and the next agent inherits a stale engine.
-- Kill by the **PID you started**. Never `pkill -f morbstackd`, never
-  `killall`. Another agent (or the user's own running app) is very likely holding
-  a daemon you did not start.
+- Never `pkill -f morbstackd`, never `killall`. A blind sweep takes out an engine
+  another agent — or the user's own running app — is actively holding.
+- **A stale daemon IS fair game.** Confirm what it is first (`ps -o
+  pid,lstart,etime,command -p <pid>`, `pgrep -fl morbstackd`, `lsof -nP
+  -iTCP:<port> -sTCP:LISTEN`), check no live agent is using it, then kill it by
+  that exact PID. This is standing user authorization, given 2026-08-05: *"you
+  can always kill old morbdaemons to get it going, how do we know we didnt break
+  shit otherwise."* An hours-old daemon is worse than no daemon — it silently
+  serves a build that predates your change, and every runtime claim you make
+  against it is about code that is no longer in the tree. That has already
+  produced a full set of "verified" results here that were all pre-fix.
+- After killing one, **restart from the current build** and say in your report
+  which observations came from before the restart and which from after. Do not
+  fold the two into one list.
 - Same for the app: launch `dist/Morbstack.app`, don't `killall MorbstackApp`.
 
 ### 1.5 `mise run app` does NOT rebuild the guest image
