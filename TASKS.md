@@ -406,3 +406,38 @@ whether each change actually improved the screen.
 | TASTE-7 | **`TASTE` Migration inspector is a wall** — ~17 rows + 4 footnotes in one scroll, three zero-value eligibility rows, defensive copy; and Morbstack lists itself among migration *sources* (review F6). | Collapse zero rows to one line when the source reports no volumes; one sentence per footnote; badge Morbstack as the destination or remove it from the source table. Blocked-by: nothing. | `open` |
 | TASTE-8 | **`TASTE` Long identifiers fight trailing alignment in the container Overview** — full digests, image refs, and multi-sentence Ports copy in a ~300 pt trailing value column; nine section headers where half hold 1–2 rows (review F7). Composition issue independent of the filed clipping bug. | Stack long identifiers label-above-value full-width (the Volumes "Guest Mount Point" pattern), middle-truncated and copyable; merge Identity/Lifecycle/Configuration into one group; demote the Ports explanation to a one-line footnote. Blocked-by: the clipping fix (same file, coordinate to avoid churn). | `open` |
 | TASTE-9 | **`TASTE` Unit-and-word sweep** — Networks "Containers" column mixes "3" with "None" (a count column says 0); Builds inspector filler row "Storage — Included in deduplicated total"; Statistics states its sampling cadence twice (review F8). | One pass fixing all three; no layout changes. Blocked-by: nothing. | `open` |
+
+## UI-051 · Right-side controls should be swallowed by the inspector · `open`
+
+**The user has asked for this three times.** *"I preferred it when these get swallowed by the slide
+over just like the left one."* The left sidebar absorbs its toggle pill as it slides; they called
+that "fantastic", unprompted, twice. The right side does not — the `+`, the inspector toggle and the
+search field sit in a separate strip and stay put while the inspector animates, which is what makes
+the right edge read as a detached panel.
+
+**Mechanism found, do not re-derive it.** An agent got most of the way before dying at a session
+limit. What it established:
+
+- `.searchable(placement: .toolbar)` declared on the route root, with the trailing cluster declared
+  **immediately before `DefaultToolbarItem(kind: .search)`**, anchors that cluster against the
+  inspector divider — and the system then carries it with the inspector's own slide. No custom
+  animation involved, which is the right shape: the system already does this, we were placing the
+  items where it could not.
+- Verified in a real window: the search field does move into the inspector region.
+
+**Why it was reverted rather than kept:**
+
+1. **The inspector toggle button disappeared entirely.** Trading a visible control for an animation
+   is not a fix. `InspectorCommands()` still offers it in the View menu, so it is not unreachable,
+   but a toolbar affordance vanishing is a worse defect than the one being fixed.
+2. The Volumes half removed `ToolbarItem(id:)` from several items, which **destroys accessibility
+   identifiers**. Those 243 identifiers are an API the XCUITest suite queries by; see
+   `docs/design/ACCESSIBILITY-IDENTIFIERS.md`. Any version of this fix keeps every identifier
+   byte-identical.
+3. Its comments were mid-edit fragments referring to a `VolumesRootView` shape that no longer
+   existed after the revert.
+
+**To finish:** keep the anchoring discovery, keep the toggle, keep every identifier. Verify on
+Containers, Images and Volumes — the inspector behaves differently where a row auto-selects. Capture
+the left sidebar and the inspector animating side by side; the left one is the reference
+implementation and it is already in this codebase.
