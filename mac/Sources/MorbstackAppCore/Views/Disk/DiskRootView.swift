@@ -759,27 +759,47 @@ struct DiskRootView: View {
                         .textSelection(.enabled)
                 }
 
+                // The state machine behind disk growth is real and worth keeping — a
+                // journal, a readiness probe, a guest capability, recovery phases. But
+                // its vocabulary is ours, not the reader's: "Transaction Readiness",
+                // "Recovery Phase — host-grown" and "reviewed growth transaction"
+                // describe our implementation, and someone looking at this pane wants
+                // to know one thing, which is whether they can make the disk bigger.
+                //
+                // So: one plain sentence at the top, and the machinery behind a
+                // disclosure for whoever is actually debugging it. Nothing is removed;
+                // it stops being the first thing you read.
                 if let diskResizeDiagnostic {
-                    LabeledContent(
-                        "Transaction Readiness",
-                        value: diskResizeStateTitle(diskResizeDiagnostic.state))
-                    LabeledContent(
-                        "Guest Resize",
-                        value: diskResizeDiagnostic.guestCapability.rawValue.capitalized)
-                    Text(diskResizeDiagnostic.summary)
+                    Text(growthReadinessSentence(diskResizeDiagnostic))
                         .foregroundStyle(.secondary)
-                } else {
-                    Text("The daemon has not reported disk-growth readiness. Morbstack checks the same preconditions again before any reviewed growth transaction.")
-                        .foregroundStyle(.secondary)
-                }
 
-                if let diskGrowthJournal {
-                    LabeledContent("Recovery Phase", value: diskGrowthJournal.phase.rawValue)
-                    LabeledContent("Saved Target") {
-                        Text(Formatters.bytesString(diskGrowthJournal.targetBytes))
-                            .monospacedDigit()
+                    DisclosureGroup("Growth Details") {
+                        LabeledContent(
+                            "Readiness",
+                            value: diskResizeStateTitle(diskResizeDiagnostic.state))
+                        LabeledContent(
+                            "Guest Resize",
+                            value: diskResizeDiagnostic.guestCapability.rawValue.capitalized)
+                        Text(diskResizeDiagnostic.summary)
+                            .foregroundStyle(.secondary)
+
+                        if let diskGrowthJournal {
+                            LabeledContent(
+                                "Interrupted At",
+                                value: diskGrowthJournal.phase.rawValue)
+                            LabeledContent("Target") {
+                                Text(Formatters.bytesString(diskGrowthJournal.targetBytes))
+                                    .monospacedDigit()
+                            }
+                            Text(
+                                TrackCDiskGrowthPresentation.journalPhaseDescription(
+                                    diskGrowthJournal.phase))
+                                .foregroundStyle(.secondary)
+                        }
                     }
-                    Text(TrackCDiskGrowthPresentation.journalPhaseDescription(diskGrowthJournal.phase))
+                    .accessibilityIdentifier("disk.growthDetails")
+                } else {
+                    Text("Morbstack has not checked yet whether this disk can grow. It checks again before any growth you confirm.")
                         .foregroundStyle(.secondary)
                 }
             } else if let diskCapacityError {
@@ -907,6 +927,33 @@ struct DiskRootView: View {
         case .increaseRequiresGuestResize: return "Growth required"
         case .decreaseUnsupported: return "Shrink unsupported"
         case .unavailable: return "Unavailable"
+        }
+    }
+
+    /// The one sentence a person reading this pane actually wants: can the disk grow,
+    /// and if not, what would change that.
+    ///
+    /// Each case answers in the reader's terms rather than the state machine's, and
+    /// every "no" names the thing they can do about it. `diskResizeStateTitle` still
+    /// exists and still says "Stop VM first" — that is the right label for a
+    /// two-word status field inside the details disclosure; it is the wrong thing to
+    /// lead with.
+    private func growthReadinessSentence(_ diagnostic: MorbDiskResize.Diagnostic) -> String {
+        switch diagnostic.state {
+        case .readyForExplicitTransaction:
+            return "This disk can grow. Growth is never automatic — you confirm the new size, and it is never made smaller."
+        case .notNeeded:
+            return "The disk already matches the size you configured, so there is nothing to grow."
+        case .decreaseUnsupported:
+            return "The configured size is smaller than the disk. Morbstack only ever grows a disk, never shrinks one, so nothing will change."
+        case .vmMustStop:
+            return "Stop the engine to grow the disk. Resizing a disk the VM is running from is not safe."
+        case .guestCapabilityUnknown, .capacityUnavailable:
+            return "Morbstack cannot tell yet whether this disk can grow. Start the engine so it can ask the guest."
+        case .guestResizeUnavailable:
+            return "This guest image cannot resize its own filesystem, so growing the disk would add space nothing can use."
+        case .recoveryRequired:
+            return "A previous growth was interrupted. Morbstack will finish or roll it back before starting another."
         }
     }
 
