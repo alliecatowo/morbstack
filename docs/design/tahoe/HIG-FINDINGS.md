@@ -112,10 +112,75 @@ Four consecutive toggles on the real Containers route, alternating direction:
 | 3 | open | 3 | 972 → 975 → 1284 → 1347 → 1372 |
 | 4 | close | 2 | 1372 → 1047 → 984 → 972 |
 
+Re-run on a freshly launched instance of the binary proven below to contain `caab2f9`, six
+toggles, and this time the warm-up is visible in the geometry itself:
+
+| Toggle | Direction | Intermediate widths | Slowest AX read |
+| --- | --- | --- | --- |
+| 1 | open | 1 | 476ms |
+| 2 | close | 3 | 123ms |
+| 3 | open | 2 | 123ms |
+| 4 | close | 1 | 231ms |
+| 5 | open | **7** | 60ms |
+| 6 | close | **8** | 52ms |
+
+The first reveal after launch draws one intermediate frame — which is very close to a pop, and is
+almost certainly what was originally reported. By the fifth and sixth it draws seven and eight,
+which is a clean slide. That is the same one-time cost the stall meter measures, read off the
+window's own geometry instead: the symptom is real, it is first-open-only, and it goes away by
+itself. "Opening pops" and "it reads as smooth now" are both true, of the same build, minutes
+apart.
+
 It interpolates. It slides. There is also **no direction asymmetry**: the same four toggles cost
 340 / 250 / 230 / 230ms of CPU (and 270 / 250 / 250 / 340 for the next four). The previously
 recorded "closing is free — 0 samples, confirmed twice" is not reproducible and was a sampling
 artifact.
+
+### Which binary each number came from, established rather than inferred
+
+`dist/Morbstack.app` was built at 10:21:30 and `caab2f9` — the `TimelineView` consolidation —
+was committed at 10:21:56, twenty-six seconds later. That ordering was read as "the bundle
+predates the fix", which would have made every measurement above, and the GIF capture, stale.
+
+It does not. A commit's timestamp is when the tree was committed, not when it was written, and
+the question is answerable off the binary itself. `caab2f9` changed a signature —
+`containerRow(_:)` became `containerRow(_:now:)` — and Swift mangles parameter labels into the
+symbol:
+
+```
+$ nm -a dist/Morbstack.app/Contents/MacOS/MorbstackApp | grep -o 'containerRow33_[A-F0-9]*LL.\{0,6\}' | sort -u
+containerRow33_0AE095D63ED5EA1B339865C74C78B832LLyQrAA   # MorbMenuBarContent.containerRow(_:)
+containerRow33_95219CD9A478FDEE85F3F601A6341B43LL_3now   # ContainersRootView.containerRow(_:now:)
+```
+
+`ContainersRootView`'s symbol carries `_3now`. The bundle **contains** the consolidation; it was
+built from the tree that was committed 26 seconds later. The second symbol is an unrelated
+`containerRow(_:)` in `MorbMenuBar.swift`, which is what makes the pair look like two versions of
+one function until the owning type is read off the mangling. Every real-app number in this
+section is from that binary, and — checked separately — the only change to `mac/Sources` between
+`caab2f9` and now that touches this route is comment text.
+
+**This is the cheap check to reach for whenever "is the running app the code I think it is?"
+comes up.** It beats reasoning from timestamps, and this project has twice reached the wrong
+conclusion by reasoning from timestamps.
+
+### A 2.9fps GIF cannot record a 250ms animation
+
+`docs/gallery/containers-inspector-reveal.gif` was captured from that same (correct) binary and
+read as showing the reveal still popping. It does not show that, because it cannot:
+
+```
+frames: 6 · total duration: 2.04s · every frame 34cs → 2.9fps
+```
+
+One frame every 340ms, against a transition the AX trace above measures at 150–250ms end to end.
+The animation is over inside a single frame interval, so the capture can only ever hold "closed"
+in one frame and "open" in the next — which reads as a pop no matter how smoothly the window
+actually moved. `scripts/capture-gif.sh` is right to declare its measured rate rather than a
+hoped-for one, but at this rate the honest reading of that file is *"this capture path cannot
+resolve this motion"*, not *"the motion did not happen"*. Use `AXColumnTrace.swift` for reveal
+timing; a GIF at screencapture's achievable rate is for showing what a route looks like, not for
+adjudicating a sub-300ms transition.
 
 ### The subtraction matrix
 
