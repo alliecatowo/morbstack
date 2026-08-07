@@ -71,7 +71,7 @@ mod sys;
 mod wire;
 
 #[cfg(target_os = "linux")]
-use std::sync::atomic::{AtomicBool, AtomicI64};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 #[cfg(target_os = "linux")]
 use std::sync::Arc;
 #[cfg(target_os = "linux")]
@@ -494,7 +494,12 @@ fn real_init() {
         sup.tick();
 
         if sleep_until_tick_or_shutdown(&shutdown) {
-            run_shutdown_sequence(&mut sup, &shutdown, docker_data_on_disk);
+            run_shutdown_sequence(
+                &mut sup,
+                &shutdown,
+                docker_data_on_disk,
+                &disk_last_trim_bytes,
+            );
             return;
         }
     }
@@ -519,20 +524,33 @@ fn sleep_until_tick_or_shutdown(shutdown: &control::ShutdownSignal) -> bool {
 }
 
 /// Bring the guest down in the order the shared contract requires: stop the
-/// services (SIGTERM, then SIGKILL), get `/var/lib/docker` onto the disk,
-/// *then* let the `ok` frame go out, and only power off once it has.
+/// services (SIGTERM, then SIGKILL), reclaim what disk space we cheaply can,
+/// get `/var/lib/docker` onto the disk, *then* let the `ok` frame go out, and
+/// only power off once it has.
 ///
 /// Doing the flush before the reply is the whole point — the host treats
 /// `ok` as permission to tear the VM down, so anything still buffered when
 /// it is sent is data we have promised to have written and have not.
+///
+/// The trim runs *before* the flush, deliberately: `disk::trim_before_shutdown`
+/// needs `/var/lib/docker` still mounted read-write, and it is bounded
+/// (`disk::TRIM_SHUTDOWN_DEADLINE`) precisely because everything after it in this
+/// function — the flush, the reply, the power-off — is still waiting on it. See
+/// `docs/design/DISK-RECLAIM-DECISION.md` §8 for why this, and not a guest-side
+/// timer, is what makes reclaim on an idle-suspended guest actually happen.
 #[cfg(target_os = "linux")]
 fn run_shutdown_sequence(
     sup: &mut supervisor::Supervisor,
     shutdown: &control::ShutdownSignal,
     docker_data_on_disk: bool,
+    disk_last_trim_bytes: &AtomicI64,
 ) {
     log::log("shutdown requested — stopping services");
     sup.stop_all();
+
+    if let Some(bytes) = disk::trim_before_shutdown(docker_data_on_disk) {
+        disk_last_trim_bytes.store(bytes, Ordering::SeqCst);
+    }
 
     log::log("flushing docker's data root");
     disk::flush_docker_data(docker_data_on_disk);

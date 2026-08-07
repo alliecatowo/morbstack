@@ -155,11 +155,11 @@ public final class Daemon {
     /// inlined so ``LifecycleTests`` can assert the nesting still holds; the guest
     /// pins the other end of the same chain in
     /// `the_reply_budget_leaves_room_for_the_host_ack_timeout_above_it`.
-    static let stopBudget: TimeInterval = 90
+    static let stopBudget: TimeInterval = 110
 
     /// How long the daemon will wait for a `suspend`. Below the CLI's timeout by
     /// enough to also absorb the pre-suspend container query that precedes it.
-    static let suspendBudget: TimeInterval = 110
+    static let suspendBudget: TimeInterval = 130
 
     /// What the `morb` CLI waits for any single daemon call — the outermost budget.
     ///
@@ -167,7 +167,7 @@ public final class Daemon {
     /// argument in `morb/main.swift`: the CLI's number is only meaningful relative to
     /// the daemon's, and a chain whose ends are declared in two files is a chain that
     /// drifts. `callDaemon` uses this as its default.
-    public static let clientTimeout: TimeInterval = 120
+    public static let clientTimeout: TimeInterval = 140
 
     private var idleTimer: DispatchSourceTimer?
     private var signalSources: [DispatchSourceSignal] = []
@@ -900,24 +900,29 @@ public final class Daemon {
             proxy.beginOrderlyShutdown()
             defer { proxy.endOrderlyShutdown() }
             // Budget must clear the clean-shutdown worst case: up to
-            // `VMManager.shutdownAckTimeout` (65 s) for the guest's ack, plus
+            // `VMManager.shutdownAckTimeout` (85 s) for the guest's ack, plus
             // `guestPowerOffTimeout` (5 s) waiting for it to halt itself, plus
-            // vsock connect and teardown overhead. The `morb` CLI waits 120 s,
+            // vsock connect and teardown overhead. The `morb` CLI waits 140 s,
             // so this replies with a real error before the client gives up.
             //
             // BUDGETS NEST AND THE NESTING IS LOAD-BEARING — an outer layer that
-            // gives up first tears the VM down with the guest's dirty pages still
-            // outstanding, which is the data-loss bug this whole handshake exists
-            // to prevent. Outermost last, every step strictly larger:
+            // gives up first tears the VM down with the guest's dirty pages (or a
+            // disk-trim subprocess) still outstanding, which is the data-loss bug
+            // this whole handshake exists to prevent. Outermost last, every step
+            // strictly larger:
             //
-            //   guest reply cap    54 s  (morbinit control::SHUTDOWN_REPLY_TIMEOUT,
-            //                             itself derived: 2 * (10 s + 2 s) + 30 s)
-            //     < host ack       65 s  (VMManager.shutdownAckTimeout)
-            //       < this         90 s
-            //         < CLI       120 s  (callDaemon's default in morb/main.swift)
+            //   guest reply cap    74 s  (morbinit control::SHUTDOWN_REPLY_TIMEOUT,
+            //                             itself derived: 2 * (10 s + 2 s)
+            //                             + GATED_PHASE_ALLOWANCE (5 s)
+            //                             + disk::TRIM_SHUTDOWN_DEADLINE (15 s)
+            //                             + FLUSH_ALLOWANCE (30 s) — TECH-3/UX-16 §8,
+            //                             docs/design/DISK-RECLAIM-DECISION.md)
+            //     < host ack       85 s  (VMManager.shutdownAckTimeout)
+            //       < this        110 s
+            //         < CLI       140 s  (callDaemon's default in morb/main.swift)
             //
-            // The 90 is sized from the inside out, not picked: worst case here is
-            // ack (65) + power-off wait (5) = 70 s of guest-driven waiting, and the
+            // The 110 is sized from the inside out, not picked: worst case here is
+            // ack (85) + power-off wait (5) = 90 s of guest-driven waiting, and the
             // remaining 20 s absorbs vsock connect, teardown and queue hops while
             // still leaving 30 s before the CLI stops listening.
             return awaitVMOperation("stop", timeout: Daemon.stopBudget) {
@@ -946,14 +951,14 @@ public final class Daemon {
             }
             proxy.beginOrderlyShutdown()
             defer { proxy.endOrderlyShutdown() }
-            // 110, not 120. The container query above can spend up to
+            // 130, not 140. The container query above can spend up to
             // `idleContainerQueryTimeout` before this even starts, and the whole reply
-            // still has to beat the CLI's 120 s so the user sees a real error rather
+            // still has to beat the CLI's 140 s so the user sees a real error rather
             // than a client-side timeout. Nesting, outermost last:
-            //   query (3 s) + this (110 s) < CLI (120 s)
+            //   query (3 s) + this (130 s) < CLI (140 s)
             // and inside it, when suspend degrades to a stop on a host that cannot
             // restore, the same ladder the `stop` case documents has to fit:
-            //   guest reply cap (54 s) < shutdownAckTimeout (65 s) < this (110 s)
+            //   guest reply cap (74 s) < shutdownAckTimeout (85 s) < this (130 s)
             var response = awaitVMOperation("suspend", timeout: Daemon.suspendBudget) {
                 self.vm.suspend(completion: $0)
             }

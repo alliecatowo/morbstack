@@ -315,9 +315,19 @@ final class LifecycleTests: XCTestCase {
 
     /// The guest's shutdown reply cap, `control::SHUTDOWN_REPLY_TIMEOUT` in
     /// `guest/morbinit/src/control.rs`. Derived there, not chosen:
-    /// `SUPERVISED_SERVICE_COUNT * (STOP_GRACE + KILL_GRACE) + FLUSH_ALLOWANCE`
-    /// = 2 * (10 + 2) + 30 = 54.
-    private static let guestReplyCap: TimeInterval = 54
+    /// `SUPERVISED_SERVICE_COUNT * (STOP_GRACE + KILL_GRACE) + GATED_PHASE_ALLOWANCE
+    /// + disk::TRIM_SHUTDOWN_DEADLINE + FLUSH_ALLOWANCE`
+    /// = 2 * (10 + 2) + 5 + 15 + 30 = 74.
+    ///
+    /// This constant previously hardcoded a stale pre-Kubernetes value (54, missing
+    /// `GATED_PHASE_ALLOWANCE`) that happened to still satisfy every `<` assertion
+    /// below without actually proving the nesting held for the real guest constant —
+    /// found and fixed alongside the disk-trim shutdown budget addition (TECH-3/UX-16
+    /// §8, `docs/design/DISK-RECLAIM-DECISION.md`). Keep this equal to the guest's
+    /// `control::SHUTDOWN_REPLY_TIMEOUT` exactly, not merely below the host timeouts —
+    /// a value that is merely "low enough to pass" stops policing drift the moment the
+    /// guest side grows another line item.
+    private static let guestReplyCap: TimeInterval = 74
 
     /// `REPLY_FLUSH_TIMEOUT` in `guest/morbinit/src/main.rs`: what the guest spends
     /// getting the `ok` onto the socket *after* the reply cap has already expired.
@@ -347,7 +357,7 @@ final class LifecycleTests: XCTestCase {
 
         // Strict ordering is necessary but not sufficient: the host must also outlast
         // the guest's *whole* worst case, which is the cap plus the flush that puts
-        // the reply on the wire. An ack of 55 would satisfy 54 < 55 and still walk
+        // the reply on the wire. An ack of 75 would satisfy 74 < 75 and still walk
         // away from an `ok` that was about to arrive.
         XCTAssertGreaterThanOrEqual(
             ack, guestCap + Self.guestReplyFlush,

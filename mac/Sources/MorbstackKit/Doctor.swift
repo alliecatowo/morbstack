@@ -567,18 +567,31 @@ public enum Doctor {
     /// images/containers are coming back to the Mac, using its most recent
     /// periodic `fstrim` sweep result.
     ///
-    /// Deliberately never `.fail` and never `.warn` on `nil`: the sweep runs on a
-    /// slow, deliberately staggered cadence (`disk::TRIM_WARMUP_DELAY` then
+    /// Deliberately never `.fail` and never `.warn` on `nil`: the periodic sweep runs
+    /// on a slow, deliberately staggered cadence (`disk::TRIM_WARMUP_DELAY` then
     /// `disk::TRIM_INTERVAL` in the guest), so "no result yet" is the ordinary
     /// state for a VM that has been up only briefly, not a problem to flag.
+    ///
+    /// `nil` here specifically means "the *periodic* in-guest sweep hasn't reported a
+    /// result this boot" — it says nothing about whether space is actually being
+    /// reclaimed, because it cannot see the guest's other reclaim trigger:
+    /// `disk::trim_before_shutdown` runs unconditionally every time the guest stops
+    /// (an idle auto-suspend included), independent of `auto_suspend_minutes` and of
+    /// this per-boot counter. That is a real gap in what this one line can prove
+    /// (TECH-3/UX-16 §8, `docs/design/DISK-RECLAIM-DECISION.md`), not a gap in
+    /// whether reclaim happens — the detail says so rather than letting a reader
+    /// conclude "nothing is being reclaimed for me" from a boot that simply hasn't
+    /// run its own periodic sweep yet.
     static func diskTrimCheck(reportedBytes: Int64?) -> DoctorCheck {
         guard let reportedBytes else {
             return DoctorCheck(
                 name: "disk-trim",
                 status: .info,
-                detail: "no guest has reported a disk-trim sweep result yet on this boot "
-                    + "(none has run yet, the data root is RAM-backed, or the image predates "
-                    + "the field)")
+                detail: "no guest has reported a periodic disk-trim sweep result yet on this "
+                    + "boot (none has run yet, the data root is RAM-backed, or the image "
+                    + "predates the field) — this counts only the periodic sweep; Morbstack "
+                    + "also reclaims space every time the guest stops, which this line cannot "
+                    + "see")
         }
         return DoctorCheck(
             name: "disk-trim",

@@ -35,6 +35,16 @@ final class DoctorDiskTrimCheckTests: XCTestCase {
         XCTAssertTrue(check.detail.contains("predates"))
     }
 
+    func testNoReportedBytesDoesNotImplyNothingIsBeingReclaimed() {
+        // TECH-3/UX-16 §8 (`docs/design/DISK-RECLAIM-DECISION.md`): this per-boot
+        // counter only sees the *periodic* in-guest sweep. Reclaim also runs
+        // unconditionally at guest shutdown, which a `nil` reading here cannot show —
+        // the detail must say so rather than reading as "nothing is happening".
+        let check = Doctor.diskTrimCheck(reportedBytes: nil)
+
+        XCTAssertTrue(check.detail.contains("every time the guest stops"))
+    }
+
     func testAZeroByteSweepIsStillAPassNotAnAbsence() {
         // Zero is a real answer ("nothing to reclaim this sweep"), not the "no sweep
         // yet" sentinel — `nil` and `Optional(0)` must produce different checks.

@@ -218,46 +218,60 @@ fn wait_for_latch(flag: &AtomicBool, timeout: Duration) -> bool {
 pub const FLUSH_ALLOWANCE: Duration = Duration::from_secs(30);
 
 /// How long a `shutdown` connection waits for the supervisor to report the
-/// guest fully stopped — services down *and* storage flushed — before
-/// answering anyway.
+/// guest fully stopped — services down, disk-trimmed, *and* storage flushed —
+/// before answering anyway.
 ///
 /// ```text
 /// ======================================================================
 ///  THIS NUMBER IS DERIVED, NOT CHOSEN. DO NOT HAND-EDIT IT.
 ///
-///    SUPERVISED_SERVICE_COUNT * (STOP_GRACE + KILL_GRACE) + FLUSH_ALLOWANCE
-///  =            2             * (    10s    +     2s    ) +      30s
-///  =                       24s                            +      30s
-///  =                                 54s
+///    SUPERVISED_SERVICE_COUNT * (STOP_GRACE + KILL_GRACE)
+///      + GATED_PHASE_ALLOWANCE + disk::TRIM_SHUTDOWN_DEADLINE + FLUSH_ALLOWANCE
+///  =            2             * (    10s    +     2s    )
+///      +            5s        +              15s          +      30s
+///  =                       24s                             +      50s
+///  =                                 74s
 ///
 ///  Timing out here means writing an `ok` that is a promise about the
 ///  future rather than a report about the past — the exact bug this whole
 ///  handshake exists to prevent (see `ShutdownSignal`). So the budget must
 ///  cover *everything* that precedes the reply: the full stop ladder
-///  (sequential, so the per-service graces add up rather than overlapping)
-///  plus the disk flush that follows it in `run_shutdown_sequence`. The old
-///  hand-picked 45s covered only the 24s ladder, leaving 21s for a flush
-///  that can need more — so a heavy pull followed by a slow umount put the
-///  `ok` on the wire mid-flush and re-created the bug it was meant to close.
+///  (sequential, so the per-service graces add up rather than overlapping),
+///  the gated (Kubernetes) phase, the bounded disk-trim sweep
+///  (`disk::trim_before_shutdown`, TECH-3/UX-16 §8 —
+///  `docs/design/DISK-RECLAIM-DECISION.md`), and the disk flush that follows
+///  all of it in `run_shutdown_sequence`. Each addition to this list is a
+///  real regression this constant used to miss: the original hand-picked 45s
+///  covered only the 24s stop ladder, and put `ok` on the wire mid-flush the
+///  first time a heavy pull's writeback outran it; `GATED_PHASE_ALLOWANCE`
+///  and `disk::TRIM_SHUTDOWN_DEADLINE` were both added later for the same
+///  reason — a step the budget did not yet know about, running for real time
+///  it was not given credit for.
 ///
 ///  BUDGETS NEST, AND THE NESTING IS LOAD-BEARING. Each layer must be
 ///  strictly larger than the one inside it, or an outer layer gives up
-///  mid-flush and tears the VM down with dirty pages outstanding:
+///  mid-flush and tears the VM down with dirty pages (or a disk-trim
+///  subprocess) still outstanding:
 ///
-///    guest reply cap        54s  <- this constant
-///      < host ack timeout   65s  (VMManager.shutdownAckTimeout)
-///        < daemon stop      90s  (Daemon's awaitVMOperation("stop"))
-///          < CLI           120s
+///    guest reply cap        74s  <- this constant
+///      < host ack timeout   85s  (VMManager.shutdownAckTimeout)
+///        < daemon stop     110s  (Daemon.stopBudget)
+///          < CLI           140s  (Daemon.clientTimeout)
 ///
 ///  Raising this constant therefore requires raising all three host-side
-///  numbers in the same change. Lowering STOP_GRACE / KILL_GRACE /
-///  FLUSH_ALLOWANCE lowers it automatically and is always safe.
+///  numbers in the same change — and `LifecycleTests.swift`'s
+///  `testShutdownBudgetsNestFromTheGuestOutwards` polices exactly that from the
+///  host side, mirroring `the_reply_budget_leaves_room_for_the_host_ack_timeout_above_it`
+///  below. Lowering STOP_GRACE / KILL_GRACE / GATED_PHASE_ALLOWANCE /
+///  `disk::TRIM_SHUTDOWN_DEADLINE` / FLUSH_ALLOWANCE lowers it automatically and
+///  is always safe.
 /// ======================================================================
 /// ```
 pub const SHUTDOWN_REPLY_TIMEOUT: Duration = Duration::from_secs(
     (crate::supervisor::SUPERVISED_SERVICE_COUNT as u64)
         * (crate::supervisor::STOP_GRACE.as_secs() + crate::supervisor::KILL_GRACE.as_secs())
         + GATED_PHASE_ALLOWANCE.as_secs()
+        + crate::disk::TRIM_SHUTDOWN_DEADLINE.as_secs()
         + FLUSH_ALLOWANCE.as_secs(),
 );
 
@@ -267,10 +281,11 @@ pub const SHUTDOWN_REPLY_TIMEOUT: Duration = Duration::from_secs(
 /// signals every gated service at once and then waits once, so the phase costs
 /// a single grace period no matter how many of them there are. That is not an
 /// optimisation for its own sake — it is what makes Kubernetes fit. Before it
-/// existed the chain had about six seconds of slack:
+/// existed, and before the disk-trim sweep below it existed either, the chain
+/// had about six seconds of slack:
 ///
 /// ```text
-///   guest reply cap  54s  <  host ack  65s   (with 5s for the reply itself)
+///   guest reply cap  59s  <  host ack  65s   (with 5s for the reply itself)
 /// ```
 ///
 /// Two more services stopped sequentially at the engine's 10s+2s ladder would
@@ -1421,13 +1436,15 @@ mod tests {
     }
 
     #[test]
-    fn the_reply_budget_covers_the_stop_ladder_and_the_flush_that_follows_it() {
-        // The regression this guards: the budget used to be a hand-picked 45s
-        // that only covered the service-stop ladder. `run_shutdown_sequence`
-        // also flushes `/var/lib/docker` before releasing the reply, and a
-        // umount after a heavy pull can take tens of seconds — so the reply
-        // would time out and go out *during* the flush, which is exactly the
-        // promise-about-the-future the handshake exists to prevent.
+    fn the_reply_budget_covers_the_stop_ladder_the_trim_sweep_and_the_flush_that_follow_it() {
+        // The regression this guards, twice over. First: the budget used to be a
+        // hand-picked 45s that only covered the service-stop ladder — a umount after
+        // a heavy pull can take tens of seconds, so the reply could time out and go
+        // out *during* the flush. Second (TECH-3/UX-16 §8,
+        // `docs/design/DISK-RECLAIM-DECISION.md`): `disk::trim_before_shutdown` was
+        // added to this same sequence *after* that fix, and needed its own line in
+        // this budget for the identical reason — a real step this constant did not
+        // yet know to wait for.
         let ladder = crate::supervisor::STOP_GRACE + crate::supervisor::KILL_GRACE;
         let worst_case = ladder * (crate::supervisor::SUPERVISED_SERVICE_COUNT as u32);
         assert_eq!(worst_case, Duration::from_secs(24));
@@ -1435,11 +1452,16 @@ mod tests {
         // and waited on once, so they contribute one 4s+1s ladder in total
         // rather than one per service. See `GATED_PHASE_ALLOWANCE`.
         assert_eq!(GATED_PHASE_ALLOWANCE, Duration::from_secs(5));
+        // ...plus the bounded shutdown-time disk-trim sweep.
+        assert_eq!(crate::disk::TRIM_SHUTDOWN_DEADLINE, Duration::from_secs(15));
         assert_eq!(
             SHUTDOWN_REPLY_TIMEOUT,
-            worst_case + GATED_PHASE_ALLOWANCE + FLUSH_ALLOWANCE
+            worst_case
+                + GATED_PHASE_ALLOWANCE
+                + crate::disk::TRIM_SHUTDOWN_DEADLINE
+                + FLUSH_ALLOWANCE
         );
-        assert_eq!(SHUTDOWN_REPLY_TIMEOUT, Duration::from_secs(59));
+        assert_eq!(SHUTDOWN_REPLY_TIMEOUT, Duration::from_secs(74));
     }
 
     #[test]
@@ -1448,17 +1470,21 @@ mod tests {
         // budget < CLI. This end asserts only its own side of the contract —
         // that the guest cap stays comfortably under the smallest host ack
         // timeout the nesting tolerates — because the host constants live in
-        // mac/ and cannot be imported here.
-        const HOST_ACK_TIMEOUT: Duration = Duration::from_secs(65);
+        // mac/ and cannot be imported here. `LifecycleTests.swift`'s
+        // `testShutdownBudgetsNestFromTheGuestOutwards` hardcodes this same
+        // `SHUTDOWN_REPLY_TIMEOUT` value as its `guestReplyCap` and asserts the rest
+        // of the chain from the host side — two suites, two languages, one ladder.
+        const HOST_ACK_TIMEOUT: Duration = Duration::from_secs(85);
         assert!(
             SHUTDOWN_REPLY_TIMEOUT < HOST_ACK_TIMEOUT,
             "guest cap {:?} must stay below the host ack timeout {:?}",
             SHUTDOWN_REPLY_TIMEOUT,
             HOST_ACK_TIMEOUT
         );
-        // And the gap must be large enough for the reply itself to make it
-        // out: `main::REPLY_FLUSH_TIMEOUT` is 5s on top of this wait.
-        assert!(SHUTDOWN_REPLY_TIMEOUT + Duration::from_secs(5) <= HOST_ACK_TIMEOUT);
+        // And the gap must be large enough for the reply itself to make it out
+        // (`main::REPLY_FLUSH_TIMEOUT` is 5s on top of this wait) with a further 6s
+        // of slack for vsock connect and scheduling — see `VMManager.shutdownAckTimeout`.
+        assert!(SHUTDOWN_REPLY_TIMEOUT + Duration::from_secs(5 + 6) <= HOST_ACK_TIMEOUT);
     }
 
     #[test]

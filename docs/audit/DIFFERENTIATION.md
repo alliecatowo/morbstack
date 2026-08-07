@@ -83,24 +83,32 @@ These are ordered by "how fast does a new user hit this".
 >
 > **T7 stands as written.** `sharedPaths` is still config-file-only.
 >
-> - **T8 — mechanism shipped 2026-08-06, not yet reverified on a rebuilt
->   guest.** `guest/morbinit/src/disk.rs`'s `spawn_periodic_trim` now runs an
->   hourly `fstrim /var/lib/docker` from a background thread, reported through
->   `info`/`status` as `disk_last_trim_bytes`/`guest_disk_last_trim_bytes` and
->   surfaced in both `morb doctor` (`Doctor.diskTrimCheck`) and the Disk
->   inspector's VM-disk footnote. This is not a live `-o discard` mount —
->   `disk.rs`'s `mount_data` doc comment has the reasoning: a continuous
->   `discard` mount pays a synchronous TRIM inline with every delete, which is
->   exactly the cost `fstrim.timer`-style periodic sweeps exist to avoid on
->   delete-heavy workloads like `docker system prune`. The reclaim mechanism
->   itself was proven live in the same session
->   ([../design/DISK-RECLAIM-DECISION.md](../design/DISK-RECLAIM-DECISION.md)
->   §4: 4.01 GiB back on a discard remount, 9.3 GiB back on a manual `fstrim`),
->   but that measurement predates this commit's guest code and was taken by
->   hand; the shipped background thread has not yet been through `mise run
->   guest-image` and re-measured end to end (§7 of the same document). Still
->   `ABSENT` as a *verified* differentiator until that rebuild-and-remeasure
->   step closes; `open` in `TASKS.md` UX-16.
+> - **T8 — mechanism shipped 2026-08-06, rebuilt-guest-verified 2026-08-06
+>   (same day, follow-up session).** `guest/morbinit/src/disk.rs`'s
+>   `spawn_periodic_trim` runs an hourly `fstrim /var/lib/docker` from a
+>   background thread, reported through `info`/`status` as
+>   `disk_last_trim_bytes`/`guest_disk_last_trim_bytes` and surfaced in both
+>   `morb doctor` (`Doctor.diskTrimCheck`) and the Disk inspector's VM-disk
+>   footnote. This is not a live `-o discard` mount — `disk.rs`'s `mount_data`
+>   doc comment has the reasoning: a continuous `discard` mount pays a
+>   synchronous TRIM inline with every delete, which is exactly the cost
+>   `fstrim.timer`-style periodic sweeps exist to avoid on delete-heavy
+>   workloads like `docker system prune`.
+>
+>   The rebuild-and-remeasure step this bullet used to be waiting on found a
+>   real bug: the periodic sweep's 10-minute warmup outlives the default
+>   `auto_suspend_minutes` (5), so on a real developer machine the guest was
+>   always idle-stopped before the sweep ever got to run once — the mechanism
+>   above was correct code that could not fire in practice. Fixed by
+>   `disk::trim_before_shutdown`, a bounded sweep the guest's own shutdown
+>   sequence now runs unconditionally on every teardown, independent of any
+>   timer or of `auto_suspend_minutes`. Verified live against the exact
+>   original failure mode (default 5-minute auto-suspend, a guest whose
+>   restore genuinely fails on this host): `disk.img` reclaimed ~4.00 GiB the
+>   moment the guest idle-stopped, with no `fstrim` run by hand. Full
+>   transcript, numbers, and the options considered:
+>   [../design/DISK-RECLAIM-DECISION.md](../design/DISK-RECLAIM-DECISION.md)
+>   §8. **Now a real, verified differentiator** — `done` in `TASKS.md` UX-16.
 
 **T1 is the one that should be uncomfortable.** 75,000 lines of Swift, 739 test
 functions, a genuinely careful port-lease design, an excellent security posture
@@ -300,13 +308,16 @@ performance target with no implementation behind it.
   after all; if it does not, the honest scope is compact-by-copy, which is
   not free.
 
-  > **Answered and shipped, 2026-08-06.** Discard passes through — see the T8
-  > note above and `docs/design/DISK-RECLAIM-DECISION.md` §4/§7. "There is no
-  > `fstrim` anywhere in the tree" is no longer true: `disk.rs` now runs one
-  > on an hourly background schedule. What is still true is that the shipped
-  > code has not been rebuilt into a guest image and re-measured — the
-  > numbers above are from the spike's manual commands, run before this
-  > mechanism existed.
+  > **Answered, shipped, and rebuilt-guest-verified, 2026-08-06.** Discard
+  > passes through — see the T8 note above and
+  > `docs/design/DISK-RECLAIM-DECISION.md` §4/§7/§8. "There is no `fstrim`
+  > anywhere in the tree" is no longer true: `disk.rs` runs one on an hourly
+  > background schedule *and* one unconditionally on every guest shutdown —
+  > the second one was added after the rebuild-and-remeasure step found the
+  > first one alone could never fire against the default auto-suspend
+  > setting (§8). Both were confirmed live on a rebuilt guest, with real
+  > `stat -f %b` numbers on `disk.img` before and after, not the earlier
+  > spike's manual commands.
 - **Fix the leaks in what exists.** `scripts/fetch-scan-tools.sh` referenced
   five times and absent; shell completions stale by 7 commands and factually
   wrong about `debug`; JetBrains "integration" is a README. Each is under a day

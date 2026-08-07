@@ -534,6 +534,19 @@ final class TrackCDiskMathTests: XCTestCase {
         XCTAssertTrue(sentence.contains("returned"))
     }
 
+    func testReclaimSentenceNamesBothTriggersNotJustTheBackgroundSweep() {
+        // TECH-3/UX-16 §8 (`docs/design/DISK-RECLAIM-DECISION.md`): a machine that
+        // idles and auto-suspends never sees the periodic sweep complete, so the
+        // claim must not describe only that trigger — it must also name the
+        // shutdown-time reclaim that actually fires for that reader.
+        for bytes: Int64? in [nil, 0, 59_050_795_008] {
+            let sentence = TrackCDiskReclaimPresentation.reclaimSentence(lastTrimBytes: bytes)
+            XCTAssertTrue(
+                sentence.contains("every time it stops") || sentence.contains("every time the guest stops"),
+                "\(String(describing: bytes)) -> \(sentence)")
+        }
+    }
+
     func testFootprintExplanationStatesTheSparseFactAndTheReclaimFactTogether() {
         let footprint = TrackCDiskMath.footprint(
             path: "/tmp/disk.img", apparentBytes: 64 * 1_000_000_000, blocks512: 3 * 1_000_000_000 / 512)

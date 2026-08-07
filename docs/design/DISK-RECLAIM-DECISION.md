@@ -3,10 +3,14 @@
 **Status:** spike run and answered (§4/§5), mechanism and reporting path
 implemented in code (§7) — the periodic `fstrim` sweep, its `info`/`status`
 reporting, a `morb doctor` check, and a corrected Disk-inspector sentence.
-**Not yet re-verified on a rebuilt guest**: the code has not been through
-`mise run guest-image`, so the §4 numbers below are from the spike's manual
-remount/`fstrim` commands, not from the shipped background thread. That
-re-measurement is the remaining step and is recorded in §7 once it runs.
+**§8 (this update): the periodic sweep as shipped in §7 could never fire in
+practice** — its 10-minute warmup outlives the default `auto_suspend_minutes`
+(5), so an idle-cycled guest was stopped before the sweep's first run every
+time. Fixed by moving reclaim-on-idle off that timer entirely and onto a
+bounded sweep in the guest's own shutdown sequence, which runs on every
+teardown regardless of `auto_suspend_minutes`. Verified on a rebuilt guest —
+see §8's "Verification" for the measured numbers, closing the "not yet
+re-verified" gap this status line used to carry.
 
 The spike itself: 2026-08-06, on a fresh `mise run guest-image` +
 `mise run app` build (initramfs sha256
@@ -262,17 +266,312 @@ happens automatically in the background, and either names the most recent
 sweep's byte count or says plainly that none has completed yet — never the
 guest's internal sentinel or timer names, which a reader has no use for.
 
-**What is still open: rebuilt-guest verification.** This commit's guest
-changes have not been through `mise run guest-image` — CLAUDE.md §1.5's exact
-trap, called out explicitly because this project has drawn false "the fix
-didn't work" conclusions from it before. The §4 numbers above are from the
-spike's manual `mount -o remount,discard` / `fstrim -v` commands run by hand
-inside a guest whose `morbinit` predates `spawn_periodic_trim`; they
+**What was still open at this point: rebuilt-guest verification.** This
+commit's guest changes had not been through `mise run guest-image` — CLAUDE.md
+§1.5's exact trap, called out explicitly because this project has drawn false
+"the fix didn't work" conclusions from it before. The §4 numbers above are
+from the spike's manual `mount -o remount,discard` / `fstrim -v` commands run
+by hand inside a guest whose `morbinit` predates `spawn_periodic_trim`; they
 demonstrate the mechanism `VZDiskImageStorageDeviceAttachment` supports, not
-that the shipped background thread invokes it correctly on a schedule. The
-remaining step is: `mise run guest-image` (new initramfs with this commit's
-`morbinit`), `mise run sign`, boot, fill and delete a large file exactly as
-in §3, and confirm `disk_last_trim_bytes`/`guest_disk_last_trim_bytes`
-eventually reports a nonzero figure without any manual `fstrim` invocation —
-blocked, as of this commit, on the machine lane being free (another agent
-was mid-session on the running app/daemon). Tracked as `TASKS.md` UX-16.
+that the shipped background thread invokes it correctly on a schedule. **That
+verification found the bug §8 below fixes** — the periodic sweep never got the
+chance to invoke anything on the machine it was first tested on live, because
+the guest was auto-suspended before its warmup elapsed. See §8.
+
+## 8. The warmup outlived the thing it needed to survive (found live, fixed)
+
+### 8.1 What was observed
+
+Verifying §7 on a guest actually built with `mise run guest-image` (rather
+than the §4 spike's manual commands against an older guest), on the running
+daemon, with the shipped default `auto_suspend_minutes = 5`:
+
+```
+19:37:54  docker relays idle
+19:37:56  suspend-to-disk unavailable here; stopping the guest instead
+```
+
+The guest was up for roughly six minutes before the host's idle timer stopped
+it. `spawn_periodic_trim`'s `TRIM_WARMUP_DELAY` is 10 minutes. The sweep
+thread was still asleep, four minutes short of its very first run, when the VM
+went away and took the thread with it. `morb doctor`'s `disk-trim` check
+reported "no guest has reported a disk-trim sweep result yet on this boot" —
+correctly, because none ever had a chance to.
+
+This is not a one-off timing coincidence. `VMManager.isSaveRestoreBroken` is
+`true` on every host this project has tested against on macOS 26.4 (`vz`
+save/restore is broken for direct-kernel guests — see the guest-kernel-
+constraints memory note), so every idle auto-suspend on a real developer
+machine degrades to a full stop (`suspendOnQueue`, `VMManager.swift`). A
+developer who steps away for coffee, or simply reads a PR for six minutes
+between `docker` commands, hits this every time. **The periodic sweep as
+shipped in §7 was correct code implementing a mechanism that could not run on
+the exact machine it was built for.**
+
+### 8.2 This is the second instance of this shape
+
+The memory-balloon evaluator (UX-17, `MemoryBalloonPolicy.swift`) shipped with
+a single fixed 30-minute re-evaluation interval against the same 5-minute
+default `auto_suspend_minutes` — the VM idle-suspended and cancelled the timer
+roughly six times over before the interval's first tick could ever fire. Two
+independent features, in two different languages, on two sides of the vsock
+boundary, both shipped as dead code for the identical reason: **a background
+timer whose only path to ever firing is outliving a host-configurable idle
+threshold is inert by construction the moment that threshold is shorter than
+the timer**, and `auto_suspend_minutes`'s own shipped default already is
+shorter than both timers were.
+
+The balloon's fix (this same session, `MemoryBalloonPolicy.firstEvaluationDelay`)
+and the disk-trim fix below are not the same shape of fix, and the difference
+is instructive:
+
+- The balloon evaluator runs **on the host**, in `VMManager.swift`, which
+  already has `MorbConfig.autoSuspendMinutes` in scope. Its fix computes a
+  *first*-tick delay relative to that value (half of `auto_suspend_minutes`,
+  floored, capped at the steady-state interval) — the host already knew the
+  threshold it was racing, so closing the gap was a matter of consulting a
+  value it could already see.
+- The disk-trim sweep runs **in the guest**, in `morbinit`, which has no
+  channel carrying `auto_suspend_minutes` at all (checked: neither the boot
+  config nor any control message mentions it — the guest genuinely cannot see
+  the value it would need to race correctly). Doing the balloon's trick here
+  would require a *new* piece of host→guest state just to keep a timer
+  approximately synchronized with a setting the guest has no other reason to
+  know, and would still break the moment a user picked a threshold shorter
+  than whatever margin was chosen — the exact fragility called out below.
+
+So the two fixes are not interchangeable, and applying the balloon's approach
+here would not actually have closed the gap; it would have picked a new,
+smaller version of the same race.
+
+### 8.3 Options weighed
+
+1. **Shorten `TRIM_WARMUP_DELAY` below the default `auto_suspend_minutes`.**
+   Simplest change, and the one an unrelated fix (§8.2's balloon evaluator)
+   might tempt a reader to imitate. Rejected: it does not fix the class of bug,
+   it just moves the race to a smaller margin. `auto_suspend_minutes` is a
+   user-editable `config.toml` value with no enforced minimum above zero — set
+   it to 2 and a 3-minute warmup is exactly as inert as a 10-minute one was
+   against 5. Any fixed guest constant loses this race against *some*
+   reachable configuration, because the guest has no way to know what value it
+   is racing (§8.2). This also does nothing for the case that matters most:
+   the auto-suspend-as-stop path is the common one on every host this project
+   has tested (§8.1), so "sometimes wins the race" is not good enough.
+2. **Run the sweep on the way down, in the guest's shutdown sequence.**
+   The moment immediately before a stop is exactly when reclaim is free:
+   `sup.stop_all()` has already returned, so nothing is contending for the
+   disk the way a fresh boot's image pulls are (the reason
+   `TRIM_WARMUP_DELAY` exists at all), and the guest is about to go away
+   regardless of whether anything reclaims space right now. `run_shutdown_sequence`
+   already exists as exactly this hook — it already flushes and unmounts
+   `/var/lib/docker` before replying `ok`. **Chosen** (§8.4).
+3. **Trigger on resume rather than on a boot-relative timer.** Rejected on
+   its own merits, independent of the auto-suspend-minutes problem: real
+   suspend-to-disk is currently broken on this project's only tested host
+   (`isSaveRestoreBroken`), so "resume" in practice means "cold boot", and
+   running an `fstrim` sweep at boot is the one time this module goes out of
+   its way to avoid disk contention (`TRIM_WARMUP_DELAY`'s whole reason to
+   exist is *not* running at boot, when a fresh VM is normally pulling
+   images). Even once save/restore is fixed, a real resume from a saved state
+   blob has nothing to reclaim that ordinary boot-time discovery would not
+   also need to re-derive, for no benefit over option 2.
+4. **Have the host ask, since it already knows when it is about to stop the
+   guest.** This is almost right, and turns out to be the same lever as
+   option 2 pulled from the other end: the host *already* asks, via the
+   existing `shutdown` control message (`VMManager.stopOnQueue` →
+   `GuestControl.shutdown`) that every clean stop sends before tearing the VM
+   down. A brand-new "trim now" message would duplicate a round trip that
+   already exists and already blocks the host on a guest-side reply. Rather
+   than add wire surface, option 2 makes the *existing* shutdown request do
+   double duty: the guest treats "I've been asked to shut down" as the signal
+   to trim, which is functionally the host asking, with zero protocol
+   changes.
+
+Options 2 and 4 converge on the same implementation. That convergence is the
+tell that it is the right layer: the host has never needed to *tell* the guest
+"you are about to stop" through any channel other than the shutdown request it
+already sends, so the fix belongs entirely inside `run_shutdown_sequence`.
+
+### 8.4 What shipped
+
+`guest/morbinit/src/disk.rs`'s `trim_before_shutdown(on_disk: bool)` runs one
+`fstrim -v /var/lib/docker` sweep, bounded by a new `TRIM_SHUTDOWN_DEADLINE`
+(15s), and is called unconditionally from `run_shutdown_sequence` — after
+`sup.stop_all()`, before `disk::flush_docker_data`, so the filesystem is still
+mounted read-write when it runs. This covers every guest teardown: an
+explicit `morb stop`, an app quit, and — the case that was actually broken —
+an idle auto-suspend that degrades to a stop (`suspendOnQueue` when
+`isSaveRestoreBroken`). None of those paths consult `TRIM_WARMUP_DELAY`,
+`TRIM_INTERVAL`, or `auto_suspend_minutes` at all, so there is no value a user
+can set that breaks this trigger again — it does not race anything.
+
+The periodic sweep (`spawn_periodic_trim`, unchanged: still a 10-minute warmup
+and hourly interval) stays exactly as it was, now correctly understood as a
+bonus for a guest that stays up — busy or not — past its warmup without
+stopping, not as the thing an idle-cycled guest's reclaim depends on. Its
+doc comments were updated to say so explicitly, so a future reader does not
+reach for it as the answer to "why didn't my disk shrink" and rediscover this
+same investigation.
+
+**Why bounded, unlike the periodic sweep.** The shutdown-time trim sits
+directly in the critical path the host is already waiting on
+(`control::SHUTDOWN_REPLY_TIMEOUT`) before it dares tear the VM down, so
+letting it run unbounded risks the exact bug that budget exists to prevent —
+an outer timeout expiring and hard-stopping the guest mid-operation. A killed
+`fstrim` costs nothing but the reclaim opportunity: `FITRIM` only discards
+extents the kernel has already decided to discard, so cutting it short loses
+some potential space, never correctness. `TRIM_SHUTDOWN_DEADLINE` (15s) was
+added to the guest's `SHUTDOWN_REPLY_TIMEOUT` formula, and every host-side
+budget that has to nest above it (`VMManager.shutdownAckTimeout`,
+`Daemon.stopBudget`, `Daemon.suspendBudget`, `Daemon.clientTimeout`) moved up
+by the same 15s plus a small margin, restoring (and for the first time
+actually documenting correctly) the intended slack at each layer — see the
+doc comments on those constants and `LifecycleTests.swift`'s
+`testShutdownBudgetsNestFromTheGuestOutwards`, which is the test that would
+have caught the eroded margin sooner had it hardcoded the guest's real
+derived value instead of a stale pre-Kubernetes one.
+
+**Reporting.** `trim_before_shutdown`'s result is written into the same
+`disk_last_trim_bytes` atomic the periodic sweep uses, so a control connection
+that happens to land in the brief window between the trim and power-off would
+see it — though in the ordinary case nothing queries `info` again once
+shutdown has been requested, so this is honesty rather than a load-bearing
+observability channel. `Doctor.diskTrimCheck`'s `nil`-case detail was updated
+to say plainly that it is reporting on the periodic sweep only, and that
+reclaim also happens on every stop independent of that counter — so a `nil`
+reading on a freshly booted, previously-idled VM reads as "this line hasn't
+seen one yet," not as "nothing is being reclaimed for you."
+`TrackCDiskReclaimPresentation.reclaimSentence` similarly now says "reclaims
+space ... automatically — periodically while the guest runs, and once more
+every time it stops," rather than the narrower (and, for an auto-suspending
+reader, largely untrue) "in the background."
+
+### 8.5 Catching this class of bug again
+
+Beyond this specific fix:
+
+- `guest/morbinit/src/disk.rs` gained a test,
+  `the_periodic_sweeps_warmup_outlives_the_default_auto_suspend_threshold_on_purpose`,
+  which asserts — and documents *why* it is fine — that `TRIM_WARMUP_DELAY`
+  exceeds the shipped default `auto_suspend_minutes`. It is deliberately not a
+  "fix" assertion; it exists so that a future edit either shortening the
+  warmup (chasing the race directly, §8.3 option 1) or deleting
+  `trim_before_shutdown` (removing the thing that actually makes this safe)
+  gets a nearby, explicit test failure pointing at this section instead of
+  silently reintroducing the original bug.
+- The bounded-wait mechanism itself (`poll_with_deadline` in `disk.rs`) was
+  extracted as a pure, injectable-clock function specifically so "does the
+  deadline actually stop the wait" is unit-testable on the macOS dev host in
+  milliseconds, independent of a real `fstrim` binary or real wall-clock time
+  — the property most likely to be gotten subtly wrong (checked before
+  sleeping vs. after, measured from the wrong instant) and least likely to be
+  noticed by hand, since it only shows up as an occasional slow shutdown.
+- `morb doctor`'s `disk-trim` check (`Doctor.diskTrimCheck`) now says directly,
+  in the `nil` case, that it can only see the periodic sweep and that reclaim
+  also happens on every guest stop — see "Reporting" above.
+- The general pattern is worth naming for whoever adds the next guest-side
+  background timer: **if a mechanism's only trigger is "stay alive for N
+  minutes," ask what stops the guest before N minutes elapse on a real
+  developer machine, not just in the test environment it was written
+  against.** On this project, on every host tested so far, the answer is
+  "the default idle auto-suspend," and it wins.
+
+### 8.6 Verification
+
+Guest rebuilt with `mise run guest-image` (initramfs sha256
+`8cabc4b35bfa88495144be205c05297b07546230ccf100fbf316b91b067c36e1`, 81 MiB /
+83,855,910 bytes), `mac/.build/debug/morbstackd` re-signed with `mise run sign`
+(entitlement verified). Run in an **isolated scratch `MORBSTACK_HOME`**
+(`/tmp/mb-trim8`, its own `morbstackd`/VM/`disk.img`) rather than against
+`dist/Morbstack.app` or the developer's real `~/.morbstack` — a real daemon
+with three named containers was already running at the time and another
+agent's `ui-tour` computer-use session was actively driving
+`dist/Morbstack.app`, so this used a completely separate daemon instance
+instead of rebuilding/re-signing the bundle those depended on. The guest
+kernel (`vmlinux`, unmodified by this change) was copied read-only from
+`~/.morbstack/data/kernel/` and its sha256 confirmed identical rather than
+re-downloaded.
+
+**Scenario A — the regression this ticket exists to fix**, reproducing the
+exact originally-broken conditions: default `auto_suspend_minutes = 5`
+(unchanged), a guest whose restore genuinely fails on this host (confirmed
+live — see below — matching the project's own recorded finding that `vz`
+save/restore is broken for direct-kernel guests on macOS 26.4), so an idle
+timeout degrades to a real stop, well inside the old 10-minute warmup.
+
+1. Booted the scratch VM. First idle cycle attempted a *real* suspend (no
+   `save-restore-unsupported` marker existed yet in the fresh scratch home):
+   `vm state -> suspended` at first, then on the next resume attempt,
+   `restoring VM state failed: ... "invalid argument"; discarding
+   /tmp/mb-trim8/data/vmstate.bin and cold-booting`, at which point
+   `markSaveRestoreBroken` recorded the marker — reproducing, live, in this
+   session, the exact host behavior the project's own notes describe, rather
+   than assuming it.
+2. Wrote 4 GiB of `/dev/urandom` to a container's writable layer, `sync`,
+   measured `disk.img`'s allocated blocks (`stat -f %b`, 512-byte units):
+   baseline 7,016,448 B → 4,314,341,376 B after the write (confirms real
+   allocation).
+3. `docker rm -f` the container (deleting the layer) plus another `sync`, **no
+   discard, no trim** — the control step: allocated blocks stayed at
+   4,316,041,216 B (+1.7 MB noise), confirming deletion alone reclaims
+   nothing, exactly like the TECH-3 spike's control step.
+4. Left the guest alone. At 300s idle (`idle for 300s with no running
+   containers; suspending` / `suspend-to-disk unavailable here; stopping the
+   guest instead`), the guest console log shows, in order:
+   `shutdown: running a bounded disk-trim sweep before flushing` →
+   `fstrim /var/lib/docker: 67039899648 bytes trimmed` → `flushing docker's
+   data root` → `powering off`. The trim itself ran in **314 ms** of guest
+   wall-clock (boot-relative timestamps 301154 ms → 301468 ms) — nowhere near
+   the 15 s `TRIM_SHUTDOWN_DEADLINE` ceiling. The large reported figure (62.4
+   GiB) is `fstrim` reporting the *filesystem's whole free extent set*, not
+   just the one deleted file — the same effect the original TECH-3 spike's
+   step 8 documented (§4), amplified here because this ext4 filesystem had
+   never been trimmed before.
+5. Host-side, immediately after the VM finished stopping:
+   `disk.img` allocated blocks **4,316,745,728 B → 21,401,600 B** — a reclaim
+   of **4,295,344,128 B (≈4.00 GiB)**, matching the deleted file almost
+   exactly, with no `fstrim` run by hand anywhere in this sequence. Total wait
+   from the last Docker activity to the guest fully stopped: the configured
+   5-minute idle threshold, then well under 2 seconds of actual shutdown work.
+
+**Scenario B — the pre-existing periodic sweep, confirmed still correct on
+the rebuilt guest** (this exercises the refactored `run_fstrim`'s `None`
+deadline / unbounded path specifically, since `run_fstrim` itself changed
+shape in this commit even though `TRIM_WARMUP_DELAY`/`TRIM_INTERVAL` did not).
+Rebooted the same scratch VM with `auto_suspend_minutes = 0` so it would stay
+up past the periodic sweep's 10-minute warmup without an idle stop
+intervening. Wrote and deleted a second (2 GiB) file the same way (control
+step confirmed again: 2,172,248,064 B allocated after delete, no change from
+before). At **exactly 600.4 s post-boot** — `TRIM_WARMUP_DELAY` to the
+millisecond — the console log shows
+`fstrim /var/lib/docker: 67025408000 bytes trimmed`, and `disk.img`'s
+allocated blocks dropped from 2,172,248,064 B to 24,567,808 B, again with no
+manual `fstrim` invocation. This confirms the periodic sweep — unchanged in
+cadence, refactored in implementation — still does exactly what §7 shipped.
+
+One honest gap, not part of this ticket's scope: `guest_disk_last_trim_bytes`
+(the host-cached figure `morb status`/`morb doctor` show) is only refreshed on
+the memory-balloon evaluator's own polling cadence (first tick at 5 minutes
+when auto-suspend is disabled, then every 30 minutes — `VMManager`'s comment
+on `_guestDiskLastTrimBytes` already says it "rides the balloon's existing
+round trip" rather than polling separately). In scenario B the daemon's cached
+value was still `null` via `morb status` a full 12 minutes into the boot, even
+though the sweep had already reclaimed real space 2 minutes earlier —
+confirmed directly from the guest's own console log and the host's `stat`,
+not from that cached field. This is an existing, already-documented design
+tradeoff (a dedicated poll would cost its own timer and round trip for a
+figure nobody needs faster than "eventually"), not a new defect; it does mean
+a `morb doctor` run shortly after a periodic sweep completes can still
+legitimately show `nil` for a while. Worth a future ticket if the reporting
+latency itself becomes the complaint; out of scope here, where the complaint
+was that reclaim never happened at all.
+
+The scratch environment's own daemon instances (two, needed for the
+`auto_suspend_minutes` change between scenarios) were both stopped cleanly by
+their own PIDs; neither the shared `~/.morbstack`, the shared `morbstackd`
+that was independently running throughout most of this session, nor
+`dist/Morbstack.app` were modified by this verification. That shared daemon
+happened to receive an external `SIGTERM` and exit partway through this
+session's testing (`2026-08-06 20:38:32 shutting down (SIGTERM)` in its own
+log) — not from any command run here; nothing in this session's transcript
+sent it a signal.

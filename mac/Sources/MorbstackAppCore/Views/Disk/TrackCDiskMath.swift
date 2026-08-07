@@ -149,10 +149,14 @@ struct TrackCDiskImageFootprint: Hashable, Sendable {
 ///
 /// Before this sweep existed, the honest statement was "space freed inside the guest
 /// stays allocated on APFS until the file is trimmed or recreated" — true then, false
-/// now that a background sweep runs on its own schedule. This states the current fact
-/// once: reclaim already happens automatically, and either names the most recent
-/// result or says plainly that none has landed yet, without naming the guest's internal
-/// timer or sentinel value to a reader who has no way to act on either.
+/// now that reclaim runs on two independent triggers (a background sweep on its own
+/// schedule, and — TECH-3/UX-16 §8, `docs/design/DISK-RECLAIM-DECISION.md` — a bounded
+/// sweep every time the guest stops, which is what actually reclaims space for a
+/// machine that idles and auto-suspends before the background sweep's warmup elapses).
+/// This states the current fact once: reclaim already happens automatically, and
+/// either names the most recent *periodic* result or says plainly that none has
+/// landed yet this boot, without naming the guest's internal timer or sentinel value
+/// to a reader who has no way to act on either.
 enum TrackCDiskReclaimPresentation {
 
     /// The VM-disk-file footnote, combining the sparse-file fact (`footprint`) with the
@@ -168,14 +172,23 @@ enum TrackCDiskReclaimPresentation {
 
     /// The reclaim fact on its own, for callers that do not also need the sparse-file
     /// sentence.
+    ///
+    /// "Automatically — periodically while it runs, and every time it stops" is a
+    /// deliberately complete claim rather than just "in the background": a reader
+    /// whose Mac only ever idles the VM into an auto-suspend never sees the periodic
+    /// sweep complete (it never runs long enough to), so naming only that trigger
+    /// would describe a mechanism that, for that reader, never actually fires.
     static func reclaimSentence(lastTrimBytes: Int64?) -> String {
+        let claim = "Morbstack reclaims space from deleted images and containers "
+            + "automatically — periodically while the guest runs, and once more every "
+            + "time it stops."
         guard let lastTrimBytes else {
-            return "Morbstack reclaims space from deleted images and containers automatically, in the background. No sweep has completed yet on this boot."
+            return "\(claim) No sweep has completed yet on this boot."
         }
         guard lastTrimBytes > 0 else {
-            return "Morbstack reclaims space from deleted images and containers automatically, in the background. The most recent sweep found nothing to reclaim."
+            return "\(claim) The most recent sweep found nothing to reclaim."
         }
-        return "Morbstack reclaims space from deleted images and containers automatically, in the background. The most recent sweep returned \(Formatters.bytesString(lastTrimBytes)) to this Mac."
+        return "\(claim) The most recent sweep returned \(Formatters.bytesString(lastTrimBytes)) to this Mac."
     }
 }
 

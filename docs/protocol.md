@@ -199,16 +199,21 @@ dirty pages outstanding, which is data loss rather than a timeout:
 
 | Layer | Budget | Where |
 |-------|--------|-------|
-| guest reply cap | 54 s | `control::SHUTDOWN_REPLY_TIMEOUT` (`guest/morbinit/src/control.rs`) |
+| guest reply cap | 74 s | `control::SHUTDOWN_REPLY_TIMEOUT` (`guest/morbinit/src/control.rs`) |
 | guest reply flush | +5 s | `REPLY_FLUSH_TIMEOUT` (`guest/morbinit/src/main.rs`) |
-| host ack timeout | 65 s | `VMManager.shutdownAckTimeout` |
-| daemon stop budget | 90 s | `Daemon.stopBudget` |
-| CLI timeout | 120 s | `Daemon.clientTimeout` |
+| host ack timeout | 85 s | `VMManager.shutdownAckTimeout` |
+| daemon stop budget | 110 s | `Daemon.stopBudget` |
+| CLI timeout | 140 s | `Daemon.clientTimeout` |
 
 The guest cap is *derived*, not chosen: `SUPERVISED_SERVICE_COUNT *
-(STOP_GRACE + KILL_GRACE) + FLUSH_ALLOWANCE` = `2 * (10 s + 2 s) + 30 s`.
-Raising any of those guest constants raises the cap and requires raising
-every host number above it in the same change. Both ends are pinned by
+(STOP_GRACE + KILL_GRACE) + GATED_PHASE_ALLOWANCE + disk::TRIM_SHUTDOWN_DEADLINE
++ FLUSH_ALLOWANCE` = `2 * (10 s + 2 s) + 5 s + 15 s + 30 s`. The
+`disk::TRIM_SHUTDOWN_DEADLINE` term is a bounded `fstrim` sweep that
+`run_shutdown_sequence` runs before the flush — see
+`docs/design/DISK-RECLAIM-DECISION.md` §8 for why reclaim on an idle-suspended
+guest has to happen here rather than on the periodic background sweep's own
+schedule. Raising any of those guest constants raises the cap and requires
+raising every host number above it in the same change. Both ends are pinned by
 tests — `the_reply_budget_leaves_room_for_the_host_ack_timeout_above_it` in
 `control.rs` and `testShutdownBudgetsNestFromTheGuestOutwards` in
 `mac/Tests/MorbstackKitTests/LifecycleTests.swift` — so the ladder cannot

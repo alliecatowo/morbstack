@@ -114,28 +114,32 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
 
     /// How long the guest gets to acknowledge a clean shutdown.
     ///
-    /// `morbinit` stops the container runtime and `sync`s the Docker data disk
+    /// `morbinit` stops the container runtime, runs a bounded disk-trim sweep
+    /// (`disk::trim_before_shutdown`, TECH-3/UX-16 §8 —
+    /// `docs/design/DISK-RECLAIM-DECISION.md`), and `sync`s the Docker data disk
     /// *before* it replies, so this is a data-durability deadline rather than a
     /// round-trip one. The guest side sends `ok` as its *last* frame, after
-    /// SIGTERM → 10 s grace → SIGKILL plus unmount/sync — ~25 s in the normal
-    /// case, capped guest-side at 54 s. Anything shorter than that cap hard-stops
-    /// the VM mid-flush and reintroduces the data-loss bug this deadline exists
-    /// to prevent, so we sit above it with room for the reply to reach the wire.
+    /// SIGTERM → 10 s grace → SIGKILL, the trim sweep, plus unmount/sync — well
+    /// under a minute in the normal case, capped guest-side at 74 s. Anything
+    /// shorter than that cap hard-stops the VM mid-flush (or mid-trim) and
+    /// reintroduces the data-loss bug this deadline exists to prevent, so we sit
+    /// above it with room for the reply to reach the wire.
     ///
     /// THIS NUMBER MIRRORS A GUEST CONSTANT. `control::SHUTDOWN_REPLY_TIMEOUT` in
     /// `guest/morbinit/src/control.rs` is *derived* — it computes
-    /// `SUPERVISED_SERVICE_COUNT * (STOP_GRACE + KILL_GRACE) + FLUSH_ALLOWANCE`
-    /// = 2 * (10 s + 2 s) + 30 s = 54 s — and the guest test
+    /// `SUPERVISED_SERVICE_COUNT * (STOP_GRACE + KILL_GRACE) + GATED_PHASE_ALLOWANCE
+    /// + disk::TRIM_SHUTDOWN_DEADLINE + FLUSH_ALLOWANCE`
+    /// = 2 * (10 s + 2 s) + 5 s + 15 s + 30 s = 74 s — and the guest test
     /// `the_reply_budget_leaves_room_for_the_host_ack_timeout_above_it` hardcodes
     /// *this* value as its `HOST_ACK_TIMEOUT`. The two move together or the guest
-    /// suite fails. The margin is not arbitrary either: after the guest's 54 s cap
+    /// suite fails. The margin is not arbitrary either: after the guest's 74 s cap
     /// expires it still needs `main.rs`'s `REPLY_FLUSH_TIMEOUT` (5 s) to get the
-    /// `ok` onto the socket, so the host must wait at least 54 + 5 = 59 s or it
-    /// walks away from a reply that was about to arrive. 65 s leaves 6 s of slack
+    /// `ok` onto the socket, so the host must wait at least 74 + 5 = 79 s or it
+    /// walks away from a reply that was about to arrive. 85 s leaves 6 s of slack
     /// for vsock connect and scheduling.
     ///
-    ///     guest reply cap (54 s) + reply flush (5 s) = 59 s ≤ this (65 s)
-    public static let shutdownAckTimeout: TimeInterval = 65
+    ///     guest reply cap (74 s) + reply flush (5 s) = 79 s ≤ this (85 s)
+    public static let shutdownAckTimeout: TimeInterval = 85
 
     /// How long to wait for the guest to actually power off after acknowledging.
     public static let guestPowerOffTimeout: TimeInterval = 5
