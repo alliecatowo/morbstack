@@ -633,6 +633,12 @@ struct BuildsRootView: View {
     /// See the note on `VolumesRootView.trailingCommandItems`.
     @ToolbarContentBuilder
     private var trailingCommandItems: some ToolbarContent {
+        // The glyph that reveals the search field. `.routeSearchable` on the inspector
+        // content only supplies the field; without this item nothing in the toolbar
+        // invokes it. Declared outside the `scope == .cache` branch because both scopes
+        // are searchable — the History table filters on the same query.
+        RouteSearchToolbarItem(
+            id: "builds.search", subject: "build records", isActive: $searchIsActive)
         if scope == .cache {
             ToolbarItem(id: "builds.start", placement: .primaryAction) {
                 Button {

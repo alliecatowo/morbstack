@@ -496,6 +496,12 @@ struct KubernetesRootView: View {
     @ToolbarContentBuilder
     private var trailingCommandItems: some ToolbarContent {
         if resourceControlsAreAvailable {
+            // The glyph that reveals the search field. `.routeSearchable` below only
+            // supplies the field; without this item there is nothing in the toolbar to
+            // invoke it, which is how this route shipped searchable and unsearchable at
+            // the same time — the modifier was attached and the control was not.
+            RouteSearchToolbarItem(
+                id: "kubernetes.search", subject: "resources", isActive: $searchIsActive)
             // `.automatic`, like every other route's inspector toggle: the toggle is
             // chrome, not this screen's primary action, and placement consistency is
             // what lets motor memory find it.
