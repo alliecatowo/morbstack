@@ -31,6 +31,61 @@
 // appears while the app is open arrives visible. Stacks remains the route that *manages*
 // Compose projects; the grouping here is only the fact, the same way Docker Desktop and
 // OrbStack present it.
+//
+// **On the inspector's reveal animation not sliding (2026-08-07).** Reported: closing
+// the trailing inspector slides; opening it stalls and then pops in place.
+//
+// First pass measured this route with Instruments (Time Profiler, real release build,
+// `showsInspector` toggled through AppleScript's Accessibility bridge — mouse clicks do
+// not reach the app from automation in this environment, AXPress does): opening blocks
+// the main thread ~360–390ms before the first animated frame can draw; closing produces
+// no measurable CPU burst. That framing was wrong to stop at, though — a corrected
+// steer sent mid-investigation, and confirmed with the follow-up below, is what actually
+// settles it.
+//
+// Two direct, structural tests, not a profiler category:
+//
+//   1. State persistence. Selected the Logs tab in the open inspector (a plain `@State`
+//      on `ContainerDetailView`), closed the inspector, reopened it. The tab was still
+//      Logs, and `ContainerLogsTab`'s buffered lines had not reloaded. If SwiftUI had
+//      dropped and rebuilt `ContainerDetailView`'s identity on the hide/show cycle — the
+//      "conditional wrapping `.inspector`" or "content identity flip" shape — that state
+//      would have reset to `.overview`. It did not, on the real, running, already-fixed
+//      app (this route's `.inspector` sits inside a stable `else` branch whose condition
+//      never changed during the test, same as the person's ordinary use). Identity is
+//      not the mechanism here.
+//   2. `docs/design/probes/ToolProbe.swift` — stock SwiftUI, zero Morbstack code:
+//      `NavigationSplitView` + `Table` + `.inspector(isPresented:)` wrapping a
+//      three-row `Form`, no conditional, no empty-state swap, `.inspectorColumnWidth`
+//      declared BEFORE `.toolbar` (i.e. without this week's outermost-modifier fix).
+//      Opening it from `--closed` produced the same ~490ms unbroken main-thread block,
+//      immediately at the click, with the same scattered AppKit/ObjC-runtime/generic-
+//      metadata leaf symbols this route's own trace showed. Answers the question
+//      already on file in that probe's own header ("Is the sidebar/inspector toggle
+//      asymmetry ours or the platform's?"): the platform's, at least on macOS 26.4 for
+//      a `NavigationSplitView` + list/table detail + `.inspector` window of this shape.
+//      Toggling the SIDEBAR column on the real app — touching no inspector content at
+//      all — showed the same magnitude too.
+//
+// So: not an identity bug in this file, not the outermost-`.inspectorColumnWidth` fix
+// (which stays — it solved a real, separate width-clipping bug and remains required),
+// and not primarily `ContainerOverviewTab`'s row count (`VolumesRootView`'s ~10-row
+// inspector showed the same order of magnitude as this tab's ~30). This reads as a
+// platform floor for `.inspector(isPresented:)`'s reveal on this window shape, not
+// something the content layer can buy its way out of — which is what CLAUDE.md §1.7
+// means by system cost: rewriting AppKit's own reveal machinery ourselves would be
+// exactly the defect that section warns against.
+//
+// What IS this app's own, and stays regardless: this list used to give every visible
+// row (up to ~20 at once) its own per-second `TimelineView`, each an independent
+// AttributeGraph subscription re-established whenever those rows went through layout
+// for any reason, including a narrowing column during an inspector reveal — present,
+// though not dominant, among the busy frames in the first pass. `containerList` now
+// wraps one `TimelineView` around the whole list and threads its `now` down as a plain
+// value: one subscription instead of N, matching Apple's own TimelineView guidance.
+// Measured before/after (Instruments, same route, same container selected): no change
+// outside trial-to-trial noise (~358–375ms before, ~373ms after) — this was never the
+// floor, only a legitimate, orthogonal cleanup kept for its own sake.
 
 import Foundation
 import MorbstackKit
@@ -415,78 +470,90 @@ struct ContainersRootView: View {
 
     private var containerList: some View {
         let grouped = TrackBContainerGrouping.groups(of: filtered)
-        return List(selection: selectionBinding) {
-            ForEach(grouped.standalone) { container in
-                containerRow(container)
-            }
-
-            // One grouping idiom for the whole screen. A Compose project used to be a
-            // `Section` while the Kubernetes group below was a `DisclosureGroup`, so
-            // two things that are the same kind of thing — a named collection of
-            // containers — looked and behaved differently on one list: one could be
-            // collapsed, one could not, and only one carried a count. `StacksRootView`
-            // reaches for disclosure for the identical concept, so this is the shape
-            // that is consistent both within the screen and across the app.
-            ForEach(grouped.projects, id: \.name) { project in
-                DisclosureGroup(isExpanded: projectExpansion(project.name)) {
-                    ForEach(project.containers) { container in
-                        containerRow(container)
-                    }
-                } label: {
-                    HStack {
-                        Label(project.name, systemImage: "square.stack.3d.up")
-                        Spacer(minLength: 12)
-                        Text(runningSummary(project.containers))
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                    }
-                    .help("Containers labelled with the Compose project \(project.name).")
-                    // The group header is the only place on this route that addresses a
-                    // whole project, so it is where the project-wide log document
-                    // belongs. Managing the project itself remains Stacks' job.
-                    .contextMenu {
-                        Button("View Merged Project Logs", systemImage: "text.alignleft") {
-                            openWindow(id: MorbWindowID.projectLogs, value: project.name)
-                        }
-                        .accessibilityIdentifier("containers.project.logs")
-                        Button("Open in Stacks") {
-                            TrackDAppBridge.reveal(.stacks, in: model)
-                        }
-                    }
+        // One clock for the whole list, not one per row. Each row used to carry its
+        // own `TimelineView`, which means up to ~20 concurrently-visible rows each
+        // held an independent AttributeGraph subscription that had to be resubscribed
+        // whenever the list's rows were laid out again for any reason — including an
+        // unrelated `.inspector` reveal narrowing the column, which forces every
+        // visible row through layout regardless of which second last ticked. A single
+        // shared tick, read into `now` and threaded down as a plain value, produces
+        // the same once-a-second status text with one subscription instead of N. See
+        // "On the inspector's reveal animation not sliding" in this file's header
+        // comment for the measurement and what it did and did not explain.
+        return TimelineView(.periodic(from: .now, by: 1)) { context in
+            List(selection: selectionBinding) {
+                ForEach(grouped.standalone) { container in
+                    containerRow(container, now: context.date)
                 }
-                .accessibilityIdentifier("containers.project.\(project.name)")
-            }
 
-            if !grouped.kubernetes.isEmpty {
-                DisclosureGroup(isExpanded: kubernetesGroupExpansion) {
-                    ForEach(grouped.kubernetes) { container in
-                        containerRow(container)
+                // One grouping idiom for the whole screen. A Compose project used to be a
+                // `Section` while the Kubernetes group below was a `DisclosureGroup`, so
+                // two things that are the same kind of thing — a named collection of
+                // containers — looked and behaved differently on one list: one could be
+                // collapsed, one could not, and only one carried a count. `StacksRootView`
+                // reaches for disclosure for the identical concept, so this is the shape
+                // that is consistent both within the screen and across the app.
+                ForEach(grouped.projects, id: \.name) { project in
+                    DisclosureGroup(isExpanded: projectExpansion(project.name)) {
+                        ForEach(project.containers) { container in
+                            containerRow(container, now: context.date)
+                        }
+                    } label: {
+                        HStack {
+                            Label(project.name, systemImage: "square.stack.3d.up")
+                            Spacer(minLength: 12)
+                            Text(runningSummary(project.containers))
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                        .help("Containers labelled with the Compose project \(project.name).")
+                        // The group header is the only place on this route that addresses a
+                        // whole project, so it is where the project-wide log document
+                        // belongs. Managing the project itself remains Stacks' job.
+                        .contextMenu {
+                            Button("View Merged Project Logs", systemImage: "text.alignleft") {
+                                openWindow(id: MorbWindowID.projectLogs, value: project.name)
+                            }
+                            .accessibilityIdentifier("containers.project.logs")
+                            Button("Open in Stacks") {
+                                TrackDAppBridge.reveal(.stacks, in: model)
+                            }
+                        }
                     }
-                } label: {
-                    HStack {
-                        // The same symbol the sidebar's Kubernetes destination uses,
-                        // so the group visibly points at that screen.
-                        Label("Kubernetes-Managed", systemImage: "helm")
-                        Spacer(minLength: 12)
-                        Text(runningSummary(grouped.kubernetes))
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                    }
-                    .help("Containers the Kubernetes kubelet created and manages. Their pods appear on the Kubernetes screen.")
+                    .accessibilityIdentifier("containers.project.\(project.name)")
                 }
-                .accessibilityIdentifier("containers.kubernetesGroup")
+
+                if !grouped.kubernetes.isEmpty {
+                    DisclosureGroup(isExpanded: kubernetesGroupExpansion) {
+                        ForEach(grouped.kubernetes) { container in
+                            containerRow(container, now: context.date)
+                        }
+                    } label: {
+                        HStack {
+                            // The same symbol the sidebar's Kubernetes destination uses,
+                            // so the group visibly points at that screen.
+                            Label("Kubernetes-Managed", systemImage: "helm")
+                            Spacer(minLength: 12)
+                            Text(runningSummary(grouped.kubernetes))
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                        .help("Containers the Kubernetes kubelet created and manages. Their pods appear on the Kubernetes screen.")
+                    }
+                    .accessibilityIdentifier("containers.kubernetesGroup")
+                }
             }
+            .onDeleteCommand {
+                if let selected { removalTarget = selected }
+            }
+            // Keep a selection reachable: if the app selected a kubelet-managed container
+            // (deep link, restored state), the group opens rather than hiding the
+            // selected record behind its own disclosure.
+            .task(id: model.selectedContainerID) {
+                if selected?.isKubernetesManaged == true { isKubernetesGroupExpanded = true }
+            }
+            .accessibilityIdentifier("containers.list")
         }
-        .onDeleteCommand {
-            if let selected { removalTarget = selected }
-        }
-        // Keep a selection reachable: if the app selected a kubelet-managed container
-        // (deep link, restored state), the group opens rather than hiding the
-        // selected record behind its own disclosure.
-        .task(id: model.selectedContainerID) {
-            if selected?.isKubernetesManaged == true { isKubernetesGroupExpanded = true }
-        }
-        .accessibilityIdentifier("containers.list")
     }
 
     /// Forced open while searching; the person's own expand/collapse otherwise.
@@ -549,7 +616,7 @@ struct ContainersRootView: View {
     /// no outline vocabulary that survives that. The columns are laid out by hand,
     /// but every element is a plain `Text` in the content layer — nothing here
     /// redraws a system control.
-    private func containerRow(_ container: ContainerSummary) -> some View {
+    private func containerRow(_ container: ContainerSummary, now: Date) -> some View {
         HStack(spacing: 12) {
             Label {
                 Text(container.displayName)
@@ -581,13 +648,13 @@ struct ContainersRootView: View {
                     .accessibilityLabel("Published ports: \(publishedPortSummary(container.ports))")
             }
 
-            TimelineView(.periodic(from: .now, by: 1)) { context in
-                Text(container.statusDisplay(at: context.date))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
-            .layoutPriority(2)
+            // `now` comes from the single `TimelineView` clock `containerList` wraps
+            // around the whole list, not a per-row one — see the note there.
+            Text(container.statusDisplay(at: now))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .layoutPriority(2)
         }
         .tag(container.id)
         // Row identity is the engine-facing reference — the unique Docker
