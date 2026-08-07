@@ -502,6 +502,51 @@ of `"30s"`. `Formatters.compactDuration(since:at:)` takes an explicit `now` prec
 this does not happen, and the sibling `testUnknownDates` already uses fixed dates. This
 is the inverse defect — an intermittent failure rather than a can't-fail test.
 
+### R.5 A List row that would not select under XCUITest — suspected cause, unconfirmed
+
+An XCUITest agent working the container browser reported that it "could not reliably
+select a container row against real (non-fixture) data — a synthetic click silently
+failed to register a `List` selection," and worked around it rather than diagnosing it.
+
+**Structural fact, confirmed by reading, independent of the hypothesis below:**
+`ContainersRootView.swift`, `ContainerFilesTab.swift`, and `CommandPalette.swift` are
+the only three `List(selection:)` screens in `mac/Sources/MorbstackAppCore` whose row
+content carries `.onTapGesture(count: 2)`, added to preserve double-click-to-open now
+that `List` has no `Table.primaryAction` equivalent. Every other selectable list or
+table in the app either doesn't need that behaviour or gets it a different way:
+`VolumesRootView`, `ImagesRootView`, and `NetworksRootView` use `Table`, which has
+native primary-action support and no tap gesture on row content; `StacksRootView` uses
+a `List` with `DisclosureGroup` sections but attaches no `onTapGesture` to its rows at
+all. So the container browser, the container file browser, and the command palette are
+the only three surfaces where this suspected mechanism could apply.
+
+**Suspected cause, unconfirmed:** a `TapGesture` attached via `.onTapGesture` to row
+content sits in front of the row's own AppKit-backed click/selection handling. A
+single click delivered by a real user waits out the double-click interval and then
+falls through to the list's normal single-click selection; there is a plausible path
+by which a *synthetic* click injected outside that timing window is consumed by the
+gesture recognizer instead of reaching the table view's selection handling. This would
+explain the XCUITest agent's report. Nobody has demonstrated the mechanism directly —
+no one has instrumented the gesture recognizer or the table view to show a synthetic
+click being consumed by it, so it remains a hypothesis, not a finding.
+
+**The experiment that would settle it:** temporarily delete the
+`.onTapGesture(count: 2)` from `ContainersRootView`'s `containerRow(_:)`, run the
+XCUITest that could not select a row against real (non-fixture) data, and see whether
+it starts selecting reliably. If it does, the same change should be tried against
+`ContainerFilesTab.swift`'s file list and `CommandPalette.swift`'s result list, since
+both carry the identical pattern. If it does not, the mechanism above is wrong and the
+XCUITest failure has some other cause. This is roughly a ten-minute check for whoever
+next holds both the machine lane and a reason to care — it was not run here.
+
+**Not corroborated by anything else.** A separate report of clicks failing against the
+running app that arrived the same day as this entry turned out to be pointer
+contention from an unrelated computer-use session driving a different window on the
+same machine — clicks landed on menu bar coordinates nowhere near the target, and
+sidebar rows (which carry no `onTapGesture` at all) failed identically, which the
+mechanism above does not explain. That report is not evidence for or against this
+hypothesis and is not counted as corroboration here.
+
 ---
 
 ## Cleared by stubbing
