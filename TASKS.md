@@ -966,7 +966,7 @@ system's, and it does not block.
 Closed as not reproducible rather than fixed: no code changed. What changed is the instruments,
 which are now in the tree.
 
-## UI-057 · One `TimelineView` around a whole `List` invalidates every row, once a second · `open`
+## UI-059 · One `TimelineView` around a whole `List` invalidates every row, once a second · `open`
 
 Found while subtracting UI-056, on an axis nobody was looking at: not the cost of a transition,
 but a **recurring** cost that runs forever while a route is on screen.

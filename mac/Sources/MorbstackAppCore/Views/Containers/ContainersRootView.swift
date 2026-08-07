@@ -67,7 +67,7 @@
 // it now wraps one around the whole list. Measured, the per-row shape cost nothing on a
 // toggle, and the whole-list shape invalidates every row on every tick, which is O(rows)
 // where the old one was O(1) per row. At this route's row counts it is a wash; it
-// degrades with list length where the old shape did not. Tracked as UI-057 — left in
+// degrades with list length where the old shape did not. Tracked as UI-059 — left in
 // place deliberately rather than churned back, with the numbers on the ticket.
 
 import Foundation
@@ -465,7 +465,7 @@ struct ContainersRootView: View {
         // O(1) per visible row. At the row counts this route shows it is a wash, so
         // it stays; it degrades with list length where the old shape did not. The
         // numbers, and the reason it was left rather than churned back, are on
-        // TASKS.md UI-057. Every other route already ticks inside the cell.
+        // TASKS.md UI-059. Every other route already ticks inside the cell.
         return TimelineView(.periodic(from: .now, by: 1)) { context in
             List(selection: selectionBinding) {
                 ForEach(grouped.standalone) { container in
