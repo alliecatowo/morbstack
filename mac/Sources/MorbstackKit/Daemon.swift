@@ -773,6 +773,27 @@ public final class Daemon {
                     targetBytes: diskCapacity.configuredBytes,
                     summary: "Morbstack cannot read the disk-growth recovery journal, so it will not alter the disk: \(error)")
             }
+            // UX-15: the guest's own address on the `vmnet` NAT segment, from the
+            // system DHCP lease file — `null`, never a stale guess, unless the VM
+            // is actually running. A lease can outlive a stop (macOS does not
+            // revoke it just because the VM went away), so showing it while
+            // stopped would be exactly the "field shows an unreachable address"
+            // failure this feature exists to avoid. See `GuestNetworkAddress.swift`
+            // and `docs/design/DNS-DECISION.md`'s DIF-4 step 0 gate result.
+            //
+            // Hoisted out of the dictionary literal below (rather than inlined, as it
+            // was originally written) because the literal is large enough that adding
+            // one more optional-chained ternary in place made the type checker unable
+            // to finish in reasonable time. Same reason `guestDiskLastTrimBytesField`
+            // is hoisted just below it.
+            let guestAddressField: AnyCodableValue =
+                (vm.state == .running ? GuestNetworkAddressLookup.currentAddress() : nil)
+                .map { AnyCodableValue.string($0.ipv4) } ?? .null
+            // Bytes reclaimed by the guest's most recent periodic `fstrim` sweep
+            // (TECH-3 / UX-16) — `null` while no sweep has landed yet this boot,
+            // never `0` for "unknown" vs. a real "nothing to reclaim" answer.
+            let guestDiskLastTrimBytesField: AnyCodableValue =
+                vm.guestDiskLastTrimBytes.map { AnyCodableValue.int(Int($0)) } ?? .null
             return .success([
                 "failed_port_forwards": .array(failedForwards.map { AnyCodableValue.string($0) }),
                 "state": .string(vm.state.token),
@@ -825,10 +846,8 @@ public final class Daemon {
                 "guest_http_proxy": vm.guestHTTPProxy.map { AnyCodableValue.string($0) } ?? .null,
                 "guest_https_proxy": vm.guestHTTPSProxy.map { AnyCodableValue.string($0) } ?? .null,
                 "guest_no_proxy": vm.guestNoProxy.map { AnyCodableValue.string($0) } ?? .null,
-                // Bytes reclaimed by the guest's most recent periodic `fstrim` sweep
-                // (TECH-3 / UX-16) — `null` while no sweep has landed yet this boot,
-                // never `0` for "unknown" vs. a real "nothing to reclaim" answer.
-                "guest_disk_last_trim_bytes": vm.guestDiskLastTrimBytes.map { AnyCodableValue.int(Int($0)) } ?? .null,
+                "guest_address": guestAddressField,
+                "guest_disk_last_trim_bytes": guestDiskLastTrimBytesField,
             ])
 
         case "shares":

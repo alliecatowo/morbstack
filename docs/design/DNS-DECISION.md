@@ -132,19 +132,132 @@ disqualifying — but either way, no unentitled build can use it.)
 
 ### NOT verified here — stated from documentation or from the repo's own prior tests
 
-- **Host → guest reachability at `192.168.64.x`.** `VMManager.swift:1884` uses
-  `VZNATNetworkDeviceAttachment`, and `docs/parity.md:129` records a *previously executed*
-  test showing the guest reaching a Mac listener at `192.168.64.1`. Host→guest over the
-  same `bridge100` NAT segment is the standard behaviour of that attachment and is how
-  every `vz` VM is SSH'd into, but **I did not confirm it, because confirming it requires
-  booting the VM, which this spike was told not to do.** It is step 1 of DIF-4 and the
-  whole bare-port story depends on it. If it fails, see the fallback below.
+- **Host → guest reachability at `192.168.64.x`.** Confirmed with a real booted VM on
+  2026-08-06 — see "DIF-4 step 0 — host→guest reachability gate" below for the full
+  evidence and, just as importantly, what was **not** tested (Ethernet, VPN, network
+  change events).
 - Everything about `NEDNSSettings`, `NEDNSProxyProvider`, entitlement acquisition, SMAppService
   authorization, and certificate trust prompts — all documentation and forum sourced, cited
   inline below.
 - **OrbStack was not installed on this machine and was not installed for this spike.** All
   OrbStack claims below are from its public documentation, its issue tracker, and its
   author's own public statements.
+
+---
+
+## DIF-4 step 0 — host→guest reachability gate (executed 2026-08-06, UX-15)
+
+**Result: PASS, on the one configuration tested (Wi-Fi, no VPN).** Recorded here per the
+gate in the estimate table below: *"if this fails, drop to the `127.0.0.1` + high-port
+fallback and re-estimate."* It did not fail on this configuration, so UX-15 (surfacing the
+guest address in the inspector and `morb status --json`) proceeds — but the field's
+`nil`-on-unknown design already assumes the untested configurations below can fail, and
+nothing here changes that assumption.
+
+macOS 26.4 (25E246), same build as the original spike. Used a Morbstack guest that was
+already running (not booted for this test) with three containers up, so this is evidence
+against a live daemon under real load, not a freshly booted idle VM.
+
+**Network conditions tested:** Wi-Fi (`en1`, default route via gateway `10.0.0.1`). No VPN
+configured (`scutil --nc list` returns no connections) and none active; the `utun0`–`utun3`
+interfaces present are macOS's own idle tunnel interfaces, not a VPN session.
+
+**Network conditions NOT tested, and why:** Ethernet-only, and any VPN — especially one that
+captures or tunnels `192.168.64.0/24`, which `docs/domains.md` and this document both flag
+as "the obvious risk." Also not tested: what happens to reachability across a live network
+change (Wi-Fi ↔ Ethernet, sleep/wake) while a session is in progress. All three would
+require either a second physical network path or disrupting a VM another agent was actively
+using for unrelated work; neither was available in this session. These remain open risks the
+step-3/step-4 guest-side proxy work should re-verify before it depends on this address being
+stable across a network transition.
+
+### Evidence
+
+The guest's pinned MAC is `02:4d:52:42:00:01` (`VMManager.guestMACAddress`). macOS's own
+`vmnet` DHCP server records leases at `/var/db/dhcpd_leases` (world-readable, root-owned);
+the live entry for that MAC:
+
+```
+{
+	ip_address=192.168.64.27
+	hw_address=1,2:4d:52:42:0:1
+	identifier=1,2:4d:52:42:0:1
+	lease=0x6a753482
+}
+```
+
+(macOS omits leading zeros in `hw_address`; `2:4d:52:42:0:1` and the pinned
+`02:4d:52:42:00:01` are the same MAC.) `lease=0x6a753482` decodes to 2026-08-06 18:27:30,
+roughly the one-hour grant window after this daemon's start — an ordinary, unremarkable
+lease, not a fixture.
+
+**ICMP, to the real address vs. an unleased address on the same segment:**
+
+```
+$ ping -c 4 192.168.64.27
+64 bytes from 192.168.64.27: icmp_seq=0 ttl=64 time=9.295 ms
+64 bytes from 192.168.64.27: icmp_seq=1 ttl=64 time=0.651 ms
+2 packets transmitted, 2 packets received, 0.0% packet loss
+
+$ ping -c 2 192.168.64.100      # no lease in the file for this address
+Request timeout for icmp_seq 0
+100.0% packet loss
+```
+
+`route get 192.168.64.27` resolves via `bridge100` — the same `vmnet` bridge
+`ifconfig bridge100` shows with `vmenet0` as its only member — confirming the reply comes
+over the local NAT segment, not a real network hop.
+
+**TCP, to a container's published port, bypassing the host's own loopback forward
+entirely:** `web-front` publishes `0.0.0.0:8090->80/tcp` (`docker ps`, via
+`~/.morbstack/run/docker.sock`) — a non-loopback bind inside the guest, per
+`guest/morbinit/src/proxy_wrapper.rs`'s `-host-ip 0.0.0.0` contract.
+
+```
+$ nc -z -v 192.168.64.27 8090
+Connection to 192.168.64.27 port 8090 [tcp/*] succeeded!
+
+$ curl -o /dev/null -w '%{http_code} from %{remote_ip}:%{remote_port}\n' http://192.168.64.27:8090/
+200 from 192.168.64.27:8090
+```
+
+For comparison, the same request through the Mac's existing loopback port forward:
+
+```
+$ curl -o /dev/null -w '%{http_code} from %{remote_ip}:%{remote_port}\n' http://127.0.0.1:8090/
+200 from 127.0.0.1:8090
+```
+
+Both succeed, which on its own would be consistent with `.27` just being a NAT alias for
+the same forward. The next two results rule that out — they show the guest's TCP stack
+itself is answering, not a translation rule that would echo any port:
+
+```
+$ nc -z -v 192.168.64.27 9999    # a port nothing in the guest is listening on
+nc: connectx to 192.168.64.27 port 9999 (tcp) failed: Connection refused
+
+$ nc -z -v 192.168.64.100 8090   # an unleased address, same port
+nc: connectx to 192.168.64.100 port 8090 (tcp) failed: Operation timed out
+```
+
+`192.168.64.27:9999` came back **refused** — actively answered by a real TCP stack with no
+listener on that port. `192.168.64.100:8090` **timed out** — nothing answers for an address
+with no lease. If `192.168.64.27` were being answered generically (a NAT device replying for
+the whole subnet, or the host's own forwarding table being consulted instead of the guest),
+`9999` would time out too, the same as `.100` does. It does not: the guest kernel is the one
+answering, at its own address, independent of anything the host's `PortForwarder` already
+does at `127.0.0.1`.
+
+### What this does and does not license
+
+This proves the address is real and reachable *today, on this network, with no VPN*. It does
+not prove the address is stable: the lease file above has 26 prior leases for other MACs
+(`.2` through `.26`), consistent with the same host handing out a new address each time a
+`vmnet`-backed VM (Morbstack's or anything else's) boots. A caller must re-resolve the
+address every time it is needed and must never persist or infer it across a VM restart —
+which is exactly what `GuestNetworkAddressLookup.currentAddress()` does (reads the lease file
+fresh, keyed by MAC, every call) and why `Daemon.swift` reports `null` rather than a stale
+guess whenever the VM is not `.running`.
 
 ---
 
@@ -351,7 +464,7 @@ and `docs/domains.md` needs the correction, not the code.
 
 | Step | Work | Estimate |
 | --- | --- | --- |
-| 0 | Prove host→guest reachability at `192.168.64.x` with a real booted VM, on Wi-Fi, on Ethernet, and under a VPN. **Gate: if this fails, drop to the `127.0.0.1` + high-port fallback and re-estimate.** | 2 days |
+| 0 | Prove host→guest reachability at `192.168.64.x` with a real booted VM, on Wi-Fi, on Ethernet, and under a VPN. **Gate: if this fails, drop to the `127.0.0.1` + high-port fallback and re-estimate.** **Wi-Fi/no-VPN: PASS, executed 2026-08-06 — see "DIF-4 step 0" above. Ethernet and VPN remain untested; do not treat this row as fully closed.** | 2 days, ~0.5 remaining for the two untested conditions |
 | 1 | mDNS registrar in `morbstackd`: `DNSServiceRegisterRecord`, `LocalOnly`, `A` only, no advertised Bonjour service type, conflict handling, lifecycle bound to Docker events | 4 days |
 | 2 | Name derivation + registry, wired to the existing `MorbLocalDomain.Name` validator (the loopback `LocalDomainClaimReconciler` was deleted under SP-5 — it validated claims against `PortForwarder` host-loopback snapshots, the rejected host-router model; the mDNS registrar keeps its own name-to-container index and duplicate rejection) | 3 days |
 | 3 | Guest-side Host-header reverse proxy on `:80`/`:443`, pinned like every other guest binary, plus listening-port auto-detection per container | 6–8 days |

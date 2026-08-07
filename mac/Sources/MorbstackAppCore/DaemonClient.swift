@@ -95,7 +95,10 @@ class DaemonClient: @unchecked Sendable {
             state: effectiveState,
             vmState: string("vm_state") ?? effectiveState,
             version: string("version"),
-            reachable: true)
+            reachable: true,
+            // UX-15: `nil` while the VM isn't running or the daemon couldn't read the
+            // DHCP lease — see `guest_address`'s doc comment in `Daemon.swift`.
+            guestAddress: string("guest_address"))
     }
 
     /// Reads the daemon's current disk-growth diagnostic without starting the daemon,

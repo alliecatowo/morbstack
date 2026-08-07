@@ -177,11 +177,14 @@ What to do, in order:
    unqualified assertion, and nobody else in this market publishes one.
 3. For whatever fails, decide between a guest-side inotify shim and accepting
    the gap loudly.
-4. Turn it on. Today `liveSharePaths` defaults to `[]` (`MorbConfig.swift:109`)
-   and there is no CLI or GUI writer anywhere. A feature reachable only by
-   hand-editing TOML is a feature nobody uses. The right default is probably
-   "the bind-mount sources of currently running containers", derived
-   automatically, with an opt-out.
+4. Turn it on. Today `liveSharePaths` defaults to `[]` (`MorbConfig.swift:109`).
+   **Update, 2026-08-05 (UX-21): this item is half done** — Settings › Sharing
+   now has a GUI writer ("Add Project Folder…" via `NSOpenPanel`, per-row
+   Remove; see §"A GUI for shared folders" below for the full citation). There
+   is still no `morb` CLI writer, and the default is still `[]` rather than
+   derived from running containers' bind-mount sources — a feature reachable
+   only by opening Settings (previously only by hand-editing TOML) is better
+   but still not on by default.
 
 This is the best impact-per-effort item on the list: the hard engineering is
 done, what remains is a rebuild and a test matrix.
