@@ -278,13 +278,16 @@ the free version of Docker's paid Mutagen mode), (c) verify same-mode `fchmod` e
 in-guest probe and record it.
 **Rewrites:** EN-7, DIF-1, `docs/live-share-bridge.md` framing.
 
-### TECH-3 · Does vz virtio-blk discard punch holes in `disk.img`? · `open` (spike)
-**Deliverable:** a measured result and decision. Guest: mount ext4 `-o discard` (or run `fstrim`) after
-deleting images; host: compare `disk.img` allocated blocks (`du` vs `ls -l`) before/after. If holes are
-punched, ship `discard`/periodic `fstrim` and the never-shrinks defect (DIFFERENTIATION T8) dies for ~free;
-if not, design compact-by-copy. Note: `disk.rs`'s btrfs `discard=async` path is dead code on the shipped
-kata kernel (no btrfs).
-**Rewrites:** EN-4/EN-5 scope, the kernel-fork (btrfs) priority.
+### TECH-3 · Does vz virtio-blk discard punch holes in `disk.img`? · `done` (spike run 2026-08-06)
+**Answer: yes.** Both `-o discard` (live ext4 mount option) and explicit `fstrim` measurably shrink
+`disk.img`'s allocated blocks on the host — `-o discard` reclaimed ~4.01 GiB deleting a 4 GiB file (against
+a no-discard control that moved <0.01%); `fstrim` swept ~9.3 GiB of accumulated free space in one bounded
+pass. Full numbers, `stat -f %b` readings for every step, and the exact `nsenter`-based method (there is no
+`morb exec`) are in `docs/design/DISK-RECLAIM-DECISION.md` §4/§5. Compact-by-copy is no longer needed.
+**Still open:** wiring `-o discard`/periodic `fstrim` into `guest/morbinit/src/disk.rs`'s `Ext4` arm and a
+user-visible reclaim readout on the Disk route — this spike measured the mechanism, it did not ship the fix.
+**Rewrites:** EN-4/EN-5 scope, the kernel-fork (btrfs) priority — both drop in priority now that ext4 alone
+answers UX-16 without a btrfs kernel fork.
 
 ### TECH-4 · Save/restore retest: scanout device + Developer ID · `open` (spike)
 **Deliverable:** a measured result. `restoreMachineStateFrom` fails for direct-kernel guests on macOS 26.4
@@ -397,7 +400,7 @@ reasoning stays in UI-FEATURE-GAP under its original heading.
 
 | ID | Ticket | Deliverable | State |
 | --- | --- | --- | --- |
-| UX-16 | **Disk space never returns to macOS** — `guest/morbinit/src/disk.rs:273`'s `discard=async` is dead code: the kata kernel has no btrfs (`architecture.md:183`), ext4 mounts with no `discard`, no `fstrim` anywhere in the tree, resize is grow-only. We reproduce Docker Desktop's single most-complained-about behaviour. DIFFERENTIATION Tier B and TECHNOLOGY-AUDIT Bet 8 flatly contradict each other here; TECHNOLOGY-AUDIT is right. | Run TECH-3 first: does virtio-blk translate a guest discard into hole-punching on the raw file? If yes, `-o discard` or periodic `fstrim` plus a user-visible reclaim readout. If no, scope compact-by-copy. Either way one honest statement of current behaviour ships immediately, ahead of the fix. | `open` |
+| UX-16 | **Disk space never returns to macOS** — `guest/morbinit/src/disk.rs:273`'s `discard=async` is dead code: the kata kernel has no btrfs (`architecture.md:183`), ext4 mounts with no `discard`, no `fstrim` anywhere in the tree, resize is grow-only. We reproduce Docker Desktop's single most-complained-about behaviour. DIFFERENTIATION Tier B and TECHNOLOGY-AUDIT Bet 8 flatly contradict each other here; TECHNOLOGY-AUDIT is right. | **TECH-3 spike answered 2026-08-06: yes, `VZDiskImageStorageDeviceAttachment` punches real holes for both `-o discard` and `fstrim` — measured, numbers in `docs/design/DISK-RECLAIM-DECISION.md` §4/§5.** Remaining work: wire `-o discard`/periodic `fstrim` into `disk.rs`'s `Ext4` arm and add the user-visible reclaim readout; compact-by-copy is no longer needed. | `open` (spike resolved; code + UI not yet written) |
 | UX-18 | **No proxy support at all** — grep for `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`/`socks` across `guest/morbinit/src`, `MorbstackKit` and `morb` returns zero hits. OrbStack inherits macOS proxy settings for free; Docker gates SOCKS5 and Kerberos/NTLM behind Business. Disqualifying on a corporate network. | Inherit the Mac's configured proxy into dockerd's environment by default (`supervisor.rs` already builds that environment), with a `config.toml` override and an off switch, plus a `morb doctor` check that says whether containers are actually using it. Corporate CA injection is a separate later commit. | `open` |
 | UX-21 | **Our own docs call our strongest capabilities `absent`** — eleven rows tabulated in CAPABILITY-GAP §16. COMPETITIVE-GAPS says Testcontainers and Dev Containers were "never tested" (ECOSYSTEM-MATRIX has four languages plus the Dev Containers CLI passing zero-config), VS Code/JetBrains `absent` (a built `.vsix` with a hijacked-stream exec terminal ships in `integrations/vscode/`), pinned kubectl "not in the repo" (`fetch_kubectl` pins v1.36.2), and "no exec, no PTY anywhere" (`Terminal/` exists with tests). An advantage nobody can see is not shipping. | One reconciliation pass over COMPETITIVE-GAPS, DIFFERENTIATION, `integrations/jetbrains/README.md`, `integrations/shell/_morb`, `docs/architecture.md` and `docs/parity.md` #18, each row checked against the code that overtook it. Audit docs keep their findings and get dated resolution notes; current-behaviour docs are simply corrected. | `open` |
 | UX-22 | **Migration only points inward** — `MorbMigrate` has the transactions, helper-container volume reads and a checksum `verify`, and no way out. OrbStack has no data path out either (their #2517 is open), so this is a differentiator, and it is the answer to "what if I want to leave". | `morb migrate --to <runtime\|socket>` reusing the same transactions and verification, plus `morb export --all` writing a directory a stock `docker load` restores. Then one README line above the fold: leaving is one command, and it is tested. | `open` |

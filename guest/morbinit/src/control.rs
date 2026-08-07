@@ -354,6 +354,15 @@ pub struct ControlContext {
     pub http_proxy: String,
     pub https_proxy: String,
     pub no_proxy: String,
+    /// Bytes reclaimed by the most recent periodic `fstrim` sweep this boot
+    /// (`disk::spawn_periodic_trim`), or ``disk::NO_TRIM_YET`` if no sweep
+    /// has completed yet — no sweep runs at all when `/var/lib/docker` is
+    /// RAM-backed. Reported in `info` as `disk_last_trim_bytes` (TECH-3 /
+    /// UX-16) so the host can show real evidence that reclaim is working
+    /// instead of a bare claim; `-1` collapses to `nil` on the host's
+    /// `GuestReply` decoder, the same sentinel convention as
+    /// ``mem_total_kb``/``mem_available_kb``.
+    pub disk_last_trim_bytes: Arc<std::sync::atomic::AtomicI64>,
     /// The Kubernetes subsystem: the enable gate, the persistence fact, and
     /// the monitor's cached cluster snapshot.
     ///
@@ -460,6 +469,10 @@ pub fn handle_request(payload: &[u8], ctx: &ControlContext) -> (Vec<u8>, bool) {
                 ),
                 ("mem_total_kb", Value::Int(mem_total_kb)),
                 ("mem_available_kb", Value::Int(mem_available_kb)),
+                (
+                    "disk_last_trim_bytes",
+                    Value::Int(ctx.disk_last_trim_bytes.load(Ordering::SeqCst)),
+                ),
             ]);
             (body.into_bytes(), false)
         }
@@ -862,6 +875,9 @@ mod tests {
             http_proxy: String::new(),
             https_proxy: String::new(),
             no_proxy: String::new(),
+            disk_last_trim_bytes: Arc::new(std::sync::atomic::AtomicI64::new(
+                crate::disk::NO_TRIM_YET,
+            )),
             // Nothing is installed on the macOS test host, so this reports
             // `not-installed` — which is exactly the state a fresh guest is in
             // and the one the protocol tests want to pin.
@@ -981,6 +997,13 @@ mod tests {
         // must still emit both fields rather than omitting them.
         assert_eq!(fields.get("mem_total_kb"), Some(&Value::Int(-1)));
         assert_eq!(fields.get("mem_available_kb"), Some(&Value::Int(-1)));
+        // `test_ctx()`'s `disk_last_trim_bytes` starts at the "no sweep yet"
+        // sentinel — nothing in this handler ever runs `fstrim` itself, so
+        // `info` must report exactly what the shared atomic holds.
+        assert_eq!(
+            fields.get("disk_last_trim_bytes"),
+            Some(&Value::Int(crate::disk::NO_TRIM_YET))
+        );
     }
 
     #[test]
@@ -1078,6 +1101,22 @@ mod tests {
         let (resp, _) = handle_request(br#"{"type":"info"}"#, &ctx);
         let fields = jsonlite::parse(std::str::from_utf8(&resp).unwrap()).unwrap();
         assert_eq!(fields.get("docker_ready"), Some(&Value::Bool(true)));
+    }
+
+    #[test]
+    fn info_reports_the_most_recent_trim_sweep_result() {
+        // `disk::spawn_periodic_trim` writes here; `info` must read the live
+        // value rather than a value frozen at `ControlContext` construction,
+        // since the sweep can complete at any point during a long boot.
+        let ctx = test_ctx();
+        ctx.disk_last_trim_bytes
+            .store(59_050_795_008, Ordering::SeqCst);
+        let (resp, _) = handle_request(br#"{"type":"info"}"#, &ctx);
+        let fields = jsonlite::parse(std::str::from_utf8(&resp).unwrap()).unwrap();
+        assert_eq!(
+            fields.get("disk_last_trim_bytes"),
+            Some(&Value::Int(59_050_795_008))
+        );
     }
 
     #[test]
@@ -1314,6 +1353,9 @@ mod tests {
             http_proxy: String::new(),
             https_proxy: String::new(),
             no_proxy: String::new(),
+            disk_last_trim_bytes: Arc::new(std::sync::atomic::AtomicI64::new(
+                crate::disk::NO_TRIM_YET,
+            )),
             k8s: Arc::new(crate::k8s::K8sState::from_disk(true)),
             shutdown: Arc::new(ShutdownSignal::new()),
         });

@@ -159,4 +159,50 @@ public enum MemoryBalloonPolicy {
         let steppedTarget = previous - min(delta, maxStepBytes)
         return max(steppedTarget, floorBytes)
     }
+
+    /// How long the slow-timer evaluator should wait before its *first* tick this
+    /// boot. Every tick after the first still uses `interval` unchanged — this only
+    /// answers "when does the clock start."
+    ///
+    /// The problem this solves (found live, see `docs/design/MEMORY-BALLOON.md`):
+    /// with a single fixed `interval` and the default `auto_suspend_minutes = 5`,
+    /// the VM idle-suspends and the timer is cancelled roughly six times before the
+    /// interval's first tick would ever fire. The balloon exists for the guest that
+    /// stays busy for hours — a VM idle enough to auto-suspend inside `interval`
+    /// never needed ballooning in the first place, since suspend already returns
+    /// its memory. So rather than shortening `interval` (which would make the
+    /// steady-state busy case re-sample and re-write the balloon target needlessly
+    /// often) or coupling suspend to the balloon's readiness (which would delay a
+    /// setting the user configured for an unrelated reason), the fix is to make the
+    /// first evaluation arrive comfortably before the configured auto-suspend
+    /// deadline: at half of it, so a session that turns out to be short-lived still
+    /// gets one real evaluation with margin to spare, while a session that turns
+    /// out to be busy-all-day only pays that shorter cadence once before settling
+    /// into `interval`.
+    ///
+    /// - Parameters:
+    ///   - autoSuspendMinutes: ``MorbConfig/autoSuspendMinutes`` for the running
+    ///     daemon. `0` means auto-suspend is off — there is no deadline to beat, so
+    ///     this falls back to `defaultDelayWhenAutoSuspendDisabled`.
+    ///   - interval: The steady-state repeat interval; the result never exceeds it,
+    ///     since firing "early" only makes sense relative to the normal cadence.
+    ///   - minimumDelay: A floor so a very short `auto_suspend_minutes` (or a
+    ///     misconfigured `0 < n < 1`) cannot make this fire effectively immediately,
+    ///     before the guest has had any time to settle post-boot.
+    ///   - defaultDelayWhenAutoSuspendDisabled: The first-tick delay used when
+    ///     there is no auto-suspend deadline to race. Deliberately shorter than
+    ///     `interval` so a long-running, always-on guest still gets its first
+    ///     evaluation well before the 30-minute steady-state cadence, not after it.
+    public static func firstEvaluationDelay(
+        autoSuspendMinutes: Int,
+        interval: TimeInterval,
+        minimumDelay: TimeInterval = 30,
+        defaultDelayWhenAutoSuspendDisabled: TimeInterval = 5 * 60
+    ) -> TimeInterval {
+        guard autoSuspendMinutes > 0 else {
+            return min(interval, defaultDelayWhenAutoSuspendDisabled)
+        }
+        let autoSuspendSeconds = Double(autoSuspendMinutes) * 60
+        return min(interval, max(minimumDelay, autoSuspendSeconds / 2))
+    }
 }

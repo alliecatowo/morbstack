@@ -71,7 +71,7 @@ mod sys;
 mod wire;
 
 #[cfg(target_os = "linux")]
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicI64};
 #[cfg(target_os = "linux")]
 use std::sync::Arc;
 #[cfg(target_os = "linux")]
@@ -170,6 +170,8 @@ fn run_linux(args: &[String]) {
             http_proxy: String::new(),
             https_proxy: String::new(),
             no_proxy: String::new(),
+            // Nothing here provisions or trims a disk either.
+            disk_last_trim_bytes: Arc::new(AtomicI64::new(disk::NO_TRIM_YET)),
             // Reads whatever the disk says, so `--serve-control` can be
             // pointed at a guest image to inspect its persisted k8s state —
             // but nothing here supervises the services, so an `enable` through
@@ -344,6 +346,10 @@ fn real_init() {
 
     let docker_ready = Arc::new(AtomicBool::new(false));
     let shutdown = Arc::new(control::ShutdownSignal::new());
+    // Shared with `disk::spawn_periodic_trim` below: the sweep thread writes,
+    // `info` replies read. Starts at the "no sweep yet" sentinel rather than
+    // 0, which would be indistinguishable from "swept and reclaimed nothing".
+    let disk_last_trim_bytes = Arc::new(AtomicI64::new(disk::NO_TRIM_YET));
 
     let ctx = Arc::new(control::ControlContext {
         start: Instant::now(),
@@ -362,9 +368,15 @@ fn real_init() {
         http_proxy: advertised_proxy_env.http.clone().unwrap_or_default(),
         https_proxy: advertised_proxy_env.https.clone().unwrap_or_default(),
         no_proxy: advertised_proxy_env.no_proxy.clone().unwrap_or_default(),
+        disk_last_trim_bytes: Arc::clone(&disk_last_trim_bytes),
         k8s: Arc::clone(&k8s_state),
         shutdown: Arc::clone(&shutdown),
     });
+
+    // TECH-3 / UX-16: reclaim deleted images/containers back to the Mac in
+    // the background. A no-op when `docker_data_on_disk` is false (tmpfs
+    // fallback — nothing to trim).
+    disk::spawn_periodic_trim(docker_data_on_disk, Arc::clone(&disk_last_trim_bytes));
 
     // Control channel (vsock 1024). A bind failure is loud but not fatal:
     // we're PID 1, there is nothing above us to hand off to, and an init

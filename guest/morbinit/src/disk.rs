@@ -59,6 +59,7 @@
 use crate::log;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Mutex;
 
 /// The guest's raw data disk, as attached by morbstackd on the host side.
@@ -268,6 +269,21 @@ impl FsKind {
     /// already-compressed blobs, so a higher level costs CPU for very little
     /// space) and `discard=async`, which lets deletes propagate back to the
     /// sparse host image without stalling the filesystem.
+    ///
+    /// ext4 deliberately does **not** get a live `discard` mount option here
+    /// (TECH-3/UX-16, `docs/design/DISK-RECLAIM-DECISION.md`). Both
+    /// mechanisms were measured to work — a live `discard` mount reclaims
+    /// per delete, `fstrim` reclaims in one bounded sweep — but continuous
+    /// `discard` on ext4 issues a synchronous `FITRIM`-equivalent for every
+    /// freed extent inline with the delete that freed it, which is exactly
+    /// the well-known reason production Linux images (systemd's
+    /// `fstrim.timer`, most cloud distro defaults) schedule `fstrim`
+    /// periodically instead of mounting `discard` live: `docker system
+    /// prune`, `docker rmi`, and ordinary layer-store GC are delete-heavy
+    /// and latency-sensitive, and paying a TRIM round trip inline with every
+    /// one of those deletes is a cost this guest does not need to take when
+    /// a periodic sweep (`spawn_periodic_trim`, driven from `main.rs`)
+    /// reclaims the same space in the background instead.
     pub fn mount_data(self) -> Option<&'static str> {
         match self {
             FsKind::Btrfs => Some("compress=zstd:1,discard=async"),
@@ -784,6 +800,169 @@ pub fn flush_docker_data(on_disk: bool) {
         ));
     }
     crate::sys::sync();
+}
+
+// ---------------------------------------------------------------------------
+// Periodic trim (TECH-3 / UX-16): the reclaim half of disk space, run from a
+// background thread rather than a live `discard` mount — see the reasoning
+// on `FsKind::mount_data`.
+// ---------------------------------------------------------------------------
+
+/// How long to wait after boot before the very first sweep. `fstrim` is a
+/// whole-filesystem scan that costs real I/O while it runs (measured:
+/// `docs/design/DISK-RECLAIM-DECISION.md` §4 step 8 swept ~9.3 GiB in one
+/// pass); running it immediately at boot would compete with the image pulls
+/// and container starts a fresh VM is normally used for in its first minute.
+const TRIM_WARMUP_DELAY: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// Steady-state interval between sweeps. Deliberately much slower than a
+/// delete-driven trigger: `fstrim` reclaims whatever has accumulated since
+/// the last sweep regardless of how long that took to build up, so there is
+/// nothing to gain from checking more often than a user could plausibly
+/// notice disk pressure changing, and real cost (I/O contention with
+/// whatever the guest is doing) to checking more often than that.
+const TRIM_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Sentinel `disk_last_trim_bytes` value meaning "no sweep has completed yet
+/// this boot" — collapsed to `nil` by the host's `GuestReply` decoder, same
+/// convention as ``mem_total_kb``/``mem_available_kb``. A real `fstrim`
+/// result is always `>= 0`.
+pub const NO_TRIM_YET: i64 = -1;
+
+/// Parses the byte count out of `fstrim -v`'s one line of output.
+///
+/// util-linux has shipped two shapes across versions actually seen in the
+/// wild:
+///   - `"/var/lib/docker: 59050795008 bytes trimmed"` (older / busybox-style)
+///   - `"/var/lib/docker: 55 GiB (59050795008 bytes) trimmed on /dev/vda"` (2.36+)
+///
+/// Rather than special-case either shape, this looks for a run of ASCII
+/// digits immediately followed by `" bytes"` — inside parentheses or not —
+/// and takes the *last* such match on the line, since the parenthesized
+/// exact-byte figure (when present) always follows the rounded human-readable
+/// one. Pure and portable so it is testable without a Linux host or a real
+/// `fstrim` binary.
+pub fn parse_fstrim_trimmed_bytes(output: &str) -> Option<i64> {
+    let line = output.lines().find(|line| line.contains(" bytes"))?;
+    // Operates on bytes throughout, never on a `&str` slice at an
+    // arbitrary offset: a digit run is always pure ASCII and therefore a
+    // valid UTF-8 boundary on both ends, but the *suffix* check below must
+    // not risk slicing `line` mid-codepoint if the line ever contains
+    // non-ASCII (a locale-dependent `fstrim` message, for instance). This is
+    // local subprocess output, not peer input, but a background thread
+    // panicking is still worse than silently reporting "no trim result".
+    let bytes = line.as_bytes();
+    let mut best: Option<i64> = None;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if !bytes[index].is_ascii_digit() {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < bytes.len() && bytes[index].is_ascii_digit() {
+            index += 1;
+        }
+        if bytes[index..].starts_with(b" bytes") {
+            // `start..index` is a contiguous run of ASCII digit bytes, so this
+            // is always valid UTF-8 — the `unwrap` cannot fail.
+            if let Ok(value) = std::str::from_utf8(&bytes[start..index])
+                .unwrap()
+                .parse::<i64>()
+            {
+                best = Some(value);
+            }
+        }
+    }
+    best
+}
+
+/// Runs one `fstrim` sweep of `DOCKER_DATA_ROOT` and returns the bytes it
+/// reported reclaiming, or `None` on any failure (missing binary, a
+/// filesystem that does not support `FITRIM`, a nonzero exit, unparseable
+/// output) — every failure is logged but never fatal, matching every other
+/// best-effort step in this module.
+#[cfg(target_os = "linux")]
+fn run_fstrim() -> Option<i64> {
+    use std::process::{Command, Stdio};
+
+    let Some(binary) = which("fstrim") else {
+        log::log("fstrim is not on GUEST_PATH — skipping the periodic trim sweep");
+        return None;
+    };
+    let output = match Command::new(&binary)
+        .args(["-v", DOCKER_DATA_ROOT])
+        .env("PATH", crate::supervisor::GUEST_PATH)
+        .stdin(Stdio::null())
+        .output()
+    {
+        Ok(output) => output,
+        Err(e) => {
+            log::log(&format!("could not run fstrim: {}", e));
+            return None;
+        }
+    };
+    if !output.status.success() {
+        log::log(&format!(
+            "fstrim {} exited with {} ({})",
+            DOCKER_DATA_ROOT,
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    match parse_fstrim_trimmed_bytes(&text) {
+        Some(bytes) => {
+            log::log(&format!(
+                "fstrim {}: {} bytes trimmed",
+                DOCKER_DATA_ROOT, bytes
+            ));
+            Some(bytes)
+        }
+        None => {
+            log::log(&format!(
+                "fstrim {} succeeded but its output could not be parsed: {:?}",
+                DOCKER_DATA_ROOT,
+                text.trim()
+            ));
+            None
+        }
+    }
+}
+
+/// Starts the background sweep thread. A no-op when `/var/lib/docker` is not
+/// on the real disk (`on_disk == false`, i.e. the tmpfs fallback): trimming a
+/// tmpfs is meaningless, and there is no `disk.img` on the host for the
+/// reclaim to matter to.
+///
+/// `last_trim_bytes` is shared with `ControlContext` so `info` replies can
+/// report the most recent sweep's result without this thread needing any
+/// awareness of the control protocol.
+#[cfg(target_os = "linux")]
+pub fn spawn_periodic_trim(on_disk: bool, last_trim_bytes: std::sync::Arc<AtomicI64>) {
+    if !on_disk {
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("disk-trim".to_string())
+        .spawn(move || {
+            std::thread::sleep(TRIM_WARMUP_DELAY);
+            loop {
+                if let Some(bytes) = run_fstrim() {
+                    last_trim_bytes.store(bytes, Ordering::SeqCst);
+                }
+                std::thread::sleep(TRIM_INTERVAL);
+            }
+        });
+    if let Err(e) = spawned {
+        log::log(&format!(
+            "WARNING: could not start the periodic disk-trim thread: {} — deleted \
+             images and containers will not return space to the Mac until the next \
+             restart",
+            e
+        ));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1636,5 +1815,73 @@ mod tests {
         for kind in CANDIDATE_FILESYSTEMS {
             assert!(!kind.mkfs_binary().contains('/'));
         }
+    }
+
+    // MARK: - fstrim output parsing (TECH-3 / UX-16)
+
+    #[test]
+    fn parses_the_older_bare_bytes_fstrim_format() {
+        // The exact shape observed live in the TECH-3 spike
+        // (`docs/design/DISK-RECLAIM-DECISION.md` §4 step 8).
+        assert_eq!(
+            parse_fstrim_trimmed_bytes("/var/lib/docker: 59050795008 bytes trimmed\n"),
+            Some(59_050_795_008)
+        );
+    }
+
+    #[test]
+    fn parses_the_util_linux_2_36_human_readable_plus_parenthesized_format() {
+        assert_eq!(
+            parse_fstrim_trimmed_bytes(
+                "/var/lib/docker: 3.5 GiB (3758096384 bytes) trimmed on /dev/vda\n"
+            ),
+            Some(3_758_096_384)
+        );
+    }
+
+    #[test]
+    fn a_zero_byte_sweep_is_a_real_result_not_a_missing_one() {
+        // Zero is a legitimate answer ("nothing to reclaim this sweep") and
+        // must decode as `Some(0)`, distinct from `NO_TRIM_YET` (-1).
+        assert_eq!(
+            parse_fstrim_trimmed_bytes("/var/lib/docker: 0 bytes trimmed\n"),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn unparseable_output_yields_no_result_rather_than_a_panic() {
+        assert_eq!(parse_fstrim_trimmed_bytes(""), None);
+        assert_eq!(
+            parse_fstrim_trimmed_bytes("fstrim: no FITRIM support\n"),
+            None
+        );
+        // A number that is not immediately followed by "bytes" (a byte count
+        // in a different unit, a PID, a percentage) must not be mistaken for
+        // the trimmed-bytes figure.
+        assert_eq!(
+            parse_fstrim_trimmed_bytes("/var/lib/docker: something else 42%\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn multiple_candidate_numbers_prefer_the_one_actually_labelled_bytes() {
+        // "3.5 GiB (3758096384 bytes)" — the rounded human figure "3" or "5"
+        // must not be picked over the exact parenthesized byte count.
+        assert_eq!(
+            parse_fstrim_trimmed_bytes("/mnt: 3.5 GiB (3758096384 bytes) trimmed on /dev/sda1\n"),
+            Some(3_758_096_384)
+        );
+    }
+
+    #[test]
+    fn a_non_ascii_line_does_not_panic_the_parser() {
+        // Local subprocess output, not peer input — but a background thread
+        // panicking on it would still be a self-inflicted denial of service.
+        assert_eq!(
+            parse_fstrim_trimmed_bytes("/var/lib/docker: 42 bytes trimmed — café\n"),
+            Some(42)
+        );
     }
 }

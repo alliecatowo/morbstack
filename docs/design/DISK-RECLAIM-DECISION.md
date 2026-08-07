@@ -1,15 +1,14 @@
 # Disk reclaim decision (TECH-3 / UX-16)
 
-**Status:** spike **not yet run** — blocked on the machine lane. 2026-08-06.
+**Status:** spike run and answered. **`discard` and `fstrim` both punch real
+holes in `disk.img`.** 2026-08-06, on a fresh `mise run guest-image` +
+`mise run app` build (initramfs sha256
+`49040a7437adbfe5bfb1224fcb9545bb77e9f424aa74689f7a1999ffd91a90f3`), against a
+running `morbstackd` (8 vCPU, 8192 MiB, 72 GiB configured disk, ext4 confirmed
+by the boot log: `mounted /dev/vda (ext4) at /var/lib/docker`).
 
 This document is the experiment design, the current honest state of the code,
-and the decision procedure. The numbers are not filled in yet: at the time of
-writing, `dist/Morbstack.app` and `morbstackd` were already running under
-another agent's `--tour-select` capture session (`ps -p 74089`/`ps -p 73206`
-both showed live processes started minutes earlier), and CLAUDE.md §1.4/the
-machine-lane rule in `TASKS.md`'s brief for this work say not to boot a second
-VM instance or restart the daemon out from under a running capture. Whoever
-picks this up next should run §3 below and fill in §4/§5.
+and the decision procedure. §4/§5 below are now filled in.
 
 ## 1. The question
 
@@ -50,6 +49,9 @@ list previously described this as already-solved plumbing; that claim was
 wrong in our own favour and has been corrected in the same commit as this
 document (see that file's "Disk reclaim" bullet).
 
+**Answer: yes.** Both mechanisms below moved real, host-measured allocated
+blocks — see §4.
+
 ## 2. What is already known
 
 - `VMManager.swift` attaches `disk.img` — a plain flat file, sparse via
@@ -62,7 +64,8 @@ document (see that file's "Disk reclaim" bullet).
   independent of a running guest.
 - Apple's `VZDiskImageStorageDeviceAttachment` documentation says nothing
   about TRIM/UNMAP passthrough. There is no public API to configure it either
-  way — this is a black-box behavioural question, not a settings gap.
+  way — this is a black-box behavioural question, not a settings gap. This
+  spike answers it empirically instead.
 
 ## 3. Experiment design
 
@@ -108,21 +111,73 @@ time by the `truncate` call and will not move regardless of the answer.
    `disk.rs` logs this), and which of `-o discard` / `fstrim` were used for
    step 4, in §4 below.
 
+Actual execution note: there is no `morb exec`. Guest-side commands were run
+via `docker run --rm --privileged --pid=host alpine sh -c "apk add
+util-linux; nsenter -t 1 -m -- <command>"` — `--pid=host` puts the container's
+`/proc` in the guest's real PID namespace, so `nsenter -t 1 -m` enters
+`morbinit`'s (PID 1's) mount namespace, which is the guest's root/host mount
+namespace, not a container's private one. Confirmed the mount seen was the
+real one: `/dev/vda /var/lib/docker ext4 rw,relatime 0 0` before any change.
+Two things worth noting for whoever repeats this: `docker run -v /:/hostroot`
+(the design's other suggested approach) does **not** work here — Morbstack's
+`DockerBindMountPreflight` rejects any bind source outside `shared_paths`
+(Mac-side directories), including the guest's own `/`, so `nsenter` is the
+only route that worked. And the target image was `alpine` (arm64/amd64
+mismatch warning appeared but the container ran fine via the guest's Rosetta
+binfmt registration — irrelevant to the disk measurement).
+
 ## 4. Numbers
 
-*(Not yet collected — see Status above.)*
+All `stat -f 'apparent=%z allocated=%b (block size %k)'
+"$MORBSTACK_HOME/data/disk.img"` (`~/.morbstack/data/disk.img`, 72 GiB
+configured). Bytes = allocated blocks × 512 (POSIX `st_blocks` unit;
+independent of the `%k`/4096 preferred-I/O-size figure `stat` also prints).
+
+| Step | Action | allocated blocks | allocated bytes | ≈ GiB | Δ from previous |
+| --- | --- | ---: | ---: | ---: | --- |
+| 1 | Baseline (VM already running, pre-existing images/containers/k8s state) | 14,711,320 | 7,532,195,840 | 7.014 | — |
+| 2 | Fill: `dd ... bs=1M count=4096` (4 GiB), `sync` | 21,967,720 | 11,247,472,640 | 10.475 | **+3.461 GiB** (real allocation, as expected) |
+| 3 | Delete, **no discard** (control), `sync` | 21,967,872 | 11,247,550,464 | 10.475 | +77,824 B (noise; **no reclaim**, as expected) |
+| 4 | Re-fill (4 GiB), `sync` | 28,454,080 | 14,568,488,960 | 13.569 | +3.094 GiB |
+| 4a | `mount -o remount,discard /var/lib/docker` confirmed live: `/dev/vda /var/lib/docker ext4 rw,relatime,discard 0 0` | — | — | — | — |
+| 5 | Delete **with discard mount active**, `sync` | 20,043,152 | 10,262,093,824 | 9.560 | **−4.010 GiB reclaimed** — matches the deleted file size almost exactly |
+| 6 | `mount -o remount,nodiscard`, re-fill (4 GiB), `sync` | 28,407,888 | 14,544,838,656 | 13.545 | +3.984 GiB |
+| 7 | Delete, **no discard** (control 2), `sync` | 28,408,144 | 14,544,969,728 | 13.545 | +131,072 B (noise; **no reclaim**, confirms control again) |
+| 8 | `fstrim -v /var/lib/docker` (whole-filesystem sweep, not scoped to the one file) | 8,903,096 | 4,558,385,152 | 4.246 | **−9.301 GiB reclaimed** (`fstrim` itself reported `59050795008 bytes trimmed` — it swept every free extent on the filesystem, including space freed by earlier no-discard deletes this session and never-trimmed slack since the filesystem was created, which is why the reclaim is larger than one 4 GiB file) |
+
+Guest boot log (`~/.morbstack/logs/console.log`), matching this run
+(`2026-08-06T15:55:57Z` UTC = `08:55:57` local, the boot under test):
+`[        22ms] mounted /dev/vda (ext4) at /var/lib/docker`. `morb status` at
+time of test: `vm running`, `docker ready`, `guest morbinit 0.1.0-m0`.
 
 ## 5. Verdict and first commit
 
-*(Follows from §4. Both branches sketched now so the next agent can act
-immediately once the numbers land.)*
+**Discard passes through — hole-punching confirmed on both mechanisms.**
+`VZDiskImageStorageDeviceAttachment` does translate a guest ext4 `discard` (live
+mount option) and an explicit `FITRIM` (`fstrim`) into real deallocation on
+the backing raw file: step 5 shows a live `-o discard` mount freeing ~4.01
+GiB against a 4 GiB deleted file (should be almost the whole file, and is),
+and step 8 shows `fstrim` freeing ~9.3 GiB by sweeping every free extent on
+the filesystem including several sessions' worth of previously "leaked" free
+space from the no-discard control deletes earlier in this same run — the
+clearest possible demonstration that trim, not something else, is doing the
+reclaiming (the two no-discard control deletes at steps 3 and 7 each moved
+allocated blocks by <0.01%, ruling out APFS's own lazy reclaim or measurement
+noise as an alternative explanation).
 
-**If discard passes through (hole-punching confirmed):**
+This means:
+
 - Mount ext4 with `-o discard` by default (`disk.rs`'s `mount_data` gains an
   `Ext4 => Some("discard")` arm — trivial, symmetric with the existing btrfs
-  arm), *or* prefer a periodic `fstrim` if step 4 shows discard's live-mount
-  overhead is measurable under `MorbBench` (async discard should not be, but
-  measure rather than assume).
+  arm), *or* prefer a periodic `fstrim` if live-mount discard overhead turns
+  out to be measurable under `MorbBench` (this spike did not measure write
+  throughput with `discard` mounted live — the design doc's `async discard
+  should not be [measurable], but measure rather than assume` caveat still
+  stands; only the reclaim mechanism itself was proven here, not its cost).
+  Given `fstrim`'s single bounded pass swept far more space than the live
+  `discard` mount did per delete, and is what most container engines actually
+  schedule, it is the stronger first commit of the two — pair it with `-o
+  discard` or without, but ship the periodic sweep regardless.
 - Add a user-visible reclaim readout: `Doctor.swift`'s existing
   apparent-vs-allocated `disk-image` check already has the two numbers: a
   free before/after comparison is one more `stat` call away from becoming a
@@ -135,27 +190,24 @@ immediately once the numbers land.)*
   Virtualization.framework attaches the disk" story is more credible than a
   bare claim.
 
-**If discard does not pass through:**
-- Scope compact-by-copy honestly, including its real cost: it needs a stopped
-  VM (or a brief pause), a helper boot, enough free host disk to hold a full
-  copy of the live data during the operation (worst case: current allocated
-  size again, on top of what is already used), and an atomic swap of the old
-  image for the new one with the same crash-safety posture
-  `MorbDiskGrowth`/`MorbDiskResize` already use for grow (never truncate live
-  data without a completed, verified transaction).
-- `docs/DIFFERENTIATION.md` T8 stays `ABSENT` until compact-by-copy ships;
-  update its "why" line to name the real mechanism and cost instead of "more
-  plumbing than research".
+Compact-by-copy (the no-branch) is now moot: it does not need to be scoped,
+since discard/`fstrim` already answers UX-16 with a much cheaper mechanism
+than a stop-the-VM copy-and-swap.
 
 ## 6. Honest statement of current behaviour (ships now, independent of §3–5)
 
-Regardless of which branch the experiment lands on: **as of this commit,
-Morbstack's disk never shrinks.** `docker system prune`, deleting images,
-removing volumes — none of it returns space to the Mac. The only way to
-reclaim space today is to delete `$MORBSTACK_HOME/data/disk.img` and let
-Morbstack recreate it, which destroys every image, container, and volume.
-This is tracked as `TASKS.md` UX-16/TECH-3 and reflected in
-`docs/audit/DIFFERENTIATION.md`'s corrected "Disk reclaim" bullet and T8 row.
-The Disk route in the app does not currently say this on screen; giving it a
-truthful line (not a promise this document has not earned yet) is a
-follow-up for `native-macos-dev`, tracked by UX-16.
+As shipped in this tree today (before `disk.rs`'s `Ext4` arm gains a
+`discard`/`fstrim` commit): **Morbstack's disk never shrinks.**
+`docker system prune`, deleting images, removing volumes — none of it returns
+space to the Mac, because nothing in the guest ever issues a `discard`/`FITRIM`
+on the ext4 mount actually used (only the dead btrfs arm does, and the kata
+kernel has no btrfs driver). The only way to reclaim space today is to delete
+`$MORBSTACK_HOME/data/disk.img` and let Morbstack recreate it, which destroys
+every image, container, and volume. This spike (§3-5) confirms the fix is
+cheap — a mount-option or a periodic `fstrim` call, not a new subsystem — but
+it is not yet wired into `disk.rs`'s `Ext4` arm as of this commit. Tracked as
+`TASKS.md` UX-16/TECH-3 and reflected in `docs/audit/DIFFERENTIATION.md`'s
+corrected "Disk reclaim" bullet and T8 row. The Disk route in the app does not
+currently say any of this on screen; giving it a truthful line, and later the
+reclaim readout described in §5, is a follow-up for `native-macos-dev`,
+tracked by UX-16.

@@ -425,6 +425,16 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
     /// transaction asks the freshly booted guest to prove `ready` again.
     private var _lastGuestDiskResize: String?
 
+    /// Bytes reclaimed by the guest's most recent periodic `fstrim` sweep this boot
+    /// (TECH-3 / UX-16), as last observed on a memory-balloon evaluator tick — there
+    /// is no dedicated poll for this alone; it rides the balloon's existing
+    /// once-per-``memoryBalloonInterval`` guest round trip rather than opening a
+    /// second one. `nil` means no guest has reported a real sweep result yet this
+    /// boot: either none has completed (the guest's own warmup delay plus interval
+    /// can exceed a short session), the data root is RAM-backed and no sweep ever
+    /// runs, or the guest predates the field.
+    private var _guestDiskLastTrimBytes: Int64?
+
     /// Whether the running guest has Rosetta working, or `nil` if no guest has
     /// said (not booted, or an initramfs older than the field).
     ///
@@ -454,6 +464,16 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
         stateLock.lock()
         defer { stateLock.unlock() }
         return _guestShareEventBridge
+    }
+
+    /// The most recent periodic `fstrim` sweep result the running guest has
+    /// reported (TECH-3 / UX-16), in bytes, or `nil` if none has landed yet this
+    /// boot. See ``_guestDiskLastTrimBytes`` for why this rides the balloon's
+    /// existing poll rather than its own.
+    public var guestDiskLastTrimBytes: Int64? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _guestDiskLastTrimBytes
     }
 
     /// The current guest's reported share-event schema version. Absence does not
@@ -635,6 +655,7 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
             _guestHTTPProxy = nil
             _guestHTTPSProxy = nil
             _guestNoProxy = nil
+            _guestDiskLastTrimBytes = nil
         }
         stateLock.unlock()
         // UX-17: the balloon policy only makes sense against a guest that is known
@@ -659,9 +680,17 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
     private func startMemoryBalloonTimerIfNeeded() {
         guard memoryBalloonTimer == nil else { return }
         memoryBalloonTargetBytes = nil
+        // The first tick arrives well before `memoryBalloonInterval` so a guest
+        // that idle-suspends inside one interval (the default auto-suspend is 5
+        // minutes against a 30-minute interval) still gets a real evaluation
+        // instead of the timer being cancelled at suspend having never fired once.
+        // See ``MemoryBalloonPolicy/firstEvaluationDelay(autoSuspendMinutes:interval:minimumDelay:defaultDelayWhenAutoSuspendDisabled:)``.
+        let firstDelay = MemoryBalloonPolicy.firstEvaluationDelay(
+            autoSuspendMinutes: config.autoSuspendMinutes,
+            interval: VMManager.memoryBalloonInterval)
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(
-            deadline: .now() + VMManager.memoryBalloonInterval,
+            deadline: .now() + firstDelay,
             repeating: VMManager.memoryBalloonInterval)
         timer.setEventHandler { [weak self] in
             self?.evaluateMemoryBalloon()
@@ -679,6 +708,11 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
     /// One slow-timer tick: samples the guest's `/proc/meminfo` off `queue`, asks
     /// ``MemoryBalloonPolicy`` what the target should be, and — only when it actually
     /// changes — applies it back on `queue`. Must run on `queue`.
+    ///
+    /// Also records ``_guestDiskLastTrimBytes`` (TECH-3 / UX-16) from the same `info`
+    /// round trip, independent of whether the balloon target itself changes — piggy
+    /// backing here rather than opening a second periodic guest connection purely to
+    /// watch one more field.
     private func evaluateMemoryBalloon() {
         guard state == .running, controlReady else { return }
         let generation = probeGeneration
@@ -687,10 +721,14 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
 
         probeQueue.async { [weak self] in
             guard let self else { return }
-            let sample = self.sampleGuestMemory()
+            let sample = self.sampleGuestInfo()
+            self.queue.async { [weak self] in
+                guard let self else { return }
+                self.noteGuestDiskLastTrimBytes(sample.diskLastTrimBytes, ifCurrent: generation)
+            }
             let configuration = MemoryBalloonPolicy.Configuration(configuredBytes: configuredBytes)
             guard let target = MemoryBalloonPolicy.nextTarget(
-                previousTargetBytes: previousTarget, sample: sample, configuration: configuration)
+                previousTargetBytes: previousTarget, sample: sample.memory, configuration: configuration)
             else { return }
             self.queue.async { [weak self] in
                 guard let self else { return }
@@ -705,26 +743,51 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
         }
     }
 
-    /// Blocking: connects to the guest control channel and returns a
-    /// ``MemoryBalloonPolicy/Sample`` if a usable `info` reply arrived. `nil` covers
-    /// every failure uniformly (unreachable guest, timeout, an older guest that does
-    /// not report the fields, or the wire's own `-1` sentinel already collapsed by
-    /// ``GuestReply``) — the policy already treats "no sample" as "change nothing",
-    /// so this does not need to distinguish the reasons.
+    /// Everything the balloon evaluator's one guest `info` round trip can answer,
+    /// bundled so a single connection can drive both the balloon policy and the
+    /// disk-trim readout without either one needing its own poll.
+    private struct GuestPeriodicInfoSample {
+        var memory: MemoryBalloonPolicy.Sample?
+        var diskLastTrimBytes: Int64?
+    }
+
+    /// Blocking: connects to the guest control channel and returns what the balloon
+    /// evaluator's tick can learn from one `info` exchange. Every field is `nil`
+    /// uniformly on any failure (unreachable guest, timeout, an older guest that does
+    /// not report it, or the wire's own sentinel already collapsed by
+    /// ``GuestReply``) — callers already treat "no sample" as "nothing to record or
+    /// act on", so this does not need to distinguish the reasons.
     ///
     /// - Important: never call from ``queue``; it blocks on a vsock round trip.
-    private func sampleGuestMemory() -> MemoryBalloonPolicy.Sample? {
+    private func sampleGuestInfo() -> GuestPeriodicInfoSample {
         switch connectVsockBlocking(port: MorbVsockPorts.guestControl, timeout: 3) {
         case .failure:
-            return nil
+            return GuestPeriodicInfoSample(memory: nil, diskLastTrimBytes: nil)
         case .success(let fd):
             let control = GuestControl(fd: fd)
             defer { control.closeOwnedDescriptor() }
-            guard let info = try? control.info(timeout: 5),
-                  let totalKB = info.memTotalKB, let availableKB = info.memAvailableKB
-            else { return nil }
-            return MemoryBalloonPolicy.Sample(totalKB: totalKB, availableKB: availableKB)
+            guard let info = try? control.info(timeout: 5) else {
+                return GuestPeriodicInfoSample(memory: nil, diskLastTrimBytes: nil)
+            }
+            let memory: MemoryBalloonPolicy.Sample?
+            if let totalKB = info.memTotalKB, let availableKB = info.memAvailableKB {
+                memory = MemoryBalloonPolicy.Sample(totalKB: totalKB, availableKB: availableKB)
+            } else {
+                memory = nil
+            }
+            return GuestPeriodicInfoSample(memory: memory, diskLastTrimBytes: info.diskLastTrimBytes)
         }
+    }
+
+    /// Records the guest's most recent `fstrim` sweep result. Left untouched when
+    /// the guest omits it (no sweep has completed yet, the data root is RAM-backed,
+    /// or the guest predates the field) — the last real number stays visible rather
+    /// than flickering to `nil` on every tick that has nothing new to report.
+    private func noteGuestDiskLastTrimBytes(_ bytes: Int64?, ifCurrent generation: Int) {
+        guard let bytes else { return }
+        stateLock.lock()
+        if _probeGeneration == generation { _guestDiskLastTrimBytes = bytes }
+        stateLock.unlock()
     }
 
     /// Writes a new balloon target and records it. Must run on `queue`, with the

@@ -276,6 +276,48 @@ final class DockerBindMountPreflightTests: XCTestCase {
         XCTAssertEqual(body, Data(original.utf8))
     }
 
+    /// UX-19: `morbinit` always listens at this exact path inside the guest —
+    /// nothing on macOS ever created it, so the ordinary "add a shared_paths
+    /// root" remedy could never apply. Matches Docker Desktop's own documented
+    /// `-v /run/host-services/ssh-auth.sock:/run/host-services/ssh-auth.sock`
+    /// usage (`docs/design/SSH-AGENT-FORWARDING.md`).
+    func testGuestSSHAgentSocketBindIsAllowedWithoutAMacShare() {
+        XCTAssertEqual(
+            inspect(
+                #"{"HostConfig":{"Binds":["/run/host-services/ssh-auth.sock:/run/host-services/ssh-auth.sock"]}}"#,
+                shares: [],
+                states: [:],
+                sourceExists: { _ in false }),
+            .allowed)
+    }
+
+    func testExplicitGuestSSHAgentSocketBindIsAllowedWithoutAMacSourceCheck() {
+        XCTAssertEqual(
+            inspect(
+                #"""
+                {"HostConfig":{"Mounts":[{"Type":"bind",
+                 "Source":"/run/host-services/ssh-auth.sock",
+                 "Target":"/run/host-services/ssh-auth.sock"}]}}
+                """#,
+                shares: [],
+                states: [:],
+                sourceExists: { _ in false }),
+            .allowed)
+    }
+
+    /// The exemption is an exact match, not a prefix: a sibling path under the
+    /// same directory that the guest does not itself provide must still go
+    /// through the ordinary share check and be rejected.
+    func testOnlyTheExactGuestSSHAgentSocketPathIsExempt() {
+        XCTAssertEqual(
+            inspect(
+                #"{"HostConfig":{"Binds":["/run/host-services/other.sock:/workspace"]}}"#,
+                shares: [],
+                states: [:]),
+            .rejected(
+                message: "invalid mount config for type \"bind\": bind source path is not shared with the Morbstack VM: /run/host-services/other.sock (add a shared_paths root that contains it, then restart Morbstack)"))
+    }
+
     func testAdvancedBindOptionsRemainTheEnginesResponsibility() {
         XCTAssertEqual(
             inspect(

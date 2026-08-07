@@ -102,6 +102,9 @@ struct ContainersRootView: View {
     private let initialDetailTab: TrackBDetailTab
 
     @State private var search = ""
+    // UI-051: search is a glyph in the trailing group until someone asks for it.
+    // `RouteSearchModifier` attaches the system field while this is true.
+    @State private var searchIsActive = false
     @State private var scope: ContainerScope = .all
     @State private var hub: TrackBStatsHub
     @State private var busy: Set<String> = []
@@ -226,7 +229,9 @@ struct ContainersRootView: View {
     @ToolbarContentBuilder
     private var trailingCommandItems: some ToolbarContent {
         if !model.containers.isEmpty {
-            ToolbarItem(id: "containers.inspector", placement: .automatic) {
+            RouteSearchToolbarItem(
+                id: "containers.search", subject: "containers", isActive: $searchIsActive)
+            ToolbarItem(id: "containers.inspector", placement: .primaryAction) {
                 Button { showsInspector.toggle() } label: {
                     Image(systemName: "sidebar.right")
                 }
@@ -240,11 +245,10 @@ struct ContainersRootView: View {
         }
     }
 
+    /// Slots 1–3 of the toolbar grammar — see `VolumesRootView.toolbarContent` and
+    /// `docs/design/NATIVE-MACOS-PLAYBOOK.md`.
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        if model.containers.isEmpty {
-            trailingCommandItems
-        }
 
         if let selected {
             ToolbarItem(id: "containers.primaryLifecycle", placement: .primaryAction) {
@@ -329,6 +333,12 @@ struct ContainersRootView: View {
             .accessibilityLabel("Container options")
             .help("Show, refresh, and cleanup options")
         }
+        if model.containers.isEmpty {
+            // No inspector on the empty screens, so the view controls need their
+            // ordinary window-toolbar home — declared last so the empty screen keeps
+            // the populated screen's order.
+            trailingCommandItems
+        }
     }
 
     /// One selected container gets one obvious toolbar command. All other lifecycle
@@ -376,7 +386,10 @@ struct ContainersRootView: View {
                     // search ride the inspector's toolbar region and remain present
                     // while the inspector is closed.
                     .toolbar { trailingCommandItems }
-                    .searchable(text: $search, placement: .toolbarPrincipal, prompt: "Name, image, or project")
+                    .routeSearchable(
+                        isActive: $searchIsActive,
+                        text: $search,
+                        prompt: "Name, image, or project")
                     // Must be the outermost modifier on the inspector's content —
                     // see the note in `VolumesRootView`: applied beneath
                     // `.toolbar`/`.searchable` its preferred width was silently

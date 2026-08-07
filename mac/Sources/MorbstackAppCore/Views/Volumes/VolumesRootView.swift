@@ -386,6 +386,9 @@ struct VolumesRootView: View {
     let model: AppModel
 
     @State private var query = ""
+    // UI-051: search is a glyph in the trailing group until someone asks for it.
+    // `RouteSearchModifier` attaches the system field while this is true.
+    @State private var searchIsActive = false
     @State private var sortOrder: [TrackCVolumeComparator] = [TrackCVolumeComparator(key: .name)]
     @State private var selection: VolumeSummary.ID?
 
@@ -594,38 +597,27 @@ struct VolumesRootView: View {
 
     // MARK: Toolbar
 
-    /// The trailing commands — create, and the inspector toggle — declared once and
-    /// mounted on whichever content is on screen, so they survive the no-volumes
-    /// state where the inspector is not mounted at all. Identifiers are identical in
-    /// both mounts.
+    /// The two view controls — search and the inspector toggle — declared once and
+    /// mounted on whichever content is on screen, so they survive the no-volumes state
+    /// where the inspector is not mounted at all. Identifiers are identical in both
+    /// mounts.
     ///
-    /// Everything trailing is `.primaryAction`. That is load-bearing (UI-051): the
-    /// system right-aligns the whole primary run against the search field, so the
-    /// commands sit as one cluster on the inspector's edge and do not move when the
-    /// inspector opens. `.secondaryAction` items are instead centred in the content
-    /// region and slide by half the inspector's width on every toggle, which is what
-    /// made the right side read as detached islands. Measured at 1600×1000.
+    /// Slot 4 and slot 5 of the toolbar grammar in
+    /// `docs/design/NATIVE-MACOS-PLAYBOOK.md`. Items declared on the *inspector's*
+    /// toolbar render after items declared on the route's own toolbar within the same
+    /// placement run, which is what puts these two hard against the window's trailing
+    /// edge, above the inspector column — measured, not assumed.
     @ToolbarContentBuilder
     private var trailingCommandItems: some ToolbarContent {
-        ToolbarItem(id: "volumes.create", placement: .primaryAction) {
-            Button {
-                presentVolumeCreateSheet()
-            } label: {
-                Image(systemName: "plus")
-            }
-            .disabled(isPerformingVolumeOperation)
-            .accessibilityIdentifier("volumes.create")
-            .accessibilityLabel("Create volume")
-            .help(
-                isPerformingVolumeOperation
-                    ? "Wait for the current volume operation to finish"
-                    : "Create a named local Docker volume")
-        }
         if !model.volumes.isEmpty {
-            // The inspector changes the window's navigation layout; it is not the
-            // primary task on a volume inventory screen.  Let the system place it
-            // with other view controls instead of promoting it above record actions.
-            ToolbarItem(id: "volumes.inspector", placement: .automatic) {
+            RouteSearchToolbarItem(
+                id: "volumes.search", subject: "volumes", isActive: $searchIsActive)
+            // Every trailing item is `.primaryAction`, including the view controls:
+            // `.automatic` lands in the same run but sorts *before* `.primaryAction`,
+            // so leaving the toggle on `.automatic` would silently put it left of
+            // search. One placement for the whole run keeps declaration order and
+            // visual order the same thing.
+            ToolbarItem(id: "volumes.inspector", placement: .primaryAction) {
                 Button {
                     showsInspector.toggle()
                 } label: {
@@ -638,8 +630,29 @@ struct VolumesRootView: View {
         }
     }
 
+    /// Slots 1–3: record actions, then collection actions, then the view controls.
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
+        // 1 · record action — acts on the selected volume.
+        ToolbarItem(id: "volumes.export", placement: .primaryAction) {
+            Button {
+                chooseVolumeArchiveDestination()
+            } label: {
+                // SF Symbol convention: up = export/share, down = import/save.
+                Image(systemName: "square.and.arrow.up")
+            }
+            .accessibilityIdentifier("volumes.export")
+            .accessibilityLabel("Export selected volume")
+            .help(volumeArchiveExportHelp)
+            .disabled(!canExportSelectedVolume)
+        }
+        // 2 · collection actions, destructive first so the prune is never adjacent to
+        // "create". `ToolbarSpacer(.fixed)` used to sit between them with a comment
+        // claiming it drew two capsules; it does not. On macOS 26.4 a placement run is
+        // one glass capsule and neither `ToolbarSpacer(.fixed)`, `(.flexible)` nor
+        // `ToolbarItemGroup` divides it — five probe variants, byte-identical captures
+        // (`docs/design/probes/ToolProbe.swift`, spacerNone…spacerSharedHidden).
+        // Ordering is the only separation the platform actually gives us.
         ToolbarItem(id: "volumes.removeUnused", placement: .primaryAction) {
             if let removalProgress {
                 ProgressView()
@@ -661,27 +674,24 @@ struct VolumesRootView: View {
                         : "Review and remove \(unusedCount) unused volume\(unusedCount == 1 ? "" : "s")")
             }
         }
-        ToolbarItem(id: "volumes.export", placement: .primaryAction) {
+        ToolbarItem(id: "volumes.create", placement: .primaryAction) {
             Button {
-                chooseVolumeArchiveDestination()
+                presentVolumeCreateSheet()
             } label: {
-                // SF Symbol convention: up = export/share, down = import/save.
-                Image(systemName: "square.and.arrow.up")
+                Image(systemName: "plus")
             }
-            .accessibilityIdentifier("volumes.export")
-            .accessibilityLabel("Export selected volume")
-            .help(volumeArchiveExportHelp)
-            .disabled(!canExportSelectedVolume)
+            .disabled(isPerformingVolumeOperation)
+            .accessibilityIdentifier("volumes.create")
+            .accessibilityLabel("Create volume")
+            .help(
+                isPerformingVolumeOperation
+                    ? "Wait for the current volume operation to finish"
+                    : "Create a named local Docker volume")
         }
-        // Breaks the glass so the destructive prune is not in the same capsule as
-        // "create". Apple: glass grouping is automatic, `ToolbarSpacer` is how you
-        // control it (HIG "Toolbars", macOS 26). Verified to render: the trailing
-        // run draws as two adjacent capsules, not one.
-        ToolbarSpacer(.fixed)
         if model.volumes.isEmpty {
-            // The inspector is not mounted on the no-volumes screen, so the trailing
-            // commands need their ordinary window-toolbar home here — declared after
-            // the spacer so the empty screen keeps the populated screen's grouping.
+            // The inspector is not mounted on the no-volumes screen, so the view
+            // controls need their ordinary window-toolbar home here — declared last so
+            // the empty screen keeps the populated screen's order.
             trailingCommandItems
         }
     }
@@ -733,9 +743,9 @@ struct VolumesRootView: View {
                     // window: they remain present and clickable while the inspector
                     // is closed.
                     .toolbar { trailingCommandItems }
-                    .searchable(
+                    .routeSearchable(
+                        isActive: $searchIsActive,
                         text: $query,
-                        placement: .toolbarPrincipal,
                         prompt: "Name, driver, label, or mount point")
                     // `.inspectorColumnWidth` must be the OUTERMOST modifier on the
                     // inspector's content. Apple's own documentation says to "apply
