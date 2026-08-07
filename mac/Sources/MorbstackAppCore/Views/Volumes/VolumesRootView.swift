@@ -612,11 +612,13 @@ struct VolumesRootView: View {
         if !model.volumes.isEmpty {
             RouteSearchToolbarItem(
                 id: "volumes.search", subject: "volumes", isActive: $searchIsActive)
-            // Every trailing item is `.primaryAction`, including the view controls:
-            // `.automatic` lands in the same run but sorts *before* `.primaryAction`,
-            // so leaving the toggle on `.automatic` would silently put it left of
-            // search. One placement for the whole run keeps declaration order and
-            // visual order the same thing.
+            // Every trailing item is `.primaryAction`, including the view controls.
+            // Not because `.automatic` would land anywhere else — the `runOrder`
+            // probe interleaved the two placements across both toolbar modifiers and
+            // got 1 2 3 4 5 in one capsule, so they do not sort against each other —
+            // but because when order is *only* declaration order, one placement for
+            // the whole run is the only spelling in which the source reads in the
+            // same order as the bar.
             ToolbarItem(id: "volumes.inspector", placement: .primaryAction) {
                 Button {
                     showsInspector.toggle()

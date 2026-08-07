@@ -148,6 +148,41 @@ enum Variant: String, CaseIterable {
     /// the system's own search field and focuses it. Nothing is imitated — the
     /// system still draws the field, we only decide when it exists.
     case glyphToggle
+
+    // ---- round 4: what may the inspector's own content be? ----
+    //
+    // The question these answer is not about the toolbar at all: it is whether
+    // the container the inspector's content uses paints chrome of its own over
+    // the chrome the window already draws. Read the capture at the inspector's
+    // leading divider (`pix … col <x>`): the window's own border tone is the
+    // reference, and any column that reads brighter than it below the toolbar is
+    // a second border being drawn by the content.
+
+    /// Baseline: the inspector's content is a plain `Form`. What the window is
+    /// supposed to look like.
+    case inspectorForm
+    /// The inspector's content is a `TabView` of `Tab`s at its default style.
+    case inspectorTabView
+    /// The same `TabView` with `.tabViewStyle(.grouped)` — macOS-only, macOS 15+.
+    case inspectorTabViewGrouped
+    /// The same `TabView` with `.tabViewStyle(.sidebarAdaptable)`.
+    case inspectorTabViewSidebarAdaptable
+    /// The shape Apple's own inspectors use: a segmented `Picker` at the top of
+    /// the pane and the selected view below it. No tab container at all.
+    case inspectorPickerPanes
+
+    // ---- round 4: what orders the trailing run? ----
+
+    /// Five numbered items in the one trailing run, declared across the two
+    /// toolbar modifiers the routes actually use (the root's and the inspector
+    /// content's), alternating `.primaryAction` and `.automatic`:
+    ///
+    ///   root:      1 primaryAction · 2 automatic
+    ///   inspector: 3 automatic · 4 primaryAction · 5 primaryAction
+    ///
+    /// If the rendered order is 1 2 3 4 5, order is declaration order and the two
+    /// placements do not sort against each other. Anything else and they do.
+    case runOrder
 }
 
 // MARK: - Content
@@ -166,6 +201,7 @@ struct ProbeContent: View {
     @State private var selection: Int?
     @FocusState private var searchFocused: Bool
     @State private var searchActive = false
+    @State private var pane = 0
     private let rows = (0..<40).map(Row.init(id:))
 
     var body: some View {
@@ -203,17 +239,8 @@ struct ProbeContent: View {
             TableColumn("Size") { _ in Text("128 MB") }
         }
         .inspector(isPresented: $showsInspector) {
-            Form {
-                LabeledContent("Variant", value: variant.rawValue)
-                LabeledContent("Query", value: query.isEmpty ? "—" : query)
-                LabeledContent("Inspector", value: showsInspector ? "open" : "closed")
-                // Identity canary: `.onAppear` fires once per view identity. If
-                // attaching `.searchable` conditionally rebuilds the subtree, this
-                // count goes to 2 and every child @State in the route was reset.
-                IdentityCanary()
-            }
-            .formStyle(.grouped)
-            .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
+            inspectorContent
+                .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
             .toolbar { trailingCluster }
             .modifier(InspectorSearchModifier(variant: variant, query: $query))
         }
@@ -225,11 +252,72 @@ struct ProbeContent: View {
         }
     }
 
+    /// Round 4. Every variant except the two `TabView` ones gets the plain form,
+    /// so every earlier capture is unaffected by this addition.
+    @ViewBuilder
+    private var inspectorContent: some View {
+        switch variant {
+        case .inspectorTabView:
+            inspectorTabs
+        case .inspectorTabViewGrouped:
+            inspectorTabs.tabViewStyle(.grouped)
+        case .inspectorTabViewSidebarAdaptable:
+            inspectorTabs.tabViewStyle(.sidebarAdaptable)
+        case .inspectorPickerPanes:
+            VStack(spacing: 0) {
+                Picker("Pane", selection: $pane) {
+                    Text("Overview").tag(0)
+                    Text("Logs").tag(1)
+                    Text("Files").tag(2)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .padding(.horizontal)
+                .padding(.top, 8)
+                inspectorForm
+            }
+        default:
+            inspectorForm
+        }
+    }
+
+    private var inspectorForm: some View {
+        Form {
+            LabeledContent("Variant", value: variant.rawValue)
+            LabeledContent("Query", value: query.isEmpty ? "—" : query)
+            LabeledContent("Inspector", value: showsInspector ? "open" : "closed")
+            // Identity canary: `.onAppear` fires once per view identity. If
+            // attaching `.searchable` conditionally rebuilds the subtree, this
+            // count goes to 2 and every child @State in the route was reset.
+            IdentityCanary()
+        }
+        .formStyle(.grouped)
+    }
+
+    private var inspectorTabs: some View {
+        TabView {
+            Tab("Overview", systemImage: "info.circle") { inspectorForm }
+            Tab("Logs", systemImage: "text.alignleft") { inspectorForm }
+            Tab("Files", systemImage: "folder") { inspectorForm }
+        }
+    }
+
     // Two visually distinct groups plus the inspector toggle, matching the
     // Morbstack shape: a destructive glyph, a share glyph, a create glyph, then
     // the toggle.
     @ToolbarContentBuilder
     private var trailingCluster: some ToolbarContent {
+        if variant == .runOrder {
+            ToolbarItem(id: "probe.r3", placement: .automatic) {
+                Button {} label: { Image(systemName: "3.circle") }
+            }
+            ToolbarItem(id: "probe.r4", placement: .primaryAction) {
+                Button {} label: { Image(systemName: "4.circle") }
+            }
+            ToolbarItem(id: "probe.r5", placement: .primaryAction) {
+                Button {} label: { Image(systemName: "5.circle") }
+            }
+        }
         if variant == .principalAllTrailing {
             ToolbarItem(id: "probe.trash", placement: .primaryAction) {
                 Button(role: .destructive) {} label: { Image(systemName: "trash") }
@@ -242,7 +330,7 @@ struct ProbeContent: View {
         if variant != .placementMap && variant != .groupingRules && variant != .toggleSymmetry
             && !isSpacerMatrix && variant != .groupPair && variant != .groupPairSpacer
             && variant != .menuInRun && !isGlyphSearch && !isSearchPlacementSweep
-            && variant != .glyphToggle
+            && variant != .glyphToggle && variant != .runOrder
         {
             ToolbarItem(id: "probe.create", placement: .primaryAction) {
                 Button {} label: { Image(systemName: "plus") }
@@ -262,6 +350,7 @@ struct ProbeContent: View {
             || variant == .principalAllTrailing || isSpacerMatrix
             || variant == .groupPair || variant == .groupPairSpacer || variant == .menuInRun
             || isGlyphSearch || isSearchPlacementSweep || variant == .glyphToggle
+            || variant == .runOrder
         {
             ToolbarItem(id: "probe.inspector", placement: .primaryAction) {
                 Button { showsInspector.toggle() } label: { Image(systemName: "sidebar.right") }
@@ -294,6 +383,18 @@ struct ProbeContent: View {
         if isGlyphSearch { glyphSearchItems }
         if isSearchPlacementSweep { searchPlacementSweepItems }
         if variant == .glyphToggle { glyphToggleItems }
+        if variant == .runOrder { runOrderRootItems }
+    }
+
+    /// Declared on the ROOT's toolbar. See `Variant.runOrder`.
+    @ToolbarContentBuilder
+    private var runOrderRootItems: some ToolbarContent {
+        ToolbarItem(id: "probe.r1", placement: .primaryAction) {
+            Button {} label: { Image(systemName: "1.circle") }
+        }
+        ToolbarItem(id: "probe.r2", placement: .automatic) {
+            Button {} label: { Image(systemName: "2.circle") }
+        }
     }
 
     @ToolbarContentBuilder
@@ -640,7 +741,11 @@ struct RootSearchModifier: ViewModifier {
             .inspectorToolbar, .inspectorPrincipal, .inspectorSidebar, .inspectorAutomatic,
             .detailSidebarPlacement, .spacerNone, .spacerFixedDefault, .spacerFixedPrimary,
             .spacerFlexPrimary, .spacerSharedHidden, .absorbedToggle,
-            .groupPair, .groupPairSpacer, .menuInRun:
+            .groupPair, .groupPairSpacer, .menuInRun,
+            // Round 4 asks about the inspector's content container, not about
+            // search; leaving search off keeps those captures to one variable.
+            .inspectorForm, .inspectorTabView, .inspectorTabViewGrouped,
+            .inspectorTabViewSidebarAdaptable, .inspectorPickerPanes, .runOrder:
             content
         case .automaticRun, .searchSquashed, .searchAccessoryBar:
             // The item is positioned by the explicit `DefaultToolbarItem`

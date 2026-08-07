@@ -442,6 +442,10 @@ whether each change actually improved the screen.
 
 ## UI-051 · Right-side controls should be swallowed by the inspector · `done`
 
+> **Read the 2026-08-06 entry at the bottom first.** The overlap the last four passes were
+> trying to remove is measured, in Apple's own apps, to be the platform's intended
+> composition. Do not open a sixth ticket to move the trailing items off the inspector.
+
 **The user has asked for this three times.** *"I preferred it when these get swallowed by the slide
 over just like the left one."* The left sidebar absorbs its toggle pill as it slides; they called
 that "fantastic", unprompted, twice. The right side does not — the `+`, the inspector toggle and the
@@ -600,3 +604,127 @@ judgement.** `.searchToolbarBehavior(.minimize)` — the collapse-to-a-glyph beh
 `@available(macOS, unavailable)` in the macOS 26.4 SDK. It does not compile. Do not add it, and do
 not hand-roll an imitation: the whole point of keeping `.searchable` is that ⌘F, the Search menu
 item, suggestions and scopes come with it.
+
+### 2026-08-06 (second entry): measured against Apple's own apps. The overlap is not a defect.
+
+The fifth pass, and the first that answered the question instead of moving items. Full
+working — measurement tables, the placement map, the capsule rules, the per-route
+inventory — is now in `docs/design/NATIVE-MACOS-PLAYBOOK.md`, *"Toolbar grammar: a window
+toolbar with a trailing inspector"*. This is the summary; the playbook is the record.
+
+**The verdict.** Xcode 26.4, captured at 1600×1000 dark with `scripts/capture-window.sh`
+and scanned per pixel, composes a toolbar and a trailing inspector exactly the way we do:
+one full-width toolbar, the inspector's leading divider running up through it to y 0 at a
+single constant tone, the inspector's own background continuous behind the bar, and the
+inspector toggle as the last item at the window's trailing edge — **above the inspector
+column**. A stock-SwiftUI probe with zero Morbstack code produces the same geometry, and
+so does Volumes. Three toolbar background tones (sidebar / content / inspector) are
+present in Xcode too, and by about the same amount, so "the material changes at the
+divider" is not something to chase either.
+
+| | Xcode | stock probe | Morbstack (Volumes) |
+| --- | --- | --- | --- |
+| inspector divider, in the toolbar band | `455052` | `444f51` | `424f53` |
+| the same divider, below the toolbar | `455052` | `444f51` | `424f53` |
+| inspector toggle x-range | 1562–1591 | 1560–1589 | 1560–1589 |
+| trailing item drift, inspector open→closed | 0 | 0 | 0 |
+| centred item drift | 130 pt (½ the inspector) | ½ the inspector | n/a |
+
+Finder and Font Book corroborate the shape: full-width bar, each pane's toggle hugging
+that pane's divider from that pane's side, and — in Finder — search as a glyph in its own
+capsule at the trailing edge, which is what `RouteSearchToolbarItem` already does. Preview
+has no trailing inspector at all (its Inspector is a floating panel). **Pages, Numbers and
+Keynote are not installed on this machine**, so that case in the ticket text is still
+unmeasured; it is the only Apple sample worth adding.
+
+**Why "put the commands beside the inspector instead of over it" keeps failing.** The
+`placementMap` probe measured every macOS placement open vs. closed. Every placement whose
+position is stable when the inspector toggles is in the one trailing run, and that run is
+over the inspector. `.secondaryAction` centres in the content region and moves by half the
+inspector's width; `.principal`, `.status` and `.destructiveAction` drift too. **There is
+no placement that pins to the content region's trailing edge.** The choice is *over the
+inspector and still*, or *left of it and drifting*. That is now written down with numbers.
+
+**What actually was wrong, and it is not placement.**
+
+1. **A stranded pill in the middle.** A placement run is one glass capsule, and only a
+   `Menu` splits it — a `Menu` is always its own capsule, with everything before it in one
+   and everything after it in another. `ToolbarSpacer(.fixed)`, `(.flexible)` and
+   `ToolbarItemGroup` do **not** split a run: five probe variants, byte-identical trailing
+   runs. Containers declared its options menu mid-run, so the bar was three capsules with
+   a row selected and two without — it re-fragmented on every click. **Fixed:** the menu is
+   declared first, so the run is always `[menu] [commands · search · inspector]`, two
+   capsules, whatever is selected. Queued for Stacks and Images, which each have a *record*
+   menu whose meaning changes if it is simply moved to the head.
+2. **`TabView` inside `.inspector`.** Reproduced in stock SwiftUI: a `TabView` draws a
+   bordered content box whose leading edge overdraws the inspector divider from the
+   toolbar's lower edge down — `444f51` above, `61686b` below, against a constant
+   `444f51` for a plain `Form`. Containers reads `435054` → `646a6c`; Volumes and Xcode are
+   constant. This is the one thing in the app that genuinely looks like "a panel that
+   starts below the toolbar". `.grouped` does not help, `.sidebarAdaptable` renders a
+   sidebar inside the inspector, and no SDK modifier suppresses the box. Apple's own
+   inspectors use a segmented control, not a tab container. **Not fixed — see UI-055.**
+
+**Two notes that were wrong and are now corrected in the source**, since acting on them is
+part of how this reached a fifth attempt:
+
+- *"`ToolbarSpacer(.fixed)` … renders — verified, two adjacent capsules."* It does not.
+- *"`.automatic` … sorts before `.primaryAction`, so leaving the toggle on `.automatic`
+  would silently put it left of search."* It does not. The `runOrder` probe interleaved
+  both placements across both toolbar modifiers and got 1 2 3 4 5 in one capsule. Order is
+  root-toolbar-before-inspector-toolbar, then declaration order, with `.cancellationAction`
+  the only placement that sorts. Use one placement per run anyway, so the source reads in
+  the same order as the bar.
+
+**Landed:** Containers' menu moved to the head of the run; Builds' inspector toggle moved
+`.automatic` → `.primaryAction` to match every other route; three wrong comments corrected;
+five new stock-SwiftUI probe variants (`inspectorForm`, `inspectorTabView`,
+`inspectorTabViewGrouped`, `inspectorTabViewSidebarAdaptable`, `inspectorPickerPanes`,
+`runOrder`) checked in so none of this has to be re-derived. Every `ToolbarItem(id:)` and
+every `.accessibilityIdentifier` is unchanged.
+
+**Not done, queued:** the after-capture sweep (nine routes × 1600×1000 and 1100×800 ×
+inspector open/closed × dark and light). The session ended with the app instances being
+shut down; only Containers' two-capsule result and the build are unverified against a real
+window. Everything else above was measured before that.
+
+## UI-054 · Stacks and Images still fragment the trailing toolbar · `todo`
+
+`docs/design/NATIVE-MACOS-PLAYBOOK.md` §4: a `Menu` is always its own glass capsule and
+splits the placement run around it, so a route's menu must be declared first or the bar
+grows a pill stranded in the middle. Containers is fixed; two routes are not.
+
+- **Images** — `runLocal · pruneDangling · explorePublic · pull · archive(Menu) · search ·
+  inspector` renders as three capsules, measured at 1600×1000 (`[▷ 🗑 🌐 +] [archive ⌄]
+  [🔍 ▤]`). `images.archive` is a *record* menu, not a collection menu, so moving it to the
+  head is a semantic change, not a reorder. Decide whether the head slot means "the route's
+  menu" or "any menu", then apply.
+- **Stacks** — has two menus (`stacks.actions`/`stacks.project-actions` for the selection,
+  plus `stacks.options`), so it can reach four capsules with a service selected. Needs a
+  decision about whether the selection's menu collapses into the options menu, not a
+  reorder.
+
+Verify the same way: `scripts/capture-window.sh`, then a row scan at y 9 across
+x 1250–1599 — a capsule fill reads `2933xx`, a gap reads `252b2d`.
+
+## UI-055 · `TabView` inside `.inspector` double-draws the window's chrome · `todo`
+
+Measured and reproduced in stock SwiftUI on 2026-08-06; full table in
+`docs/design/NATIVE-MACOS-PLAYBOOK.md` §8. A `TabView` draws a bordered content box, and
+inside an inspector that border lands on chrome the window already draws: the inspector
+divider (leading) and the window border (trailing). At x 1200 the divider goes `444f51`
+above the toolbar's lower edge and `61686b` below it, where a `Form` stays constant. Xcode
+and Volumes are constant. It is why the inspector reads as a card that begins below the
+toolbar.
+
+Affects `ContainerDetailView` and Builds' history inspector, and only when a record is
+selected. `.tabViewStyle(.grouped)` is byte-identical; `.sidebarAdaptable` renders a whole
+sidebar inside a 400pt column; the SDK has no modifier that suppresses the box. Apple's own
+inspectors — Xcode's, captured — use a segmented control at the top of the column with the
+pane below, which probe `inspectorPickerPanes` reproduces with a constant divider.
+
+**The care this needs:** `Tab` carries `containers.detail.tab.overview/logs/files/stats/
+inspect`, and `MorbstackFixtureUITests` queries `containers.detail.tab.logs` and
+`containers.detail.tab.files`. A segmented `Picker` does not carry per-segment
+accessibility identifiers reliably. Establish that first — with the probe, not in the app —
+or the conversion trades a 1px seam for a broken UI-test contract.

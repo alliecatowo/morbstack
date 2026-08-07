@@ -650,8 +650,11 @@ struct BuildsRootView: View {
             }
         }
         if scope == .cache ? !records.isEmpty : !model.buildHistory.isEmpty {
-            // `.automatic`, matching every other route's inspector toggle placement.
-            ToolbarItem(id: "builds.inspector", placement: .automatic) {
+            // `.primaryAction`, like every other trailing item on every route.
+            // `.automatic` renders in the same run and the same order (probe
+            // `runOrder`), but a single placement keeps source order and visual
+            // order the same thing — see `VolumesRootView.trailingCommandItems`.
+            ToolbarItem(id: "builds.inspector", placement: .primaryAction) {
                 Button {
                     showsInspector.toggle()
                 } label: {

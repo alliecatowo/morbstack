@@ -249,6 +249,47 @@ struct ContainersRootView: View {
     /// `docs/design/NATIVE-MACOS-PLAYBOOK.md`.
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
+        // The options menu is declared FIRST, ahead of the selection's commands.
+        // On macOS 26 a placement run is one glass capsule and a `Menu` is always
+        // its own capsule, splitting the run around it — `ToolbarSpacer` and
+        // `ToolbarItemGroup` do not (five stock-SwiftUI probe variants,
+        // `docs/design/probes/ToolProbe.swift`: spacerNone…menuInRun). Declared in
+        // the middle, this menu made three capsules the moment a row was selected
+        // and two when nothing was, so the bar re-fragmented on every selection.
+        // Leading, the run is always [menu] [commands · search · inspector] — two
+        // capsules, whatever is selected.
+        //
+        // This is a semantic collection-options menu, not a second, manually managed
+        // overflow. It keeps filtering, refresh, and the infrequent prune operation
+        // together while the selected record's commands stay with that record.
+        ToolbarItem(id: "containers.options", placement: .primaryAction) {
+            Menu {
+                Picker("Show", selection: $scope) {
+                    ForEach(ContainerScope.allCases) { item in
+                        Text(item.title).tag(item)
+                    }
+                }
+
+                Divider()
+
+                Button("Refresh", systemImage: "arrow.clockwise") {
+                    Task { await model.refreshAll() }
+                }
+
+                if stoppedCount > 0 {
+                    Divider()
+                    Button("Remove Stopped Containers…", role: .destructive) {
+                        isShowingPruneConfirmation = true
+                    }
+                    .disabled(isPruning)
+                }
+            } label: {
+                Label("Container options", systemImage: "slider.horizontal.3")
+            }
+            .accessibilityIdentifier("containers.options")
+            .accessibilityLabel("Container options")
+            .help("Show, refresh, and cleanup options")
+        }
 
         if let selected {
             ToolbarItem(id: "containers.primaryLifecycle", placement: .primaryAction) {
@@ -302,37 +343,6 @@ struct ContainersRootView: View {
             }
         }
 
-        // This is a semantic collection-options menu, not a second, manually managed
-        // overflow. It keeps filtering, refresh, and the infrequent prune operation
-        // together while the selected record's commands stay with that record.
-        ToolbarItem(id: "containers.options", placement: .primaryAction) {
-            Menu {
-                Picker("Show", selection: $scope) {
-                    ForEach(ContainerScope.allCases) { item in
-                        Text(item.title).tag(item)
-                    }
-                }
-
-                Divider()
-
-                Button("Refresh", systemImage: "arrow.clockwise") {
-                    Task { await model.refreshAll() }
-                }
-
-                if stoppedCount > 0 {
-                    Divider()
-                    Button("Remove Stopped Containers…", role: .destructive) {
-                        isShowingPruneConfirmation = true
-                    }
-                    .disabled(isPruning)
-                }
-            } label: {
-                Label("Container options", systemImage: "slider.horizontal.3")
-            }
-            .accessibilityIdentifier("containers.options")
-            .accessibilityLabel("Container options")
-            .help("Show, refresh, and cleanup options")
-        }
         if model.containers.isEmpty {
             // No inspector on the empty screens, so the view controls need their
             // ordinary window-toolbar home — declared last so the empty screen keeps
@@ -382,9 +392,9 @@ struct ContainersRootView: View {
             }
             .inspector(isPresented: $showsInspector) {
                 inspector
-                    // See the note on `VolumesRootView`: the trailing commands and
-                    // search ride the inspector's toolbar region and remain present
-                    // while the inspector is closed.
+                    // See the note on `VolumesRootView`: declaring these here rather
+                    // than on the list is a lifetime decision, not a placement one.
+                    // They stay mounted and clickable while the inspector is closed.
                     .toolbar { trailingCommandItems }
                     .routeSearchable(
                         isActive: $searchIsActive,
