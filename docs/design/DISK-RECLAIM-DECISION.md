@@ -1,14 +1,22 @@
 # Disk reclaim decision (TECH-3 / UX-16)
 
-**Status:** spike run and answered. **`discard` and `fstrim` both punch real
-holes in `disk.img`.** 2026-08-06, on a fresh `mise run guest-image` +
+**Status:** spike run and answered (§4/§5), mechanism and reporting path
+implemented in code (§7) — the periodic `fstrim` sweep, its `info`/`status`
+reporting, a `morb doctor` check, and a corrected Disk-inspector sentence.
+**Not yet re-verified on a rebuilt guest**: the code has not been through
+`mise run guest-image`, so the §4 numbers below are from the spike's manual
+remount/`fstrim` commands, not from the shipped background thread. That
+re-measurement is the remaining step and is recorded in §7 once it runs.
+
+The spike itself: 2026-08-06, on a fresh `mise run guest-image` +
 `mise run app` build (initramfs sha256
 `49040a7437adbfe5bfb1224fcb9545bb77e9f424aa74689f7a1999ffd91a90f3`), against a
 running `morbstackd` (8 vCPU, 8192 MiB, 72 GiB configured disk, ext4 confirmed
 by the boot log: `mounted /dev/vda (ext4) at /var/lib/docker`).
 
 This document is the experiment design, the current honest state of the code,
-and the decision procedure. §4/§5 below are now filled in.
+and the decision procedure. §4/§5 below are now filled in; §7 records what
+shipped versus what was only measured by hand.
 
 ## 1. The question
 
@@ -177,14 +185,22 @@ This means:
   Given `fstrim`'s single bounded pass swept far more space than the live
   `discard` mount did per delete, and is what most container engines actually
   schedule, it is the stronger first commit of the two — pair it with `-o
-  discard` or without, but ship the periodic sweep regardless.
+  discard` or without, but ship the periodic sweep regardless. **Decided
+  (§7): periodic `fstrim` only, no live `discard` mount** — a continuous
+  `discard` mount pays a synchronous TRIM round trip inline with every
+  delete, which is the documented reason production Linux distributions run
+  `fstrim.timer` instead of mounting `discard` live; Docker's own
+  delete-heavy operations (`system prune`, `rmi`, layer-store GC) are exactly
+  the latency-sensitive case that cost would fall on.
 - Add a user-visible reclaim readout: `Doctor.swift`'s existing
   apparent-vs-allocated `disk-image` check already has the two numbers: a
   free before/after comparison is one more `stat` call away from becoming a
   "how much of the configured disk is actually in use on your Mac right now"
   line, which is the number OrbStack/Docker Desktop do not show either.
   Wiring this into the Disk route UI belongs to `native-macos-dev`, not this
-  agent.
+  agent. **Done (§7):** the guest's own last-sweep byte count now rides the
+  same `info`/`status` path as the memory-balloon sample and reaches both
+  `morb doctor` and the Disk inspector.
 - `docs/DIFFERENTIATION.md` T8 flips from `ABSENT` to a real, tested
   differentiator — the "we tried it and it works because of how
   Virtualization.framework attaches the disk" story is more credible than a
@@ -194,20 +210,69 @@ Compact-by-copy (the no-branch) is now moot: it does not need to be scoped,
 since discard/`fstrim` already answers UX-16 with a much cheaper mechanism
 than a stop-the-VM copy-and-swap.
 
-## 6. Honest statement of current behaviour (ships now, independent of §3–5)
+## 6. Honest statement of current behaviour, as of the spike commit (superseded by §7)
 
-As shipped in this tree today (before `disk.rs`'s `Ext4` arm gains a
-`discard`/`fstrim` commit): **Morbstack's disk never shrinks.**
+As shipped in the tree at the time of the spike (before `disk.rs` gained a
+periodic-trim commit): **Morbstack's disk never shrinks.**
 `docker system prune`, deleting images, removing volumes — none of it returns
 space to the Mac, because nothing in the guest ever issues a `discard`/`FITRIM`
 on the ext4 mount actually used (only the dead btrfs arm does, and the kata
-kernel has no btrfs driver). The only way to reclaim space today is to delete
+kernel has no btrfs driver). The only way to reclaim space was to delete
 `$MORBSTACK_HOME/data/disk.img` and let Morbstack recreate it, which destroys
-every image, container, and volume. This spike (§3-5) confirms the fix is
-cheap — a mount-option or a periodic `fstrim` call, not a new subsystem — but
-it is not yet wired into `disk.rs`'s `Ext4` arm as of this commit. Tracked as
-`TASKS.md` UX-16/TECH-3 and reflected in `docs/audit/DIFFERENTIATION.md`'s
-corrected "Disk reclaim" bullet and T8 row. The Disk route in the app does not
-currently say any of this on screen; giving it a truthful line, and later the
-reclaim readout described in §5, is a follow-up for `native-macos-dev`,
-tracked by UX-16.
+every image, container, and volume. This section is kept for the historical
+record; §7 below is the current state.
+
+## 7. What shipped, and what is still only measured (this commit)
+
+**Mechanism: periodic `fstrim`, not a live `discard` mount.**
+`guest/morbinit/src/disk.rs`'s `spawn_periodic_trim` starts a background thread (a no-op
+when the data root is the tmpfs fallback) that waits `TRIM_WARMUP_DELAY` (10
+minutes, so it does not compete with a fresh VM's first-minute image pulls),
+then runs `fstrim -v /var/lib/docker` every `TRIM_INTERVAL` (1 hour)
+thereafter. `FsKind::mount_data`'s `Ext4` arm deliberately stays `None`
+rather than gaining `Some("discard")` — see the doc comment on that function
+for the full reasoning: continuous `discard` issues a synchronous
+FITRIM-equivalent inline with every delete, which is exactly the cost
+`fstrim.timer`-style periodic sweeps exist to avoid, and Docker's own
+delete-heavy operations (`system prune`, `rmi`, layer-store GC) are the
+latency-sensitive case that inline cost would land on.
+
+**Reporting path.** The sweep's last result (bytes, or the `-1`
+`disk::NO_TRIM_YET` sentinel before the first sweep completes) is shared via
+an `Arc<AtomicI64>` with `ControlContext` and reported on `info` as
+`disk_last_trim_bytes`. On the host, `GuestControl.swift`'s `GuestReply`
+decodes it the same way as `memTotalKB`/`memAvailableKB` — collapsing the
+sentinel to `nil` rather than exposing `-1` to any caller — `VMManager`
+caches it alongside the guest's periodic memory sample
+(`guestDiskLastTrimBytes`), and `Daemon.swift`'s `status` command republishes
+it as `guest_disk_last_trim_bytes` (`null` until a sweep lands). Two readers
+consume that field: `Doctor.diskTrimCheck` (a `morb doctor` line that is
+`.info`, never `.warn`/`.fail`, on `nil` — the sweep's slow, deliberately
+staggered cadence makes "no result yet" the ordinary state for a
+recently-started VM, not a problem) and the app's
+`DaemonClient.guestDiskLastTrimBytes()`.
+
+**The Disk route.** Before this commit the VM-disk footnote said "Space
+freed inside the guest remains allocated on APFS until the file is trimmed
+or recreated" — true when written, false the moment a periodic sweep exists
+and a reader has no way to trigger either action anyway.
+`TrackCDiskReclaimPresentation.footprintExplanation` (pure, tested in
+`TrackCDiskMathTests`) now states the current fact once: reclaim already
+happens automatically in the background, and either names the most recent
+sweep's byte count or says plainly that none has completed yet — never the
+guest's internal sentinel or timer names, which a reader has no use for.
+
+**What is still open: rebuilt-guest verification.** This commit's guest
+changes have not been through `mise run guest-image` — CLAUDE.md §1.5's exact
+trap, called out explicitly because this project has drawn false "the fix
+didn't work" conclusions from it before. The §4 numbers above are from the
+spike's manual `mount -o remount,discard` / `fstrim -v` commands run by hand
+inside a guest whose `morbinit` predates `spawn_periodic_trim`; they
+demonstrate the mechanism `VZDiskImageStorageDeviceAttachment` supports, not
+that the shipped background thread invokes it correctly on a schedule. The
+remaining step is: `mise run guest-image` (new initramfs with this commit's
+`morbinit`), `mise run sign`, boot, fill and delete a large file exactly as
+in §3, and confirm `disk_last_trim_bytes`/`guest_disk_last_trim_bytes`
+eventually reports a nonzero figure without any manual `fstrim` invocation —
+blocked, as of this commit, on the machine lane being free (another agent
+was mid-session on the running app/daemon). Tracked as `TASKS.md` UX-16.

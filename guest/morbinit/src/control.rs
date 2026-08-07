@@ -1109,7 +1109,8 @@ mod tests {
         // value rather than a value frozen at `ControlContext` construction,
         // since the sweep can complete at any point during a long boot.
         let ctx = test_ctx();
-        ctx.disk_last_trim_bytes.store(59_050_795_008, Ordering::SeqCst);
+        ctx.disk_last_trim_bytes
+            .store(59_050_795_008, Ordering::SeqCst);
         let (resp, _) = handle_request(br#"{"type":"info"}"#, &ctx);
         let fields = jsonlite::parse(std::str::from_utf8(&resp).unwrap()).unwrap();
         assert_eq!(

@@ -273,6 +273,10 @@ struct DiskRootView: View {
     @State private var diskResizeDiagnostic: MorbDiskResize.Diagnostic?
     @State private var diskGrowthJournal: MorbDiskGrowth.Journal?
     @State private var diskCapacityError: String?
+    /// The guest's most recent periodic reclaim-sweep result (TECH-3 / UX-16), read
+    /// alongside the other disk-growth facts. `nil` covers "no daemon", "no sweep yet",
+    /// and "older daemon" alike — see ``DaemonClient/guestDiskLastTrimBytes()``.
+    @State private var diskLastTrimBytes: Int64?
     @State private var isGrowingDisk = false
     @State private var diskGrowthError: String?
     @State private var showsDiskGrowthConfirmation = false
@@ -717,7 +721,9 @@ struct DiskRootView: View {
             } header: {
                 Text("Virtual Machine Disk")
             } footer: {
-                Text(footprintExplanation(footprint))
+                Text(
+                    TrackCDiskReclaimPresentation.footprintExplanation(
+                        footprint: footprint, lastTrimBytes: diskLastTrimBytes))
             }
         } else {
             Section {
@@ -989,13 +995,6 @@ struct DiskRootView: View {
         }
     }
 
-    private func footprintExplanation(_ footprint: TrackCDiskImageFootprint) -> String {
-        if footprint.isSparse {
-            return "This sparse file reserves \(Formatters.bytesString(footprint.apparentBytes)) but currently uses \(Formatters.bytesString(footprint.actualBytes)) on APFS."
-        }
-        return "This image is close to fully allocated. Space freed inside the guest remains allocated on APFS until the file is trimmed or recreated."
-    }
-
     // MARK: Operations
 
     private var operationErrorBinding: Binding<Bool> {
@@ -1063,6 +1062,7 @@ struct DiskRootView: View {
                 diskResizeDiagnostic = nil
                 diskGrowthJournal = nil
                 diskCapacityError = nil
+                diskLastTrimBytes = nil
             }
             return
         }
@@ -1090,12 +1090,14 @@ struct DiskRootView: View {
             }
         }.value
         let daemonDiagnostic = await model.daemon.diskResizeDiagnostic()
+        let lastTrimBytes = await model.daemon.guestDiskLastTrimBytes()
 
         await MainActor.run {
             diskCapacity = localFacts.capacity
             diskGrowthJournal = localFacts.journal
             diskCapacityError = localFacts.errorMessage
             diskResizeDiagnostic = daemonDiagnostic
+            diskLastTrimBytes = lastTrimBytes
         }
     }
 

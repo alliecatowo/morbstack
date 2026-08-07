@@ -59,6 +59,12 @@
 use crate::log;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+// Only `spawn_periodic_trim` (Linux-only: it starts a real background thread that
+// mounts nothing meaningfully on the macOS dev host) touches the shared atomic, so the
+// import itself must be gated the same way — otherwise `cargo clippy -D warnings` on
+// the macOS host build (part of `mise run check`) fails on an unused import that is
+// very much used on the real target.
+#[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Mutex;
 
@@ -866,7 +872,10 @@ pub fn parse_fstrim_trimmed_bytes(output: &str) -> Option<i64> {
         if bytes[index..].starts_with(b" bytes") {
             // `start..index` is a contiguous run of ASCII digit bytes, so this
             // is always valid UTF-8 — the `unwrap` cannot fail.
-            if let Ok(value) = std::str::from_utf8(&bytes[start..index]).unwrap().parse::<i64>() {
+            if let Ok(value) = std::str::from_utf8(&bytes[start..index])
+                .unwrap()
+                .parse::<i64>()
+            {
                 best = Some(value);
             }
         }
@@ -1849,7 +1858,10 @@ mod tests {
     #[test]
     fn unparseable_output_yields_no_result_rather_than_a_panic() {
         assert_eq!(parse_fstrim_trimmed_bytes(""), None);
-        assert_eq!(parse_fstrim_trimmed_bytes("fstrim: no FITRIM support\n"), None);
+        assert_eq!(
+            parse_fstrim_trimmed_bytes("fstrim: no FITRIM support\n"),
+            None
+        );
         // A number that is not immediately followed by "bytes" (a byte count
         // in a different unit, a PID, a percentage) must not be mistaken for
         // the trimmed-bytes figure.

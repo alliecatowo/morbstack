@@ -140,6 +140,45 @@ struct TrackCDiskImageFootprint: Hashable, Sendable {
     var isSparse: Bool { occupancy < 0.98 && savedBytes > 0 }
 }
 
+// MARK: - Disk reclaim presentation (TECH-3 / UX-16)
+
+/// What the Disk inspector says about automatic space reclaim, given the guest's most
+/// recent periodic `fstrim` sweep result (`disk::spawn_periodic_trim` in
+/// `guest/morbinit`, reported over `info` as `disk_last_trim_bytes` and surfaced here
+/// through `morbstackd`'s `status` as `guest_disk_last_trim_bytes`).
+///
+/// Before this sweep existed, the honest statement was "space freed inside the guest
+/// stays allocated on APFS until the file is trimmed or recreated" — true then, false
+/// now that a background sweep runs on its own schedule. This states the current fact
+/// once: reclaim already happens automatically, and either names the most recent
+/// result or says plainly that none has landed yet, without naming the guest's internal
+/// timer or sentinel value to a reader who has no way to act on either.
+enum TrackCDiskReclaimPresentation {
+
+    /// The VM-disk-file footnote, combining the sparse-file fact (`footprint`) with the
+    /// reclaim fact (`lastTrimBytes`) — the two answer the same underlying question
+    /// ("does deleting things in the guest actually give me space back") and stating
+    /// them separately would read as if they disagreed.
+    static func footprintExplanation(footprint: TrackCDiskImageFootprint, lastTrimBytes: Int64?) -> String {
+        let sizeFact = footprint.isSparse
+            ? "This sparse file reserves \(Formatters.bytesString(footprint.apparentBytes)) but currently uses \(Formatters.bytesString(footprint.actualBytes)) on APFS."
+            : "This image is close to fully allocated on APFS."
+        return "\(sizeFact) \(reclaimSentence(lastTrimBytes: lastTrimBytes))"
+    }
+
+    /// The reclaim fact on its own, for callers that do not also need the sparse-file
+    /// sentence.
+    static func reclaimSentence(lastTrimBytes: Int64?) -> String {
+        guard let lastTrimBytes else {
+            return "Morbstack reclaims space from deleted images and containers automatically, in the background. No sweep has completed yet on this boot."
+        }
+        guard lastTrimBytes > 0 else {
+            return "Morbstack reclaims space from deleted images and containers automatically, in the background. The most recent sweep found nothing to reclaim."
+        }
+        return "Morbstack reclaims space from deleted images and containers automatically, in the background. The most recent sweep returned \(Formatters.bytesString(lastTrimBytes)) to this Mac."
+    }
+}
+
 // MARK: - VM disk growth presentation
 
 /// The one safe next action for a disk-growth fact set. This is intentionally a

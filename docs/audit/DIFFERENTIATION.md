@@ -81,8 +81,26 @@ These are ordered by "how fast does a new user hit this".
 >   to close — but the VS Code extension already ships the interactive shell
 >   over a hijacked exec stream (`integrations/vscode/src/api.ts:329-402`).
 >
-> **T7 and T8 stand as written.** `sharedPaths` is still config-file-only, and
-> disk space still never returns to the Mac — see the Tier B correction below.
+> **T7 stands as written.** `sharedPaths` is still config-file-only.
+>
+> - **T8 — mechanism shipped 2026-08-06, not yet reverified on a rebuilt
+>   guest.** `guest/morbinit/src/disk.rs`'s `spawn_periodic_trim` now runs an
+>   hourly `fstrim /var/lib/docker` from a background thread, reported through
+>   `info`/`status` as `disk_last_trim_bytes`/`guest_disk_last_trim_bytes` and
+>   surfaced in both `morb doctor` (`Doctor.diskTrimCheck`) and the Disk
+>   inspector's VM-disk footnote. This is not a live `-o discard` mount —
+>   `disk.rs`'s `mount_data` doc comment has the reasoning: a continuous
+>   `discard` mount pays a synchronous TRIM inline with every delete, which is
+>   exactly the cost `fstrim.timer`-style periodic sweeps exist to avoid on
+>   delete-heavy workloads like `docker system prune`. The reclaim mechanism
+>   itself was proven live in the same session
+>   ([../design/DISK-RECLAIM-DECISION.md](../design/DISK-RECLAIM-DECISION.md)
+>   §4: 4.01 GiB back on a discard remount, 9.3 GiB back on a manual `fstrim`),
+>   but that measurement predates this commit's guest code and was taken by
+>   hand; the shipped background thread has not yet been through `mise run
+>   guest-image` and re-measured end to end (§7 of the same document). Still
+>   `ABSENT` as a *verified* differentiator until that rebuild-and-remeasure
+>   step closes; `open` in `TASKS.md` UX-16.
 
 **T1 is the one that should be uncomfortable.** 75,000 lines of Swift, 739 test
 functions, a genuinely careful port-lease design, an excellent security posture
@@ -278,6 +296,14 @@ performance target with no implementation behind it.
   If discard passes through, this is close to "more plumbing than research"
   after all; if it does not, the honest scope is compact-by-copy, which is
   not free.
+
+  > **Answered and shipped, 2026-08-06.** Discard passes through — see the T8
+  > note above and `docs/design/DISK-RECLAIM-DECISION.md` §4/§7. "There is no
+  > `fstrim` anywhere in the tree" is no longer true: `disk.rs` now runs one
+  > on an hourly background schedule. What is still true is that the shipped
+  > code has not been rebuilt into a guest image and re-measured — the
+  > numbers above are from the spike's manual commands, run before this
+  > mechanism existed.
 - **Fix the leaks in what exists.** `scripts/fetch-scan-tools.sh` referenced
   five times and absent; shell completions stale by 7 commands and factually
   wrong about `debug`; JetBrains "integration" is a README. Each is under a day

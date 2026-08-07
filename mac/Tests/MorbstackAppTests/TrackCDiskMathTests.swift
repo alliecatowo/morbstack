@@ -509,4 +509,50 @@ final class TrackCDiskMathTests: XCTestCase {
         XCTAssertGreaterThan(result.actualBytes, 0, "a written file must have allocated blocks")
         XCTAssertEqual(result.path, url.path)
     }
+
+    // MARK: - Disk reclaim presentation (TECH-3 / UX-16)
+
+    func testReclaimSentenceNamesNoSweepYetRatherThanAnInternalSentinel() {
+        let sentence = TrackCDiskReclaimPresentation.reclaimSentence(lastTrimBytes: nil)
+        XCTAssertTrue(sentence.contains("No sweep has completed yet"))
+        // The guest's own sentinel is -1; a reader has no use for that number and it
+        // must never leak into the sentence.
+        XCTAssertFalse(sentence.contains("-1"))
+    }
+
+    func testReclaimSentenceReportsAZeroByteSweepAsARealResultNotAMissingOne() {
+        // Zero is a legitimate "nothing to reclaim this sweep" answer, distinct from
+        // "no sweep has run at all" — see `disk::NO_TRIM_YET` on the guest side.
+        let sentence = TrackCDiskReclaimPresentation.reclaimSentence(lastTrimBytes: 0)
+        XCTAssertTrue(sentence.contains("found nothing to reclaim"))
+        XCTAssertFalse(sentence.contains("No sweep has completed"))
+    }
+
+    func testReclaimSentenceNamesTheRealByteCountOfARecentSweep() {
+        let sentence = TrackCDiskReclaimPresentation.reclaimSentence(lastTrimBytes: 59_050_795_008)
+        XCTAssertTrue(sentence.contains(Formatters.bytesString(59_050_795_008)))
+        XCTAssertTrue(sentence.contains("returned"))
+    }
+
+    func testFootprintExplanationStatesTheSparseFactAndTheReclaimFactTogether() {
+        let footprint = TrackCDiskMath.footprint(
+            path: "/tmp/disk.img", apparentBytes: 64 * 1_000_000_000, blocks512: 3 * 1_000_000_000 / 512)
+        let explanation = TrackCDiskReclaimPresentation.footprintExplanation(
+            footprint: footprint, lastTrimBytes: 4_010_000_000)
+
+        XCTAssertTrue(explanation.contains("reserves"), "the sparse-file fact must still be present")
+        XCTAssertTrue(explanation.contains(Formatters.bytesString(4_010_000_000)))
+    }
+
+    func testFootprintExplanationOnAFullyAllocatedImageNoLongerClaimsSpaceIsStuck() {
+        // Regression: the pre-reclaim wording ("remains allocated ... until the file
+        // is trimmed or recreated") became false the moment the periodic sweep shipped
+        // and must not survive as dead text a reader could act on incorrectly.
+        let footprint = TrackCDiskMath.footprint(path: "/tmp/disk.img", apparentBytes: 100 * 512, blocks512: 99)
+        let explanation = TrackCDiskReclaimPresentation.footprintExplanation(
+            footprint: footprint, lastTrimBytes: nil)
+
+        XCTAssertFalse(explanation.contains("until the file is trimmed or recreated"))
+        XCTAssertTrue(explanation.contains("automatically"))
+    }
 }

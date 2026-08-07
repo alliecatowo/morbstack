@@ -114,6 +114,20 @@ class DaemonClient: @unchecked Sendable {
         return try? JSONDecoder().decode(MorbDiskResize.Diagnostic.self, from: data)
     }
 
+    /// Bytes reclaimed by the guest's most recent periodic `fstrim` sweep of
+    /// `/var/lib/docker` (TECH-3 / UX-16), or `nil` when there is no daemon to ask, no
+    /// sweep has completed yet this boot, the data root is RAM-backed, or the running
+    /// daemon predates the field. Like ``diskResizeDiagnostic()``, this reads the
+    /// existing `status` snapshot and never starts anything.
+    func guestDiskLastTrimBytes() async -> Int64? {
+        guard FileManager.default.fileExists(atPath: socketPath) else { return nil }
+        guard let response = try? await roundTrip(DaemonRequest(cmd: "status"), timeout: Self.statusTimeout),
+              response.ok,
+              case .int(let bytes)? = response.data?["guest_disk_last_trim_bytes"]
+        else { return nil }
+        return Int64(bytes)
+    }
+
     /// The guest's view of the shared host paths, or `nil` when nothing answered.
     ///
     /// `nil` and `[]` are different answers and both are used: `nil` means "no daemon,
