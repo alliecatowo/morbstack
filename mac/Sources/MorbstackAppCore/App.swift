@@ -482,7 +482,8 @@ struct RootWindow: View {
             FirstRunCLISetupSheet(
                 model: cliSetup,
                 isPresented: $isCLISetupPresented,
-                deferFirstRunSetup: { isCLISetupDeferred = true })
+                deferFirstRunSetup: { isCLISetupDeferred = true },
+                openMigration: { model.selection = .migration })
         }
         // The two cross-track hooks Track D asked for. Installed from the window rather
         // than from `init` because `openWindow` is an environment action and only exists

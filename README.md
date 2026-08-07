@@ -298,6 +298,11 @@ Full detail, including troubleshooting the `credsStore`/`docker-credential-deskt
 hang and the port-forwarder retry behavior, lives in
 [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`docs/architecture.md`](docs/architecture.md).
 
+Coming from Docker Desktop, Colima, or OrbStack? See
+[`docs/switching-from-docker-desktop.md`](docs/switching-from-docker-desktop.md)
+for the handful of things that behave differently in the first ten minutes —
+the credential-helper hang above is one of five.
+
 ## Architecture
 
 ```mermaid

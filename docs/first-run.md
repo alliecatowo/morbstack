@@ -160,6 +160,20 @@ from PATH. The complete candidate, socket-discovery, and fixture rules are the
 [clean-profile Docker acceptance matrix](clean-profile-acceptance.md). Merely
 proving these files exist is not evidence that those tools work end to end.
 
+## Coming from another Docker runtime
+
+When the first-run sheet detects Docker Desktop, Colima, or OrbStack already
+installed, it names what it found and offers to open the Migration route —
+the same detection and review sheets `Nav.migration` always has, just reached
+from the path a switching user actually walks first. It never starts a
+transfer itself; the sheet only navigates.
+
+That covers moving *data* — images and volumes. What behaves differently
+about the *environment itself* once you switch — the credential-helper hang,
+which file watchers go quiet, bind-mount roots, a stale `DOCKER_HOST`, and
+the login-item/VM distinction — is
+[`switching-from-docker-desktop.md`](switching-from-docker-desktop.md).
+
 ## Safe removal
 
 The inverse is explicit and inspectable:

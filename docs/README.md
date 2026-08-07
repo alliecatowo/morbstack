@@ -39,6 +39,9 @@ silently merged the first two and that is how three headline features shipped ha
 **How it works** — [architecture.md](architecture.md) · [protocol.md](protocol.md) ·
 [build.md](build.md) · [background-service.md](background-service.md) ·
 [first-run.md](first-run.md) ·
+[switching-from-docker-desktop.md](switching-from-docker-desktop.md) — coming from
+Docker Desktop, Colima, or OrbStack: the credential-helper hang, silent file-watcher
+gaps, bind-mount roots, `DOCKER_HOST` precedence, and the login-item/VM distinction ·
 [design/PATCH-FREE-PUBLISH-ALL.md](design/PATCH-FREE-PUBLISH-ALL.md) — why `docker run -P` works on
 stock upstream `dockerd`, through its own `--userland-proxy-path` hook, with no engine patch. Read
 this before believing any older document that mentions a Moby patch.
