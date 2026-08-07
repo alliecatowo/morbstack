@@ -49,65 +49,120 @@ producing it.
   is worth re-examining against this).
 - Sidebar: **no more than two levels of hierarchy**; icons follow the **system accent** by default.
 
-## Inspector reveal: a measured platform floor, not a Morbstack bug (2026-08-07)
+## Inspector reveal: what the ~350ms actually is (2026-08-07, corrected)
+
+> **This section previously concluded "a measured platform floor, not a Morbstack bug" and said
+> the reveal was unfixable. That conclusion was wrong, and it was wrong for an instructive
+> reason: the instrument measured how much work the transition does, and the symptom was about
+> whether any of that work lands in one unbroken block. Those are different quantities and
+> Instruments' Time Profiler cannot tell them apart. The numbers below supersede it.**
 
 Reported against `ContainersRootView`: closing the trailing inspector slides; opening it stalls
-and pops in place. Two candidate explanations were tested and ruled out before landing on this
-one, in order, because a profiler category is not proof and neither is a plausible-sounding bug:
+and pops in place.
 
-- **Not expensive content.** Instruments (Time Profiler, real signed release build, PID-attached)
-  measured opening the inspector blocking the main thread ~360–390ms before the first animated
-  frame, closing producing no measurable CPU burst. But `VolumesRootView`'s ~10-row inspector
-  showed the same order of magnitude as `ContainersRootView`'s ~30-row `Overview` tab (~335ms vs.
-  ~358–375ms), and the SIDEBAR toggle — touching no inspector content at all — showed ~387ms.
-  Content size is not the driver.
-- **Not a view-identity bug.** Selected the Logs tab in the open inspector (a plain `@State` on
-  `ContainerDetailView`), closed, reopened: still on Logs, the log buffer had not reloaded. A
-  dropped-and-rebuilt identity — the "conditional wrapping `.inspector`" or "content identity
-  flip" shape — would have reset that state to `.overview`. It did not, on the real, running app,
-  with this week's outermost-`.inspectorColumnWidth` fix already in place.
-- **Reproduces in stock SwiftUI, zero Morbstack code.** `docs/design/probes/ToolProbe.swift`,
-  variant `inspectorForm`: `NavigationSplitView` + `Table` + `.inspector(isPresented:)` wrapping a
-  trivial three-row `Form`. No conditional, no empty-state swap, `.inspectorColumnWidth` declared
-  *before* `.toolbar` (i.e. without the outermost-modifier fix). Opening it from `--closed`
-  produced the same ~490ms unbroken main-thread block, immediately at the click, with the same
-  scattered AppKit/Objective-C-runtime/generic-metadata-cache leaf symbols as the real app's trace.
+### The measurement error
 
-**It is every open, not a one-time warm-up.** Repeated open → close → open → close → open on one
-`inspectorForm` probe window, each transition profiled separately with precise click-epoch timing:
+Instruments (Time Profiler, real signed build, PID-attached) reported an "unbroken run of
+main-thread samples" of ~335–490ms at each toggle and this was read as a ~350ms *block* before
+the first animated frame. It is not a block. It is the animation running.
 
-| Transition | Busy window | Duration |
-| --- | --- | --- |
-| open #1 | 3.737s → 4.179s | 442ms |
-| close #1 | 3.660s → 4.001s | 341ms |
-| open #2 | 3.729s → 4.038s | 309ms |
-| close #2 | 4.015s → 4.334s | 319ms |
-| open #3 | 4.771s → 5.093s | 322ms |
+Two instruments on the *same* clicks separate them:
 
-No downward trend across three repeated opens on the same window — if this were AppKit lazily
-instantiating the split-view item once, the second and third opens would drop toward zero the way
-`.inspector` close does on the real Containers route (0 measurable samples, confirmed twice with
-precise timing). They do not. This rules out "warm the column at launch" as a fix: there is no
-cold/warm distinction to exploit.
+- **In-process stall meter.** A `Timer` on the main run loop at 2ms in `.common` mode with zero
+  tolerance. A timer cannot fire while the main thread is inside a synchronous AppKit layout
+  pass, so the largest gap between consecutive ticks *is* the unbroken block.
+- **External CPU delta.** Cumulative process CPU sampled with `ps` around each `AXPress`, which
+  is the quantity Instruments was actually reporting.
 
-One open discrepancy, recorded rather than smoothed over: on the real Containers route, *closing*
-the inspector is free (0 samples, twice). On the bare `inspectorForm` probe above, closing costs
-the same order of magnitude as opening (309–341ms) on this same repeated-cycle run. The two
-windows are not identical (sidebar content, list row count, toolbar item count all differ), and
-which direction is free is apparently not fixed across window shapes — only that *opening* costs
-several hundred ms is consistent everywhere tested (Containers, Volumes, the sidebar toggle, and
-the stock probe).
+On the same six real toolbar clicks on `PerfProbe`: CPU delta **400 / 290 / 300 / 290 / 290 /
+340ms**, in-process block **0ms — no gap anywhere above 30ms.** Roughly 300ms of main-thread CPU
+per toggle, spread across the animation's frames, none of it blocking. `docs/design/probes/`
+holds both instruments (`PerfProbe.swift`, `axpress-cost.sh`).
 
-**Conclusion:** `.inspector(isPresented:)`'s reveal, on a `NavigationSplitView` + list/table +
-inspector window of this general shape, costs several hundred ms of synchronous main-thread AppKit
-work — Auto Layout on `NSView`/`NSWindow`, `NSTableRowView` row management, Objective-C
-runtime/ARC churn, CoreAnimation commit — on macOS 26.4, regardless of the content inside the
-inspector and regardless of Morbstack's own view structure. That is long enough to consume a
-reveal animation's entire frame budget, so SwiftUI has no frames left to interpolate and the
-column appears rather than slides. This is the system's own reveal cost, not something the content
-layer can buy its way out of, and rewriting it ourselves would be the exact defect this document's
-"don't rebuild a design system in the content layer" rule warns against. Tracked as TASKS.md
-(performance/platform-limitation backlog).
+### It is a one-time cost, not a per-open one
+
+The earlier write-up's load-bearing claim was "It is every open, not a one-time warm-up", which
+is what ruled out warming the column as a fix. With real `AXPress` clicks on a real bundled
+window and the stall meter running, eight consecutive toggles produced exactly **one** block —
+the first reveal, 307ms — and nothing above 30ms for the other seven. The magnitude of that
+first reveal also decays as the machine warms: 523ms, then 362ms, then 92 / 61 / 47ms across
+consecutive launches of the same binary. Any measurement of it that does not say how warm the
+machine was is not comparable to any other.
+
+**And it is only paid on the transition that first presents the column.** With
+`start=open` — which is what all nine routes ship, `@State private var showsInspector = true` —
+there is no block in either direction at all, because the column's AppKit backing is built
+during window setup where it is invisible. That, not a direction-dependent platform floor, is
+the whole of the "close is free on Containers, expensive in the probe" asymmetry: the probe was
+launched `--closed`.
+
+### The column slides, on the real app, in both directions
+
+`docs/design/probes/AXColumnTrace.swift` reads the content column's width out of the running
+window through the accessibility API — no rebuild, no instrumentation, works on
+`dist/Morbstack.app` while somebody else has it open — and presses the toolbar control by
+`AXIdentifier`. A pop shows two widths and nothing between them; a slide shows a ramp.
+
+Four consecutive toggles on the real Containers route, alternating direction:
+
+| Toggle | Direction | Intermediate widths | Ramp |
+| --- | --- | --- | --- |
+| 1 | open | 3 | 972 → 1101 → 1316 → 1364 → 1372 |
+| 2 | close | 6 | 1372 → 1292 → 1243 → 1194 → 1144 → 1039 → 981 |
+| 3 | open | 3 | 972 → 975 → 1284 → 1347 → 1372 |
+| 4 | close | 2 | 1372 → 1047 → 984 → 972 |
+
+It interpolates. It slides. There is also **no direction asymmetry**: the same four toggles cost
+340 / 250 / 230 / 230ms of CPU (and 270 / 250 / 250 / 340 for the next four). The previously
+recorded "closing is free — 0 samples, confirmed twice" is not reproducible and was a sampling
+artifact.
+
+### The subtraction matrix
+
+Every ingredient varied independently against a minimum case, three interleaved reps per shape,
+fresh process each (reps interleaved because a warming machine otherwise manufactures a
+difference). `lead1` is the first reveal's block, `leadN` steady-state, `frames%` display-link
+callbacks delivered during the animation on a 165Hz panel, `cpu` main-thread CPU per toggle.
+
+| Shape | lead1 | leadN | frames% | cpu | Δcpu |
+| --- | --- | --- | --- | --- | --- |
+| minimum: `NavigationSplitView` + `Text` + `.inspector(Text)`, no toolbar | 84.8 | 0.0 | 88% | **181.3** | — |
+| \+ one plain toolbar button on the root | 69.9 | 0.0 | 88% | 199.0 | +17.7 |
+| \+ one plain toolbar button on the inspector's content | 64.3 | 33.4 | 86% | 193.5 | +12.2 |
+| \+ a `Menu` | 0.0 | 0.0 | 95% | 192.3 | +11.0 |
+| \+ the full route toolbar (menu, 3 buttons, spacer, toggle) | 36.0 | 0.0 | 95% | 196.6 | +15.3 |
+| \+ `.searchable(placement: .toolbar)` | 49.6 | 0.0 | 96% | 196.6 | +15.3 |
+| content column `List`, 5 rows | 34.4 | 0.0 | 94% | 205.4 | +24.1 |
+| content column `List`, 500 rows | 67.9 | 0.0 | 74% | 241.6 | +60.3 |
+| content column `Table`, 5 rows | 64.7 | 0.0 | 79% | 246.2 | +64.9 |
+| content column `Table`, 500 rows | 74.0 | 38.7 | 60% | 265.5 | +84.2 |
+| inspector content `Form`, 3 rows | 103.8 | 0.0 | 80% | 212.1 | +30.8 |
+| inspector content `Form`, 30 rows | 161.9 | 36.4 | 69% | 240.3 | +59.0 |
+| `.inspectorColumnWidth(min:ideal:max:)` | 69.1 | 0.0 | 90% | 194.3 | +13.0 |
+| `.inspectorColumnWidth(400)` — a single fixed value | 86.7 | 0.0 | 88% | 197.4 | +16.1 |
+| everything at once (the `inspectorForm` shape) | 107.5 | 32.2 | 57% | 289.9 | +108.6 |
+
+Read off it:
+
+- **The toolbar is not the cost.** +11 to +18ms whatever is in it, and it makes no difference
+  whether items are mounted on the route root or on the inspector's own content. Hypothesis
+  rejected.
+- **A ranged `.inspectorColumnWidth` costs nothing over a fixed one** — 194.3 vs 197.4ms, inside
+  the noise. There is no constraint-solve penalty for the range, so the outermost-modifier fix
+  on all nine routes stays exactly as it is. Hypothesis rejected.
+- **The content column scales, mildly.** `List` 5 → 500 rows is +24 → +60; `Table` costs more
+  than `List` at every size. Real, and it is where frame delivery degrades (94% → 60%), but it
+  is a minority of the total.
+- **62% of the cost is the minimum case.** A bare `NavigationSplitView` with a `Text` on both
+  sides and no toolbar still spends 181ms of main-thread CPU presenting the column. *That* is
+  the platform's own cost — but it is CPU spread across frames, it delivers 88% of a 165Hz
+  panel, and it does not block.
+
+**Conclusion.** `.inspector(isPresented:)`'s reveal costs ~180ms of main-thread CPU in the
+minimum case and ~290ms in our shape, spread across the animation's frames. It blocks the main
+thread exactly once per window, on whichever transition first presents the column, and the
+routes already avoid paying that visibly by defaulting the inspector open. Nothing in the
+content layer needs to change, and — this is the correction — nothing is broken.
 
 ## Toolbar — three regions with fixed semantics
 

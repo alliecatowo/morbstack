@@ -32,60 +32,43 @@
 // Compose projects; the grouping here is only the fact, the same way Docker Desktop and
 // OrbStack present it.
 //
-// **On the inspector's reveal animation not sliding (2026-08-07).** Reported: closing
-// the trailing inspector slides; opening it stalls and then pops in place.
+// **On the inspector's reveal animation (2026-08-07, corrected).** Reported: closing
+// the trailing inspector slides; opening it stalls and then pops in place. This comment
+// used to end in "a platform floor, not something the content layer can buy its way out
+// of". That was wrong, and the ~350ms number it rested on was real but measured the
+// wrong quantity. Retracted here; the full retraction, the subtraction matrix and both
+// new instruments are in docs/design/tahoe/HIG-FINDINGS.md and TASKS.md UI-056.
 //
-// First pass measured this route with Instruments (Time Profiler, real release build,
-// `showsInspector` toggled through AppleScript's Accessibility bridge — mouse clicks do
-// not reach the app from automation in this environment, AXPress does): opening blocks
-// the main thread ~360–390ms before the first animated frame can draw; closing produces
-// no measurable CPU burst. That framing was wrong to stop at, though — a corrected
-// steer sent mid-investigation, and confirmed with the follow-up below, is what actually
-// settles it.
+// The short version, because it is a trap worth not falling into twice: Instruments'
+// Time Profiler reports an unbroken run of main-thread samples, and that was read as a
+// ~350ms BLOCK before the first animated frame. It is not a block, it is the animation
+// running — a 300ms transition is supposed to keep the main thread busy for 300ms. An
+// in-process 2ms stall meter and an external CPU-delta meter, run on the same six real
+// AXPress clicks, disagree completely: ~300ms of CPU each, and zero gaps above 30ms.
 //
-// Two direct, structural tests, not a profiler category:
+// On this route specifically, measured on the real signed app:
 //
-//   1. State persistence. Selected the Logs tab in the open inspector (a plain `@State`
-//      on `ContainerDetailView`), closed the inspector, reopened it. The tab was still
-//      Logs, and `ContainerLogsTab`'s buffered lines had not reloaded. If SwiftUI had
-//      dropped and rebuilt `ContainerDetailView`'s identity on the hide/show cycle — the
-//      "conditional wrapping `.inspector`" or "content identity flip" shape — that state
-//      would have reset to `.overview`. It did not, on the real, running, already-fixed
-//      app (this route's `.inspector` sits inside a stable `else` branch whose condition
-//      never changed during the test, same as the person's ordinary use). Identity is
-//      not the mechanism here.
-//   2. `docs/design/probes/ToolProbe.swift` — stock SwiftUI, zero Morbstack code:
-//      `NavigationSplitView` + `Table` + `.inspector(isPresented:)` wrapping a
-//      three-row `Form`, no conditional, no empty-state swap, `.inspectorColumnWidth`
-//      declared BEFORE `.toolbar` (i.e. without this week's outermost-modifier fix).
-//      Opening it from `--closed` produced the same ~490ms unbroken main-thread block,
-//      immediately at the click, with the same scattered AppKit/ObjC-runtime/generic-
-//      metadata leaf symbols this route's own trace showed. Answers the question
-//      already on file in that probe's own header ("Is the sidebar/inspector toggle
-//      asymmetry ours or the platform's?"): the platform's, at least on macOS 26.4 for
-//      a `NavigationSplitView` + list/table detail + `.inspector` window of this shape.
-//      Toggling the SIDEBAR column on the real app — touching no inspector content at
-//      all — showed the same magnitude too.
+//   - The column slides, in both directions. docs/design/probes/AXColumnTrace.swift
+//     reads the content column's width out of the running window over the accessibility
+//     API; four consecutive toggles drew 3, 6, 3 and 2 intermediate widths.
+//   - There is no close-is-free asymmetry. Eight alternating toggles cost 340/250/230/
+//     230/270/250/250/340ms with no direction dependence. The earlier "closing produces
+//     no measurable CPU burst" is not reproducible.
+//   - The one real block is one-time, and this route already avoids paying it visibly:
+//     it lands on whichever transition FIRST presents the column, and `showsInspector`
+//     defaults to true, so the column is built during window setup.
 //
-// So: not an identity bug in this file, not the outermost-`.inspectorColumnWidth` fix
-// (which stays — it solved a real, separate width-clipping bug and remains required),
-// and not primarily `ContainerOverviewTab`'s row count (`VolumesRootView`'s ~10-row
-// inspector showed the same order of magnitude as this tab's ~30). This reads as a
-// platform floor for `.inspector(isPresented:)`'s reveal on this window shape, not
-// something the content layer can buy its way out of — which is what CLAUDE.md §1.7
-// means by system cost: rewriting AppKit's own reveal machinery ourselves would be
-// exactly the defect that section warns against.
+// The outermost-`.inspectorColumnWidth` fix stays, now for two reasons: it solved a real
+// width-clipping bug, and the matrix shows a ranged width costs nothing over a fixed one
+// (194.3ms vs 197.4ms) — there is no constraint-solve penalty to trade it away for.
 //
-// What IS this app's own, and stays regardless: this list used to give every visible
-// row (up to ~20 at once) its own per-second `TimelineView`, each an independent
-// AttributeGraph subscription re-established whenever those rows went through layout
-// for any reason, including a narrowing column during an inspector reveal — present,
-// though not dominant, among the busy frames in the first pass. `containerList` now
-// wraps one `TimelineView` around the whole list and threads its `now` down as a plain
-// value: one subscription instead of N, matching Apple's own TimelineView guidance.
-// Measured before/after (Instruments, same route, same container selected): no change
-// outside trial-to-trial noise (~358–375ms before, ~373ms after) — this was never the
-// floor, only a legitimate, orthogonal cleanup kept for its own sake.
+// One thing here IS still ours, and it is the opposite of what the previous pass
+// believed. This list used to give every visible row its own per-second `TimelineView`;
+// it now wraps one around the whole list. Measured, the per-row shape cost nothing on a
+// toggle, and the whole-list shape invalidates every row on every tick, which is O(rows)
+// where the old one was O(1) per row. At this route's row counts it is a wash; it
+// degrades with list length where the old shape did not. Tracked as UI-057 — left in
+// place deliberately rather than churned back, with the numbers on the ticket.
 
 import Foundation
 import MorbstackKit
@@ -470,16 +453,19 @@ struct ContainersRootView: View {
 
     private var containerList: some View {
         let grouped = TrackBContainerGrouping.groups(of: filtered)
-        // One clock for the whole list, not one per row. Each row used to carry its
-        // own `TimelineView`, which means up to ~20 concurrently-visible rows each
-        // held an independent AttributeGraph subscription that had to be resubscribed
-        // whenever the list's rows were laid out again for any reason — including an
-        // unrelated `.inspector` reveal narrowing the column, which forces every
-        // visible row through layout regardless of which second last ticked. A single
-        // shared tick, read into `now` and threaded down as a plain value, produces
-        // the same once-a-second status text with one subscription instead of N. See
-        // "On the inspector's reveal animation not sliding" in this file's header
-        // comment for the measurement and what it did and did not explain.
+        // One clock for the whole list, not one per row, threaded down as a plain
+        // value. This was introduced to avoid ~20 per-row AttributeGraph
+        // subscriptions being re-established on every layout pass — but that cost
+        // was assumed, not measured, and when it was finally measured it was not
+        // there: per-row clocks cost nothing on an inspector toggle (286ms of CPU
+        // against this shape's 310ms, inside the noise).
+        //
+        // What this shape does cost is a tick that invalidates the WHOLE list every
+        // second instead of one label per row: O(rows) where the per-row shape was
+        // O(1) per visible row. At the row counts this route shows it is a wash, so
+        // it stays; it degrades with list length where the old shape did not. The
+        // numbers, and the reason it was left rather than churned back, are on
+        // TASKS.md UI-057. Every other route already ticks inside the cell.
         return TimelineView(.periodic(from: .now, by: 1)) { context in
             List(selection: selectionBinding) {
                 ForEach(grouped.standalone) { container in

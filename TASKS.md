@@ -500,6 +500,44 @@ whether each change actually improved the screen.
 | TASTE-11 | **`TASTE` One predicate, two rows in the Volumes Identity section** — "Volume — Anonymous" and "Prune — Eligible" are both computed from `isAnonymousVolumeName`; the second restates the first, and "Eligible" reads as a safety verdict directly above "Usage — Not scanned yet", where usage is exactly what is unknown (pass 2, found in the pane TASTE-4 cleaned). | **Done 2026-08-06** (`badc44f`) in `VolumesRootView.swift`: the "Prune" row deleted; the consequence stays where it already lived (the Remove button's caption, and the bulk-prune description). Identity section keeps exactly one row. | `done` |
 | TASTE-12 | **`TASTE` The absence sweep stopped at Volumes** — Images inspector still says "Reported use — Not reported" plus a remedy-free footnote ("Docker did not report container usage for this image."), the Stacks project inspector still carries "Compose files — Not reported", and the app now has two vocabularies for one category of absence: "Not scanned yet" (Volumes) vs "Not reported" (Images) (pass 2). | **Done 2026-08-06** (`5f8f223`) in `ImagesRootView.swift`: "Reported use" now says "Not scanned yet" (matching TASTE-5's constant) with the Disk-scan remedy named once. The Stacks "Compose files — Not reported" row was audited and deliberately left alone — `TrackDComposeMetadata.load` caches a permanent negative lookup with no scan/refresh/action that could ever change the answer, which is exactly the case reserved for "Not reported." One vocabulary, applied correctly rather than uniformly. | `done` |
 
+## UI-057 · `MorbSavedState.purge()` misses the path that actually wedges · `open`
+
+Found while recording the animated captures (2026-08-07). A wedged AppKit window-restoration
+store kept resurrecting a broken "Logs — No services" window over every new launch, defeating
+`--tour-select` and several capture attempts until it was removed by hand.
+
+The store was at `$TMPDIR/com.apple.testmanagerd/dev.morbstack.app.savedState`. That is exactly
+the failure `AppLaunchRescue.swift`'s `MorbSavedState.purge()` exists to prevent — it just is not
+in the candidate list, because that path only appears when the app has been launched under
+XCUITest, which is how every automated capture run starts it.
+
+**Deliverable:** add the `com.apple.testmanagerd` location to `purge()`'s candidates, and check
+whether any other launch context produces a saved-state path the list also misses. A test that
+pins the candidate set against the known locations would stop this recurring — this is the same
+"two things that must agree with nothing checking" shape as the completions drift and the search
+glyph, and it is the fifth instance.
+
+## UI-058 · "Jump to Newest" does not start following · `open`
+
+Found while recording the Compose log window (2026-08-07), and visible in
+`docs/gallery/containers-compose-logs.gif`.
+
+Two related faults in the same surface:
+
+1. The window **opens scrolled to its oldest buffered lines** rather than the newest, despite
+   declaring `.defaultScrollAnchor(.bottom)`.
+2. Clicking **"Jump to Newest" scrolls once and does not establish ongoing follow.** New lines keep
+   arriving — the line counter climbs — and the view goes stale again immediately.
+
+The second is the worse of the two: a control named "Jump to Newest" beside a live stream reads as
+"follow the stream", and a user watching a deploy will believe they are seeing current output when
+they are not. Silent staleness in a log view is a correctness problem, not a polish one.
+
+**Deliverable:** opening lands at the newest line, and the jump control establishes follow that
+holds until the user scrolls away from the bottom — the behaviour every terminal and log viewer
+shares. Decide and document whether the control is a one-shot or a toggle; if it stays one-shot,
+it needs a different name.
+
 ## UI-051 · Right-side controls should be swallowed by the inspector · `done`
 
 > **Read the 2026-08-06 entry at the bottom first.** The overlap the last four passes were
@@ -881,34 +919,98 @@ before the isolated probe made the cause unambiguous.
 `mise run check`: exit 0. Every `.accessibilityIdentifier` string byte-identical to what it
 replaced.
 
-## UI-056 · `.inspector` reveal pops instead of sliding · `closed — platform limitation (2026-08-07)`
+## UI-056 · `.inspector` reveal pops instead of sliding · `closed — not reproducible; the earlier verdict measured the wrong quantity (2026-08-07)`
 
 Reported against `ContainersRootView`: closing the trailing inspector slides; opening it stalls
-and pops in place. Two plausible Morbstack-side causes were tested directly and both ruled out
-before landing on the actual one — full numbers and the probe variant in
-`docs/design/tahoe/HIG-FINDINGS.md` ("Inspector reveal: a measured platform floor").
+and pops in place.
 
-- **Not expensive tab content.** `VolumesRootView`'s ~10-row inspector and
-  `ContainersRootView`'s ~30-row `Overview` tab show the same order-of-magnitude main-thread
-  block on open (~335ms vs. ~358–375ms), and the SIDEBAR toggle — no inspector content at all —
-  shows ~387ms.
-- **Not a view-identity bug.** Selected the Logs tab, closed the inspector, reopened it: still on
-  Logs, log buffer unchanged. A dropped/rebuilt `ContainerDetailView` identity would have reset
-  that `@State` to `.overview`. It did not, with this week's outermost-`.inspectorColumnWidth`
-  fix already in place (that fix stays — it solved a separate, real width-clipping bug).
-- **Reproduces in stock SwiftUI, zero Morbstack code.** `docs/design/probes/ToolProbe.swift`,
-  variant `inspectorForm` (`NavigationSplitView` + `Table` + `.inspector(isPresented:)` around a
-  trivial 3-row `Form`, no conditional, `.inspectorColumnWidth` deliberately not outermost):
-  opening from `--closed` produces the same ~490ms unbroken main-thread block at the click.
-- **Every open, not a one-time warm-up.** Repeated open→close→open→close→open on one probe
-  window, each transition profiled with precise click-epoch timing: 442ms / 341ms / 309ms /
-  319ms / 322ms. No downward trend across three repeated opens — rules out "warm the inspector
-  column at launch" as a fix, since there is no cold/warm distinction to exploit.
+**This ticket was closed on 2026-08-07 as an unfixable platform limitation. That was wrong and
+is retracted here.** Full numbers, the subtraction matrix and both new instruments are in
+`docs/design/tahoe/HIG-FINDINGS.md` ("Inspector reveal: what the ~350ms actually is").
 
-Dominated (leaf-symbol categorized) by AppKit's own `NSView`/`NSWindow` Auto Layout,
-`NSTableRowView` row management, Objective-C runtime/ARC churn, and CoreAnimation commit —
-system cost in the CLAUDE.md §1.7 sense. Closed as a platform limitation rather than left open:
-there is no content-layer or Morbstack-structure change on file that plausibly closes a ~300ms+
-gap against a several-hundred-ms floor that reproduces in a three-row stock `Form`. Revisit if a
-future macOS SDK changes `.inspector`'s reveal cost, or if Apple documents a way to pre-warm a
-split-view item's AppKit backing before first presentation.
+What the earlier round got right: the toggle really does cost ~250–350ms of main-thread CPU, on
+the real app and in a stock-SwiftUI probe alike, and that number has not moved. What it got
+wrong is what the number *means*. Instruments' Time Profiler reports an unbroken run of
+main-thread samples; that was read as a ~350ms **block** before the first animated frame. It is
+not a block — it is the animation running, which is supposed to keep the main thread busy for
+its whole duration. Two instruments on the same six real clicks:
+
+- external CPU delta (`docs/design/probes/axpress-cost.sh`): 400 / 290 / 300 / 290 / 290 / 340ms
+- in-process 2ms stall meter (`docs/design/probes/PerfProbe.swift`): **0ms — no gap above 30ms**
+
+The three specific claims that carried the "unfixable" verdict, each now contradicted:
+
+- **"It is every open, not a one-time warm-up."** Eight consecutive `AXPress` toggles on a real
+  window produced exactly one block: the first reveal, 307ms. The other seven produced nothing
+  above 30ms. It *is* a one-time cost. The first reveal's size also decays with machine warmth
+  (523 → 362 → 92 → 61 → 47ms across consecutive launches), so any figure quoted without the
+  machine state is not comparable to any other.
+- **"Closing is free on Containers — 0 samples, confirmed twice."** Not reproducible. Eight
+  alternating toggles on the real route cost 340 / 250 / 230 / 230 / 270 / 250 / 250 / 340ms
+  with no direction dependence. The probe/route asymmetry was entirely `start=open` vs
+  `--closed`: the block lands on whichever transition *first* presents the column, and all nine
+  routes already ship `showsInspector = true`, so they pay it invisibly during window setup.
+- **"SwiftUI has no frames left to interpolate, so the column appears rather than slides."** It
+  slides. `docs/design/probes/AXColumnTrace.swift` reads the content column's width out of the
+  running app through the accessibility API; four consecutive toggles on the real Containers
+  route drew 3, 6, 3 and 2 intermediate widths, ramping in both directions.
+
+Subtraction also cleared two Morbstack-side suspects for good: the toolbar costs +11 to +18ms
+whatever is in it and wherever it is mounted, and `.inspectorColumnWidth(min:ideal:max:)` costs
+194.3ms against a single fixed value's 197.4ms — no constraint-solve penalty, so the
+outermost-modifier fix on all nine routes stays exactly as it is. 62% of the remaining cost is
+the minimum case: a bare `NavigationSplitView` with a `Text` on either side and no toolbar
+spends 181ms of CPU presenting the column, at 88% of a 165Hz panel's frames. That part is the
+system's, and it does not block.
+
+Closed as not reproducible rather than fixed: no code changed. What changed is the instruments,
+which are now in the tree.
+
+## UI-057 · One `TimelineView` around a whole `List` invalidates every row, once a second · `open`
+
+Found while subtracting UI-056, on an axis nobody was looking at: not the cost of a transition,
+but a **recurring** cost that runs forever while a route is on screen.
+
+`caab2f9` consolidated `ContainersRootView`'s per-row clocks — every visible row carried its own
+`TimelineView(.periodic(by: 1))` — into one `TimelineView` wrapping the entire `List`, with the
+date threaded down as a plain value. The stated reason was that per-row subscriptions had to be
+resubscribed on every layout pass, including during an unrelated `.inspector` reveal.
+
+Measured, that reason does not hold and the replacement has a scaling cost the original did not.
+`docs/design/probes/PerfProbe.swift` has the three shapes behind one axis (`rowclock=none`,
+`shared`, `per`), which makes them directly comparable in stock SwiftUI with no Morbstack code:
+
+- **The stated problem is not measurable.** Per-row `TimelineView`s cost nothing during an
+  inspector toggle: 100 rows at `per` measured 286.4ms of CPU against `shared`'s 310.2ms and
+  `none`'s 268.9ms — all inside the noise, and no main-thread block in any of the three.
+- **The replacement blocks the main thread once a second, and it scales with the row count.**
+  Over 20s of complete idle with an accessibility client attached, no interaction at all:
+
+  | rows | `none` | `per` | `shared` |
+  | --- | --- | --- | --- |
+  | 20 | 2 blocks / 367ms · 2 / 282ms | 2 / 367ms · 1 / 53ms | 4 / 419ms · 1 / 46ms |
+  | 100 | 2 / 230ms · 2 / 192ms | 2 / 268ms · 0 / 0ms | **11 / 581ms · 18 / 769ms** |
+
+  (two reps per cell, blocks ≥30ms.) The mechanism is straightforward: a clock *outside* the
+  `List` invalidates the whole list every tick, so the cost is O(rows); a clock inside each row
+  invalidates one label, so it is O(1) per row and the rows that are not visible cost nothing.
+
+Two honest qualifications, because this is not a fire:
+
+- **It only appears once an accessibility client has touched the window.** With no AX client the
+  same runs show 0–1 blocks for every shape. AppKit builds accessibility elements lazily and a
+  whole-list invalidation then rebuilds the whole list's AX tree. Real users hit this whenever
+  VoiceOver, Voice Control, a window manager or our own tour/XCUITest tooling is attached — and
+  every measurement this project has ever taken through AppleScript `AXPress` was taken in that
+  state.
+- **At the row count Containers actually shows it is not measurable.** The 20-row rows are a
+  wash. The defect is that the shape degrades with list length where the previous one did not.
+
+So: not a regression anyone can see today, and not worth reverting on its own. Worth fixing when
+that file is next touched, by moving the clock back inside the row.
+
+The rest of the app is already in the cheap shape, checked rather than assumed —
+`StacksRootView:642`, `KubernetesRootView:1117` and `:1189` all declare the per-second
+`TimelineView` *inside* the cell that shows the ticking value, and `ImagesRootView:839` /
+`BuildsRootView:777`, `:914` tick once a minute. `ContainersRootView:483` is the only place a
+periodic clock wraps a whole collection.

@@ -10,6 +10,13 @@
 //      what shares one glass capsule with what?                          (round 2)
 //   5. Is the sidebar/inspector toggle asymmetry ours or the platform's?  (round 2)
 //
+// Question 5 has since been answered, and NOT here: see `PerfProbe.swift`, which is the
+// same idea taken apart into independent axes and given a main-thread stall meter. The
+// asymmetry is neither ours nor a platform floor — it is whether the inspector starts
+// open. `ToolProbe`'s `inspectorForm` variant launched `--closed`, which is what made
+// its first open expensive. Do not re-derive a timing conclusion from this file; it can
+// show you a window, not what the window costs.
+//
 // Build and capture with `./run-probe.sh`. Every variant is one declaration
 // shape; nothing here imports or mimics Morbstack.
 //
