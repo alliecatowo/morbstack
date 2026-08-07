@@ -121,14 +121,17 @@ source-level exception proposed for one selected Pod TCP lease. Kubernetes
 controls log rotation and Event retention, so an empty result means only that
 no retained data was returned at that moment.
 
-### Planned selected-Pod local port-forward
+### Selected-Pod local port-forward
 
-**Status: source-level coordinator, daemon IPC, and `morb` CLI only; not tested
-or released.** This is the only port-forward capability proposed for
-Morbstack. It is deliberately a small local-development escape hatch, not a
-general Kubernetes proxy and not a replacement for a person's `kubectl`
-installation. `K8sManager` owns the bounded session model. The CLI is its
-explicit owner while there is no native row action:
+**Status: daemon coordinator and IPC, `morb` CLI, and a native inspector
+action, all against the one shared lease — not yet run through the full
+acceptance matrix below on a real cluster.** This is the only port-forward
+capability Morbstack offers. It is deliberately a small local-development
+escape hatch, not a general Kubernetes proxy and not a replacement for a
+person's `kubectl` installation. `K8sManager` owns the bounded session model,
+and there is exactly **one** lease at a time, daemon-process-local — starting
+a second forward requires cancelling the first, whether it was started by the
+CLI or the app.
 
 ```sh
 # The UID must be copied from the exact currently selected Pod, not inferred
@@ -152,11 +155,30 @@ a Ready Kubernetes runtime. It does not enable Kubernetes, generate a
 kubeconfig, or publish the Kubernetes API just because a command asks for a
 Pod forward.
 
-There is no native UI action yet, so this source-level CLI boundary does not
-claim that a command-line caller is the app's current visual selection. It
-still revalidates the exact live namespace/name/UID and requested running
-container before and after helper readiness; a reused Pod name cannot be
-adopted.
+**The native action** lives in the selected Pod's inspector
+(`KubernetesRootView.podPortForwardSection`), below its Containers section: a
+Pod-port field, an optional local-port field, and Start/Cancel, plus
+Open-in-Browser and Copy-Address once a forward is live. It calls the exact
+same `k8s-port-forward-start` / `-status` / `-cancel` daemon commands the CLI
+above does, through typed `DaemonClient` methods and a client-facing
+`K8s.PodPortForwardLease` decoded from the identical IPC reply — there is no
+second implementation to drift from the CLI's. Because the daemon holds only
+one lease, the inspector shows an honest "a forward to `<namespace>/<pod>` is
+active" state, with its own cancel action, when the active lease belongs to a
+different Pod than the one currently selected, rather than presenting a
+`start` action that would just fail. Changing the pod or node selection,
+switching the resource picker, or leaving the Kubernetes route cancels a
+forward *this route started* for the pod being left — matching "Cancellation
+and cleanup" in the table below — but never touches a lease that belongs to a
+different Pod (for example one left running by `morb k8s port-forward`, or
+one for a Pod selected earlier in the same session): browsing away from
+*viewing* that fact must not be read as cancelling it.
+
+This source-level CLI boundary does not claim that a command-line caller is
+the app's current visual selection, and the native action does not claim
+CLI-started forwards as its own for teardown purposes. Both revalidate the
+exact live namespace/name/UID and requested running container before and
+after helper readiness; a reused Pod name cannot be adopted.
 
 The source tree records the exact Darwin arm64 `kubectl` release the
 coordinator uses, and `scripts/fetch-guest-assets.sh` fetches and
@@ -212,20 +234,21 @@ no transparent reconnect, retarget, retry loop, background persistence, or
 restoration after restart: the person selects the current Pod and explicitly
 starts a new forward.
 
-Required acceptance before this status can change:
+Required acceptance before this status can change to fully verified:
 
-| Case | Required proof |
-| --- | --- |
-| Exact selection and authority | A selected Pod/UID succeeds; an old UID, another Pod, Service, selector, arbitrary command, user `kubectl`, and user kubeconfig are each rejected or unused. |
-| Listener boundary | The usable endpoint is TCP on `127.0.0.1` only; wildcard, LAN, VPN, UDP, ranges, and invalid ports fail without a listener. |
-| Credential and binary provenance | The daemon uses the bundled pinned binary and its private ephemeral credential input; `PATH`, `KUBECONFIG`, `~/.kube/config`, and logs/process arguments contain no controlling or leaked user credential state. |
-| Readiness and drift | Cluster/API/credential/Pod/port changes both before readiness and after startup close or prevent the forward with a specific recovery message. |
-| Cancellation and cleanup | Explicit cancel, route/selection change, VM/Kubernetes stop, child failure, and listener failure close all sockets/relays, kill the child group, and remove temporary credentials. |
-| No implicit restoration | Pod restart/reschedule, daemon/app restart, and VM recovery leave no listener or child; a new current selection and explicit request are required. |
+| Case | Required proof | Status |
+| --- | --- | --- |
+| Exact selection and authority | A selected Pod/UID succeeds; an old UID, another Pod, Service, selector, arbitrary command, user `kubectl`, and user kubeconfig are each rejected or unused. | Validation paths unit-tested (`K8sPortForwardTests`-style DNS/port rejection); UID/Pod-changed rejection reachable but not yet exercised against a real cluster. |
+| Listener boundary | The usable endpoint is TCP on `127.0.0.1` only; wildcard, LAN, VPN, UDP, ranges, and invalid ports fail without a listener. | By construction (`--address 127.0.0.1`, fixed args); not independently probed with a socket client. |
+| Credential and binary provenance | The daemon uses the bundled pinned binary and its private ephemeral credential input; `PATH`, `KUBECONFIG`, `~/.kube/config`, and logs/process arguments contain no controlling or leaked user credential state. | By construction; not independently audited on a live run. |
+| Readiness and drift | Cluster/API/credential/Pod/port changes both before readiness and after startup close or prevent the forward with a specific recovery message. | Not exercised live. |
+| Cancellation and cleanup | Explicit cancel, route/selection change, VM/Kubernetes stop, child failure, and listener failure close all sockets/relays, kill the child group, and remove temporary credentials. | Daemon-side (explicit cancel, VM/Kubernetes stop) already existed and is unchanged. App-side "route/selection change" is now implemented (`cancelOwnedPortForwardIfNeeded`) but not exercised live. |
+| No implicit restoration | Pod restart/reschedule, daemon/app restart, and VM recovery leave no listener or child; a new current selection and explicit request are required. | By construction (no persisted lease state anywhere); not independently probed. |
 
-Passing that matrix on a real local cluster is a prerequisite for an
-implementation claim. It is not evidence of a general port-forward feature or
-of Docker Desktop replacement release readiness.
+Passing that matrix on a real local cluster, including through the native
+action, is a prerequisite for an implementation claim. It is not evidence of a
+general port-forward feature or of Docker Desktop replacement release
+readiness.
 
 ### Bounded Pod and Node descriptions
 

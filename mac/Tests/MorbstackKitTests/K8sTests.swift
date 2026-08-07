@@ -437,6 +437,75 @@ final class K8sTests: XCTestCase {
         XCTAssertFalse(readyNoKubeconfig.guidance.contains("metrics-server"))
     }
 
+    // MARK: - Selected-Pod port-forward lease decoding
+
+    func testPortForwardLeaseDecodesTheDaemonsActiveFields() throws {
+        let id = UUID()
+        let lease = try K8s.PodPortForwardLease.decode(ipcFields: [
+            "active": .bool(true),
+            "lease": .string(id.uuidString.lowercased()),
+            "namespace": .string("default"),
+            "pod": .string("hello-web-6d9c8f7b7-x4n2q"),
+            "container": .string("hello-web"),
+            "local_address": .string("127.0.0.1"),
+            "local_port": .int(54321),
+            "pod_port": .int(8080),
+        ])
+        let unwrapped = try XCTUnwrap(lease)
+        XCTAssertEqual(unwrapped.id, id)
+        XCTAssertEqual(unwrapped.namespace, "default")
+        XCTAssertEqual(unwrapped.pod, "hello-web-6d9c8f7b7-x4n2q")
+        XCTAssertEqual(unwrapped.container, "hello-web")
+        XCTAssertEqual(unwrapped.localPort, 54321)
+        XCTAssertEqual(unwrapped.podPort, 8080)
+        XCTAssertEqual(unwrapped.podID, "default/hello-web-6d9c8f7b7-x4n2q")
+    }
+
+    func testPortForwardLeaseDecodesAnOmittedContainerAsNil() throws {
+        let lease = try K8s.PodPortForwardLease.decode(ipcFields: [
+            "active": .bool(true),
+            "lease": .string(UUID().uuidString),
+            "namespace": .string("default"),
+            "pod": .string("hello-web"),
+            "container": .null,
+            "local_port": .int(1024),
+            "pod_port": .int(80),
+        ])
+        XCTAssertNil(try XCTUnwrap(lease).container)
+    }
+
+    func testPortForwardLeaseDecodesNoActiveLeaseAsNilRatherThanThrowing() throws {
+        let lease = try K8s.PodPortForwardLease.decode(ipcFields: ["active": .bool(false)])
+        XCTAssertNil(lease)
+    }
+
+    func testPortForwardLeaseDecodeThrowsOnAMalformedActiveReplyRatherThanReadingItAsIdle() {
+        // A reply that claims to be active but is missing required fields must not
+        // be silently read as "no forward" — that would hide a real daemon/app
+        // protocol mismatch as an ordinary idle state.
+        XCTAssertThrowsError(
+            try K8s.PodPortForwardLease.decode(ipcFields: [
+                "active": .bool(true),
+                "lease": .string(UUID().uuidString),
+                "namespace": .string("default"),
+                // "pod" missing
+                "local_port": .int(1024),
+                "pod_port": .int(80),
+            ]))
+    }
+
+    func testPortForwardLeaseDecodeThrowsOnAnInvalidLeaseID() {
+        XCTAssertThrowsError(
+            try K8s.PodPortForwardLease.decode(ipcFields: [
+                "active": .bool(true),
+                "lease": .string("not-a-uuid"),
+                "namespace": .string("default"),
+                "pod": .string("hello-web"),
+                "local_port": .int(1024),
+                "pod_port": .int(80),
+            ]))
+    }
+
     // MARK: - Payload pins
 
     func testPayloadDigestsMatchTheFetchScript() throws {

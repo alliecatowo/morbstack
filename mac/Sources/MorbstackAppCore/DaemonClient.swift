@@ -230,6 +230,52 @@ class DaemonClient: @unchecked Sendable {
         return received
     }
 
+    /// Reads the daemon's current selected-Pod port-forward lease, or `nil` when
+    /// none is active. Like the other Kubernetes reads, this never starts a VM, a
+    /// forward, or anything else — a lease is daemon-process-local, so this can
+    /// answer even while the VM is stopped.
+    func kubernetesPodPortForwardStatus() async throws -> K8s.PodPortForwardLease? {
+        let fields = try await kubernetesCommand("k8s-port-forward-status")
+        return try K8s.PodPortForwardLease.decode(ipcFields: fields)
+    }
+
+    /// Starts the daemon's one selected-Pod local port forward. `uid` must be the
+    /// exact currently selected Pod's Kubernetes UID: the daemon revalidates it
+    /// before and after startup and rejects a stale one, the same authority rule
+    /// `podEvents(for:)` already applies.
+    func startKubernetesPodPortForward(
+        namespace: String, pod: String, uid: String, container: String?,
+        localPort: Int?, podPort: Int
+    ) async throws -> K8s.PodPortForwardLease {
+        var args = [
+            "namespace": namespace,
+            "pod": pod,
+            "uid": uid,
+            "pod_port": String(podPort),
+        ]
+        if let container { args["container"] = container }
+        if let localPort { args["local_port"] = String(localPort) }
+        let fields = try await kubernetesCommand("k8s-port-forward-start", args: args)
+        guard let lease = try K8s.PodPortForwardLease.decode(ipcFields: fields) else {
+            throw MorbError.protocolViolation(
+                "morbstackd started a Kubernetes port forward but did not report it as active")
+        }
+        return lease
+    }
+
+    /// Cancels exactly the daemon's current lease with this ID. A stale ID is not
+    /// an error — `cancelled` reports whether this call is what ended a forward.
+    @discardableResult
+    func cancelKubernetesPodPortForward(lease: UUID) async throws -> Bool {
+        let fields = try await kubernetesCommand(
+            "k8s-port-forward-cancel", args: ["lease": lease.uuidString.lowercased()])
+        guard case .bool(let cancelled)? = fields["cancelled"] else {
+            throw MorbError.protocolViolation(
+                "morbstackd returned an invalid Kubernetes port-forward cancellation")
+        }
+        return cancelled
+    }
+
     private func decodeKubernetesStatus(command: String) async throws -> K8s.Status {
         let fields = try await kubernetesCommand(command)
         return try decodeKubernetesStatus(fields)
