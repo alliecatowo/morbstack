@@ -478,6 +478,47 @@ is selected, a mid-run menu makes the **capsule count change with the selection*
 capsules with nothing selected, three with something selected). Menu-first keeps it at
 two either way, so the bar stops re-fragmenting as you click down a list.
 
+#### 4a. Two `Menu`s do not fuse, even adjacent — and what that means for a route with two menus' worth of content
+
+Written for UI-054's Stacks half. The question the Images fix left open: if a route
+needs *two* menus — a selection-scoped record menu and the route's own options menu —
+does declaring them adjacent, both at the head, produce one capsule the way two plain
+buttons do?
+
+Probe `twoMenusAdjacent`: two `Menu`s back to back, nothing between them, a plain button
+trailing. A row scan at y 26 (`docs/design/probes/ToolProbe.swift`, capture via
+`run-probe.sh twoMenusAdjacent`) reads:
+
+| x range | tone | capsule |
+| --- | --- | --- |
+| 1404–1450 | fill `1f24xx` | menu 1 |
+| 1452 | gap `1b1f20` | — |
+| 1458–1500 | fill `1f24xx` | menu 2 |
+| 1506–1512 | gap `1b1f20` | — |
+| 1518–1584 | fill `1f24xx` | trailing button + toggle |
+
+**Three capsules, not one.** A `Menu` earns its own capsule regardless of what is or is
+not next to it — adjacency does not fuse two menus the way it fuses two buttons.
+Reordering — the fix that closed Images — cannot produce one capsule for a route that
+carries two menus' worth of content. There is no arrangement of two separate `Menu`
+values that reaches the two-capsule shape.
+
+**The rule:** if a route has more than one menu's worth of trailing content, merge the
+*content* into one `Menu`, sectioned by `Divider`, rather than declaring a second `Menu`.
+One `Menu`, one identifier, one capsule — the same way a single macOS File menu holds
+both document-scoped and application-scoped commands instead of splitting into two menus
+that come and go with what document is open. Stacks (§6) is the applied case: its
+selection-scoped record menu and its `stacks.options` menu collapsed into one
+`stacks.actions`, with the record's commands above a `Divider` and Refresh/Edit Compose
+File below, constant at two capsules regardless of selection. Verified on a real window,
+1600×1000 dark, `stacks.actions` fill 1458–1502 (or 1310–1354 with a record section
+present) separated from the trailing `[search inspector]` fill by one background gap —
+never three, in any selection state.
+
+A `Menu`'s *items* may still vary with state, the way a File menu's items enable and
+disable per document — that is what keeps the capsule count stable while the content
+underneath keeps being honest about what is selected.
+
 ### 5. Slot order inside the run
 
 Leading → trailing, narrowing scope, view controls last:
@@ -504,9 +545,9 @@ the capsule count in the trailing run.
 
 | route | `.principal` | trailing run, in render order | pills | grammar |
 | --- | --- | --- | --- | --- |
-| Containers | — | `options`(Menu) · `primaryLifecycle` · `openTerminal` · `runCommand` · `search` · `inspector` | 2 | **fixed this pass** — menu moved to the head; was 3 with a row selected, 2 without |
-| Stacks | — | `primaryLifecycle` · `actions`(Menu) *or* `project-actions`(Menu) · `options`(Menu) · `search` · `inspector` | 2 empty / up to 4 selected | **queued** — two menus, one of them a record action; needs a decision, not a reorder |
-| Images | — | `runLocal` · `pruneDangling` · `explorePublic` · `pull` · `archive`(Menu) · `search` · `inspector` | 3 | **queued** — `archive` is a record menu; moving it to the head changes its meaning |
+| Containers | — | `options`(Menu) · `primaryLifecycle` · `openTerminal` · `runCommand` · `search` · `inspector` | 2 | fixed 2026-08-06 — menu moved to the head; was 3 with a row selected, 2 without |
+| Stacks | — | `actions`(Menu, always present) · `primaryLifecycle` · `search` · `inspector` | 2, constant | **fixed, UI-054** — `actions`/`project-actions`/`options` merged into one always-present `stacks.actions`, sectioned by a `Divider`; two adjacent `Menu`s cannot reach one capsule (§4a), so this had to be a content merge, not a reorder |
+| Images | — | `archive`(Menu) · `runLocal` · `pruneDangling` · `explorePublic` · `pull` · `search` · `inspector` | 2 | **fixed, UI-054** — menu moved to the head; `archive` behaves like a collection menu (always present, items disabled by selection) even though one of its two items acts on the selection |
 | Volumes | — | `export` · `removeUnused` · `create` · `search` · `inspector` | 1 | conforms |
 | Networks | — | `removeUnused` · `create` · `search` · `inspector` | 1 | conforms |
 | Builds | `scope` picker | `options`(Menu) · `start` · `inspector` | 2 | conforms; toggle moved `.automatic` → `.primaryAction` this pass |
@@ -534,7 +575,7 @@ the narrow case now starts from a smaller run than the one that was measured.
 
 ### 8. `TabView` must not be the inspector's content container
 
-Found this pass, reproduced in stock SwiftUI, **not yet fixed** — see the queued ticket.
+Found 2026-08-06, reproduced in stock SwiftUI, **fixed the same day — UI-055.**
 
 `TabView` draws a bordered content box. Inside `.inspector` that border lands exactly on
 chrome the window already draws: its leading edge overdraws the inspector divider, its
@@ -547,23 +588,63 @@ dark:
 | `TabView` (probe `inspectorTabView`) | `444f51` | **`61686b`** |
 | `TabView` + `.tabViewStyle(.grouped)` | `444f51` | **`61686b`** — no help |
 | `TabView` + `.tabViewStyle(.sidebarAdaptable)` | `434d50` | `434d50` — but it renders a whole sidebar inside the 400pt inspector |
+| `TabView` + `.tabViewStyle(.tabBarOnly)` | `444f51` | **`61686b`** — no help (probe `inspectorTabViewBarOnly`) |
+| `TabView` + `.background(.clear)` + `.clipShape(Rectangle())` | `444f51` | **`61686b`** — no help (probe `inspectorTabViewClipped`) |
 | segmented `Picker` + switch (probe `inspectorPickerPanes`) | `444f51` | `444f51` — constant |
-| Morbstack Containers, a container selected | `435054` | **`646a6c`** |
+| Morbstack Containers, a container selected, before | `435054` | **`646a6c`** |
 | Morbstack Volumes | `424f53` | `424f53` — constant |
 | Xcode | `455052` | `455052` — constant |
 
-The consequence is the one thing in this app that genuinely reads as "a panel that starts
-below the toolbar": the inspector's leading edge is ~30 levels brighter from the toolbar's
-lower edge down, and its content sits in a rounded card with a visible top-left corner.
-Only Containers and Builds do this, and only when a record is selected.
+The consequence was the one thing in this app that genuinely read as "a panel that starts
+below the toolbar": the inspector's leading edge ~30 levels brighter from the toolbar's
+lower edge down, its content sitting in a rounded card with a visible top-left corner.
+Only Containers and Builds did this, and only when a record was selected.
 
-There is no API to remove a `TabView`'s border — the macOS 26.4 SDK exposes
-`.automatic`, `.grouped`, `.sidebarAdaptable`, `.tabBarOnly`, `.page`, `.verticalPage`,
-`.carousel` and nothing that suppresses the box. **Apple's own inspectors do not use a
-tab container**: Xcode's inspector is a segmented control at the top of the column with
-the pane below it, which is what `inspectorPickerPanes` reproduces cleanly.
+There is no API to remove a `TabView`'s border — the macOS 26.4 SDK exposes `.automatic`,
+`.grouped`, `.sidebarAdaptable`, `.tabBarOnly`, `.page`, `.verticalPage`, `.carousel`, and
+neither a style nor `.background`/`.clipShape` suppresses the box (five stock-SwiftUI
+variants tried: `inspectorTabView`, `inspectorTabViewGrouped`,
+`inspectorTabViewSidebarAdaptable`, `inspectorTabViewBarOnly`, `inspectorTabViewClipped`).
+A sixth variant, `inspectorTabViewOverlaidDivider`, drew a 1pt `Rectangle` over the
+inspector's leading edge in the divider's measured color, to check whether the seam could
+be won by drawing over it rather than suppressing the box: it does not generalize (the
+hard-coded tone matched only the exact appearance/materials it was measured under, and the
+overlay showed the tab strip's own header disappearing behind it in the capture — a second
+failure mode, not just a color mismatch), and it is a custom-drawing hack CLAUDE.md §1.7
+already rules out regardless. **Apple's own inspectors do not use a tab container**:
+Xcode's inspector is a segmented control at the top of the column with the pane below it,
+which `inspectorPickerPanes` reproduces cleanly.
 
-Do not convert `ContainerDetailView`/Builds to a `Picker` casually: `Tab` carries the
-`containers.detail.tab.*` accessibility identifiers that
-`MorbstackFixtureUITests` queries by, and a segmented `Picker`'s options do not carry
-per-segment identifiers reliably. That is the work the queued ticket is for.
+**Fix:** `ContainerDetailView` and Builds' history inspector now use a segmented `Picker`
+over the pane, exactly Xcode's shape, not a `TabView`.
+
+The blocking assumption — *"a segmented `Picker`'s options do not carry per-segment
+identifiers reliably"* — was **wrong, and had never been measured.** Two new probe
+variants, `inspectorPickerIdentified` (a segmented `Picker` with `.accessibilityIdentifier`
+on each option) and `inspectorControlGroupIdentified` (a `ControlGroup` of `Button`s, same
+treatment), were dumped with the Accessibility API directly (`AXUIElementCopyAttributeValue`
+walking `kAXChildrenAttribute`, the same resolution `XCUITest`'s `app.descendants(matching:
+.any)[identifier]` uses) rather than reasoned about from memory:
+
+```
+[AXRadioButton] id="probe.pane.overview" title="" desc="Overview" value=""
+[AXRadioButton] id="probe.pane.logs"     title="" desc="Logs"     value=""
+[AXRadioButton] id="probe.pane.files"    title="" desc="Files"    value=""
+```
+
+Every option surfaces its own `AXIdentifier` on its own `AXRadioButton` element, both for
+the `Picker` and for the `ControlGroup`. `containers.detail.tab.overview/logs/files/
+stats/inspect` moved onto the `Picker`'s options **byte-identical**, and
+`MorbstackFixtureUITests` needed no change — it queries by identifier through
+`app.descendants(matching: .any)`, which does not care what control produced the element.
+Builds' history inspector (`details`/`log`) had no identifiers to preserve and converted
+the same way.
+
+Real-window evidence: `docs/design/probes/ToolProbe.swift`'s isolated comparison is the
+clean measurement (above); a real Containers window with a container selected shows the
+same pill-in-a-box before, a plain segmented control matching Xcode after, in both dark
+and light — screenshots, not just numbers, because the divider-tone measurement on a
+real, content-dense `Form` is confounded by the Form's own row backgrounds in a way the
+isolated probe is not (the isolated jump is ~30 levels; the same column in the real app
+moves by single digits, masked by content, which is part of why this took four passes to
+pin down before the isolated probe made it unambiguous).

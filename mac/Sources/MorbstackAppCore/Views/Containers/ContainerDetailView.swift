@@ -66,56 +66,43 @@ struct ContainerDetailView: View {
     }
 
     var body: some View {
-        // A selected container is an inspector with four peer representations, not a
-        // custom-header detail page. `TabView` supplies the macOS tab behavior,
-        // keyboard focus, accessibility, and Tahoe appearance for that choice.
-        TabView(selection: $tab) {
-            Tab(
-                TrackBDetailTab.overview.title,
-                systemImage: TrackBDetailTab.overview.symbol,
-                value: .overview)
-            {
-                tabBody(for: .overview)
+        // A selected container is an inspector with five peer representations.
+        // Apple's own inspectors — Xcode's, measured — put a segmented control at
+        // the top of the column and the selected pane below it; they do not use a
+        // `TabView`. UI-055 (docs/design/NATIVE-MACOS-PLAYBOOK.md §8) found why: a
+        // `TabView` draws a bordered content box, and inside `.inspector` that
+        // border overdraws chrome the window already draws — its leading edge
+        // overdraws the inspector's own divider from the toolbar's lower edge down.
+        // Measured at that seam: `444f51` constant for a `Form` or this `Picker`,
+        // `444f51` → `61686b` for a `TabView`, reproduced in stock SwiftUI
+        // (`docs/design/probes/ToolProbe.swift`, `inspectorTabView` vs.
+        // `inspectorPickerIdentified`) and in this view before this change
+        // (`435054` → `646a6c`). No SDK modifier suppresses the box; a segmented
+        // `Picker` is the shape Apple's own inspectors already use.
+        //
+        // The identifiers below stay byte-identical to the `Tab`s they replace.
+        // `MorbstackFixtureUITests` queries them via
+        // `app.descendants(matching: .any)[identifier]`, which does not care what
+        // control produced the element — and a segmented `Picker`'s options do
+        // carry their own `AXIdentifier`, verified with the Accessibility API
+        // against `inspectorPickerIdentified` (each option surfaces as its own
+        // `AXRadioButton` with the identifier attached, the same resolution
+        // XCUITest uses), contrary to this file's previous assumption.
+        VStack(spacing: 0) {
+            Picker("Detail", selection: $tab) {
+                ForEach(TrackBDetailTab.allCases) { candidate in
+                    Label(candidate.title, systemImage: candidate.symbol)
+                        .tag(candidate)
+                        .accessibilityIdentifier("containers.detail.tab.\(candidate.rawValue)")
+                }
             }
-            // Identifies the tab picker's own button, per rule 4 of
-            // docs/design/ACCESSIBILITY-IDENTIFIERS.md, not the pane it displays.
-            .accessibilityIdentifier("containers.detail.tab.overview")
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(.horizontal)
+            .padding(.top, 8)
+            .padding(.bottom, 8)
 
-            Tab(
-                TrackBDetailTab.logs.title,
-                systemImage: TrackBDetailTab.logs.symbol,
-                value: .logs)
-            {
-                tabBody(for: .logs)
-            }
-            .accessibilityIdentifier("containers.detail.tab.logs")
-
-            Tab(
-                TrackBDetailTab.files.title,
-                systemImage: TrackBDetailTab.files.symbol,
-                value: .files)
-            {
-                tabBody(for: .files)
-            }
-            .accessibilityIdentifier("containers.detail.tab.files")
-
-            Tab(
-                TrackBDetailTab.stats.title,
-                systemImage: TrackBDetailTab.stats.symbol,
-                value: .stats)
-            {
-                tabBody(for: .stats)
-            }
-            .accessibilityIdentifier("containers.detail.tab.stats")
-
-            Tab(
-                TrackBDetailTab.inspect.title,
-                systemImage: TrackBDetailTab.inspect.symbol,
-                value: .inspect)
-            {
-                tabBody(for: .inspect)
-            }
-            .accessibilityIdentifier("containers.detail.tab.inspect")
+            tabBody(for: tab)
         }
         // Container state changes require a fresh inspect document.  Giving the task a
         // state-aware identity lets SwiftUI cancel the superseded read rather than

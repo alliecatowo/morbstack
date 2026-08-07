@@ -501,8 +501,47 @@ struct ImagesRootView: View {
 
     /// Slots 1–3 of the toolbar grammar — see `VolumesRootView.toolbarContent` and
     /// `docs/design/NATIVE-MACOS-PLAYBOOK.md`.
+    ///
+    /// **UI-054.** `archive` is declared FIRST, ahead of every button. On macOS 26 a
+    /// `Menu` is always its own glass capsule and splits the placement run around it
+    /// (`docs/design/NATIVE-MACOS-PLAYBOOK.md` §4); declared after the four buttons,
+    /// as it used to be, the run was `[runLocal pruneDangling explorePublic pull]
+    /// [archive] [search inspector]` — three capsules, unconditionally, because
+    /// `archive` is not selection-gated and never goes away.
+    ///
+    /// Moving it is a semantic call, not just a mechanical one: `archive` reads as a
+    /// *record* menu because one of its two items ("Export Selected Image…") acts on
+    /// the selection. But the menu itself behaves exactly like Containers'
+    /// `containers.options` — a small, always-present document-operations menu whose
+    /// individual items are enabled or disabled by selection, never a menu that
+    /// appears or disappears. ("Load Image Archive…" has nothing to do with the
+    /// selection at all.) A menu's *items* may vary with state the way a File menu's
+    /// items do; the menu's *position* must not, or the run refragments — see the
+    /// Stacks case below for what happens when a route tries to keep two such menus.
+    /// Leading, the run is always `[archive] [runLocal · pruneDangling ·
+    /// explorePublic · pull · search · inspector]` — two capsules, always.
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
+        ToolbarItem(id: "images.archive", placement: .primaryAction) {
+            Menu {
+                Button("Load Image Archive…") {
+                    chooseImageArchiveForLoading()
+                }
+                .disabled(!canImportImages)
+
+                Divider()
+
+                Button("Export Selected Image…") {
+                    chooseImageArchiveDestination()
+                }
+                .disabled(!canExportSelectedImage)
+            } label: {
+                Image(systemName: "archivebox")
+            }
+            .accessibilityIdentifier("images.archive")
+            .accessibilityLabel("Image archive actions")
+            .help(imageArchiveMenuHelp)
+        }
         // 1 · record actions — act on the selected image.
         ToolbarItem(id: "images.runLocal", placement: .primaryAction) {
             Button {
@@ -546,30 +585,6 @@ struct ImagesRootView: View {
             .accessibilityIdentifier("images.pull")
             .accessibilityLabel("Pull an image")
             .help("Pull an image")
-        }
-        // 3 · the route's menu. Import and export are two document operations in one
-        // small, native Menu. Grouping them keeps the toolbar from accumulating
-        // unrelated one-off glyphs; the full commands remain discoverable in the Image
-        // menu and inspector.
-        ToolbarItem(id: "images.archive", placement: .primaryAction) {
-            Menu {
-                Button("Load Image Archive…") {
-                    chooseImageArchiveForLoading()
-                }
-                .disabled(!canImportImages)
-
-                Divider()
-
-                Button("Export Selected Image…") {
-                    chooseImageArchiveDestination()
-                }
-                .disabled(!canExportSelectedImage)
-            } label: {
-                Image(systemName: "archivebox")
-            }
-            .accessibilityIdentifier("images.archive")
-            .accessibilityLabel("Image archive actions")
-            .help(imageArchiveMenuHelp)
         }
         if model.images.isEmpty {
             trailingCommandItems

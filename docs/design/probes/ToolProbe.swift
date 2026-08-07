@@ -121,6 +121,12 @@ enum Variant: String, CaseIterable {
     case groupPairSpacer
     /// A `Menu` next to plain buttons: does a menu share the capsule?
     case menuInRun
+    /// Two `Menu`s declared back to back, nothing between them: do they fuse
+    /// into one capsule (both being menus) or still split into two, the way
+    /// one `Menu` mid-run splits everything around it? Answers the Stacks
+    /// decision in UI-054 — whether a record-scoped menu and the route's
+    /// options menu can sit adjacently at the head of the run as one capsule.
+    case twoMenusAdjacent
 
     // ---- round 3: search as a glyph, with the machinery kept ----
 
@@ -170,6 +176,25 @@ enum Variant: String, CaseIterable {
     /// The shape Apple's own inspectors use: a segmented `Picker` at the top of
     /// the pane and the selected view below it. No tab container at all.
     case inspectorPickerPanes
+    /// Same shape, but each segment's label carries `.accessibilityIdentifier`,
+    /// to test whether a synthesized `NSSegmentedControl` segment surfaces a
+    /// per-segment `AXIdentifier` the way XCUITest resolution needs. (UI-055)
+    case inspectorPickerIdentified
+    /// Apple's `ControlGroup` — a segmented-looking cluster made of real,
+    /// independent `Button`s rather than one synthesized control — with an
+    /// `.accessibilityIdentifier` on each `Button`. (UI-055)
+    case inspectorControlGroupIdentified
+    /// `TabView` content wrapped in `.clipShape(Rectangle())` /
+    /// `.background(.clear)` / `.tabViewStyle(.tabBarOnly)`, to check whether
+    /// any of the remaining, less-obvious modifiers suppresses the content
+    /// box the plain `TabView` variant draws. (UI-055)
+    case inspectorTabViewClipped
+    case inspectorTabViewBarOnly
+    /// The overlay approach: `TabView` left exactly as shipped, plus a 1pt
+    /// `Rectangle` redrawn on top of the inspector's leading edge in the
+    /// divider's own color, to see whether drawing over the seam is even
+    /// geometrically viable before ruling it out on design grounds. (UI-055)
+    case inspectorTabViewOverlaidDivider
 
     // ---- round 4: what orders the trailing run? ----
 
@@ -276,6 +301,53 @@ struct ProbeContent: View {
                 .padding(.top, 8)
                 inspectorForm
             }
+        case .inspectorPickerIdentified:
+            VStack(spacing: 0) {
+                Picker("Pane", selection: $pane) {
+                    Text("Overview").tag(0)
+                        .accessibilityIdentifier("probe.pane.overview")
+                    Text("Logs").tag(1)
+                        .accessibilityIdentifier("probe.pane.logs")
+                    Text("Files").tag(2)
+                        .accessibilityIdentifier("probe.pane.files")
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .padding(.horizontal)
+                .padding(.top, 8)
+                inspectorForm
+            }
+        case .inspectorControlGroupIdentified:
+            VStack(spacing: 0) {
+                ControlGroup {
+                    Button("Overview") { pane = 0 }
+                        .accessibilityIdentifier("probe.pane.overview")
+                    Button("Logs") { pane = 1 }
+                        .accessibilityIdentifier("probe.pane.logs")
+                    Button("Files") { pane = 2 }
+                        .accessibilityIdentifier("probe.pane.files")
+                }
+                .padding(.horizontal)
+                .padding(.top, 8)
+                inspectorForm
+            }
+        case .inspectorTabViewClipped:
+            inspectorTabs
+                .background(.clear)
+                .clipShape(Rectangle())
+        case .inspectorTabViewBarOnly:
+            inspectorTabs.tabViewStyle(.tabBarOnly)
+        case .inspectorTabViewOverlaidDivider:
+            inspectorTabs
+                .overlay(alignment: .leading) {
+                    // The measured divider tone from the playbook's §8 table
+                    // (`444f51` in the stock probe, above the toolbar's lower
+                    // edge). Drawn 1pt wide at the inspector's own leading
+                    // edge to test whether an overlay can win the seam.
+                    Rectangle()
+                        .fill(Color(red: 0x44 / 255, green: 0x4f / 255, blue: 0x51 / 255))
+                        .frame(width: 1)
+                }
         default:
             inspectorForm
         }
@@ -329,8 +401,8 @@ struct ProbeContent: View {
         }
         if variant != .placementMap && variant != .groupingRules && variant != .toggleSymmetry
             && !isSpacerMatrix && variant != .groupPair && variant != .groupPairSpacer
-            && variant != .menuInRun && !isGlyphSearch && !isSearchPlacementSweep
-            && variant != .glyphToggle && variant != .runOrder
+            && variant != .menuInRun && variant != .twoMenusAdjacent && !isGlyphSearch
+            && !isSearchPlacementSweep && variant != .glyphToggle && variant != .runOrder
         {
             ToolbarItem(id: "probe.create", placement: .primaryAction) {
                 Button {} label: { Image(systemName: "plus") }
@@ -349,8 +421,8 @@ struct ProbeContent: View {
             || variant == .toggleSymmetry || variant == .principalToggleLast
             || variant == .principalAllTrailing || isSpacerMatrix
             || variant == .groupPair || variant == .groupPairSpacer || variant == .menuInRun
-            || isGlyphSearch || isSearchPlacementSweep || variant == .glyphToggle
-            || variant == .runOrder
+            || variant == .twoMenusAdjacent || isGlyphSearch || isSearchPlacementSweep
+            || variant == .glyphToggle || variant == .runOrder
         {
             ToolbarItem(id: "probe.inspector", placement: .primaryAction) {
                 Button { showsInspector.toggle() } label: { Image(systemName: "sidebar.right") }
@@ -497,6 +569,29 @@ struct ProbeContent: View {
         }
     }
 
+    @ToolbarContentBuilder
+    private var twoMenusAdjacentItems: some ToolbarContent {
+        ToolbarItem(id: "probe.menu1", placement: .primaryAction) {
+            Menu {
+                Button("Start") {}
+                Button("Stop") {}
+            } label: {
+                Image(systemName: "ellipsis")
+            }
+        }
+        ToolbarItem(id: "probe.menu2", placement: .primaryAction) {
+            Menu {
+                Button("Refresh") {}
+                Button("Edit…") {}
+            } label: {
+                Label("Options", systemImage: "slider.horizontal.3")
+            }
+        }
+        ToolbarItem(id: "probe.trailingButton", placement: .primaryAction) {
+            Button {} label: { Image(systemName: "b.circle") }
+        }
+    }
+
     private var isSpacerMatrix: Bool {
         switch variant {
         case .spacerNone, .spacerFixedDefault, .spacerFixedPrimary, .spacerFlexPrimary,
@@ -541,6 +636,7 @@ struct ProbeContent: View {
         if variant == .automaticRun { automaticRunItems }
         if variant == .searchSquashed { searchSquashedItems }
         if variant == .searchAccessoryBar { searchAccessoryBarItems }
+        if variant == .twoMenusAdjacent { twoMenusAdjacentItems }
         if usesStandardItems { standardItems }
     }
 
@@ -550,7 +646,7 @@ struct ProbeContent: View {
         case .placementMap, .groupingRules, .toggleSymmetry, .crowded,
             .principalAllTrailing, .automaticRun, .searchSquashed, .searchAccessoryBar,
             .spacerNone, .spacerFixedDefault, .spacerFixedPrimary, .spacerFlexPrimary,
-            .spacerSharedHidden, .groupPair, .groupPairSpacer, .menuInRun,
+            .spacerSharedHidden, .groupPair, .groupPairSpacer, .menuInRun, .twoMenusAdjacent,
             .glyphOnly, .glyphSidebar, .glyphRemoveInner,
             .searchAtNavigation, .searchAtStatus, .searchAtDestructive, .searchAtConfirmation,
             .glyphToggle:
@@ -745,7 +841,10 @@ struct RootSearchModifier: ViewModifier {
             // Round 4 asks about the inspector's content container, not about
             // search; leaving search off keeps those captures to one variable.
             .inspectorForm, .inspectorTabView, .inspectorTabViewGrouped,
-            .inspectorTabViewSidebarAdaptable, .inspectorPickerPanes, .runOrder:
+            .inspectorTabViewSidebarAdaptable, .inspectorPickerPanes, .runOrder,
+            .inspectorPickerIdentified, .inspectorControlGroupIdentified,
+            .inspectorTabViewClipped, .inspectorTabViewBarOnly,
+            .inspectorTabViewOverlaidDivider, .twoMenusAdjacent:
             content
         case .automaticRun, .searchSquashed, .searchAccessoryBar:
             // The item is positioned by the explicit `DefaultToolbarItem`

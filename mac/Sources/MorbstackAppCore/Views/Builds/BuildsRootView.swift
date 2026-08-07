@@ -1029,22 +1029,32 @@ struct BuildsRootView: View {
                     }
                 }
             case .loaded(let detail):
-                // These are two representations of one selected record. The native
-                // TabView owns peer-destination behavior and keeps raw output outside
-                // the factual Form.
-                TabView(selection: $historyInspectorTab) {
-                    Tab(
-                        "Details",
-                        systemImage: "doc.text",
-                        value: BuildHistoryInspectorTab.details)
-                    {
-                        historyDetailsTab(detail)
+                // These are two representations of one selected record: the factual
+                // Form and the raw log, kept as peer destinations rather than
+                // compressed into one column. A segmented `Picker` over the pane,
+                // not a `TabView` — see UI-055, docs/design/NATIVE-MACOS-PLAYBOOK.md
+                // §8: a `TabView` draws a bordered content box that overdraws the
+                // inspector's own divider from the toolbar's lower edge down, and
+                // Apple's own inspectors use a segmented control at the top of the
+                // column instead. This history inspector has no accessibility
+                // identifiers to preserve, so the conversion is a plain swap.
+                VStack(spacing: 0) {
+                    Picker("Detail", selection: $historyInspectorTab) {
+                        Label("Details", systemImage: "doc.text")
+                            .tag(BuildHistoryInspectorTab.details)
+                        Label("Log", systemImage: "text.alignleft")
+                            .tag(BuildHistoryInspectorTab.log)
                     }
-                    Tab(
-                        "Log",
-                        systemImage: "text.alignleft",
-                        value: BuildHistoryInspectorTab.log)
-                    {
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .padding(.horizontal)
+                    .padding(.top, 8)
+                    .padding(.bottom, 8)
+
+                    switch historyInspectorTab {
+                    case .details:
+                        historyDetailsTab(detail)
+                    case .log:
                         historyLogPane(for: record)
                     }
                 }

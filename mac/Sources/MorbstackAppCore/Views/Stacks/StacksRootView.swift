@@ -337,17 +337,41 @@ struct StacksRootView: View {
 
     /// Slots 1–3 of the toolbar grammar — see `VolumesRootView.toolbarContent` and
     /// `docs/design/NATIVE-MACOS-PLAYBOOK.md`.
+    ///
+    /// **UI-054.** Docker Compose gives this route two menus' worth of content: the
+    /// selected service's or project's own commands, and the route's own
+    /// Refresh/Edit Compose File. The obvious spelling — the selection's menu, then
+    /// the route's own menu, both `Menu`s adjacent — does not reach one capsule:
+    /// `docs/design/probes/ToolProbe.swift`'s `twoMenusAdjacent` variant puts two
+    /// back-to-back `Menu`s in their own capsules each (a row scan at y 26 reads
+    /// three capsule fills separated by two background-tone gaps at the exact seams
+    /// between them, `1b1f20` against a `1f24xx` fill). A `Menu` earns its own
+    /// capsule regardless of what is or is not next to it — reordering alone, the
+    /// fix that worked for Containers and Images, cannot produce one capsule when a
+    /// route has two menus' worth of content.
+    ///
+    /// So this is one menu, `stacks.actions`, always present, sectioned by a
+    /// `Divider`: the selected record's own commands above (whichever record is
+    /// selected), the route's own Refresh/Edit Compose File below — the same way one
+    /// File menu holds both document-scoped and app-scoped commands rather than
+    /// splitting into two menus that come and go with what document is open. Three
+    /// identifiers for what is now one control — `stacks.actions`,
+    /// `stacks.project-actions`, `stacks.options` — collapse into the one the merged
+    /// menu keeps. Nothing in `mac/UITests` or `mac/Tests` queries the other two by
+    /// name.
+    ///
+    /// The one-tap lifecycle toggle stays a plain button outside the menu, in the
+    /// slot Containers uses for `containers.primaryLifecycle`: a non-`Menu` item
+    /// never splits a run, so it can appear and disappear with the selection without
+    /// changing the capsule count.
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        // 1–2 · record actions for the selected service or project: the useful action
-        // depends on the selected project or service and already lives in its
-        // contextual menu below.  Utility work — refresh and the Compose file editor —
-        // shares one semantic options menu so the toolbar stays at a handful of
-        // stable groups instead of a row of loose glyphs.
-        if let stack = selectedStack {
-            if let service = selectedService,
-                isServiceBusy(service) || isProjectBusy(for: service)
-            {
+        ToolbarItem(id: "stacks.actions", placement: .primaryAction) {
+            stacksActionsMenu
+        }
+
+        if let service = selectedService, selectedStack != nil {
+            if isServiceBusy(service) || isProjectBusy(for: service) {
                 ToolbarItem(id: "stacks.primaryLifecycle", placement: .primaryAction) {
                     ProgressView()
                         .controlSize(.small)
@@ -355,61 +379,24 @@ struct StacksRootView: View {
                         .accessibilityLabel("Updating \(service.composeService ?? service.displayName)")
                         .help("Updating \(service.composeService ?? service.displayName)")
                 }
-            } else if let service = selectedService {
-                if let action = primaryLifecycleAction(for: service) {
-                    ToolbarItem(id: "stacks.primaryLifecycle", placement: .primaryAction) {
-                        Button { perform(action, on: service) } label: {
-                            Image(systemName: action.symbol)
-                        }
-                        .accessibilityIdentifier("stacks.primaryLifecycle")
-                        .accessibilityLabel(action.title)
-                        .help("\(action.title) \(service.composeService ?? service.displayName)")
+            } else if let action = primaryLifecycleAction(for: service) {
+                ToolbarItem(id: "stacks.primaryLifecycle", placement: .primaryAction) {
+                    Button { perform(action, on: service) } label: {
+                        Image(systemName: action.symbol)
                     }
-                }
-                ToolbarItem(id: "stacks.actions", placement: .primaryAction) {
-                    selectionActionsMenu(service: service, stack: stack)
-                }
-            } else if busyProjects.contains(stack.id) {
-                ToolbarItem(id: "stacks.project-progress", placement: .primaryAction) {
-                    ProgressView()
-                        .controlSize(.small)
-                        .accessibilityIdentifier("stacks.project-progress")
-                        .accessibilityLabel("Updating \(stack.title)")
-                        .help("Updating \(stack.title)")
-                }
-            } else {
-                ToolbarItem(id: "stacks.project-actions", placement: .primaryAction) {
-                    projectActionsMenu(for: stack)
+                    .accessibilityIdentifier("stacks.primaryLifecycle")
+                    .accessibilityLabel(action.title)
+                    .help("\(action.title) \(service.composeService ?? service.displayName)")
                 }
             }
-        }
-
-        // 3 · the route's menu. A Compose project has no one universal primary
-        // command: the useful action depends on the selected project or service and
-        // already lives in its contextual menu above. Utility work — refresh and the
-        // Compose file editor — shares one semantic options menu so the toolbar stays
-        // at a handful of stable groups instead of a row of loose glyphs.
-        ToolbarItem(id: "stacks.options", placement: .primaryAction) {
-            Menu {
-                Button("Refresh", systemImage: "arrow.clockwise") {
-                    Task { await model.refreshAll() }
-                }
-
-                if selectedStack != nil {
-                    Button("Edit Compose File…", systemImage: "doc.text") {
-                        chooseComposeFile()
-                    }
-                    .disabled(!composeSourceSelectionIsAvailable)
-                    .help(externalStackOperationsAreAvailable
-                        ? "Choose and edit a Compose YAML file"
-                        : fixtureStackOperationMessage)
-                }
-            } label: {
-                Label("Stack options", systemImage: "slider.horizontal.3")
+        } else if selectedService == nil, let stack = selectedStack, busyProjects.contains(stack.id) {
+            ToolbarItem(id: "stacks.project-progress", placement: .primaryAction) {
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityIdentifier("stacks.project-progress")
+                    .accessibilityLabel("Updating \(stack.title)")
+                    .help("Updating \(stack.title)")
             }
-            .accessibilityIdentifier("stacks.options")
-            .accessibilityLabel("Stack options")
-            .help("Refresh and Compose file options")
         }
 
         if services.isEmpty {
@@ -469,62 +456,118 @@ struct StacksRootView: View {
             && !isProjectBusy(for: service)
     }
 
-    private func selectionActionsMenu(service: ContainerSummary, stack: ComposeGroup) -> some View {
-        Menu {
-            let secondaryActions = secondaryLifecycleActions(for: service)
-            if isServiceBusy(service) {
-                // NSMenu cannot animate a ProgressView; it rendered as a dead blank
-                // row. A disabled text item states the same fact legibly.
-                Button("Updating \(service.composeService ?? service.displayName)…") {}
-                    .disabled(true)
-            } else {
-                ForEach(secondaryActions, id: \.rawValue) { action in
-                    Button(action.title, systemImage: action.symbol) {
-                        perform(action, on: service)
-                    }
-                    .disabled(!externalStackOperationsAreAvailable || isProjectBusy(for: service))
-                    .help(externalStackOperationsAreAvailable
-                        ? action.title
-                        : fixtureStackOperationMessage)
-                }
-            }
-            if isServiceBusy(service) || !secondaryActions.isEmpty {
-                Divider()
-            }
-            Menu("Project Actions") {
-                projectActionItems(for: stack)
-            }
-            Divider()
-            Button("Open in Containers") {
-                TrackDAppBridge.reveal(containerID: service.id, in: model)
-            }
-            Button("View Logs") {
-                revealContainerLogs(for: service)
-            }
-            if let project = stack.project {
-                Button("View Merged Project Logs") { openProjectLogs(for: project) }
-            }
-            if canRemove(service) {
-                Divider()
-                Button("Remove Service…", role: .destructive) { removalTarget = service }
-            }
-        } label: {
-            Image(systemName: "ellipsis")
-        }
-        .accessibilityIdentifier("stacks.actions")
-        .accessibilityLabel("Actions for \(service.composeService ?? service.displayName)")
-        .help("Actions for \(service.composeService ?? service.displayName)")
+    /// The one always-present route menu — see the note on `toolbarContent`. Its
+    /// content is sectioned, not swapped: whichever record is selected gets its
+    /// commands above a `Divider`, then Refresh and Edit Compose File stay in the
+    /// same position whether or not anything is selected.
+    /// When a project (and no more specific service) is selected and not busy, the
+    /// record section above already renders `projectActionItems`'s own "Edit Compose
+    /// File…"/"Edit Project Environment File…" pair in full — see `projectActionItems`.
+    /// Every other state (nothing selected, a service selected, a busy project) has
+    /// no other route to "Edit Compose File…" in this menu, so the collection
+    /// section's own copy is the only one and stays. This flag is what keeps the two
+    /// from ever rendering side by side in the same menu.
+    private var projectOnlyRecordSectionAlreadyOffersComposeFileEditing: Bool {
+        guard selectedService == nil, let stack = selectedStack else { return false }
+        return !busyProjects.contains(stack.id)
     }
 
-    private func projectActionsMenu(for stack: ComposeGroup) -> some View {
+    @ViewBuilder
+    private var stacksActionsMenu: some View {
         Menu {
-            projectActionItems(for: stack)
+            if let service = selectedService, let stack = selectedStack {
+                serviceActionItems(service: service, stack: stack)
+                Divider()
+            } else if let stack = selectedStack {
+                if busyProjects.contains(stack.id) {
+                    // NSMenu cannot animate a ProgressView; it rendered as a dead
+                    // blank row. A disabled text item states the same fact legibly.
+                    Button("Updating \(stack.title)…") {}.disabled(true)
+                } else {
+                    projectActionItems(for: stack)
+                }
+                Divider()
+            }
+
+            Button("Refresh", systemImage: "arrow.clockwise") {
+                Task { await model.refreshAll() }
+            }
+
+            if selectedStack != nil, !projectOnlyRecordSectionAlreadyOffersComposeFileEditing {
+                Button("Edit Compose File…", systemImage: "doc.text") {
+                    chooseComposeFile()
+                }
+                .disabled(!composeSourceSelectionIsAvailable)
+                .help(externalStackOperationsAreAvailable
+                    ? "Choose and edit a Compose YAML file"
+                    : fixtureStackOperationMessage)
+            }
         } label: {
-            Image(systemName: "ellipsis")
+            Label(stacksActionsLabel, systemImage: "slider.horizontal.3")
         }
-        .accessibilityIdentifier("stacks.project-actions")
-        .accessibilityLabel("Actions for \(stack.title)")
-        .help("Actions for \(stack.title)")
+        .accessibilityIdentifier("stacks.actions")
+        .accessibilityLabel(stacksActionsLabel)
+        .help(stacksActionsHelp)
+    }
+
+    /// The selected service's own commands: its secondary lifecycle actions, its
+    /// project's actions nested one level down (there is a service section above
+    /// them here, so nesting keeps the flat items from being confused for the
+    /// service's own), and its record-local navigation and removal.
+    @ViewBuilder
+    private func serviceActionItems(service: ContainerSummary, stack: ComposeGroup) -> some View {
+        let secondaryActions = secondaryLifecycleActions(for: service)
+        if isServiceBusy(service) {
+            Button("Updating \(service.composeService ?? service.displayName)…") {}
+                .disabled(true)
+        } else {
+            ForEach(secondaryActions, id: \.rawValue) { action in
+                Button(action.title, systemImage: action.symbol) {
+                    perform(action, on: service)
+                }
+                .disabled(!externalStackOperationsAreAvailable || isProjectBusy(for: service))
+                .help(externalStackOperationsAreAvailable
+                    ? action.title
+                    : fixtureStackOperationMessage)
+            }
+        }
+        if isServiceBusy(service) || !secondaryActions.isEmpty {
+            Divider()
+        }
+        Menu("Project Actions") {
+            projectActionItems(for: stack)
+        }
+        Divider()
+        Button("Open in Containers") {
+            TrackDAppBridge.reveal(containerID: service.id, in: model)
+        }
+        Button("View Logs") {
+            revealContainerLogs(for: service)
+        }
+        if let project = stack.project {
+            Button("View Merged Project Logs") { openProjectLogs(for: project) }
+        }
+        if canRemove(service) {
+            Divider()
+            Button("Remove Service…", role: .destructive) { removalTarget = service }
+        }
+    }
+
+    private var stacksActionsLabel: String {
+        if let service = selectedService, selectedStack != nil {
+            return "Actions for \(service.composeService ?? service.displayName)"
+        }
+        if let stack = selectedStack {
+            return "Actions for \(stack.title)"
+        }
+        return "Stack actions"
+    }
+
+    private var stacksActionsHelp: String {
+        if selectedStack != nil {
+            return stacksActionsLabel
+        }
+        return "Refresh and Compose file options"
     }
 
     // MARK: Content
