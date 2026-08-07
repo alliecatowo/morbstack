@@ -92,14 +92,17 @@ struct ContainersRootView: View {
     init(
         model: AppModel,
         initialDetailTab: TrackBDetailTab = .overview,
+        initialStatsMetric: ContainerStatsMetric = .cpu,
         initialHub: TrackBStatsHub? = nil
     ) {
         self.model = model
         self.initialDetailTab = initialDetailTab
+        self.initialStatsMetric = initialStatsMetric
         _hub = State(initialValue: initialHub ?? TrackBStatsHub())
     }
 
     private let initialDetailTab: TrackBDetailTab
+    private let initialStatsMetric: ContainerStatsMetric
 
     @State private var search = ""
     // UI-051: search is a glyph in the trailing group until someone asks for it.
@@ -611,7 +614,8 @@ struct ContainersRootView: View {
                 container: selected,
                 model: model,
                 hub: hub,
-                initialTab: initialDetailTab)
+                initialTab: initialDetailTab,
+                initialStatsMetric: initialStatsMetric)
             .id(selected.id)
         } else {
             ContentUnavailableView {

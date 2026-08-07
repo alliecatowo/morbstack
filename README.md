@@ -64,11 +64,12 @@ photographed, and names the ones that haven't.
 
 [![Containers, grouped by Compose project](docs/gallery/containers-compose-grouping.png)](docs/gallery/)
 
-Sixteen containers, eight of them Kubernetes' own `k8s_POD_*` scaffolding — and
-the scaffolding is one collapsed row, not eight rows of 60-character names
-burying the containers you started. Compose projects group under their own name.
-Nothing on this screen is custom chrome: a `NavigationSplitView`, a system list,
-and real `docker ps` data.
+38 containers, sixteen of them Kubernetes' own `k8s_POD_*`/`k8s_*` scaffolding — and
+the scaffolding is one collapsed row headed "8 of 16 running", not sixteen rows of
+60-character names burying the containers you started. Compose projects group under
+their own name, headed by how many of their services are actually up. Nothing on
+this screen is custom chrome: a `NavigationSplitView`, a system list, and real
+`docker ps` data.
 
 [![Images](docs/gallery/images.png)](docs/gallery/)
 
@@ -79,8 +80,9 @@ you run it rather than after `exec format error`.
 [![Disk](docs/gallery/disk.png)](docs/gallery/)
 
 The number that matters is the pair: the VM disk reserves **77.31 GB** and
-actually occupies **7.46 GB** on APFS. Most "why is Docker eating my disk"
-confusion is one of those two figures shown alone.
+actually occupies **6.57 GB** on APFS. Most "why is Docker eating my disk"
+confusion is one of those two figures shown alone. Reclaim is automatic — the
+screen states when the last sweep ran and what it found.
 
 ## Status: pre-release (milestone M0)
 

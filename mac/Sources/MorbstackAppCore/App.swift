@@ -429,7 +429,7 @@ struct RootWindow: View {
                     .navigationSplitViewColumnWidth(
                         min: 180, ideal: 220, max: 280)
             } detail: {
-                DetailHost(model: model)
+                DetailHost(model: model, options: options)
                     .frame(minWidth: 620, minHeight: 420)
             }
         }
@@ -699,7 +699,12 @@ struct EngineFooter: View {
 struct DetailHost: View {
 
     @Bindable var model: AppModel
+    let options: LaunchOptions
     @State private var diagnosticsWorkflow = DiagnosticsBundleWorkflow()
+    @Environment(\.openWindow) private var openWindow
+    /// Guards the terminal-open and project-logs tour actions so a `.task(id:)` rerun
+    /// (selection change, engine flap) cannot open a second window for the same launch.
+    @State private var didFireTourWindowActions = false
 
     var body: some View {
         // No painted background. The detail column of a `NavigationSplitView` already
@@ -764,9 +769,33 @@ struct DetailHost: View {
             guard model.selection == .disk else { return }
             await model.refreshDisk()
         }
+        // `--tour-warm-disk-scan`: same fetch as the line above, but not gated on the
+        // Disk route being selected — see `LaunchOptions.warmDiskScan`.
+        .task(id: "\(options.warmDiskScan)|\(model.engine.isRunning)") {
+            guard options.warmDiskScan, model.engine.isRunning else { return }
+            await model.refreshDisk()
+        }
         .task(id: "\(model.selection)|\(model.engine.isRunning)") {
             guard model.selection == .builds else { return }
             await model.refreshBuildCache()
+        }
+        // `--tour-open-terminal` / `--tour-project-logs`: the same deep-link contract
+        // `--tour-container` already gives the sidebar route and the detail tab, extended
+        // to the two surfaces that only open as their own window
+        // (`ContainerTerminalWindowController`, `MorbWindowID.projectLogs`) and so have no
+        // SwiftUI state a plain route/tab selection can reach. Gated on `hasLoaded` so it
+        // fires once real data exists, and on `didFireTourWindowActions` so a later
+        // selection or engine-state change cannot reopen either window.
+        .task(id: "\(model.hasLoaded)|\(model.selectedContainerID ?? "")") {
+            guard !didFireTourWindowActions, model.hasLoaded else { return }
+            if options.openTerminal, let container = model.selectedContainer, container.isRunning {
+                ContainerTerminalWindowController.open(for: container, client: model.client)
+                didFireTourWindowActions = true
+            }
+            if let project = options.projectLogs {
+                openWindow(id: MorbWindowID.projectLogs, value: project)
+                didFireTourWindowActions = true
+            }
         }
     }
 
@@ -788,7 +817,11 @@ struct DetailHost: View {
     @ViewBuilder
     private var content: some View {
         switch model.selection {
-        case .containers: ContainersRootView(model: model)
+        case .containers:
+            ContainersRootView(
+                model: model,
+                initialDetailTab: options.tab ?? .overview,
+                initialStatsMetric: options.statMetric ?? .cpu)
         case .stacks: StacksRootView(model: model)
         case .images: ImagesRootView(model: model)
         case .volumes: VolumesRootView(model: model)

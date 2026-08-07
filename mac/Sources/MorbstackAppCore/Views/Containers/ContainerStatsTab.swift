@@ -162,6 +162,18 @@ struct ContainerStatsTab: View {
     let hub: TrackBStatsHub
     let client: DockerClient
 
+    init(
+        container: ContainerSummary,
+        hub: TrackBStatsHub,
+        client: DockerClient,
+        initialMetric: ContainerStatsMetric = .cpu
+    ) {
+        self.container = container
+        self.hub = hub
+        self.client = client
+        _selectedMetric = State(initialValue: initialMetric)
+    }
+
     @State private var probe: TrackBStatsProbe?
     @State private var selectedMetric: ContainerStatsMetric = .cpu
 

@@ -38,6 +38,13 @@ fi
 VIEW="${1:-containers}"
 APPEARANCE="${2:-dark}"
 SIZE="${3:-1440x900}"
+# Anything past the first three positional args is forwarded verbatim to the app
+# as extra `--tour-*` switches (`--tour-container`, `--tour-tab`,
+# `--tour-open-terminal`, `--tour-project-logs`) — the deep-link surfaces that
+# route selection alone cannot reach. Kept to a plain pass-through, not a second
+# copy of `LaunchOptions`' parsing, so this script does not need to change again
+# the next time that contract grows.
+EXTRA_ARGS=("${@:4}")
 
 if [ ! -x "$BIN" ]; then
 	echo "error: ${BUNDLE} not built." >&2
@@ -52,7 +59,8 @@ open -n "$BUNDLE" --args \
 	--tour-select "$VIEW" \
 	--appearance "$APPEARANCE" \
 	--window-size "$SIZE" \
-	$FIXTURES
+	$FIXTURES \
+	${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
 
 # Give SwiftUI time to lay out, and the window-rescue delegate time to run its
 # retry sweeps (0.35/0.9/1.5s) on machines with wedged restoration state.

@@ -47,12 +47,14 @@ struct ContainerDetailView: View {
     @State private var filesStore = ContainerFileTreeStore()
 
     private let preloadedLogs: TrackBLogStore?
+    private let initialStatsMetric: ContainerStatsMetric
 
     init(
         container: ContainerSummary,
         model: AppModel,
         hub: TrackBStatsHub,
         initialTab: TrackBDetailTab = .overview,
+        initialStatsMetric: ContainerStatsMetric = .cpu,
         preloadedInspectJSON: String? = nil,
         preloadedLogs: TrackBLogStore? = nil
     ) {
@@ -60,6 +62,7 @@ struct ContainerDetailView: View {
         self.model = model
         self.hub = hub
         self.preloadedLogs = preloadedLogs
+        self.initialStatsMetric = initialStatsMetric
         _tab = State(initialValue: initialTab)
         _inspectJSON = State(initialValue: preloadedInspectJSON ?? "")
         _details = State(initialValue: preloadedInspectJSON.flatMap(TrackBInspectDetails.init(json:)))
@@ -140,7 +143,8 @@ struct ContainerDetailView: View {
             ContainerStatsTab(
                 container: container,
                 hub: hub,
-                client: model.client)
+                client: model.client,
+                initialMetric: initialStatsMetric)
         case .inspect:
             ContainerInspectTab(json: inspectJSON, isLoading: isLoadingInspect, errorText: inspectError)
         }
