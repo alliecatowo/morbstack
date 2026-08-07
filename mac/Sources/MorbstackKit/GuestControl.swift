@@ -176,6 +176,16 @@ public struct GuestReply: Codable, Equatable, Sendable {
     /// The guest kernel's `/proc/meminfo` `MemAvailable`, in kB — the kernel's own
     /// reclaim-aware estimate, not `MemFree`. See ``memTotalKB``.
     public var memAvailableKB: Int64?
+    /// Bytes reclaimed by the guest's most recent periodic `fstrim` sweep of
+    /// `/var/lib/docker` this boot (TECH-3 / UX-16, `disk::spawn_periodic_trim`)
+    /// — present on `info` from guests that report it.
+    ///
+    /// `nil` covers both "an older guest that predates the field" and "no sweep
+    /// has completed yet this boot" (the guest's own `-1` sentinel, `disk::NO_TRIM_YET`),
+    /// same convention as ``memTotalKB``/``memAvailableKB``. A guest with the data
+    /// root on tmpfs never runs the sweep at all, so this stays `nil` for the whole
+    /// boot in that case too — there is nothing on the host disk for it to describe.
+    public var diskLastTrimBytes: Int64?
     /// Failure detail — present on `error`.
     public var message: String?
 
@@ -198,6 +208,7 @@ public struct GuestReply: Codable, Equatable, Sendable {
         case diskResize = "disk_resize"
         case memTotalKB = "mem_total_kb"
         case memAvailableKB = "mem_available_kb"
+        case diskLastTrimBytes = "disk_last_trim_bytes"
         case message
     }
 
@@ -215,6 +226,9 @@ public struct GuestReply: Codable, Equatable, Sendable {
         dockerDataOnDisk = try c.decodeIfPresent(Bool.self, forKey: .dockerDataOnDisk)
         shares = try c.decodeIfPresent(String.self, forKey: .shares)
         tmpAliasMounted = try c.decodeIfPresent(Bool.self, forKey: .tmpAliasMounted)
+        httpProxy = try c.decodeIfPresent(String.self, forKey: .httpProxy)
+        httpsProxy = try c.decodeIfPresent(String.self, forKey: .httpsProxy)
+        noProxy = try c.decodeIfPresent(String.self, forKey: .noProxy)
         rosetta = try c.decodeIfPresent(Bool.self, forKey: .rosetta)
         binfmtAmd64 = try c.decodeIfPresent(String.self, forKey: .binfmtAmd64)
         shareEventBridge = try c.decodeIfPresent(String.self, forKey: .shareEventBridge)
@@ -232,6 +246,12 @@ public struct GuestReply: Codable, Equatable, Sendable {
         } else {
             memTotalKB = nil
             memAvailableKB = nil
+        }
+        let rawDiskLastTrimBytes = try c.decodeIfPresent(Int64.self, forKey: .diskLastTrimBytes)
+        if let rawDiskLastTrimBytes, rawDiskLastTrimBytes >= 0 {
+            diskLastTrimBytes = rawDiskLastTrimBytes
+        } else {
+            diskLastTrimBytes = nil
         }
         message = try c.decodeIfPresent(String.self, forKey: .message)
     }

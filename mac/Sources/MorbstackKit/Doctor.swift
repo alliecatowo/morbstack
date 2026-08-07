@@ -394,6 +394,14 @@ public enum Doctor {
                 // `info` report rather than merely echoed back from config.toml.
                 checks.append(
                     proxyLiveCheck(expected: effectiveProxy, reported: guestReportedProxy()))
+
+                // 11d. Disk reclaim, live (TECH-3 / UX-16): real evidence that the
+                // periodic guest `fstrim` sweep is actually returning space to the
+                // Mac, not a bare claim. `nil` legitimately covers several states
+                // (no sweep yet, RAM-backed data root, older guest) that this check
+                // cannot and does not try to distinguish further — `morb status`'s
+                // `guest_disk_last_trim_bytes` already carries whichever is true.
+                checks.append(diskTrimCheck(reportedBytes: guestReportedDiskLastTrimBytes()))
             } else {
                 checks.append(
                     DoctorCheck(
@@ -551,6 +559,44 @@ public enum Doctor {
                     noProxy: reported.noProxy.isEmpty ? nil : reported.noProxy)
                 + ", which no longer matches the configured proxy — restart the VM to pick up "
                 + "the change")
+    }
+
+    // MARK: - Disk reclaim (TECH-3 / UX-16)
+
+    /// Reports whether the running guest has real evidence that deleted
+    /// images/containers are coming back to the Mac, using its most recent
+    /// periodic `fstrim` sweep result.
+    ///
+    /// Deliberately never `.fail` and never `.warn` on `nil`: the sweep runs on a
+    /// slow, deliberately staggered cadence (`disk::TRIM_WARMUP_DELAY` then
+    /// `disk::TRIM_INTERVAL` in the guest), so "no result yet" is the ordinary
+    /// state for a VM that has been up only briefly, not a problem to flag.
+    static func diskTrimCheck(reportedBytes: Int64?) -> DoctorCheck {
+        guard let reportedBytes else {
+            return DoctorCheck(
+                name: "disk-trim",
+                status: .info,
+                detail: "no guest has reported a disk-trim sweep result yet on this boot "
+                    + "(none has run yet, the data root is RAM-backed, or the image predates "
+                    + "the field)")
+        }
+        return DoctorCheck(
+            name: "disk-trim",
+            status: .pass,
+            detail: "the guest's most recent background sweep returned "
+                + formatBytes(reportedBytes) + " to the Mac")
+    }
+
+    /// Asks a running daemon for the guest's most recent `fstrim` sweep result, or
+    /// `nil` when there is no daemon to ask or none has landed yet.
+    private static func guestReportedDiskLastTrimBytes() -> Int64? {
+        guard FileManager.default.fileExists(atPath: MorbPaths.controlSocket.path),
+            let response = try? UnixSocketClient.roundTrip(
+                path: MorbPaths.controlSocket.path, request: DaemonRequest(cmd: "status"), timeout: 5),
+            response.ok,
+            case .int(let bytes)? = response.data?["guest_disk_last_trim_bytes"]
+        else { return nil }
+        return Int64(bytes)
     }
 
     private static func describeProxyFields(http: String?, https: String?, noProxy: String?) -> String {

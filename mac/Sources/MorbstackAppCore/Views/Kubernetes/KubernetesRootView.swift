@@ -191,6 +191,9 @@ struct KubernetesRootView: View {
     @State private var pods: [K8sPodInfo] = []
     @State private var resource: KubernetesResource = .pods
     @State private var query = ""
+    // UI-051: search is a glyph in the trailing group until someone asks for it.
+    // `RouteSearchModifier` attaches the system field while this is true.
+    @State private var searchIsActive = false
     @State private var nodeSortOrder: [KubernetesNodeComparator] = [
         KubernetesNodeComparator(key: .name),
     ]
@@ -817,9 +820,9 @@ struct KubernetesRootView: View {
                             // region and remain present while the inspector is
                             // closed.
                             .toolbar { trailingCommandItems }
-                            .searchable(
+                            .routeSearchable(
+                                isActive: $searchIsActive,
                                 text: $query,
-                                placement: .toolbarPrincipal,
                                 prompt: "Search \(resource.rawValue.lowercased())")
                             // Must be the outermost modifier on the inspector's
                             // content — see the note in `ContainersRootView`:

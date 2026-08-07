@@ -122,6 +122,9 @@ struct StacksRootView: View {
     @Environment(\.openWindow) private var openWindow
     @State private var metadata = TrackDComposeMetadata()
     @State private var query = ""
+    // UI-051: search is a glyph in the trailing group until someone asks for it.
+    // `RouteSearchModifier` attaches the system field while this is true.
+    @State private var searchIsActive = false
     @State private var selection: StackOutlineID?
     @State private var showsInspector = true
     /// Projects the person has deliberately collapsed. Absence means expanded, so a
@@ -332,40 +335,15 @@ struct StacksRootView: View {
 
     // MARK: Toolbar
 
+    /// Slots 1–3 of the toolbar grammar — see `VolumesRootView.toolbarContent` and
+    /// `docs/design/NATIVE-MACOS-PLAYBOOK.md`.
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        // A Compose project has no one universal primary command: the useful action
+        // 1–2 · record actions for the selected service or project: the useful action
         // depends on the selected project or service and already lives in its
         // contextual menu below.  Utility work — refresh and the Compose file editor —
         // shares one semantic options menu so the toolbar stays at a handful of
         // stable groups instead of a row of loose glyphs.
-        ToolbarItem(id: "stacks.options", placement: .primaryAction) {
-            Menu {
-                Button("Refresh", systemImage: "arrow.clockwise") {
-                    Task { await model.refreshAll() }
-                }
-
-                if selectedStack != nil {
-                    Button("Edit Compose File…", systemImage: "doc.text") {
-                        chooseComposeFile()
-                    }
-                    .disabled(!composeSourceSelectionIsAvailable)
-                    .help(externalStackOperationsAreAvailable
-                        ? "Choose and edit a Compose YAML file"
-                        : fixtureStackOperationMessage)
-                }
-            } label: {
-                Label("Stack options", systemImage: "slider.horizontal.3")
-            }
-            .accessibilityIdentifier("stacks.options")
-            .accessibilityLabel("Stack options")
-            .help("Refresh and Compose file options")
-        }
-
-        if services.isEmpty {
-            trailingCommandItems
-        }
-
         if let stack = selectedStack {
             if let service = selectedService,
                 isServiceBusy(service) || isProjectBusy(for: service)
@@ -405,6 +383,38 @@ struct StacksRootView: View {
                 }
             }
         }
+
+        // 3 · the route's menu. A Compose project has no one universal primary
+        // command: the useful action depends on the selected project or service and
+        // already lives in its contextual menu above. Utility work — refresh and the
+        // Compose file editor — shares one semantic options menu so the toolbar stays
+        // at a handful of stable groups instead of a row of loose glyphs.
+        ToolbarItem(id: "stacks.options", placement: .primaryAction) {
+            Menu {
+                Button("Refresh", systemImage: "arrow.clockwise") {
+                    Task { await model.refreshAll() }
+                }
+
+                if selectedStack != nil {
+                    Button("Edit Compose File…", systemImage: "doc.text") {
+                        chooseComposeFile()
+                    }
+                    .disabled(!composeSourceSelectionIsAvailable)
+                    .help(externalStackOperationsAreAvailable
+                        ? "Choose and edit a Compose YAML file"
+                        : fixtureStackOperationMessage)
+                }
+            } label: {
+                Label("Stack options", systemImage: "slider.horizontal.3")
+            }
+            .accessibilityIdentifier("stacks.options")
+            .accessibilityLabel("Stack options")
+            .help("Refresh and Compose file options")
+        }
+
+        if services.isEmpty {
+            trailingCommandItems
+        }
     }
 
     /// See the note on `VolumesRootView.trailingCommandItems`: mounted on the
@@ -413,7 +423,9 @@ struct StacksRootView: View {
     @ToolbarContentBuilder
     private var trailingCommandItems: some ToolbarContent {
         if !services.isEmpty {
-            ToolbarItem(id: "stacks.inspector", placement: .automatic) {
+            RouteSearchToolbarItem(
+                id: "stacks.search", subject: "stacks", isActive: $searchIsActive)
+            ToolbarItem(id: "stacks.inspector", placement: .primaryAction) {
                 Button { showsInspector.toggle() } label: {
                     Image(systemName: "sidebar.right")
                 }
@@ -540,7 +552,10 @@ struct StacksRootView: View {
                     // search ride the inspector's toolbar region and remain present
                     // while the inspector is closed.
                     .toolbar { trailingCommandItems }
-                    .searchable(text: $query, placement: .toolbarPrincipal, prompt: "Project, service, image")
+                    .routeSearchable(
+                        isActive: $searchIsActive,
+                        text: $query,
+                        prompt: "Project, service, image")
                     // Must be the outermost modifier on the inspector's content —
                     // see the note in `ContainersRootView`: applied beneath
                     // `.toolbar`/`.searchable` its preferred width was silently

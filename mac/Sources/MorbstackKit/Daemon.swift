@@ -825,6 +825,10 @@ public final class Daemon {
                 "guest_http_proxy": vm.guestHTTPProxy.map { AnyCodableValue.string($0) } ?? .null,
                 "guest_https_proxy": vm.guestHTTPSProxy.map { AnyCodableValue.string($0) } ?? .null,
                 "guest_no_proxy": vm.guestNoProxy.map { AnyCodableValue.string($0) } ?? .null,
+                // Bytes reclaimed by the guest's most recent periodic `fstrim` sweep
+                // (TECH-3 / UX-16) — `null` while no sweep has landed yet this boot,
+                // never `0` for "unknown" vs. a real "nothing to reclaim" answer.
+                "guest_disk_last_trim_bytes": vm.guestDiskLastTrimBytes.map { AnyCodableValue.int(Int($0)) } ?? .null,
             ])
 
         case "shares":

@@ -148,6 +148,37 @@ final class GuestControlTests: XCTestCase {
         XCTAssertNil(legacy.binfmtAmd64, "an absent field must not decode as \"none\"")
     }
 
+    /// UX-18 / `morb doctor`'s `proxy-live` check: what `apply_proxy_env` actually
+    /// launched dockerd with. Empty string ("this proxy kind is unset") must survive
+    /// decoding distinctly from `nil` ("an older guest that never reports this at
+    /// all") — `proxy-live` cannot tell "guest reported no proxy" from "guest never
+    /// reported" if both collapse to the same value.
+    func testInfoDecodesTheProxyEnvironmentFields() throws {
+        let current = try JSONDecoder().decode(
+            GuestReply.self,
+            from: Data(
+                #"""
+                {"type":"info","http_proxy":"http://proxy.example:8080",
+                 "https_proxy":"http://proxy.example:8080","no_proxy":"localhost,127.0.0.1"}
+                """#.utf8))
+        XCTAssertEqual(current.httpProxy, "http://proxy.example:8080")
+        XCTAssertEqual(current.httpsProxy, "http://proxy.example:8080")
+        XCTAssertEqual(current.noProxy, "localhost,127.0.0.1")
+
+        let unset = try JSONDecoder().decode(
+            GuestReply.self,
+            from: Data(#"{"type":"info","http_proxy":"","https_proxy":"","no_proxy":""}"#.utf8))
+        XCTAssertEqual(unset.httpProxy, "", "empty string means \"configured with no proxy of this kind\"")
+        XCTAssertEqual(unset.httpsProxy, "")
+        XCTAssertEqual(unset.noProxy, "")
+
+        let legacy = try JSONDecoder().decode(
+            GuestReply.self, from: Data(#"{"type":"info","kernel":"6.1"}"#.utf8))
+        XCTAssertNil(legacy.httpProxy, "an absent field must not decode as \"\"")
+        XCTAssertNil(legacy.httpsProxy)
+        XCTAssertNil(legacy.noProxy)
+    }
+
     /// An explicit negative guest capability is different from an older guest that
     /// did not know the field: neither says hot reload works, but the first gives the
     /// bridge diagnostic a precise reason not to create an unconsumed FSEvents watch.
@@ -216,6 +247,32 @@ final class GuestControlTests: XCTestCase {
             from: Data(#"{"type":"info","mem_total_kb":8137368,"mem_available_kb":-1}"#.utf8))
         XCTAssertNil(half.memTotalKB)
         XCTAssertNil(half.memAvailableKB)
+    }
+
+    /// TECH-3 / UX-16: the periodic `fstrim` sweep's only host-visible evidence.
+    /// A real sweep result decodes as a real number, including zero (a legitimate
+    /// "nothing to reclaim" answer); an older guest and the guest's own `-1`
+    /// "no sweep yet" sentinel both collapse to `nil` — same convention as
+    /// ``testInfoDecodesTheMemorySample``.
+    func testInfoDecodesTheDiskTrimResult() throws {
+        let current = try JSONDecoder().decode(
+            GuestReply.self,
+            from: Data(#"{"type":"info","disk_last_trim_bytes":59050795008}"#.utf8))
+        XCTAssertEqual(current.diskLastTrimBytes, 59_050_795_008)
+
+        let zero = try JSONDecoder().decode(
+            GuestReply.self,
+            from: Data(#"{"type":"info","disk_last_trim_bytes":0}"#.utf8))
+        XCTAssertEqual(zero.diskLastTrimBytes, 0, "a real zero-byte sweep must not read as no sweep")
+
+        let legacy = try JSONDecoder().decode(
+            GuestReply.self, from: Data(#"{"type":"info","kernel":"6.1"}"#.utf8))
+        XCTAssertNil(legacy.diskLastTrimBytes, "an absent field must not decode as 0")
+
+        let sentinel = try JSONDecoder().decode(
+            GuestReply.self,
+            from: Data(#"{"type":"info","disk_last_trim_bytes":-1}"#.utf8))
+        XCTAssertNil(sentinel.diskLastTrimBytes, "the guest's own -1 sentinel must read as no sweep yet")
     }
 
     func testDiskResizeSuccessReplyUsesTheStrictProofSchema() throws {

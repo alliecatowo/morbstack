@@ -97,6 +97,9 @@ struct ImagesRootView: View {
     let model: AppModel
 
     @State private var query = ""
+    // UI-051: search is a glyph in the trailing group until someone asks for it.
+    // `RouteSearchModifier` attaches the system field while this is true.
+    @State private var searchIsActive = false
     @State private var sortOrder: [ImageTableComparator] = [ImageTableComparator(key: .created, order: .reverse)]
     @State private var selection: ImageSummary.ID?
 
@@ -477,21 +480,13 @@ struct ImagesRootView: View {
     /// the inspector-less empty screen.
     @ToolbarContentBuilder
     private var trailingCommandItems: some ToolbarContent {
-        ToolbarItem(id: "images.pull", placement: .primaryAction) {
-            Button {
-                presentPull()
-            } label: {
-                Image(systemName: "plus")
-            }
+        if !model.images.isEmpty {
             // Identifiers follow docs/design/ACCESSIBILITY-IDENTIFIERS.md: a toolbar
             // control reuses its `ToolbarItem(id:)` string verbatim, and the label —
             // never the identifier — carries the user-facing state.
-            .accessibilityIdentifier("images.pull")
-            .accessibilityLabel("Pull an image")
-            .help("Pull an image")
-        }
-        if !model.images.isEmpty {
-            ToolbarItem(id: "images.inspector", placement: .automatic) {
+            RouteSearchToolbarItem(
+                id: "images.search", subject: "images", isActive: $searchIsActive)
+            ToolbarItem(id: "images.inspector", placement: .primaryAction) {
                 Button {
                     showsInspector.toggle()
                 } label: {
@@ -504,8 +499,26 @@ struct ImagesRootView: View {
         }
     }
 
+    /// Slots 1–3 of the toolbar grammar — see `VolumesRootView.toolbarContent` and
+    /// `docs/design/NATIVE-MACOS-PLAYBOOK.md`.
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
+        // 1 · record actions — act on the selected image.
+        ToolbarItem(id: "images.runLocal", placement: .primaryAction) {
+            Button {
+                runLocalImageAction?()
+            } label: {
+                Image(systemName: "play")
+            }
+            .accessibilityIdentifier("images.runLocal")
+            .accessibilityLabel("Run selected local image")
+            .help(
+                runLocalImageAction == nil
+                    ? "Select a local image while the engine is running"
+                    : "Create and start one container using the selected local image")
+            .disabled(runLocalImageAction == nil)
+        }
+        // 2 · collection actions, destructive first so it is never adjacent to "pull".
         ToolbarItem(id: "images.pruneDangling", placement: .primaryAction) {
             pruneDanglingButton
         }
@@ -513,15 +526,31 @@ struct ImagesRootView: View {
             Button {
                 showingPublicImageDiscovery = true
             } label: {
-                Image(systemName: "magnifyingglass")
+                // Not `magnifyingglass`: slot 4 of this route's own toolbar is now the
+                // local filter's magnifying glass, and two identical glyphs in one
+                // capsule meaning "filter what you have" and "browse a remote registry"
+                // is exactly the ambiguity the HIG's "make the meaning of each control
+                // clear" is about. A globe says remote.
+                Image(systemName: "globe")
             }
             .accessibilityIdentifier("images.explorePublic")
             .accessibilityLabel("Explore public images")
             .help("Search public Docker Hub repositories")
         }
-        // Import and export are two document operations in one small, native Menu.
-        // Grouping them keeps the toolbar from accumulating unrelated one-off glyphs;
-        // the full commands remain discoverable in the Image menu and inspector.
+        ToolbarItem(id: "images.pull", placement: .primaryAction) {
+            Button {
+                presentPull()
+            } label: {
+                Image(systemName: "plus")
+            }
+            .accessibilityIdentifier("images.pull")
+            .accessibilityLabel("Pull an image")
+            .help("Pull an image")
+        }
+        // 3 · the route's menu. Import and export are two document operations in one
+        // small, native Menu. Grouping them keeps the toolbar from accumulating
+        // unrelated one-off glyphs; the full commands remain discoverable in the Image
+        // menu and inspector.
         ToolbarItem(id: "images.archive", placement: .primaryAction) {
             Menu {
                 Button("Load Image Archive…") {
@@ -542,23 +571,6 @@ struct ImagesRootView: View {
             .accessibilityLabel("Image archive actions")
             .help(imageArchiveMenuHelp)
         }
-        ToolbarItem(id: "images.runLocal", placement: .primaryAction) {
-            Button {
-                runLocalImageAction?()
-            } label: {
-                Image(systemName: "play")
-            }
-            .accessibilityIdentifier("images.runLocal")
-            .accessibilityLabel("Run selected local image")
-            .help(
-                runLocalImageAction == nil
-                    ? "Select a local image while the engine is running"
-                    : "Create and start one container using the selected local image")
-            .disabled(runLocalImageAction == nil)
-        }
-        // Keeps the destructive dangling-prune out of "pull"'s capsule — see
-        // `VolumesRootView.toolbarContent`.
-        ToolbarSpacer(.fixed)
         if model.images.isEmpty {
             trailingCommandItems
         }
@@ -765,7 +777,10 @@ struct ImagesRootView: View {
                     // search ride the inspector's toolbar region and remain present
                     // while the inspector is closed.
                     .toolbar { trailingCommandItems }
-                    .searchable(text: $query, placement: .toolbarPrincipal, prompt: "Repository, tag, digest")
+                    .routeSearchable(
+                        isActive: $searchIsActive,
+                        text: $query,
+                        prompt: "Repository, tag, digest")
                     // Must be the outermost modifier on the inspector's content —
                     // see the note in `ContainersRootView`: applied beneath
                     // `.toolbar`/`.searchable` its preferred width was silently

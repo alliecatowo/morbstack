@@ -122,6 +122,53 @@ A slower cadence also means fewer guest control round trips for a benefit
 that, by design (the bounded step + hysteresis above), cannot materialize
 faster than several ticks anyway.
 
+**The first tick does not wait a full 30 minutes.** This was found live and
+fixed in the same change as this note: with the default
+`auto_suspend_minutes = 5` and a *fixed* 30-minute repeating timer, the VM
+idle-suspends — cancelling the balloon timer along with it (`setControlReady(false)`,
+above) — six times over before the interval's first tick could ever fire.
+Reproduced directly: a VM suspended at 315 s idle, 3.5 minutes short of a
+30-minute deadline that was never close. UX-17 had shipped as inert code
+under the shipped default.
+
+`MemoryBalloonPolicy.firstEvaluationDelay(autoSuspendMinutes:interval:...)`
+(pure, unit-tested in `MemoryBalloonPolicyTests.swift`) fixes this by giving
+the *first* tick a shorter deadline than the steady-state 30-minute
+`interval`, without changing that steady-state cadence at all:
+
+- **Auto-suspend enabled:** half of the auto-suspend window (floored at 30 s
+  so the first read is not taken before the guest has had time to settle
+  post-boot). Half, not "just under," leaves real margin — for the default
+  5-minute window that is a first tick at 2.5 minutes, comfortably ahead of
+  the 5-minute suspend deadline rather than racing it.
+- **Auto-suspend disabled (`0`):** a fixed 5-minute default first tick, so an
+  always-on guest still gets an early evaluation rather than waiting the full
+  30 minutes with no deadline forcing the question.
+- Either way, the result is capped at `interval` itself — "early" is only
+  meaningful relative to the normal cadence, never longer than it.
+
+Three options were weighed for this fix, and the one above was chosen
+deliberately rather than by default:
+
+1. *Shorten the 30-minute interval outright.* Rejected: it would make the
+   steady-state busy-all-day case — the one case this policy actually
+   exists for — re-sample and potentially re-write the balloon target far
+   more often than the bounded-step/hysteresis design calls for, for no
+   benefit to that case.
+2. *Defer or reset auto-suspend until the balloon has evaluated at least
+   once.* Rejected: auto-suspend is a setting the user configured for an
+   unrelated reason (return memory/CPU promptly when idle); silently
+   stretching it to let an unrelated subsystem get its first sample would be
+   a surprising interaction the user did not ask for.
+3. *Make the first evaluation happen early, chosen above.* This is honest
+   about what the balloon is actually for: a VM idle enough to auto-suspend
+   inside one interval does not need ballooning at all, because suspend
+   already returns all of its memory (see "What this does not cover" below,
+   unchanged). The fix does not try to make ballooning relevant to that
+   case — it only makes sure a VM that turns out to be busy past the
+   auto-suspend window, or never idle at all, gets its first real
+   evaluation promptly instead of accidentally never getting one.
+
 ## What this does not cover, on purpose
 
 - **The 5-minute auto-suspend window.** A VM that goes idle for 5+ minutes

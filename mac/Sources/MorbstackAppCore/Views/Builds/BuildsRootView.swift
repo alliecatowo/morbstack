@@ -227,6 +227,9 @@ struct BuildsRootView: View {
     let model: AppModel
 
     @State private var query = ""
+    // UI-051: search is a glyph in the trailing group until someone asks for it.
+    // `RouteSearchModifier` attaches the system field while this is true.
+    @State private var searchIsActive = false
     @State private var scope: BuildDataScope = .cache
     @State private var sortOrder: [BuildComparator] = [BuildComparator(key: .size, order: .reverse)]
     @State private var selection: BuildCacheRecord.ID?
@@ -728,7 +731,8 @@ struct BuildsRootView: View {
                     // search ride the inspector's toolbar region and remain present
                     // while the inspector is closed.
                     .toolbar { trailingCommandItems }
-                    .searchable(text: $query, placement: .toolbarPrincipal, prompt: searchPrompt)
+                    .routeSearchable(
+                        isActive: $searchIsActive, text: $query, prompt: searchPrompt)
                     // `.inspectorColumnWidth` must be the outermost modifier on the
                     // inspector's content — applied beneath `.toolbar`/`.searchable`
                     // its preferred width was silently discarded and every route
@@ -854,7 +858,8 @@ struct BuildsRootView: View {
                     historyDetailPane
                         // See the note on `VolumesRootView`.
                         .toolbar { trailingCommandItems }
-                        .searchable(text: $query, placement: .toolbarPrincipal, prompt: searchPrompt)
+                        .routeSearchable(
+                            isActive: $searchIsActive, text: $query, prompt: searchPrompt)
                         // See the note above this pattern's other use in this file:
                         // must be outermost or its width is silently discarded.
                         .inspectorColumnWidth(min: 340, ideal: 400, max: 460)

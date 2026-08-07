@@ -220,6 +220,9 @@ struct NetworksRootView: View {
     let model: AppModel
 
     @State private var query = ""
+    // UI-051: search is a glyph in the trailing group until someone asks for it.
+    // `RouteSearchModifier` attaches the system field while this is true.
+    @State private var searchIsActive = false
     @State private var sortOrder: [TrackCNetworkComparator] = [TrackCNetworkComparator(key: .name)]
     @State private var selection: NetworkSummary.ID?
 
@@ -394,30 +397,14 @@ struct NetworksRootView: View {
 
     // MARK: Toolbar
 
-    /// The trailing commands, mounted on the inspector content while the inspector
-    /// is available and in the window toolbar only on the inspector-less empty
-    /// screen — see the note on `VolumesRootView.trailingCommandItems`, including
-    /// why every trailing item here is `.primaryAction`.
+    /// Slots 4–5 of the toolbar grammar — see `VolumesRootView.trailingCommandItems`
+    /// and `docs/design/NATIVE-MACOS-PLAYBOOK.md`.
     @ToolbarContentBuilder
     private var trailingCommandItems: some ToolbarContent {
-        ToolbarItem(id: "networks.create", placement: .primaryAction) {
-            Button {
-                isShowingNetworkCreate = true
-            } label: {
-                Image(systemName: "plus")
-            }
-            .disabled(isPerformingNetworkOperation)
-            .accessibilityIdentifier("networks.create")
-            .accessibilityLabel("Create network")
-            .help(
-                isPerformingNetworkOperation
-                    ? "Wait for the current network operation to finish"
-                    : "Create a bridge network")
-        }
         if !model.networks.isEmpty {
-            // Creating is the primary task; the inspector still changes navigation
-            // layout and remains system-placed with the other view controls.
-            ToolbarItem(id: "networks.inspector", placement: .automatic) {
+            RouteSearchToolbarItem(
+                id: "networks.search", subject: "networks", isActive: $searchIsActive)
+            ToolbarItem(id: "networks.inspector", placement: .primaryAction) {
                 Button {
                     showsInspector.toggle()
                 } label: {
@@ -430,6 +417,7 @@ struct NetworksRootView: View {
         }
     }
 
+    /// Slots 1–3 — see `VolumesRootView.toolbarContent`.
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(id: "networks.removeUnused", placement: .primaryAction) {
@@ -461,9 +449,20 @@ struct NetworksRootView: View {
                     .accessibilityLabel("Updating network membership")
             }
         }
-        // Keeps the destructive prune out of "create"'s capsule — see
-        // `VolumesRootView.toolbarContent`.
-        ToolbarSpacer(.fixed)
+        ToolbarItem(id: "networks.create", placement: .primaryAction) {
+            Button {
+                isShowingNetworkCreate = true
+            } label: {
+                Image(systemName: "plus")
+            }
+            .disabled(isPerformingNetworkOperation)
+            .accessibilityIdentifier("networks.create")
+            .accessibilityLabel("Create network")
+            .help(
+                isPerformingNetworkOperation
+                    ? "Wait for the current network operation to finish"
+                    : "Create a bridge network")
+        }
         if model.networks.isEmpty {
             trailingCommandItems
         }
@@ -511,7 +510,10 @@ struct NetworksRootView: View {
                     // search ride the inspector's toolbar region and remain present
                     // while the inspector is closed.
                     .toolbar { trailingCommandItems }
-                    .searchable(text: $query, placement: .toolbarPrincipal, prompt: "Name, driver, ID")
+                    .routeSearchable(
+                        isActive: $searchIsActive,
+                        text: $query,
+                        prompt: "Name, driver, ID")
                     // Must be the outermost modifier on the inspector's content —
                     // see the note in `ContainersRootView`: applied beneath
                     // `.toolbar`/`.searchable` its preferred width was silently

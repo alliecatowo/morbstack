@@ -31,6 +31,14 @@ import Foundation
 /// default. See `docs/design/SSH-AGENT-FORWARDING.md`.
 public enum SSHAgentForward {
 
+    /// The fixed guest-side path `morbinit` always listens on, matching
+    /// `ssh_agent_forward::SSH_AUTH_SOCK_PATH` in the guest and Docker
+    /// Desktop's own documented path. This is a resource the guest itself
+    /// creates, not a Mac directory — ``DockerBindMountPreflight`` must not
+    /// apply the "add a shared_paths root" bind-source rule to it, since no
+    /// Mac-side root could ever contain it.
+    public static let guestSocketPath = "/run/host-services/ssh-auth.sock"
+
     /// The only request line this channel accepts. There is nothing to
     /// parametrize — the mapping is always "the one host SSH agent" — so
     /// unlike ``GuestPortLease`` the grammar carries no fields.

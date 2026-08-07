@@ -227,4 +227,60 @@ final class MemoryBalloonPolicyTests: XCTestCase {
             previousTargetBytes: 8 * GiB, sample: sample, configuration: cfg)!
         XCTAssertEqual(target, expected)
     }
+
+    // MARK: - First evaluation timing (a suspend-before-first-tick regression)
+
+    /// The bug found live: default `auto_suspend_minutes = 5` against the fixed
+    /// 30-minute interval meant the VM idle-suspended, and the balloon timer was
+    /// cancelled with it, roughly six times before the interval's first tick could
+    /// ever fire. The first delay must land safely inside the auto-suspend window,
+    /// not past it.
+    func testFirstEvaluationDelayLandsBeforeTheDefaultAutoSuspendDeadline() {
+        let delay = MemoryBalloonPolicy.firstEvaluationDelay(
+            autoSuspendMinutes: 5, interval: 30 * 60)
+        XCTAssertLessThan(delay, 5 * 60, "must fire before the default 5-minute auto-suspend deadline")
+        XCTAssertGreaterThan(delay, 0)
+    }
+
+    /// Halving the auto-suspend window is the whole policy: verified at several
+    /// sizes rather than just the default, so a future default change to either
+    /// constant does not silently stop covering the relationship.
+    func testFirstEvaluationDelayIsHalfTheAutoSuspendWindowWhenThatIsTheBindingConstraint() {
+        XCTAssertEqual(
+            MemoryBalloonPolicy.firstEvaluationDelay(autoSuspendMinutes: 10, interval: 30 * 60), 5 * 60)
+        XCTAssertEqual(
+            MemoryBalloonPolicy.firstEvaluationDelay(autoSuspendMinutes: 20, interval: 30 * 60), 10 * 60)
+    }
+
+    /// A very short auto-suspend window (or a user typo like `1`) must not make the
+    /// first tick fire effectively immediately, before the guest has had any time
+    /// to settle after boot — the floor wins over half the window.
+    func testFirstEvaluationDelayNeverGoesBelowItsFloor() {
+        let delay = MemoryBalloonPolicy.firstEvaluationDelay(
+            autoSuspendMinutes: 1, interval: 30 * 60, minimumDelay: 30)
+        XCTAssertEqual(delay, 30, "half of a 60s window is 30s, exactly the floor")
+
+        let tinier = MemoryBalloonPolicy.firstEvaluationDelay(
+            autoSuspendMinutes: 1, interval: 30 * 60, minimumDelay: 45)
+        XCTAssertEqual(tinier, 45, "the floor wins outright once half the window is smaller than it")
+    }
+
+    /// The result never exceeds `interval` even for an auto-suspend window
+    /// configured longer than the steady-state cadence — firing "early" only means
+    /// something relative to the normal repeat interval.
+    func testFirstEvaluationDelayNeverExceedsTheSteadyStateInterval() {
+        let delay = MemoryBalloonPolicy.firstEvaluationDelay(
+            autoSuspendMinutes: 120, interval: 30 * 60)
+        XCTAssertEqual(delay, 30 * 60)
+    }
+
+    /// Auto-suspend off (`0`) means there is no deadline to race, so the first tick
+    /// uses the disabled-case default instead of waiting a full `interval` — a
+    /// long-running, always-on guest still gets an early first evaluation.
+    func testFirstEvaluationDelayFallsBackToItsDefaultWhenAutoSuspendIsDisabled() {
+        let delay = MemoryBalloonPolicy.firstEvaluationDelay(
+            autoSuspendMinutes: 0, interval: 30 * 60, defaultDelayWhenAutoSuspendDisabled: 5 * 60)
+        XCTAssertEqual(delay, 5 * 60)
+        XCTAssertLessThan(delay, 30 * 60)
+    }
 }

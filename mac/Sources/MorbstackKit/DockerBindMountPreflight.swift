@@ -156,6 +156,22 @@ public enum DockerBindMountPreflight {
                 continue
             }
 
+            // The guest's own ssh-agent forward listener (UX-19,
+            // ``SSHAgentForward``) is not backed by any Mac directory:
+            // `morbinit` creates this exact socket itself, inside the guest,
+            // at boot. Docker Desktop's documented `-v
+            // /run/host-services/ssh-auth.sock:/run/host-services/ssh-auth.sock`
+            // usage names a path that never existed on macOS to begin with,
+            // so the general "add a shared_paths root that contains it"
+            // remedy below is impossible to follow for this one source. This
+            // is an exact match against a fixed guest-owned resource, the
+            // same shape as the Docker socket exemption above — not a
+            // pattern that admits any `/run/host-services/*` path, only this
+            // one the engine itself provides.
+            if isGuestOwnedSocketPath(bindSource.path) {
+                continue
+            }
+
             // Testcontainers-style clients derive "the Docker socket" from their
             // discovery result — `DOCKER_HOST`, or the per-user
             // `~/.docker/run/docker.sock` link — and bind that Mac-side path into
@@ -333,6 +349,14 @@ public enum DockerBindMountPreflight {
 
     private static func isGuestDockerSocket(_ source: String) -> Bool {
         source == "/var/run/docker.sock" || source == "/run/docker.sock"
+    }
+
+    /// Exact matches only, and a fixed, known list — never a prefix or
+    /// pattern — so this stays a narrow exemption for resources the engine
+    /// itself creates inside the guest, not a general escape from the
+    /// "must be shared with the VM" rule the rest of this preflight enforces.
+    private static func isGuestOwnedSocketPath(_ source: String) -> Bool {
+        source == SSHAgentForward.guestSocketPath
     }
 
     private static func unsupportedBareSystemAlias(_ source: String) -> String? {
