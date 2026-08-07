@@ -691,6 +691,11 @@ case "status":
             ("docker data", storage),
             ("connections", data["active_connections"]?.displayString ?? "0"),
             ("docker socket", data["docker_socket"]?.displayString ?? MorbPaths.dockerSocket.path),
+            // UX-15: the guest's own address on the `vmnet` NAT segment — "-" while
+            // the VM is not running or the daemon could not read the DHCP lease. See
+            // `docs/design/DNS-DECISION.md`'s DIF-4 step 0 gate result for what this
+            // does and does not prove about a given network.
+            ("guest address", data["guest_address"]?.displayString ?? "-"),
             ("cpus", data["cpus"]?.displayString ?? "-"),
             ("memory", (data["memory_mib"]?.displayString).map { "\($0) MiB" } ?? "-"),
             ("auto-suspend", (data["auto_suspend_minutes"]?.displayString).map { $0 == "0" ? "off" : "\($0)m" } ?? "-"),
