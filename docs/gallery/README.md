@@ -3,10 +3,18 @@
 Real windows, real data — a live `shopdemo` Compose project (five current services, one
 publishing two TCP ports, one publishing UDP), three standalone containers reused across
 sessions (`web-front`, `cache-node`, `dns-probe`), a real Kubernetes workload contributing
-sixteen more, a real BuildKit cache, and 38 containers total on a working engine. Captured
-with [`scripts/capture-window.sh`](../../scripts/capture-window.sh), which grabs a single
-window's own composited content rather than a screen region, so nothing else on the desktop
-can leak in.
+sixteen more, a real BuildKit cache, and 38 containers total on a working engine. Stills are
+captured with [`scripts/capture-window.sh`](../../scripts/capture-window.sh), which grabs a
+single window's own composited content rather than a screen region, so nothing else on the
+desktop can leak in. This pass adds the same guarantee for motion:
+[`scripts/capture-gif.sh`](../../scripts/capture-gif.sh) loops that exact `screencapture -l`
+call into a frame sequence and assembles it into a GIF with ImageIO — still one window's own
+buffer, never a screen region (`-R`) and never a full-display recording (`-V`); see that
+script's header for why both are refused. `screencapture -l` is slow — this machine achieved
+roughly 0.25–2.1 s per frame depending on how much the window had to redraw — so every GIF
+below declares the frame delay actually measured for its own capture run rather than a
+hoped-for rate, and several hand-pick a handful of the captured frames rather than replaying
+all of them, to keep file size down without changing what any single frame shows.
 
 **Nothing here is staged, retouched or cropped to hide anything.** Where a screen still has a
 known defect it is either absent from this page or the defect is named below it. This project
@@ -60,6 +68,26 @@ max: 520)` was previously discarded because the modifier sat underneath `.toolba
 instead of outermost on the inspector's content, so every route was stuck at SwiftUI's ~270 pt
 default and clipping values ("Running" as "Runnin", "linux" as "linu"). Nothing here is clipped.
 
+### Containers, the inspector's reveal
+
+![The inspector opening, closed then popped open](containers-inspector-reveal.gif)
+
+`shopdemo-web-1` selected, six real `screencapture -l` frames at ~340 ms apart (this machine's
+measured rate for this window). This animates a defect this project investigated and then
+closed as a **platform limitation, not a bug** (UI-056, `TASKS.md`): closing the trailing
+`.inspector` slides; opening it does not, because AppKit's own reveal work — Auto Layout,
+`NSTableRowView` management, Objective-C runtime/ARC churn, CoreAnimation commit — costs
+several hundred ms of synchronous main-thread time on macOS 26.4, consuming the entire
+animation's frame budget before SwiftUI has a frame left to interpolate. It reproduces
+identically in a three-row stock `Form` with zero Morbstack code
+(`docs/design/tahoe/HIG-FINDINGS.md`), on the sidebar toggle, and on every route's inspector
+regardless of content size, so there is no content-layer fix on file for it. What this GIF
+actually shows, frame by frame: two frames closed, then the panel already fully open and
+settled by the very next capture — sometimes (run-to-run) an intermediate frame catches the
+column mid-width with values still clipped before layout finishes, sometimes the whole
+transition lands between two 340 ms-apart captures and reads as a hard cut. Either way, no
+frame here shows a smooth interpolated slide, because the real animation does not produce one.
+
 ### Containers, the Files tab on a real container
 
 ![Container files](containers-files-tab.png)
@@ -72,16 +100,22 @@ default and clipping values ("Running" as "Runnin", "linux" as "linu"). Nothing 
 ### The container terminal, a live shell
 
 ![Container terminal](container-terminal.png)
+![Container terminal, a real command running](container-terminal.gif)
 
 An interactive `exec` session connected to `shopdemo-web-1` — the window title tracks the
 resolved shell (`shopdemo-web-1 — /bin/sh`) and the prompt (`/ #`) with a live cursor is real
 output from the container, not a placeholder. Opened this pass with `--tour-open-terminal`,
 which calls the same `ContainerTerminalWindowController.open(for:client:)` the toolbar button,
-context menu, and ⌃⌘T all call.
+context menu, and ⌃⌘T all call. The GIF types `for i in 1 2 3 4 5; do echo tick $i; sleep 0.6;
+done` into that live session — keyboard input reaches the app from automation, mouse clicks do
+not (see the inspector-reveal note above and `ContainersRootView.swift`'s comment on the same
+limitation) — and shows five real `tick N` lines actually arriving from the container's shell
+one at a time, not a canned transcript.
 
 ### Containers, the Compose-aggregated log window
 
 ![Compose project logs](containers-compose-logs.png)
+![Compose project logs, opening scrolled to the old lines then jumped to the live tail](containers-compose-logs.gif)
 
 The `shopdemo` project's merged log (UX-2/UX-3), opened this pass with `--tour-project-logs
 shopdemo`: five services' `stdout`/`stderr` interleaved by real arrival time, each line
@@ -92,26 +126,48 @@ auto-follow-on-append rule — the `Jump to Newest` button stays visible instead
 fixed in this pass; worth its own ticket. The header's "5 of 8 services streaming" reflects the
 same repeated-demo-run history as the Containers screen above, not a bug in the header itself.
 
+The GIF, captured for this pass, extends that same finding rather than hiding it: frame 1 is
+the stale open-to-old-lines state above; a scripted click on `Jump to Newest` (AXPress, not a
+mouse click) reaches the real interleaved tail by frame 3 — `web`/`api`/`worker`/`dns-probe`
+lines genuinely arriving during the capture, colour-coded, real timestamps. Frame 4, roughly
+20 real seconds later with the line counter risen from 3,434 to 3,454 lines, shows **the exact
+same visible lines as frame 3** — the one-time manual jump does not turn into ongoing
+auto-follow, so the view drifts stale again immediately and `Jump to Newest` never disappears.
+Confirms the auto-follow-on-append rule is not just failing on first open; it does not fire on
+append at all in this window.
+
 ### Containers, the Statistics tab's network rate chart
 
 ![Container network statistics](containers-statistics-network.png)
+![Container network statistics, the chart climbing under real traffic](containers-statistics-network.gif)
 
 `shopdemo-web-1`, Network Activity selected via `--tour-stat-metric network` — reachable in the
 app today only by a click on the Metric picker until this pass added the flag. Received/Sent are
 cumulative Engine counters (90 KB / 236 KB here); the chart plots the derived per-interval rate,
 visibly spiking to the mid-teens of KB/s while this capture ran repeated `curl` requests against
 the container's published port and settling back to zero once they stopped — a real, driven
-signal, not a static mock.
+signal, not a static mock. The GIF is eight frames picked out of a real ~24 s capture (the
+route polls every 2 s, stated on-screen) while a fresh `curl` loop ran against the container's
+published port: Received climbs 332 KB → 348 KB → 363 KB, Send/Receive Rate move between 2–5
+KB/s, and the dot cluster at the chart's right edge visibly grows — not a looped clip.
 
 ### Containers, the Statistics tab's disk rate chart
 
 ![Container disk statistics](containers-statistics-disk.png)
+![Container disk statistics, Written and the write rate climbing live](containers-statistics-disk.gif)
 
 The same container, Disk Activity via `--tour-stat-metric disk`. Written climbs to 115.3 MB and
 the chart shows a real spike from a `dd if=/dev/zero` run inside the container moments before
 the capture, tapering to zero as the write finished — reads and writes served from page cache
 never reach a block device and correctly never appear here, which the section's own footnote
-states.
+states. The still's single spike is brief enough that a first attempt at an animated version
+(one burst of `dd` calls) had already finished writing before the frame loop caught up to it —
+a real limit of a ~1–2 s-per-frame capture rate against a write that completes in one polling
+interval. The GIF instead drives a steadier load (repeated small `dd ... conv=fsync` writes,
+~2.5 MB every 0.4 s) so the rate stays visibly non-zero across the whole capture: seven frames
+over ~15 s real time, Written 303.1 MB → 326.1 MB → 351.3 MB, Write Rate holding in the
+2.6–3.7 MB/s band, x-axis timestamps advancing — genuine sustained motion, not the single-spike
+shape the still documents.
 
 ### Stacks
 
@@ -210,3 +266,8 @@ destination, 0 on an unsupported driver) rather than one blanket verdict.
   changes and is not republished here as current evidence.
 - **The Compose log window's initial scroll position** (named above, under Containers) is a real
   defect, not a missing capture, but it was caught rather than fixed in this pass.
+- **Animated capture exists for five surfaces so far** (the inspector's reveal, the container
+  terminal, the Compose log window, and both Statistics rate charts) — the ones judged to
+  actually read as motion worth watching. Stacks, Images, Disk, Volumes, Networks, Builds and
+  Migration are stills only; nothing about them is inherently unanimatable, they simply were not
+  judged to need it this pass.

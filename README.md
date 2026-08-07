@@ -60,7 +60,10 @@ app — is thin, native Swift glue.
 
 Real windows, captured off a running engine — not mockups, not offscreen
 renders. [**The full gallery**](docs/gallery/) covers every route that has been
-photographed, and names the ones that haven't.
+photographed (and, for the surfaces where motion is the actual claim, animated
+with [`scripts/capture-gif.sh`](scripts/capture-gif.sh) — same one-window,
+never-a-screen-region capture as the stills, just looped into a GIF), and names
+the ones that haven't.
 
 [![Containers, grouped by Compose project](docs/gallery/containers-compose-grouping.png)](docs/gallery/)
 
@@ -83,6 +86,14 @@ The number that matters is the pair: the VM disk reserves **77.31 GB** and
 actually occupies **6.57 GB** on APFS. Most "why is Docker eating my disk"
 confusion is one of those two figures shown alone. Reclaim is automatic — the
 screen states when the last sweep ran and what it found.
+
+[![Container terminal, a real command running](docs/gallery/container-terminal.gif)](docs/gallery/)
+
+A live `exec` session, not a mock: the GIF above types a command into a real
+shell in a running container and shows the output arriving one line at a time.
+The gallery has four more of these — including an honest one of the trailing
+`.inspector`'s reveal, which pops rather than slides and is now measured and
+documented as a macOS platform floor, not glossed over as fixed.
 
 ## Status: pre-release (milestone M0)
 
