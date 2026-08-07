@@ -388,3 +388,181 @@ Caveats that remain true:
   > ≤1.20.x installed base works against, while Docker Desktop is insulated
   > only until it moves off engine 27. Not re-run through this file's Java
   > probe, so it is the commit's live evidence, not this document's.
+
+---
+
+# Part 2 — Switching from Docker Desktop: the first ten minutes
+
+**Added 2026-08-07.** Companion to
+[PERFORMANCE-MODEL.md](PERFORMANCE-MODEL.md), written in the same pass — that
+one is about why OrbStack is fast, this one is about whether you can leave
+Docker Desktop for us. Everything above this line is about
+whether *tools* find the engine. This part is about whether a *person* with a
+working Docker Desktop setup can switch without going back, and it is scoped
+deliberately to the first ten minutes — the window in which somebody decides.
+
+Competitor claims were fetched from vendor docs and trackers on 2026-08-07 and
+carry a URL. Our claims carry a file path and one of two labels: **[live]** for
+something executed against a real engine and recorded (in this document or a
+named one), **[source]** for something read out of the tree but never run. The
+distinction matters more here than anywhere else in this file, because a
+migration path that has only been read is exactly the kind of thing that fails
+on someone else's Mac. Where an item is only **[source]**, that is the finding.
+
+Companion: [CAPABILITY-GAP.md](CAPABILITY-GAP.md) §14 ranks migration against
+the other switching decisions; [../design/ZERO-CONFIG-DISCOVERY.md](../design/ZERO-CONFIG-DISCOVERY.md)
+is the design. This part supersedes neither — it is the step-by-step.
+
+## The switch, step by step
+
+| Step | OrbStack | Morbstack | Who wins |
+| --- | --- | --- | --- |
+| **Install** | Download, open. "Switching from Docker Desktop is 100% seamless: just open OrbStack and get started" ([install](https://docs.orbstack.dev/install)) | Download, open. First-run sheet shows the full plan and asks (`MorbstackAppCore/FirstRunCLISetup.swift`, `docs/first-run.md`) **[source]** | level |
+| **`/var/run/docker.sock`** | Claimed **automatically if you have admin** ([install](https://docs.orbstack.dev/install), [FAQ](https://docs.orbstack.dev/faq)) | **Never automatic.** `MorbDockerContext.suggestedSymlinkCommand` prints `sudo ln -sf …` for the user to run (`MorbstackKit/MorbDockerContext.swift:779-796`); nothing in the tree writes `/var/run` **[source]** | different by design — see below |
+| **`~/.docker/run/docker.sock`** | not documented | Created **only when the path is free**, with five-state ownership checks and a TOCTOU re-check (`MorbDockerContext.swift:511-620`) **[live]** — it is what makes the zero-config rerun above pass | us |
+| **Context** | `orbstack` context, selected | `morbstack` context, selected **only if the current one was Docker's plain `default`** (`MorbDockerContext.use(force:)`, `:273-275`); `desktop-linux` is never stomped **[live]** | us |
+| **`docker` CLI** | Bundled. Installs to `/usr/local/bin` **only if you don't already have them**; an existing Docker Desktop CLI "will be left alone" ([install](https://docs.orbstack.dev/install)) | Bundled, hash-pinned: docker **29.7.1**, compose **v5.3.1**, buildx **v0.36.0** (`MorbstackKit/CliPlugins.swift:90-100`), re-verified against `TOOLCHAIN.plist` at *use* time and gated on `SecStaticCodeCheckValidity` for a packaged app (`:222-292`). Links go to `~/.morbstack/bin`, **no sudo** | us on provenance, level on outcome |
+| **Credential helper** | "You may also need to change the credential store" ([install](https://docs.orbstack.dev/install)) — one sentence, no automation | We hold no credential and write none. `config.json` writes preserve `credsStore`, `credHelpers`, `auths`, mode bits and symlink identity (`MorbDockerContext.writeConfigJSON`, `:362-438`); `morb doctor` warns when `credsStore: "desktop"` is set and Desktop is gone (`Doctor.swift:312-337`) **[source]** | us |
+| **Images and volumes** | `orb docker migrate`, offered automatically after install, copies rather than moves ([install](https://docs.orbstack.dev/install)) | `morb migrate` — `detect`/`config`/`plan`/`run`/`images`/`volumes`/`verify`, `--from` accepting Docker Desktop, Colima, **OrbStack**, or a raw socket (`MorbMigrate/EngineSelection.swift:51-82`), copy-only, with a checksum-manifest `verify` neither competitor documents (`VerifyCommand.swift`) **[source]** | us on breadth and verification, **them on the offer** |
+| **Containers** | "containers, volumes, images, and more" ([install](https://docs.orbstack.dev/install)) | **Not migrated, stated plainly** (`MorbMigrate/MigrateCLI.swift:187-188`, `docs/migrate.md:88-97`) | them, nominally |
+| **Compose files** | "fully compatible with Compose" ([HN, 2024-09-02](https://news.ycombinator.com/item?id=41423187)) | Compose v5.3.1; parity rows #5–#7 are **PASS live** — 4-service stack with `depends_on: service_healthy`, named volume, two custom bridges, service DNS, `down -v`; WordPress+MySQL to a real 302 (`docs/parity.md:176-178`) | level |
+| **Leaving** | Three sentences: stop OrbStack, `docker context use desktop-linux`. **No data path out** — their [#2354](https://github.com/orbstack/orbstack/issues/2354) (open, 2026-03-09) and [#2517](https://github.com/orbstack/orbstack/issues/2517) both ask for one | `morb migrate --to <runtime\|socket>` (`MorbMigrate/MigrateOutCommand.swift`, landed 2026-08-06 in `2966032`), same transactions, same verification; `morb export --all` writes a directory stock `docker load` restores; `morb uninstall-cli` removes only artifacts still positively ours **[source — see below]** | us, decisively |
+
+## The `/var/run/docker.sock` divergence, stated honestly
+
+This is the one place where our principle costs a user something, so it should
+be written down rather than discovered.
+
+OrbStack asks for admin once and takes `/var/run/docker.sock`. That path is what
+hardcoded scripts, older CI runners, and any tool that never learned about
+Docker contexts actually open. We refuse to take it automatically, because
+`morb install-cli` promises no privilege and spending admin silently in
+first-run would break that promise permanently
+([ZERO-CONFIG-DISCOVERY.md](../design/ZERO-CONFIG-DISCOVERY.md) §1).
+
+The refusal is right. The **reporting** of it is incomplete, and that is a
+defect rather than a principle: `morb doctor`'s `docker-discovery` check probes
+`~/.docker/run/docker.sock` and `~/.docker/desktop/docker.sock` and
+**deliberately excludes `/var/run/docker.sock`** (`MorbstackKit/Doctor.swift:761-772`).
+So a user whose machine has an old-style Docker Desktop owning the system path —
+or who ran our own printed `sudo ln -sf` and later moved on — gets no warning
+about the single path most likely to be silently answering somebody else. The
+design doc claims doctor "warns whenever a competing conventional socket would
+win" ([ZERO-CONFIG-DISCOVERY.md](../design/ZERO-CONFIG-DISCOVERY.md) §"Coexistence");
+that claim is currently wider than the code. → **UX-25**
+
+## What actually loses the user, ranked
+
+These are the things a person hits inside ten minutes that send them back. Each
+is checked in source; none is inferred from a competitor's docs.
+
+1. **Hot reload dies, silently.** inotify does not cross VirtioFS — no
+   VM-backed Docker on macOS has real passthrough (the 2021 FUSE RFC, LWN
+   874000, never merged). Our live-share bridge nudges changed files with a
+   same-mode `fchmod(2)`, which emits `IN_ATTRIB` only: chokidar/nodemon/Vite
+   and Python `watchdog` react, **Go `fsnotify` and Rust `notify-rs` do not**
+   (`docs/benchmarks.md` watcher matrix; `docs/parity.md` #10). A Go developer
+   running `air` watches their reload stop working and gets no error. We have
+   published the matrix, which is more than either competitor has done —
+   OrbStack's [#2561](https://github.com/orbstack/orbstack/issues/2561) is the
+   same class of bug, filed 2026-06-23 and closed in v2.2.2 on 2026-08-03 —
+   but publishing a gap is not closing it. DIF-1a is the fix.
+2. **`credsStore: "desktop"` hangs every credential-needing `docker` command**
+   the moment Docker Desktop stops running. We detect it
+   (`Doctor.swift:312-337`) and deliberately do not fix it, because writing
+   another process's credential configuration is exactly the thing we promise
+   not to do. Correct, and it needs to be in the switching instructions rather
+   than in a doctor check the user has not run yet. → **UX-26**
+3. **Bind mounts outside `/Users`, `/Volumes`, `/private/tmp` are a hard 400**,
+   and the remedy requires a **restart**, not just a config edit
+   (`MorbstackKit/DockerBindMountPreflight.swift:221-254`,
+   `DirectoryShares.swift`). Docker Desktop's default share list is broader, so
+   a `compose.yaml` with `/opt/data` or `/srv` in it works there and fails here.
+   The error message is good and says what to do; the restart requirement is the
+   part that reads as a product limitation.
+4. **`host.docker.internal` is still PARTIAL.** Split-DNS is implemented
+   (`guest/morbinit/src/dns.rs:60,233-239`) and `--add-host
+   host.docker.internal:host-gateway` reaches a real Mac service at
+   `192.168.64.1`, but the 2026-08-03 live re-run had the **bare name still not
+   resolving** (`docs/parity.md:189`, #18/#19). A bridge-DNS fix (`d82b823`)
+   landed after that run and **has never been re-run**. This is a
+   copied-`compose.yaml` killer and it is one live pass away from being either
+   fixed or honestly downgraded. → **UX-24**
+5. **A `DOCKER_HOST` already in the user's shell profile silently wins over the
+   context.** We model the precedence correctly and `morb context status` says
+   so (`MorbDockerContext.Status.effectiveSelection`, `:154-162`;
+   `morb/main.swift:889-891`), but nothing checks for it during install, which
+   is when it matters.
+6. **Containers with `--restart unless-stopped` do not come back after a
+   reboot.** The login item is a *host service* and, by its own documentation,
+   "does not start the VM or containers" (`docs/first-run.md:85-93`).
+   Restart policies do survive `morb stop`/`morb start` (`docs/parity.md` #24,
+   PASS). Docker Desktop starts its VM at login by default, so this is a
+   behaviour change and not a documented one.
+7. **`--network host` produces no Mac listener at all.** Deliberate — a started
+   container must never imply a fabricated Mac mapping (`docs/parity.md` #20) —
+   and the same limitation Docker Desktop had until 4.34. Not a regression from
+   Desktop; a regression from Linux.
+
+Explicitly **not** on this list, having been checked: cgroup v2, overlay2,
+healthchecks and `depends_on: service_healthy`, restart policies across
+stop/start, named-volume and image persistence, `docker events` ordering,
+`docker stats`, the `OOMKilled=true`/exit-137 contract, disk-full behaviour,
+byte-identical registry error strings, DinD via a socket bind mount, and
+`docker context` mechanics — all PASS in `docs/parity.md`.
+
+## Where the migration path is only read, not run
+
+The way out is our best argument and it is the least tested thing in it.
+
+`morb migrate --to` and `morb export --all` landed on 2026-08-06 and the
+commit that landed them says so itself: *"Not exercised against a live engine —
+no engine in this lane; `morb export --all`'s docker-load round trip is
+unverified pending the machine lane"* (`2966032`). Neither has a live row in
+this document. The README sentence CAPABILITY-GAP §14 recommends — *"leaving is
+one command, and it is tested"* — **is not yet true**, and must not be written
+until a machine-lane pass makes it true. → **UX-27**
+
+Two further limits found in source and worth stating in `docs/migrate.md`
+rather than leaving to discovery:
+
+- **No free-space preflight.** `ImageMigrationTransaction` stages each image to
+  a temp archive under `~/.morbstack/migrate/image-transactions/`
+  (`:523-536`) with no capacity check anywhere in either transaction; the only
+  bounds are a 900 s export and 1800 s load timeout (`:547,559`). Migrating a
+  large image set on a nearly-full Mac fails late.
+- **Not resumable once import begins.** After `POST /images/load` starts, a
+  cancel yields `.requiresReview`, not a rollback (`:557-583`,
+  `docs/migrate.md:170-176`). OrbStack made migration resumable in v2.2.0;
+  ours is honest about not being, which is better than pretending, but the
+  gap is real.
+
+## The offer we don't make
+
+OrbStack's first launch **offers** to import Docker Desktop's data, and can be
+re-run from `File ▸ Migrate Docker Data` ([install](https://docs.orbstack.dev/install)).
+Ours does not: `FirstRunCLISetup.swift` (824 lines) contains no occurrence of
+`migrat` or `Docker Desktop` — verified by exhaustion, not inferred.
+
+We do have the GUI: `Nav.migration` is a first-class sidebar route and
+`MigrationRootView.swift` (2,091 lines) detects Docker Desktop, Colima and
+OrbStack and runs both **image** and **volume** transfers through review sheets
+(`:59-61`, `:401`, `:460`). It is simply not on the path anyone walks on day
+one. Adding one line to the existing first-run sheet — *"Docker Desktop data
+found. Import it?"*, deep-linking to the route that already exists — is the
+single cheapest thing in this document. → **UX-23**
+
+(While confirming that: `docs/migrate.md:124` says *"The native Migration route
+does not yet execute volume transfers."* It does — `MigrationRootView.swift:126,
+159-162, 460` wire a full `VolumeMigrationWorkflow`. One more row for the UX-21
+class of error, filed as part of **UX-32**.)
+
+## Two more doc-vs-source corrections found in this pass
+
+- `docs/compat.md:42` says *"Compose v2 and buildx are bundled."* The pin is
+  **v5.3.1** (`CliPlugins.swift:95`, `NOTICE:39`).
+- `docs/dynamic-port-allocation.md:181` calls loopback-narrowing "an intentional
+  local-desktop safety policy" while `MorbstackKit/DockerAPI.swift:134-147`
+  says the default is Docker-compatible `0.0.0.0`. Both describe real behaviour
+  on different axes ( `[::]`→`[::1]` narrowing vs. the IPv4 default) and read as
+  contradicting each other. → **UX-32**

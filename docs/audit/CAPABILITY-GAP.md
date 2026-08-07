@@ -1,7 +1,10 @@
 # Capability gap — Docker Desktop / OrbStack vs Morbstack
 
 **Written 2026-08-05.** Companion to [UI-FEATURE-GAP.md](UI-FEATURE-GAP.md), which is about
-**screens**. This file is about **capabilities** — the things that make somebody switch, or refuse
+**screens**, and to [PERFORMANCE-MODEL.md](PERFORMANCE-MODEL.md) (2026-08-07), which is about
+**mechanism** — it supplies the engineering explanation behind §1, §5, §6 and §7 below, and
+several of the "we have not measured it" statements here have moved since. This file is about
+**capabilities** — the things that make somebody switch, or refuse
 to, whether or not any of it is visible in a window. Competitor claims were fetched from vendor
 docs, release notes and issue trackers on 2026-08-05; "our side" is read from source on
 `swarm/cleanup` and every claim carries a file path. Engine-level *checklist* tracking stays in

@@ -71,13 +71,20 @@ bug worth fixing
 **Competitive position** — [COMPETITIVE-GAPS.md](COMPETITIVE-GAPS.md) ·
 [comparison.md](comparison.md) · [audit/COMPETITOR-UI-RESEARCH.md](audit/COMPETITOR-UI-RESEARCH.md) ·
 [audit/UI-FEATURE-GAP.md](audit/UI-FEATURE-GAP.md) ·
-[audit/CAPABILITY-GAP.md](audit/CAPABILITY-GAP.md)
+[audit/CAPABILITY-GAP.md](audit/CAPABILITY-GAP.md) ·
+[audit/PERFORMANCE-MODEL.md](audit/PERFORMANCE-MODEL.md)
 
-The last two are companions and should be read together: **UI-FEATURE-GAP** is the delta in
-**screens**, **CAPABILITY-GAP** is the delta in **capabilities** — performance, networking, disk,
-proxies, integrations, migration — whether or not any of it is visible in a window. Both rank their
-findings by what changes a user's day, and both record skip verdicts as product decisions rather
-than omissions.
+The last three are companions and should be read together. **UI-FEATURE-GAP** is the delta in
+**screens**. **CAPABILITY-GAP** is the delta in **capabilities** — networking, disk, proxies,
+integrations, migration — whether or not any of it is visible in a window. **PERFORMANCE-MODEL** is
+the delta in **mechanism**: why OrbStack is fast (they left Virtualization.framework; their own
+engineer says so, and the document cites where), which of those techniques are structurally closed
+to us, which are not, and which are marketing. All three rank their findings by what changes a
+user's day, and all three record skip verdicts as product decisions rather than omissions.
+
+For migration specifically — what a person with a working Docker Desktop setup has to do to switch,
+and what silently behaves differently afterwards — see
+[audit/ECOSYSTEM-MATRIX.md](audit/ECOSYSTEM-MATRIX.md) Part 2.
 
 **Audits** — [audit/](audit/). [audit/MASTER-AUDIT.md](audit/MASTER-AUDIT.md) is the entry point, but
 it is dated 2026-08-03 and its companion table does not list anything written since. The rest:
@@ -88,7 +95,8 @@ it is dated 2026-08-03 and its companion table does not list anything written si
 | [audit/TECHNOLOGY-AUDIT.md](audit/TECHNOLOGY-AUDIT.md) | are the platform bets sound. Bet 6 was decided by TECH-1; see the dated note in that section. |
 | [audit/TASTE-REVIEW.md](audit/TASTE-REVIEW.md) | is the UI *good*, as opposed to not broken. Every finding marked LAW or TASTE. Companion to the defect register in [audit/UI-AUDIT.md](audit/UI-AUDIT.md). |
 | [audit/INPUT-VALIDATION-REVIEW.md](audit/INPUT-VALIDATION-REVIEW.md) | can a hostile message off a socket hurt us — line-by-line over the guest wire parsers, the MCP server, and every process-spawning site. Names what it did not review. |
-| [audit/ECOSYSTEM-MATRIX.md](audit/ECOSYSTEM-MATRIX.md) | do Testcontainers and Dev Containers work, run live against the dev daemon. |
+| [audit/ECOSYSTEM-MATRIX.md](audit/ECOSYSTEM-MATRIX.md) | do Testcontainers and Dev Containers work, run live against the dev daemon. **Part 2** (2026-08-07) is the drop-in/migration story: the switch step by step against OrbStack's, and the seven things that lose a user in the first ten minutes. |
+| [audit/PERFORMANCE-MODEL.md](audit/PERFORMANCE-MODEL.md) | why OrbStack is fast, mechanically, and where that leaves us on filesystem, memory, networking, startup, install size and Rosetta. Names the one decision everything else is downstream of, and concludes that copying it is the famous thing not worth building. |
 | [audit/PROXY-FRAMING.md](audit/PROXY-FRAMING.md) | the fail-open preflight defect, its fix, and the streaming paths the fix could have broken. |
 | [audit/CONCURRENCY-PROTOCOL-FIXES.md](audit/CONCURRENCY-PROTOCOL-FIXES.md) | what CONC-2..5 / PROTO-1..7 / MOD-4 actually changed, including which races no unit test can reproduce. |
 | [audit/ENGINE-MATRIX.md](audit/ENGINE-MATRIX.md) | the first full runtime run against a rebuilt guest. Dated evidence; its publish-all sections describe a deleted mechanism. |
