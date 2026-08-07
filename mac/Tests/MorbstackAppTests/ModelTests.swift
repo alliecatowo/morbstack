@@ -261,6 +261,68 @@ final class PortMappingTests: XCTestCase {
         XCTAssertEqual(invalid.browserAddressUnavailableReason, "Docker reported an invalid host port.")
     }
 
+    // MARK: - Guest-reachable address (UX-15)
+
+    func testGuestReachableAddressUsesTheWildcardBindingAndTheReportedGuestAddress() {
+        let port = PortMapping(hostIP: "0.0.0.0", hostPort: 8080, containerPort: 80, proto: "tcp")
+        XCTAssertEqual(
+            port.guestReachableAddress(guestAddress: "192.168.64.27")?.absoluteString,
+            "http://192.168.64.27:8080")
+        XCTAssertNil(port.guestReachableAddressUnavailableReason(guestAddress: "192.168.64.27"))
+    }
+
+    /// A LAN-address binding (Docker Desktop-style `-p 192.168.1.40:8080:80`) is still
+    /// bound non-loopback inside the guest, so it is just as guest-reachable as a
+    /// wildcard binding — unlike `browserAddress`, which rejects it.
+    func testGuestReachableAddressAcceptsANonLoopbackReportedHostIP() {
+        let port = PortMapping(hostIP: "192.168.1.40", hostPort: 8080, containerPort: 80, proto: "tcp")
+        XCTAssertEqual(
+            port.guestReachableAddress(guestAddress: "192.168.64.27")?.absoluteString,
+            "http://192.168.64.27:8080")
+    }
+
+    func testGuestReachableAddressIsNilWithoutAKnownGuestAddress() {
+        let port = PortMapping(hostIP: "0.0.0.0", hostPort: 8080, containerPort: 80, proto: "tcp")
+        XCTAssertNil(port.guestReachableAddress(guestAddress: nil))
+        XCTAssertEqual(
+            port.guestReachableAddressUnavailableReason(guestAddress: nil),
+            "The guest VM's address is not currently known.")
+    }
+
+    /// A binding Docker reported as loopback was bound to loopback *inside the guest*,
+    /// so the guest's own address does not reach it — this is the one case that
+    /// differs in kind (not just in which address is used) from `browserAddress`.
+    func testGuestReachableAddressRejectsALoopbackBindingEvenWithAKnownGuestAddress() {
+        let ipv4 = PortMapping(hostIP: "127.0.0.1", hostPort: 8080, containerPort: 80, proto: "tcp")
+        XCTAssertNil(ipv4.guestReachableAddress(guestAddress: "192.168.64.27"))
+        XCTAssertEqual(
+            ipv4.guestReachableAddressUnavailableReason(guestAddress: "192.168.64.27"),
+            "This port was bound to loopback inside the guest, so the guest's own address does not reach it.")
+
+        let ipv6 = PortMapping(hostIP: "::1", hostPort: 8080, containerPort: 80, proto: "tcp")
+        XCTAssertNil(ipv6.guestReachableAddress(guestAddress: "192.168.64.27"))
+    }
+
+    func testGuestReachableAddressRejectsUDPAndInvalidPorts() {
+        let udp = PortMapping(hostIP: "0.0.0.0", hostPort: 53, containerPort: 53, proto: "udp")
+        XCTAssertNil(udp.guestReachableAddress(guestAddress: "192.168.64.27"))
+        XCTAssertEqual(
+            udp.guestReachableAddressUnavailableReason(guestAddress: "192.168.64.27"),
+            "Guest addresses are only available for TCP mappings.")
+
+        let unpublished = PortMapping(hostIP: nil, hostPort: nil, containerPort: 80, proto: "tcp")
+        XCTAssertNil(unpublished.guestReachableAddress(guestAddress: "192.168.64.27"))
+        XCTAssertEqual(
+            unpublished.guestReachableAddressUnavailableReason(guestAddress: "192.168.64.27"),
+            "No host port was reported.")
+
+        let invalid = PortMapping(hostIP: "0.0.0.0", hostPort: 0, containerPort: 80, proto: "tcp")
+        XCTAssertNil(invalid.guestReachableAddress(guestAddress: "192.168.64.27"))
+        XCTAssertEqual(
+            invalid.guestReachableAddressUnavailableReason(guestAddress: "192.168.64.27"),
+            "Docker reported an invalid host port.")
+    }
+
     func testPublishedTCPPortGetsALoopbackURL() {
         let port = PortMapping(hostIP: "0.0.0.0", hostPort: 8080, containerPort: 80, proto: "tcp")
         XCTAssertEqual(port.url?.absoluteString, "http://127.0.0.1:8080")

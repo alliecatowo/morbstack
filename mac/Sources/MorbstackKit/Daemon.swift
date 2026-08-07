@@ -825,6 +825,15 @@ public final class Daemon {
                 "guest_http_proxy": vm.guestHTTPProxy.map { AnyCodableValue.string($0) } ?? .null,
                 "guest_https_proxy": vm.guestHTTPSProxy.map { AnyCodableValue.string($0) } ?? .null,
                 "guest_no_proxy": vm.guestNoProxy.map { AnyCodableValue.string($0) } ?? .null,
+                // UX-15: the guest's own address on the `vmnet` NAT segment, from the
+                // system DHCP lease file — `null`, never a stale guess, unless the VM
+                // is actually running. A lease can outlive a stop (macOS does not
+                // revoke it just because the VM went away), so showing it while
+                // stopped would be exactly the "field shows an unreachable address"
+                // failure this feature exists to avoid. See `GuestNetworkAddress.swift`
+                // and `docs/design/DNS-DECISION.md`'s DIF-4 step 0 gate result.
+                "guest_address": (vm.state == .running ? GuestNetworkAddressLookup.currentAddress() : nil)
+                    .map { AnyCodableValue.string($0.ipv4) } ?? .null,
             ])
 
         case "shares":

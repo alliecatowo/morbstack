@@ -359,6 +359,12 @@ struct EngineStatus: Sendable, Equatable {
     var version: String?
     /// Whether the control socket answered at all.
     var reachable: Bool
+    /// The guest VM's own address on the `vmnet` NAT segment (UX-15), when the VM is
+    /// running and the daemon could resolve it. `nil` covers both "not running" and
+    /// "running but the lease could not be read" — deliberately not distinguished here,
+    /// since neither case has an address a caller should show as reachable. Defaulted
+    /// so the many existing call sites that predate UX-15 keep compiling.
+    var guestAddress: String? = nil
 
     static let unknown = EngineStatus(state: "stopped", vmState: "not running", version: nil, reachable: false)
 
@@ -458,6 +464,54 @@ struct PortMapping: Hashable, Sendable, Identifiable {
         case "127.0.0.1", "::1": hostIP
         default: nil
         }
+    }
+
+    /// UX-15: the address this port is reachable at directly on the guest VM's own
+    /// network segment, given the daemon's current `EngineStatus.guestAddress` —
+    /// distinct from ``browserAddress``, which is always the Mac's loopback-forwarded
+    /// copy of the same port.
+    ///
+    /// Docker's userland-proxy inside the guest binds every published port on
+    /// whatever interface Docker was told to use (`guest/morbinit/src/proxy_wrapper.rs`
+    /// forwards dockerd's own `-host-ip`/`-host-port` unchanged). A binding Docker
+    /// reported as a literal loopback address was bound to loopback *inside the
+    /// guest* — not reachable from the Mac through this path at all — so this is
+    /// `nil` for anything but a non-loopback (normally wildcard) binding, on top of
+    /// the same TCP-only, valid-port requirements ``browserAddress`` already applies.
+    /// `guestAddress == nil` (VM not running, or the daemon couldn't read the DHCP
+    /// lease — see `EngineStatus.guestAddress`) always yields `nil`: there is no
+    /// mechanism here to guess a stale address.
+    func guestReachableAddress(guestAddress: String?) -> URL? {
+        guard let guestAddress,
+            let hostPort,
+            (1...65_535).contains(hostPort),
+            proto.caseInsensitiveCompare("tcp") == .orderedSame,
+            hostIP != "127.0.0.1", hostIP != "::1"
+        else { return nil }
+
+        var components = URLComponents()
+        components.scheme = "http"
+        components.host = guestAddress
+        components.port = hostPort
+        return components.url
+    }
+
+    /// The factual reason ``guestReachableAddress(guestAddress:)`` is unavailable,
+    /// mirroring ``browserAddressUnavailableReason``'s "describe, never diagnose"
+    /// rule. `nil` when an address is available.
+    func guestReachableAddressUnavailableReason(guestAddress: String?) -> String? {
+        guard guestReachableAddress(guestAddress: guestAddress) == nil else { return nil }
+        guard guestAddress != nil else {
+            return "The guest VM's address is not currently known."
+        }
+        guard hostPort != nil else { return "No host port was reported." }
+        guard (1...65_535).contains(hostPort ?? 0) else {
+            return "Docker reported an invalid host port."
+        }
+        guard proto.caseInsensitiveCompare("tcp") == .orderedSame else {
+            return "Guest addresses are only available for TCP mappings."
+        }
+        return "This port was bound to loopback inside the guest, so the guest's own address does not reach it."
     }
 
     /// `8080 → 80/tcp`, or `80/tcp` when unpublished.
