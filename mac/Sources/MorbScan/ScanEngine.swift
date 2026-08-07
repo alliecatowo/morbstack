@@ -36,6 +36,17 @@ public enum ScanEngineError: Error, CustomStringConvertible {
 public enum ScanPaths {
     public static var root: URL { MorbPaths.root.appendingPathComponent("scan", isDirectory: true) }
 
+    /// Where `scripts/fetch-scan-tools.sh` installs syft and grype. Deliberately not
+    /// `dist/host-bin` (unlike the bundled docker/compose/buildx/kubectl host
+    /// binaries): `mise-tasks/app` copies that whole directory into the signed app
+    /// bundle, and CLAUDE.md §1.1 calls the extra nested-executable signing surface a
+    /// landmine. syft and grype are a first-run fetch, not a bundled payload — see the
+    /// header comment in `fetch-scan-tools.sh` — so they live beside the database this
+    /// directory's sibling ``grypeDBCacheDir`` caches, under `$MORBSTACK_HOME` on a
+    /// repo checkout and a shipped app alike, never inside anything `mise run app`
+    /// assembles.
+    public static var toolsDirectory: URL { root.appendingPathComponent("bin", isDirectory: true) }
+
     /// Where grype's vulnerability database is cached. Explicit rather than letting
     /// grype fall back to its own default (`~/Library/Caches/grype/db`) — the local-
     /// only guarantee this feature makes is worth more when the cache location is
