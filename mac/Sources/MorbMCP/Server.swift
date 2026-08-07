@@ -227,11 +227,37 @@ final class MCPServer {
     private func record(
         tool: String, decision: PermissionDecision, arguments: [String: Any], started: Date, result: ToolCallResult
     ) {
-        let summary = result.content.compactMap { $0["text"] as? String }.joined(separator: " ")
         audit.recordToolCall(
             tool: tool, decision: decision, arguments: arguments,
             durationMS: Date().timeIntervalSince(started) * 1_000,
-            ok: !result.isError, resultSummary: summary)
+            ok: !result.isError, resultSummary: Self.auditSummary(of: result))
+    }
+
+    /// What the audit log is allowed to know about a tool's result.
+    ///
+    /// **Never the content.** `container_logs` returns whatever a container wrote to
+    /// its stdout and `container_exec` returns whatever a command printed; both can
+    /// carry a token, a connection string, or a customer's data. This used to join
+    /// that text and hand 500 characters of it to the log — sitting directly beside
+    /// an `arguments` field that `Redactor.redact` scrubs carefully, which made the
+    /// scrubbing beside it decorative.
+    ///
+    /// Redacting free text was rejected: a redactor can recognise a key named
+    /// `password`, but not an arbitrary secret in arbitrary output, and one that
+    /// half-works reads as a guarantee it cannot make.
+    ///
+    /// An audit trail needs to answer *what was invoked, was it allowed, did it
+    /// work, how much came back* — none of which requires the bytes. Error text is
+    /// the exception and is kept: those strings are written by us, not by the
+    /// container, and they are the whole reason to read the log after a failure.
+    static func auditSummary(of result: ToolCallResult) -> String {
+        let text = result.content.compactMap { $0["text"] as? String }.joined(separator: "\n")
+        if result.isError { return text }
+        if text.isEmpty { return "ok, no content" }
+        let lines = text.reduce(into: 1) { count, character in
+            if character == "\n" { count += 1 }
+        }
+        return "ok, \(text.utf8.count) bytes, \(lines) line\(lines == 1 ? "" : "s")"
     }
 
     private func toolCallPayload(_ result: ToolCallResult) -> [String: Any] {
