@@ -10,6 +10,7 @@
 // transactions means the graphical and terminal paths cannot quietly diverge.
 
 import Foundation
+import MorbMigrate
 import MorbstackKit
 import Observation
 import SwiftUI
@@ -49,6 +50,40 @@ enum FirstRunEngineVerificationChoice: String, CaseIterable, Identifiable {
     }
 }
 
+// MARK: - Migration offer (pure, testable without a probe)
+
+/// The presentation logic for the first-run sheet's "switching from another Docker
+/// runtime" offer, kept separate from ``FirstRunCLISetupModel`` so it is testable
+/// against literal name lists rather than a real install/socket probe.
+enum FirstRunMigrationOffer {
+
+    /// Whether anything was actually found. Never true for an empty list — the sheet
+    /// says nothing rather than showing a migration offer with no detected source
+    /// (§1.8).
+    static func offers(_ sourceNames: [String]) -> Bool { !sourceNames.isEmpty }
+
+    /// States the one fact this offer depends on, once: "Docker Desktop is on this
+    /// Mac.", "Docker Desktop and Colima are on this Mac.", or the Oxford-comma join
+    /// of all three. Returns an empty string for an empty list rather than guessing
+    /// at a grammatical fallback nobody should see — callers must check ``offers(_:)``
+    /// first.
+    static func detectionSentence(for sourceNames: [String]) -> String {
+        let names: String
+        switch sourceNames.count {
+        case 0:
+            return ""
+        case 1:
+            return "\(sourceNames[0]) is on this Mac."
+        case 2:
+            names = "\(sourceNames[0]) and \(sourceNames[1])"
+        default:
+            let allButLast = sourceNames.dropLast().joined(separator: ", ")
+            names = "\(allButLast), and \(sourceNames[sourceNames.count - 1])"
+        }
+        return "\(names) are on this Mac."
+    }
+}
+
 // MARK: - Model
 
 /// The state behind the first-run setup sheet.
@@ -72,6 +107,13 @@ final class FirstRunCLISetupModel {
     private(set) var isLoading = false
     private(set) var isInstalling = false
     private(set) var hasCompletedSetup = false
+
+    /// Other Docker runtimes found installed on this Mac, in the fixed order this
+    /// module always probes them. Read-only — the same detection `morb migrate detect`
+    /// and the Migration route already run, not a second implementation of it. Empty
+    /// unless something was actually found; the sheet says nothing when this is empty
+    /// rather than showing a migration offer with no destination (§1.8).
+    private(set) var migrationSourceNames: [String] = []
 
     /// The only route to `MorbBackgroundService.enable()`. This starts false so a
     /// durable per-user service is an affirmative choice made from the review sheet.
@@ -147,6 +189,19 @@ final class FirstRunCLISetupModel {
         needsCLISetup || (offersBackgroundService && enableBackgroundService)
     }
 
+    /// Whether the sheet has anything true to say about switching from another Docker
+    /// runtime. `migrationSourceNames` is only ever populated from an actual install
+    /// probe, so this is never shown as a guess.
+    var offersMigration: Bool { FirstRunMigrationOffer.offers(migrationSourceNames) }
+
+    /// States the one fact this offer depends on, once. See
+    /// ``FirstRunMigrationOffer/detectionSentence(for:)``. Callers must check
+    /// `offersMigration` first; this returns an empty string otherwise rather than
+    /// guessing at a grammatical fallback nobody should see.
+    var migrationDetectionSentence: String {
+        FirstRunMigrationOffer.detectionSentence(for: migrationSourceNames)
+    }
+
     /// Whether dismissing the sheet should suppress only its automatic first-run
     /// presentation. Manual presentation from the app menu remains available.
     var shouldPersistFirstRunDeferral: Bool {
@@ -187,6 +242,16 @@ final class FirstRunCLISetupModel {
         // `status()` only inspects Service Management and the control-socket path. It
         // never registers, launches, or connects to the background service.
         backgroundServiceStatus = MorbBackgroundService.status()
+        // The same read-only install/socket probes `morb migrate detect` and the
+        // Migration route already run — not a second detector. "Installed" (not
+        // "running") is the bar: someone who quit Docker Desktop before switching
+        // still has images and volumes worth offering to bring over, and the
+        // Migration route itself already shows a not-running source honestly.
+        migrationSourceNames = await Task.detached(priority: .userInitiated) {
+            [RuntimeDetect.detectDockerDesktop(), RuntimeDetect.detectColima(), RuntimeDetect.detectOrbStack()]
+                .filter(\.installed)
+                .map(\.name)
+        }.value
         hasPrepared = true
         isLoading = false
     }
@@ -356,6 +421,7 @@ struct FirstRunCLISetupSheet: View {
     @Bindable var model: FirstRunCLISetupModel
     @Binding var isPresented: Bool
     let deferFirstRunSetup: () -> Void
+    let openMigration: () -> Void
 
     var body: some View {
         NavigationStack {
@@ -436,6 +502,10 @@ struct FirstRunCLISetupSheet: View {
                     "Set up Morbstack’s bundled Docker, Compose, and Buildx tools for new Terminal sessions. Review the changes below before continuing."
                 )
                 .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if model.offersMigration {
+                migrationOfferSection
             }
 
             Section("Command-Line Tools") {
@@ -527,6 +597,28 @@ struct FirstRunCLISetupSheet: View {
                 .font(.callout)
                 .multilineTextAlignment(.trailing)
                 .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// Only ever shown when `model.offersMigration` is true — an actual install probe
+    /// found something, not a standing invitation. Deep-links to the existing
+    /// Migration route (`MigrationRootView`) rather than duplicating any of its
+    /// detection, review, or transfer logic here.
+    private var migrationOfferSection: some View {
+        Section("Switching From Another Runtime") {
+            Text(
+                "\(model.migrationDetectionSentence) Morbstack can review its images and volumes before you switch — nothing transfers until you review and confirm it on the Migration screen."
+            )
+            .fixedSize(horizontal: false, vertical: true)
+
+            Button("Review Migration…") {
+                if !model.hasCompletedSetup {
+                    deferFirstRunSetup()
+                }
+                isPresented = false
+                openMigration()
+            }
+            .accessibilityIdentifier("app.firstRunSetup.reviewMigration")
         }
     }
 
