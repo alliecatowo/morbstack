@@ -841,3 +841,35 @@ before the isolated probe made the cause unambiguous.
 
 `mise run check`: exit 0. Every `.accessibilityIdentifier` string byte-identical to what it
 replaced.
+
+## UI-056 · `.inspector` reveal pops instead of sliding · `closed — platform limitation (2026-08-07)`
+
+Reported against `ContainersRootView`: closing the trailing inspector slides; opening it stalls
+and pops in place. Two plausible Morbstack-side causes were tested directly and both ruled out
+before landing on the actual one — full numbers and the probe variant in
+`docs/design/tahoe/HIG-FINDINGS.md` ("Inspector reveal: a measured platform floor").
+
+- **Not expensive tab content.** `VolumesRootView`'s ~10-row inspector and
+  `ContainersRootView`'s ~30-row `Overview` tab show the same order-of-magnitude main-thread
+  block on open (~335ms vs. ~358–375ms), and the SIDEBAR toggle — no inspector content at all —
+  shows ~387ms.
+- **Not a view-identity bug.** Selected the Logs tab, closed the inspector, reopened it: still on
+  Logs, log buffer unchanged. A dropped/rebuilt `ContainerDetailView` identity would have reset
+  that `@State` to `.overview`. It did not, with this week's outermost-`.inspectorColumnWidth`
+  fix already in place (that fix stays — it solved a separate, real width-clipping bug).
+- **Reproduces in stock SwiftUI, zero Morbstack code.** `docs/design/probes/ToolProbe.swift`,
+  variant `inspectorForm` (`NavigationSplitView` + `Table` + `.inspector(isPresented:)` around a
+  trivial 3-row `Form`, no conditional, `.inspectorColumnWidth` deliberately not outermost):
+  opening from `--closed` produces the same ~490ms unbroken main-thread block at the click.
+- **Every open, not a one-time warm-up.** Repeated open→close→open→close→open on one probe
+  window, each transition profiled with precise click-epoch timing: 442ms / 341ms / 309ms /
+  319ms / 322ms. No downward trend across three repeated opens — rules out "warm the inspector
+  column at launch" as a fix, since there is no cold/warm distinction to exploit.
+
+Dominated (leaf-symbol categorized) by AppKit's own `NSView`/`NSWindow` Auto Layout,
+`NSTableRowView` row management, Objective-C runtime/ARC churn, and CoreAnimation commit —
+system cost in the CLAUDE.md §1.7 sense. Closed as a platform limitation rather than left open:
+there is no content-layer or Morbstack-structure change on file that plausibly closes a ~300ms+
+gap against a several-hundred-ms floor that reproduces in a three-row stock `Form`. Revisit if a
+future macOS SDK changes `.inspector`'s reveal cost, or if Apple documents a way to pre-warm a
+split-view item's AppKit backing before first presentation.

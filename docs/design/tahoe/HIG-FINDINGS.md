@@ -49,6 +49,66 @@ producing it.
   is worth re-examining against this).
 - Sidebar: **no more than two levels of hierarchy**; icons follow the **system accent** by default.
 
+## Inspector reveal: a measured platform floor, not a Morbstack bug (2026-08-07)
+
+Reported against `ContainersRootView`: closing the trailing inspector slides; opening it stalls
+and pops in place. Two candidate explanations were tested and ruled out before landing on this
+one, in order, because a profiler category is not proof and neither is a plausible-sounding bug:
+
+- **Not expensive content.** Instruments (Time Profiler, real signed release build, PID-attached)
+  measured opening the inspector blocking the main thread ~360–390ms before the first animated
+  frame, closing producing no measurable CPU burst. But `VolumesRootView`'s ~10-row inspector
+  showed the same order of magnitude as `ContainersRootView`'s ~30-row `Overview` tab (~335ms vs.
+  ~358–375ms), and the SIDEBAR toggle — touching no inspector content at all — showed ~387ms.
+  Content size is not the driver.
+- **Not a view-identity bug.** Selected the Logs tab in the open inspector (a plain `@State` on
+  `ContainerDetailView`), closed, reopened: still on Logs, the log buffer had not reloaded. A
+  dropped-and-rebuilt identity — the "conditional wrapping `.inspector`" or "content identity
+  flip" shape — would have reset that state to `.overview`. It did not, on the real, running app,
+  with this week's outermost-`.inspectorColumnWidth` fix already in place.
+- **Reproduces in stock SwiftUI, zero Morbstack code.** `docs/design/probes/ToolProbe.swift`,
+  variant `inspectorForm`: `NavigationSplitView` + `Table` + `.inspector(isPresented:)` wrapping a
+  trivial three-row `Form`. No conditional, no empty-state swap, `.inspectorColumnWidth` declared
+  *before* `.toolbar` (i.e. without the outermost-modifier fix). Opening it from `--closed`
+  produced the same ~490ms unbroken main-thread block, immediately at the click, with the same
+  scattered AppKit/Objective-C-runtime/generic-metadata-cache leaf symbols as the real app's trace.
+
+**It is every open, not a one-time warm-up.** Repeated open → close → open → close → open on one
+`inspectorForm` probe window, each transition profiled separately with precise click-epoch timing:
+
+| Transition | Busy window | Duration |
+| --- | --- | --- |
+| open #1 | 3.737s → 4.179s | 442ms |
+| close #1 | 3.660s → 4.001s | 341ms |
+| open #2 | 3.729s → 4.038s | 309ms |
+| close #2 | 4.015s → 4.334s | 319ms |
+| open #3 | 4.771s → 5.093s | 322ms |
+
+No downward trend across three repeated opens on the same window — if this were AppKit lazily
+instantiating the split-view item once, the second and third opens would drop toward zero the way
+`.inspector` close does on the real Containers route (0 measurable samples, confirmed twice with
+precise timing). They do not. This rules out "warm the column at launch" as a fix: there is no
+cold/warm distinction to exploit.
+
+One open discrepancy, recorded rather than smoothed over: on the real Containers route, *closing*
+the inspector is free (0 samples, twice). On the bare `inspectorForm` probe above, closing costs
+the same order of magnitude as opening (309–341ms) on this same repeated-cycle run. The two
+windows are not identical (sidebar content, list row count, toolbar item count all differ), and
+which direction is free is apparently not fixed across window shapes — only that *opening* costs
+several hundred ms is consistent everywhere tested (Containers, Volumes, the sidebar toggle, and
+the stock probe).
+
+**Conclusion:** `.inspector(isPresented:)`'s reveal, on a `NavigationSplitView` + list/table +
+inspector window of this general shape, costs several hundred ms of synchronous main-thread AppKit
+work — Auto Layout on `NSView`/`NSWindow`, `NSTableRowView` row management, Objective-C
+runtime/ARC churn, CoreAnimation commit — on macOS 26.4, regardless of the content inside the
+inspector and regardless of Morbstack's own view structure. That is long enough to consume a
+reveal animation's entire frame budget, so SwiftUI has no frames left to interpolate and the
+column appears rather than slides. This is the system's own reveal cost, not something the content
+layer can buy its way out of, and rewriting it ourselves would be the exact defect this document's
+"don't rebuild a design system in the content layer" rule warns against. Tracked as TASKS.md
+(performance/platform-limitation backlog).
+
 ## Toolbar — three regions with fixed semantics
 
 Leading (back / sidebar toggle, then title — not customizable) · Center (common controls,
