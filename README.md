@@ -14,13 +14,8 @@ invoked through dockerd's own stock `--userland-proxy-path` hook — no
 engine patch required. Everything else — the CLI, the daemon, and the
 app — is thin, native Swift glue.
 
-<!--
-  TODO(human): the CI badge URL below assumes the repo is published as
-  github.com/morbstack/morbstack (see docs/PUBLISHING.md). Update the
-  org/repo once that's decided, and this comment stops being needed.
--->
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![CI](https://github.com/morbstack/morbstack/actions/workflows/ci.yml/badge.svg)](https://github.com/morbstack/morbstack/actions/workflows/ci.yml)
+[![CI](https://github.com/alliecatowo/morbstack/actions/workflows/ci.yml/badge.svg)](https://github.com/alliecatowo/morbstack/actions/workflows/ci.yml)
 ![macOS 26+](https://img.shields.io/badge/macOS-26%2B-lightgrey)
 ![Apple Silicon](https://img.shields.io/badge/arch-Apple%20Silicon-lightgrey)
 
