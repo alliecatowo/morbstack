@@ -52,3 +52,6 @@ artifacts/*
 
 # Runtime data (never commit disk images or VM state)
 *.img
+
+# Local MCP config
+.mcp.json

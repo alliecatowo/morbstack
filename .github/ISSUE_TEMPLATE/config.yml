@@ -1,13 +1,10 @@
-# TODO(human): the two urls below assume the repo is published as
-# github.com/morbstack/morbstack (see docs/PUBLISHING.md for the naming
-# decision this depends on). Update both once the real org/repo name is
-# final — GitHub requires contact_links.url to be a fully-qualified URL,
-# so these cannot be left relative.
+# GitHub requires contact_links.url to be a fully-qualified URL, so these
+# cannot be left relative.
 blank_issues_enabled: false
 contact_links:
   - name: Security vulnerability
-    url: https://github.com/morbstack/morbstack/security/advisories/new
+    url: https://github.com/alliecatowo/morbstack/security/advisories/new
     about: Please report security issues privately via GitHub Security Advisories, not a public issue — see SECURITY.md.
   - name: Questions and discussion
-    url: https://github.com/morbstack/morbstack/discussions
+    url: https://github.com/alliecatowo/morbstack/discussions
     about: General questions, ideas, and discussion that aren't a specific bug/feature/compatibility report.
