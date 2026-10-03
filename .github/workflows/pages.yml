@@ -1,0 +1,46 @@
+name: Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # The static site links to repo files via "../docs/x.md"; those do not
+      # exist on Pages, so point them at the GitHub blob view in the artifact.
+      - name: Stage site
+        run: |
+          cp -r site _site
+          sed -i 's#\(href="\)\.\./#\1https://github.com/${{ github.repository }}/blob/main/#g' _site/*.html
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v5
