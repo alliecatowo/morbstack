@@ -874,12 +874,12 @@ code.inline {
 
 .docs-layout {
   display: grid;
-  grid-template-columns: 220px 1fr;
+  grid-template-columns: 220px minmax(0, 1fr);
   gap: calc(var(--space-6) * 1.5);
   align-items: start;
 }
 @media (max-width: 900px) {
-  .docs-layout { grid-template-columns: 1fr; }
+  .docs-layout { grid-template-columns: minmax(0, 1fr); }
 }
 .docs-toc {
   position: sticky;
