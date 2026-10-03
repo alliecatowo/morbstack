@@ -123,7 +123,19 @@ DOCKER_ARCHIVE_SHA256="4eb4d1b21131897ed3990aac31039161bf4bdd07fcfb733e996010319
 DOCKER_BIN_NAMES="containerd containerd-shim-runc-v2 ctr docker docker-init docker-proxy dockerd runc"
 
 # --- alpine: 3.24.1 aarch64 minirootfs ---
-ALPINE_RELEASE_URL="https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/aarch64/alpine-minirootfs-3.24.1-aarch64.tar.gz"
+# Alpine publishes only the current build of each package on its CDN, so a pinned apk
+# vanishes the day Alpine ships a newer one (libblkid 2.42.1 did). Every Alpine download
+# therefore walks this mirror list in order; the sha256 pins below keep any mirror honest.
+ALPINE_MIRRORS="
+https://dl-cdn.alpinelinux.org/alpine
+https://mirrors.edge.kernel.org/alpine
+https://uk.alpinelinux.org/alpine
+https://mirror.leaseweb.com/alpine
+https://ftp.halifax.rwth-aachen.de/alpine
+"
+# Point-release path (v3.24/releases/...), not latest-stable/, so the pin outlives 3.24.2.
+ALPINE_RELEASE_PATH="v3.24/releases/aarch64/alpine-minirootfs-3.24.1-aarch64.tar.gz"
+ALPINE_RELEASE_URL="https://dl-cdn.alpinelinux.org/alpine/${ALPINE_RELEASE_PATH}"
 ALPINE_SHA256_SIDECAR_URL="${ALPINE_RELEASE_URL}.sha256"
 
 # --- fsutils: Alpine v3.24 aarch64 apks (btrfs-progs + e2fsprogs +
@@ -141,7 +153,7 @@ ALPINE_SHA256_SIDECAR_URL="${ALPINE_RELEASE_URL}.sha256"
 # decision still holds: scripts/mkinitramfs.sh stages that one directory out
 # of this apk and drops its usr/sbin nft binaries on the floor. Without it,
 # dockerd dies on its first NAT rule with "Couldn't load match `addrtype'".
-FSUTILS_APK_REPO_URL="https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64"
+FSUTILS_APK_REPO_PATH="v3.24/main/aarch64"
 # name:version-release:sha256, one per line (name-version-release.apk under
 # FSUTILS_APK_REPO_URL).
 FSUTILS_APKS="
@@ -261,7 +273,7 @@ KUBECTL_SHA256="4408c85c83fd3a31adaa555bdf3c7a6c81f74b19449a9060ba31ab91926f023d
 
 usage() {
 	cat <<EOF
-Usage: $(basename "$0") [--kernel-only|--docker-only|--alpine-only|--fsutils-only|--host-cli|--cli-only|--compose-only|--buildx-only|--host-kubectl-only|--k8s-only] [-h]
+Usage: $(basename "$0") [--kernel-only|--docker-only|--alpine-only|--fsutils-only|--update-fsutils-pins|--host-cli|--cli-only|--compose-only|--buildx-only|--host-kubectl-only|--k8s-only] [-h]
 
 Fetch and verify all pinned third-party guest assets:
   kernel   -> ${MORBSTACK_HOME}/data/kernel/vmlinux
@@ -279,6 +291,9 @@ Options:
   --docker-only    Only fetch/verify the Docker engine binaries
   --alpine-only    Only fetch/verify the Alpine minirootfs
   --fsutils-only   Only fetch/verify the btrfs-progs/e2fsprogs/iptables-legacy apks
+  --update-fsutils-pins
+                    Print fresh name:version:sha256 pins for the fsutils apks from the
+                    current Alpine index (use when a pinned apk disappears)
   --host-cli       Fetch/verify docker, docker-compose and docker-buildx for the host Mac
   --cli-only       Only fetch/verify the host docker CLI binary
   --compose-only   Only fetch/verify the host docker-compose CLI plugin
@@ -297,6 +312,20 @@ sha256_of() {
 	else
 		shasum -a 256 "$1" | cut -d' ' -f1
 	fi
+}
+
+# alpine_fetch <path under the mirror root> <output file> [extra curl args...]
+# Tries every ALPINE_MIRRORS entry until one serves the file.
+alpine_fetch() {
+	local rel="$1" out="$2" mirror
+	shift 2
+	for mirror in ${ALPINE_MIRRORS}; do
+		if curl --fail --location --silent --show-error --connect-timeout 15 --max-time 300 "$@" --output "${out}" "${mirror}/${rel}" 2>/dev/null; then
+			return 0
+		fi
+		echo "  ${mirror}/${rel} unavailable, trying the next mirror" >&2
+	done
+	return 1
 }
 
 check() { printf '  \033[32m\xE2\x9C\x93\033[0m %s\n' "$1"; }
@@ -481,7 +510,11 @@ fetch_alpine() {
 	# already present, since it's tiny and lets us confirm a cached tarball
 	# is still trustworthy without re-downloading 4MB every run.
 	local sidecar_sha
-	sidecar_sha="$(curl --fail --location --show-error --silent "${ALPINE_SHA256_SIDECAR_URL}" | awk '{print $1}')"
+	local sidecar_tmp
+	sidecar_tmp="$(mktemp "${TMPDIR:-/tmp}/morbstack-alpine-sha.XXXXXX")"
+	alpine_fetch "${ALPINE_RELEASE_PATH}.sha256" "${sidecar_tmp}" || true
+	sidecar_sha="$(awk '{print $1}' "${sidecar_tmp}")"
+	rm -f "${sidecar_tmp}"
 	[ -n "${sidecar_sha}" ] || fail "failed to fetch/parse Alpine sha256 sidecar from ${ALPINE_SHA256_SIDECAR_URL}"
 
 	if [ -f "${dest_file}" ]; then
@@ -501,8 +534,8 @@ fetch_alpine() {
 	trap 'rm -f "${tmp_file}"' RETURN
 
 	info "downloading ${ALPINE_RELEASE_URL}"
-	curl --fail --location --show-error --progress-bar --output "${tmp_file}" "${ALPINE_RELEASE_URL}" ||
-		fail "failed to download alpine minirootfs"
+	alpine_fetch "${ALPINE_RELEASE_PATH}" "${tmp_file}" ||
+		fail "failed to download alpine minirootfs from any mirror"
 
 	local got_sha
 	got_sha="$(sha256_of "${tmp_file}")"
@@ -596,8 +629,8 @@ fetch_fsutils() {
 		info "downloading ${fname}"
 		local tmp
 		tmp="$(mktemp "${TMPDIR:-/tmp}/morbstack-apk.XXXXXX")"
-		curl --fail --location --show-error --silent --output "${tmp}" "${FSUTILS_APK_REPO_URL}/${fname}" ||
-			fail "failed to download ${fname}"
+		alpine_fetch "${FSUTILS_APK_REPO_PATH}/${fname}" "${tmp}" ||
+			fail "failed to download ${fname} from any Alpine mirror (Alpine drops superseded packages: run $(basename "$0") --update-fsutils-pins and re-pin)"
 
 		local got_sha
 		got_sha="$(sha256_of "${tmp}")"
@@ -1047,6 +1080,32 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# Maintenance: print current name:version:sha256 pins for FSUTILS_APKS
+# ---------------------------------------------------------------------------
+
+update_fsutils_pins() {
+	require_cmd curl
+	require_cmd tar
+	local work index entry name ver tmp
+	work="$(mktemp -d "${TMPDIR:-/tmp}/morbstack-pins.XXXXXX")"
+	trap 'rm -rf "${work}"' RETURN
+	alpine_fetch "${FSUTILS_APK_REPO_PATH}/APKINDEX.tar.gz" "${work}/APKINDEX.tar.gz" ||
+		fail "could not download APKINDEX from any Alpine mirror"
+	tar -xzf "${work}/APKINDEX.tar.gz" -C "${work}" APKINDEX
+	index="${work}/APKINDEX"
+	echo "# paste over FSUTILS_APKS in scripts/fetch-guest-assets.sh (then review dist/apks/PROVENANCE.txt)"
+	for entry in ${FSUTILS_APKS}; do
+		name="$(echo "${entry}" | cut -d: -f1)"
+		ver="$(awk -v n="${name}" 'BEGIN{RS="";FS="\n"} {p="";v=""; for(i=1;i<=NF;i++){if($i ~ /^P:/)p=substr($i,3); if($i ~ /^V:/)v=substr($i,3)} if(p==n){print v; exit}}' "${index}")"
+		[ -n "${ver}" ] || fail "package ${name} is not in the current APKINDEX"
+		tmp="${work}/${name}.apk"
+		alpine_fetch "${FSUTILS_APK_REPO_PATH}/${name}-${ver}.apk" "${tmp}" ||
+			fail "failed to download ${name}-${ver}.apk"
+		echo "${name}:${ver}:$(sha256_of "${tmp}")"
+	done
+}
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -1115,6 +1174,10 @@ while [ $# -gt 0 ]; do
 	--k8s-only)
 		disable_all_fetches
 		DO_K8S=1
+		;;
+	--update-fsutils-pins)
+		update_fsutils_pins
+		exit 0
 		;;
 	-h | --help)
 		usage
