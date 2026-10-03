@@ -537,7 +537,7 @@ a.text-link:hover { color: var(--brand); }
   .grid-3 { grid-template-columns: repeat(2, 1fr); }
 }
 @media (max-width: 640px) {
-  .grid-3, .grid-2 { grid-template-columns: 1fr; }
+  .grid-3, .grid-2 { grid-template-columns: minmax(0, 1fr); }
 }
 
 .card {
@@ -621,6 +621,7 @@ a.text-link:hover { color: var(--brand); }
 --------------------------------------------------------------------- */
 
 .table-scroll {
+  position: relative; /* contain the visually-hidden caption */
   overflow-x: auto;
   border: 1px solid var(--hairline);
   border-radius: var(--radius-card);
@@ -746,6 +747,7 @@ td.num, th.num { font-family: var(--font-mono); font-variant-numeric: tabular-nu
   background: color-mix(in srgb, var(--status-running) 6%, var(--surface-card));
 }
 .callout-good .callout-title { color: var(--status-running); }
+.callout { overflow-wrap: anywhere; }
 .callout ul { padding-left: 1.1em; list-style: disc; }
 .callout li { margin-top: var(--space-2); color: var(--text-secondary); }
 .callout li::marker { color: var(--text-tertiary); }
