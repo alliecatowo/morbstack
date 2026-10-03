@@ -1,10 +1,22 @@
 name: CI
 
-# Trigger on every push and PR, plus a manual button for re-running the
-# slow guest-image job without pushing an empty commit.
+# `push:` is restricted to main on purpose. It used to be unrestricted, and
+# with `pull_request:` alongside it every push to a PR branch started TWO full
+# runs — 62 push runs and 38 pull_request runs over three days, most of them
+# duplicate pairs of the same commit. A PR branch is covered by the
+# pull_request event; main is covered by push. Nothing needs both.
+#
+# Docs-only pushes are excluded outright. Three of the four jobs below run on
+# macOS, which GitHub bills at a 10x minute multiplier, and a large share of
+# this project's commits touch only Markdown. Rebuilding Swift and Rust to
+# validate a sentence in TASKS.md is pure cost. `workflow_dispatch` is always
+# available when a docs change genuinely needs a run.
 on:
   push:
+    branches: [main]
+    paths-ignore: ['**/*.md', 'docs/**', 'TASKS.md', 'LICENSE', '.gitignore']
   pull_request:
+    paths-ignore: ['**/*.md', 'docs/**', 'TASKS.md', 'LICENSE', '.gitignore']
   workflow_dispatch:
 
 # Cancel a superseded run on the same branch/PR rather than letting two
@@ -27,6 +39,14 @@ jobs:
   # ---------------------------------------------------------------------
   changes:
     runs-on: ubuntu-latest
+    # On a pull_request event paths-filter does not diff locally — it calls the
+    # API's listFiles, which the workflow-level `contents: read` does not cover.
+    # Without this the job fails with "Resource not accessible by integration"
+    # and takes every downstream job with it. Scoped to this job rather than
+    # raised workflow-wide: nothing else here reads pull requests.
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       guest_image: ${{ steps.filter.outputs.guest_image }}
     steps:
@@ -79,9 +99,8 @@ jobs:
         uses: actions/cache@v6
         with:
           path: mac/.build
-          key: swiftpm-${{ runner.os }}-${{ hashFiles('mac/Package.swift') }}-${{ github.sha }}
+          key: swiftpm-${{ runner.os }}-${{ hashFiles('mac/Package.swift') }}
           restore-keys: |
-            swiftpm-${{ runner.os }}-${{ hashFiles('mac/Package.swift') }}-
             swiftpm-${{ runner.os }}-
 
       # Cargo registry + host-arch build products for morbinit. Keyed on
@@ -94,9 +113,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             guest/morbinit/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('guest/morbinit/Cargo.lock') }}-${{ github.sha }}
+          key: cargo-${{ runner.os }}-${{ hashFiles('guest/morbinit/Cargo.lock') }}
           restore-keys: |
-            cargo-${{ runner.os }}-${{ hashFiles('guest/morbinit/Cargo.lock') }}-
             cargo-${{ runner.os }}-
 
       # Also exercises the documented first-run path: `mise trust` is
@@ -148,8 +166,13 @@ jobs:
   # one here the same shape as the Rust job below once a config lands,
   # rather than inventing default rules this project hasn't agreed to.
   # ---------------------------------------------------------------------
+  # Linux, not macOS. Nothing this job does is platform-specific — shellcheck,
+  # cargo fmt, clippy on the host and on the aarch64-musl target, and mise task
+  # validation all behave identically, and the guest target is Linux anyway.
+  # It used to run on macos-26, where GitHub's 10x multiplier turned a 1m21s
+  # job into the billing equivalent of ~14 minutes, every run.
   lint:
-    runs-on: macos-26
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
@@ -189,6 +212,24 @@ jobs:
           command -v shellcheck >/dev/null 2>&1 || brew install shellcheck
           shellcheck scripts/*.sh scripts/git-hooks/pre-commit
           shellcheck --shell=bash mise-tasks/*
+          shellcheck integrations/shell/morb.bash
+
+      # The other two completions are not shell dialects shellcheck knows, so
+      # they get their own interpreter's parser instead. `zsh` and `bash` are
+      # always present on a macOS runner; `fish` is not, and its check is
+      # skipped rather than faked. What each file *declares* is checked by
+      # ShellCompletionDriftTests in the Swift suite — this step only proves
+      # they parse.
+      - name: Shell completions parse
+        run: |
+          set -euo pipefail
+          bash -n integrations/shell/morb.bash
+          zsh -n integrations/shell/_morb
+          if command -v fish >/dev/null 2>&1; then
+            fish --no-execute integrations/shell/morb.fish
+          else
+            echo "note: fish not installed; morb.fish was not parse-checked" >&2
+          fi
 
   # ---------------------------------------------------------------------
   # The bootable guest image: cross-compiles morbinit for

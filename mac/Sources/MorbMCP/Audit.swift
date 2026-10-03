@@ -129,6 +129,11 @@ public final class AuditLog {
     // MARK: - Record builders
 
     /// Records one `tools/call` outcome.
+    ///
+    /// `resultSummary` must describe the result, **not contain it** — see
+    /// `Server.auditSummary(of:)`, which is the only thing that should build this
+    /// value. `arguments` goes through `Redactor.redact`; free-form tool output
+    /// cannot be redacted the same way, so it never reaches this field at all.
     public func recordToolCall(
         tool: String, decision: PermissionDecision, arguments: [String: Any],
         durationMS: Double, ok: Bool, resultSummary: String

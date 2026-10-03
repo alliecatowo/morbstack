@@ -114,34 +114,46 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
 
     /// How long the guest gets to acknowledge a clean shutdown.
     ///
-    /// `morbinit` stops the container runtime and `sync`s the Docker data disk
+    /// `morbinit` stops the container runtime, runs a bounded disk-trim sweep
+    /// (`disk::trim_before_shutdown`, TECH-3/UX-16 §8 —
+    /// `docs/design/DISK-RECLAIM-DECISION.md`), and `sync`s the Docker data disk
     /// *before* it replies, so this is a data-durability deadline rather than a
     /// round-trip one. The guest side sends `ok` as its *last* frame, after
-    /// SIGTERM → 10 s grace → SIGKILL plus unmount/sync — ~25 s in the normal
-    /// case, capped guest-side at 54 s. Anything shorter than that cap hard-stops
-    /// the VM mid-flush and reintroduces the data-loss bug this deadline exists
-    /// to prevent, so we sit above it with room for the reply to reach the wire.
+    /// SIGTERM → 10 s grace → SIGKILL, the trim sweep, plus unmount/sync — well
+    /// under a minute in the normal case, capped guest-side at 74 s. Anything
+    /// shorter than that cap hard-stops the VM mid-flush (or mid-trim) and
+    /// reintroduces the data-loss bug this deadline exists to prevent, so we sit
+    /// above it with room for the reply to reach the wire.
     ///
     /// THIS NUMBER MIRRORS A GUEST CONSTANT. `control::SHUTDOWN_REPLY_TIMEOUT` in
     /// `guest/morbinit/src/control.rs` is *derived* — it computes
-    /// `SUPERVISED_SERVICE_COUNT * (STOP_GRACE + KILL_GRACE) + FLUSH_ALLOWANCE`
-    /// = 2 * (10 s + 2 s) + 30 s = 54 s — and the guest test
+    /// `SUPERVISED_SERVICE_COUNT * (STOP_GRACE + KILL_GRACE) + GATED_PHASE_ALLOWANCE
+    /// + disk::TRIM_SHUTDOWN_DEADLINE + FLUSH_ALLOWANCE`
+    /// = 2 * (10 s + 2 s) + 5 s + 15 s + 30 s = 74 s — and the guest test
     /// `the_reply_budget_leaves_room_for_the_host_ack_timeout_above_it` hardcodes
     /// *this* value as its `HOST_ACK_TIMEOUT`. The two move together or the guest
-    /// suite fails. The margin is not arbitrary either: after the guest's 54 s cap
+    /// suite fails. The margin is not arbitrary either: after the guest's 74 s cap
     /// expires it still needs `main.rs`'s `REPLY_FLUSH_TIMEOUT` (5 s) to get the
-    /// `ok` onto the socket, so the host must wait at least 54 + 5 = 59 s or it
-    /// walks away from a reply that was about to arrive. 65 s leaves 6 s of slack
+    /// `ok` onto the socket, so the host must wait at least 74 + 5 = 79 s or it
+    /// walks away from a reply that was about to arrive. 85 s leaves 6 s of slack
     /// for vsock connect and scheduling.
     ///
-    ///     guest reply cap (54 s) + reply flush (5 s) = 59 s ≤ this (65 s)
-    public static let shutdownAckTimeout: TimeInterval = 65
+    ///     guest reply cap (74 s) + reply flush (5 s) = 79 s ≤ this (85 s)
+    public static let shutdownAckTimeout: TimeInterval = 85
 
     /// How long to wait for the guest to actually power off after acknowledging.
     public static let guestPowerOffTimeout: TimeInterval = 5
 
     /// Interval between guest-control probes while waiting for boot.
     private static let controlProbeInterval: useconds_t = 250_000
+
+    /// How often the memory-balloon policy (UX-17) re-evaluates the guest's
+    /// reported working set. Deliberately much slower than the 30 s idle-check
+    /// timer in `Daemon.swift`: memory need moves far slower than connection
+    /// activity, and the policy's own step limits and hysteresis mean nothing
+    /// useful could happen on a faster cadence anyway. See
+    /// `docs/design/MEMORY-BALLOON.md`.
+    private static let memoryBalloonInterval: TimeInterval = 30 * 60
 
     /// The serial queue that owns the `VZVirtualMachine`.
     private let queue = DispatchQueue(label: "dev.morbstack.vm", qos: .userInitiated)
@@ -171,6 +183,19 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
     /// the *current* VM object. Replaced wholesale when a new VM is built.
     private var guestListeners: [UInt32: (VZVirtioSocketListener, GuestVsockAcceptDelegate)] = [:]
     private var consoleHandle: FileHandle?
+
+    /// The VM's actual configured memory size for the current boot, captured in
+    /// ``buildConfiguration()`` — the memory-balloon policy's ceiling, and the value
+    /// its target implicitly starts at (an undriven `VZVirtioTraditionalMemoryBalloonDevice`
+    /// grants the guest everything it was configured with). Queue-confined, UX-17.
+    private var bootedMemoryBytes: UInt64 = 0
+    /// The last target this manager set on the balloon device this boot, or `nil`
+    /// before the first evaluation — which ``evaluateMemoryBalloon()`` treats as
+    /// ``bootedMemoryBytes`` (the undriven starting point). Queue-confined.
+    private var memoryBalloonTargetBytes: UInt64?
+    /// Slow-timer driver for the memory balloon; running only while the guest is
+    /// control-ready. Queue-confined. See ``startMemoryBalloonTimerIfNeeded()``.
+    private var memoryBalloonTimer: DispatchSourceTimer?
 
     private let stateLock = NSLock()
     private var _state: VMState = .stopped
@@ -327,6 +352,28 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
         return _guestMorbinitVersion
     }
 
+    /// What the running guest reports it actually launched dockerd with, for
+    /// each of the three proxy fields (UX-18). Empty string means "dockerd
+    /// has no proxy of this kind this boot"; `nil` means no guest has
+    /// answered `info` yet, or the guest predates the field — those two
+    /// states must not be conflated, since the first is a real "off" and the
+    /// second is "unknown".
+    public var guestHTTPProxy: String? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _guestHTTPProxy
+    }
+    public var guestHTTPSProxy: String? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _guestHTTPSProxy
+    }
+    public var guestNoProxy: String? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _guestNoProxy
+    }
+
     /// Mirror of ``controlReady`` for cross-thread reads, guarded by ``stateLock``.
     private var _controlReadySnapshot = false
 
@@ -346,6 +393,14 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
     /// answered `info` on this boot — an initramfs old enough to omit the field
     /// predates every release that shipped one.
     private var _guestMorbinitVersion: String?
+
+    /// Last `http_proxy`/`https_proxy`/`no_proxy` values reported by the guest's
+    /// `info` reply — what dockerd was actually launched with, not merely what
+    /// the host asked for. See ``guestHTTPProxy`` for the empty-string-vs-`nil`
+    /// convention.
+    private var _guestHTTPProxy: String?
+    private var _guestHTTPSProxy: String?
+    private var _guestNoProxy: String?
 
     /// Last `rosetta` value reported by the guest: the share mounted *and* an
     /// interpreter was registered from it.
@@ -373,6 +428,16 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
     /// cannot answer `info`, so Settings may use this only as a preflight hint; the
     /// transaction asks the freshly booted guest to prove `ready` again.
     private var _lastGuestDiskResize: String?
+
+    /// Bytes reclaimed by the guest's most recent periodic `fstrim` sweep this boot
+    /// (TECH-3 / UX-16), as last observed on a memory-balloon evaluator tick — there
+    /// is no dedicated poll for this alone; it rides the balloon's existing
+    /// once-per-``memoryBalloonInterval`` guest round trip rather than opening a
+    /// second one. `nil` means no guest has reported a real sweep result yet this
+    /// boot: either none has completed (the guest's own warmup delay plus interval
+    /// can exceed a short session), the data root is RAM-backed and no sweep ever
+    /// runs, or the guest predates the field.
+    private var _guestDiskLastTrimBytes: Int64?
 
     /// Whether the running guest has Rosetta working, or `nil` if no guest has
     /// said (not booted, or an initramfs older than the field).
@@ -403,6 +468,16 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
         stateLock.lock()
         defer { stateLock.unlock() }
         return _guestShareEventBridge
+    }
+
+    /// The most recent periodic `fstrim` sweep result the running guest has
+    /// reported (TECH-3 / UX-16), in bytes, or `nil` if none has landed yet this
+    /// boot. See ``_guestDiskLastTrimBytes`` for why this rides the balloon's
+    /// existing poll rather than its own.
+    public var guestDiskLastTrimBytes: Int64? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _guestDiskLastTrimBytes
     }
 
     /// The current guest's reported share-event schema version. Absence does not
@@ -502,6 +577,20 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
         return plan
     }
 
+    /// Replaces every `morb.proxy=<value>` token's value with `<redacted>`,
+    /// for logging a boot command line that may otherwise carry a proxy URL's
+    /// embedded basic-auth credentials. Pure and static so it can be tested
+    /// without booting anything.
+    static func redactingProxyTokens(_ cmdline: String) -> String {
+        cmdline.split(separator: " ", omittingEmptySubsequences: false)
+            .map { token -> String in
+                token.hasPrefix(MorbGuestProxy.cmdlineKey + "=")
+                    ? "\(MorbGuestProxy.cmdlineKey)=<redacted>"
+                    : String(token)
+            }
+            .joined(separator: " ")
+    }
+
     /// Records the guest's share report. Safe from any thread.
     private func noteGuestShares(_ states: [String: MorbShares.GuestMountState]) {
         stateLock.lock()
@@ -567,8 +656,156 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
             _guestShareEventBridge = nil
             _guestShareEventBridgeContractVersion = nil
             _guestDiskResize = nil
+            _guestHTTPProxy = nil
+            _guestHTTPSProxy = nil
+            _guestNoProxy = nil
+            _guestDiskLastTrimBytes = nil
         }
         stateLock.unlock()
+        // UX-17: the balloon policy only makes sense against a guest that is known
+        // usable on the *current* boot. Starting/stopping here — the one place a
+        // boot's readiness flips in either direction — means every caller of
+        // `invalidateControlReadiness()`/the `.ready` probe outcome gets this for
+        // free instead of needing its own reminder to manage the timer.
+        if ready {
+            startMemoryBalloonTimerIfNeeded()
+        } else {
+            stopMemoryBalloonTimer()
+        }
+    }
+
+    /// Starts the slow-timer memory-balloon evaluator (UX-17) if it is not already
+    /// running. Must run on ``queue``, same as every other call in ``setControlReady(_:)``.
+    ///
+    /// Resets the tracked target to `nil` — treated by ``evaluateMemoryBalloon()`` as
+    /// ``bootedMemoryBytes``, the undriven starting point — so a fresh boot always
+    /// begins from "the guest has everything it was configured with" rather than
+    /// inheriting a previous boot's shrunk target.
+    private func startMemoryBalloonTimerIfNeeded() {
+        guard memoryBalloonTimer == nil else { return }
+        memoryBalloonTargetBytes = nil
+        // The first tick arrives well before `memoryBalloonInterval` so a guest
+        // that idle-suspends inside one interval (the default auto-suspend is 5
+        // minutes against a 30-minute interval) still gets a real evaluation
+        // instead of the timer being cancelled at suspend having never fired once.
+        // See ``MemoryBalloonPolicy/firstEvaluationDelay(autoSuspendMinutes:interval:minimumDelay:defaultDelayWhenAutoSuspendDisabled:)``.
+        let firstDelay = MemoryBalloonPolicy.firstEvaluationDelay(
+            autoSuspendMinutes: config.autoSuspendMinutes,
+            interval: VMManager.memoryBalloonInterval)
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(
+            deadline: .now() + firstDelay,
+            repeating: VMManager.memoryBalloonInterval)
+        timer.setEventHandler { [weak self] in
+            self?.evaluateMemoryBalloon()
+        }
+        memoryBalloonTimer = timer
+        timer.resume()
+    }
+
+    /// Stops the memory-balloon evaluator. Safe to call when it was never started.
+    private func stopMemoryBalloonTimer() {
+        memoryBalloonTimer?.cancel()
+        memoryBalloonTimer = nil
+    }
+
+    /// One slow-timer tick: samples the guest's `/proc/meminfo` off `queue`, asks
+    /// ``MemoryBalloonPolicy`` what the target should be, and — only when it actually
+    /// changes — applies it back on `queue`. Must run on `queue`.
+    ///
+    /// Also records ``_guestDiskLastTrimBytes`` (TECH-3 / UX-16) from the same `info`
+    /// round trip, independent of whether the balloon target itself changes — piggy
+    /// backing here rather than opening a second periodic guest connection purely to
+    /// watch one more field.
+    private func evaluateMemoryBalloon() {
+        guard state == .running, controlReady else { return }
+        let generation = probeGeneration
+        let previousTarget = memoryBalloonTargetBytes ?? bootedMemoryBytes
+        let configuredBytes = bootedMemoryBytes
+
+        probeQueue.async { [weak self] in
+            guard let self else { return }
+            let sample = self.sampleGuestInfo()
+            self.queue.async { [weak self] in
+                guard let self else { return }
+                self.noteGuestDiskLastTrimBytes(sample.diskLastTrimBytes, ifCurrent: generation)
+            }
+            let configuration = MemoryBalloonPolicy.Configuration(configuredBytes: configuredBytes)
+            guard let target = MemoryBalloonPolicy.nextTarget(
+                previousTargetBytes: previousTarget, sample: sample.memory, configuration: configuration)
+            else { return }
+            self.queue.async { [weak self] in
+                guard let self else { return }
+                // The same staleness guard `beginControlProbe` uses (CONC-2): a boot
+                // that ended or was superseded between the sample above and this
+                // callback must not have a stale evaluation write to its balloon —
+                // or, worse, to a newer boot's.
+                guard self.probeGeneration == generation, self.state == .running, self.controlReady
+                else { return }
+                self.applyMemoryBalloonTarget(target)
+            }
+        }
+    }
+
+    /// Everything the balloon evaluator's one guest `info` round trip can answer,
+    /// bundled so a single connection can drive both the balloon policy and the
+    /// disk-trim readout without either one needing its own poll.
+    private struct GuestPeriodicInfoSample {
+        var memory: MemoryBalloonPolicy.Sample?
+        var diskLastTrimBytes: Int64?
+    }
+
+    /// Blocking: connects to the guest control channel and returns what the balloon
+    /// evaluator's tick can learn from one `info` exchange. Every field is `nil`
+    /// uniformly on any failure (unreachable guest, timeout, an older guest that does
+    /// not report it, or the wire's own sentinel already collapsed by
+    /// ``GuestReply``) — callers already treat "no sample" as "nothing to record or
+    /// act on", so this does not need to distinguish the reasons.
+    ///
+    /// - Important: never call from ``queue``; it blocks on a vsock round trip.
+    private func sampleGuestInfo() -> GuestPeriodicInfoSample {
+        switch connectVsockBlocking(port: MorbVsockPorts.guestControl, timeout: 3) {
+        case .failure:
+            return GuestPeriodicInfoSample(memory: nil, diskLastTrimBytes: nil)
+        case .success(let fd):
+            let control = GuestControl(fd: fd)
+            defer { control.closeOwnedDescriptor() }
+            guard let info = try? control.info(timeout: 5) else {
+                return GuestPeriodicInfoSample(memory: nil, diskLastTrimBytes: nil)
+            }
+            let memory: MemoryBalloonPolicy.Sample?
+            if let totalKB = info.memTotalKB, let availableKB = info.memAvailableKB {
+                memory = MemoryBalloonPolicy.Sample(totalKB: totalKB, availableKB: availableKB)
+            } else {
+                memory = nil
+            }
+            return GuestPeriodicInfoSample(memory: memory, diskLastTrimBytes: info.diskLastTrimBytes)
+        }
+    }
+
+    /// Records the guest's most recent `fstrim` sweep result. Left untouched when
+    /// the guest omits it (no sweep has completed yet, the data root is RAM-backed,
+    /// or the guest predates the field) — the last real number stays visible rather
+    /// than flickering to `nil` on every tick that has nothing new to report.
+    private func noteGuestDiskLastTrimBytes(_ bytes: Int64?, ifCurrent generation: Int) {
+        guard let bytes else { return }
+        stateLock.lock()
+        if _probeGeneration == generation { _guestDiskLastTrimBytes = bytes }
+        stateLock.unlock()
+    }
+
+    /// Writes a new balloon target and records it. Must run on `queue`, with the
+    /// generation/state guard from ``evaluateMemoryBalloon()`` already satisfied by
+    /// the caller.
+    private func applyMemoryBalloonTarget(_ bytes: UInt64) {
+        guard let vm = virtualMachine,
+              let balloon = vm.memoryBalloonDevices.first as? VZVirtioTraditionalMemoryBalloonDevice
+        else { return }
+        balloon.targetVirtualMachineMemorySize = bytes
+        memoryBalloonTargetBytes = bytes
+        log.info(
+            "memory balloon target -> \(bytes / (1024 * 1024)) MiB "
+                + "(of \(bootedMemoryBytes / (1024 * 1024)) MiB configured)")
     }
 
     /// Records that `morbinit` answered on this boot. Safe from any thread.
@@ -620,6 +857,24 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
         guard let version else { return }
         stateLock.lock()
         if _probeGeneration == generation { _guestMorbinitVersion = version }
+        stateLock.unlock()
+    }
+
+    /// Records the guest's reported proxy environment. Each field is left
+    /// untouched when the guest omits it — an older initramfs not repeating
+    /// `info`'s proxy fields must not erase a prior report — but an empty
+    /// string, unlike `nil`, is recorded: it is the guest's positive
+    /// statement that dockerd has no proxy of that kind.
+    private func noteGuestProxy(
+        http: String?, https: String?, noProxy: String?, ifCurrent generation: Int
+    ) {
+        guard http != nil || https != nil || noProxy != nil else { return }
+        stateLock.lock()
+        if _probeGeneration == generation {
+            if let http { _guestHTTPProxy = http }
+            if let https { _guestHTTPSProxy = https }
+            if let noProxy { _guestNoProxy = noProxy }
+        }
         stateLock.unlock()
     }
 
@@ -2010,6 +2265,9 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
                     contractVersion: info.shareEventBridgeContractVersion,
                     ifCurrent: generation)
                 noteGuestDiskResize(info.diskResize, ifCurrent: generation)
+                noteGuestProxy(
+                    http: info.httpProxy, https: info.httpsProxy, noProxy: info.noProxy,
+                    ifCurrent: generation)
                 // A guest too old to report the field cannot tell us dockerd is up;
                 // treating "absent" as ready keeps this compatible rather than
                 // hanging for the whole boot budget against an older initramfs.
@@ -2102,6 +2360,12 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
         configuration.memorySize = min(
             max(requestedMemory, VZVirtualMachineConfiguration.minimumAllowedMemorySize),
             VZVirtualMachineConfiguration.maximumAllowedMemorySize)
+        // Captured for the memory-balloon policy (UX-17): its ceiling must match what
+        // Virtualization.framework actually granted, not the raw `config.toml` value
+        // the two clamps above may have adjusted. `buildConfiguration()` runs on
+        // `queue` for every boot and restore, so this write is queue-confined like
+        // every other VM-state field here.
+        bootedMemoryBytes = configuration.memorySize
 
         // Directory sharing. Planned before the boot loader because the share map
         // travels to the guest on the kernel command line: morbinit reads
@@ -2121,17 +2385,38 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate {
         } else {
             bootMode = .disk
         }
-        let cmdline = try config.resolvedKernelCmdline(for: bootMode, shares: sharePlan.shares)
+        // The Mac's proxy configuration (UX-18), read fresh on every boot so a
+        // proxy that changed since the last start — a laptop moving between a
+        // corporate network and home — takes effect without an explicit
+        // config edit. `config.toml` overrides win; see `effectiveGuestProxy`.
+        let proxy = config.effectiveGuestProxy(host: HostProxyConfiguration.current())
+        let cmdline = try config.resolvedKernelCmdline(for: bootMode, shares: sharePlan.shares, proxy: proxy)
         bootLoader.commandLine = cmdline
         configuration.bootLoader = bootLoader
         log.info("boot mode \(bootMode.rawValue)"
             + (bootMode == .initramfs ? ", initrd \(initrdURL.path)" : "")
-            + ", cmdline \"\(cmdline)\"")
+            // Proxy tokens are redacted: a proxy URL can carry embedded
+            // basic-auth credentials, and the console log is not a secret
+            // store. Shares are plain paths and stay visible.
+            + ", cmdline \"\(Self.redactingProxyTokens(cmdline))\""
+            + (proxy.isEmpty ? "" : ", proxy configured for the guest"))
+        if proxy.pacOnly {
+            log.warn(
+                "the Mac's proxy is configured via PAC/auto-discovery"
+                    + (proxy.pacURLString.map { " (\($0))" } ?? "")
+                    + " — Morbstack cannot evaluate a PAC script, so no proxy is being passed "
+                    + "to the guest; set http_proxy/https_proxy in \(MorbPaths.configFile.path) "
+                    + "to work around this")
+        }
 
         // Serial console -> ~/.morbstack/logs/console.log
         configuration.serialPorts = [try makeConsolePort()]
 
-        // Entropy and ballooning.
+        // Entropy and ballooning. The balloon device itself is just attached here;
+        // `evaluateMemoryBalloon()` is what actually drives its
+        // `targetVirtualMachineMemorySize` once the guest is control-ready (UX-17,
+        // docs/design/MEMORY-BALLOON.md) — an undriven device grants the guest
+        // everything configured below, which is `bootedMemoryBytes`.
         configuration.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
         configuration.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
 
@@ -2347,10 +2632,16 @@ public enum MorbVsockPorts {
     public static let datagramDial: UInt32 = 2378
     /// Bounded host-to-guest shared-file event receiver.
     public static let liveShareReceiver: UInt32 = 2381
-    /// Host-side port-lease channel — the registry's one **guest-initiated**
-    /// entry. The guest's userland-proxy wrapper (`morbstack-docker-proxy`,
+    /// Host-side port-lease channel — one of two **guest-initiated**
+    /// entries. The guest's userland-proxy wrapper (`morbstack-docker-proxy`,
     /// which stock dockerd execs per published port) connects out to the host
     /// on this port, asks for the Mac endpoint, and holds the connection for
     /// the proxy process's lifetime; EOF releases the Mac listener.
     public static let hostPortLease: UInt32 = 2382
+    /// Host-side SSH-agent forward channel (UX-19) — the registry's other
+    /// **guest-initiated** entry. The guest's `/run/host-services/ssh-auth.sock`
+    /// listener connects out to the host on this port per accepted local
+    /// connection; see ``SSHAgentForward``. Off by default
+    /// (``MorbConfig/sshAgentForwarding``).
+    public static let sshAgentForward: UInt32 = 2383
 }

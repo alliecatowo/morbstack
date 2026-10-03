@@ -143,10 +143,68 @@ replacement Theme, Design, Style, or Appearance rendering module.
 | `App.swift`: window, sidebar, global errors, engine-off, diagnostics recovery | Windows, sidebar, toolbar, alerts, unavailable states, menu commands, focus/accessibility | Native source implementation — partial dark real-window evidence recorded; broader verification pending | HIG/API read: [Designing for macOS](https://developer.apple.com/design/human-interface-guidelines/designing-for-macos/), [Alerts](https://developer.apple.com/design/human-interface-guidelines/alerts), [Progress indicators](https://developer.apple.com/design/human-interface-guidelines/progress-indicators), [ContentUnavailableView](https://developer.apple.com/documentation/swiftui/contentunavailableview), [ProgressView](https://developer.apple.com/documentation/swiftui/progressview), and [NSOpenPanel](https://developer.apple.com/documentation/appkit/nsopenpanel). Preserve the system sidebar collapse/selection; no manual error chrome or unnecessary custom footer. An engine-error `ContentUnavailableView` exposes the existing offline `MorbDiagnostics` collector as a recovery action: an explicit parent-folder Open panel is cancellable before any write, then a small indeterminate `ProgressView` represents the collector’s unknown duration. The service never contacts or starts the daemon/Docker, creates only a new redacted reviewable directory, and has no cancellation contract, so the UI provides no false in-flight Cancel action. A native success/failure alert reports the actual result; success offers Show in Finder and never uploads or shares. The recorded dark Computer Use pass covers sidebar collapse/reveal and engine-off recovery only. Light/narrow, keyboard/accessibility, XCUITest, diagnostics collection, and real daemon recovery evidence remain pending. |
 | `FirstRunCLISetup.swift` | Onboarding, sheets, forms, picker, toggles, progress, status/feedback, privacy/consent, accessibility | Native rewrite staged — live-window verification pending | HIG/API read: [Sheets](https://developer.apple.com/design/human-interface-guidelines/sheets), [Pickers](https://developer.apple.com/design/human-interface-guidelines/pickers), [Toggles](https://developer.apple.com/design/human-interface-guidelines/toggles), [Progress indicators](https://developer.apple.com/design/human-interface-guidelines/progress-indicators), [Form](https://developer.apple.com/documentation/swiftui/form), [Picker](https://developer.apple.com/documentation/swiftui/picker), [LabeledContent](https://developer.apple.com/documentation/swiftui/labeledcontent), [SMAppService](https://developer.apple.com/documentation/servicemanagement/smappservice). Use a normal `Form` review sheet; the default-off per-user-service toggle explains registration, does not register during status/launch, and applies only from explicit confirmation. A visible radio picker distinguishes host-only setup from the selected one-time Morbstack start; the confirmation title changes to match. The real in-flight work uses `ProgressView`; after the explicit start, a bounded read-only readiness check and `/_ping` either prove Docker healthy or expose a repair action that repeats only that confirmed start/check phase. Completion uses `LabeledContent`, not custom status cards. |
 | `Settings/**` | Settings, forms, text fields, pickers, toggles, sliders, toolbar panes, keyboard | Native source implementation — live-window verification pending | **User task:** inspect or change a durable application preference, not scan a dashboard. **HIG/API read:** [Settings](https://developer.apple.com/design/human-interface-guidelines/settings), [Form](https://developer.apple.com/documentation/swiftui/form), [FormStyle](https://developer.apple.com/documentation/swiftui/formstyle), [LabeledContent](https://developer.apple.com/documentation/swiftui/labeledcontent), [Toolbars](https://developer.apple.com/design/human-interface-guidelines/toolbars), [Toggles](https://developer.apple.com/design/human-interface-guidelines/toggles), and [Accessibility](https://developer.apple.com/design/human-interface-guidelines/accessibility). The system `Settings` scene and `TabView` own stable pane navigation. The views use `Form`, `Section`, `LabeledContent`, standard controls, and explicit review/apply semantics; forced `.formStyle(.grouped)` was removed because it produced the rounded in-content row clusters observed in the real dark window. `.automatic` restores the platform-selected macOS form treatment instead of replacing one custom visual system with another. Advanced separates the app model’s latest Docker Engine/VM state and socket facts from Docker CLI integration: a registered context’s literal endpoint, saved context, process-level winner after Docker environment precedence, discovery socket, and bundled-toolchain state stay distinct. Existing copy/reload actions remain explicitly labeled; Settings itself performs no context, socket, CLI-link, or lifecycle mutation. General, Resources, Sharing, and Advanced still need current-bundle light/dark/narrow, keyboard, VoiceOver, contrast/transparency/motion, control-state, and mutation-confirmation review before acceptance. |
-| `MenuBar/**` | Menus, menu-bar extras, popovers, commands, accessibility | Native rewrite staged — live-window verification pending | Compact information and actual actions in a system-owned presentation |
+| `MenuBar/**` | Menus, menu-bar extras, popovers, commands, accessibility | Native rewrite staged — live-window verification pending | **User task:** glance at the engine, see what is running, and act on one container without opening the app. **HIG/API read:** [The menu bar](https://developer.apple.com/design/human-interface-guidelines/the-menu-bar), [Menus](https://developer.apple.com/design/human-interface-guidelines/menus), [MenuBarExtra](https://developer.apple.com/documentation/swiftui/menubarextra), [Menu](https://developer.apple.com/documentation/swiftui/menu). Compact information and actual actions in a system-owned presentation. The running list is grouped by the same split the Containers route uses (`TrackBContainerGrouping`): Compose projects first, then Standalone, then Kubernetes-Managed, each header naming "n of m running" and opening the screen that owns those records. A single group draws no header. The row budget (8) is shared across groups and also decides which `/stats` sockets open, so the extra never streams a container it did not draw. The per-container `Menu` carries View Logs, Restart, Stop, Copy Name, Copy Container ID — the things that need no second screen. **Deliberately absent (UX-10):** project-level start/stop, container removal, and anything else that needs a confirmation: a modal presented from a `MenuBarExtra` window dismisses the window presenting it, and an unconfirmed bulk lifecycle would be a weaker copy of the Stacks dialog that names its exact scope. The project header opens Stacks instead. Terminal is DIF-2's. Live-window, keyboard, and VoiceOver review of the grouped list remain pending. |
 | `Palette/**` | Search, menus/commands, sheets or panel modality, keyboard focus, accessibility | Native rewrite staged — live-window verification pending | A standard sheet is acceptable when a global command has no stable popover anchor; avoid a decorative Raycast clone. A destructive result never executes from a single Return: it must pass through a system confirmation dialog. |
-| `Views/Containers/**` | Tables, inspector, forms, logs/text, context menus, toolbar/search, Charts, progress, unavailable states, destructive actions | Native rewrite staged — partial dark real-window evidence recorded; broader verification pending | Main list/detail is table + inspector. Statistics is read-only: CPU/memory history and network throughput use real `/containers/{id}/stats` values, with `LabeledContent`, Swift Charts, Audio Graphs, and exact sample tables. Network throughput is derived only from complete monotonic counters; stopped, priming, missing, and reset data use system unavailable/progress states rather than placeholder values or a start action. The recorded dark Computer Use pass covers selecting one stopped container and its Overview inspector; it does not verify statistics, logs, lifecycle changes, menus, or destructive actions. Light/narrow, keyboard/accessibility, XCUITest, and those real-engine workflows remain pending. |
+| `Views/Containers/**` | Tables, inspector, forms, logs/text, context menus, toolbar/search, Charts, progress, unavailable states, destructive actions | Native rewrite staged — partial dark real-window evidence recorded; broader verification pending | Main list/detail is table + inspector. Statistics is read-only: CPU/memory history plus network and disk throughput use real `/containers/{id}/stats` values, with `LabeledContent`, Swift Charts, Audio Graphs, and exact sample tables. Network and disk are the same measurement on different cumulative counters and share one section, one axis discipline and one accessibility descriptor (`ByteRateSection`), so the two charts cannot drift apart. Throughput is derived only from complete monotonic counters over real elapsed time: the first sample has no interval, a zero-length interval has no rate, a counter that went backwards is a reset that omits one interval rather than a negative transfer, and a direction the Engine did not report stays `nil` instead of becoming a plausible zero. An Engine that lists no interfaces, and one that lists no block device, each get a `ContentUnavailableView` stating what the Engine reported — the disk one states the Engine's listing rule rather than diagnosing a cause the payload cannot distinguish. Stopped, priming, missing, and reset data use system unavailable/progress states rather than placeholder values or a start action. The recorded dark Computer Use pass covers selecting one stopped container and its Overview inspector; it does not verify statistics, logs, lifecycle changes, menus, or destructive actions. Light/narrow, keyboard/accessibility, XCUITest, and those real-engine workflows remain pending. |
 | `Views/Images/**` | Tables, inspector, local filtering, public repository discovery, pull/tag sheets, image archive export, bounded local-image run, destructive image actions | Native source implementation — partial dark real-window evidence recorded; broader verification pending | **User task:** inspect the local Docker image inventory; separately discover a public repository without initiating a pull; give one selected immutable local image an additional repository/tag alias; or create and start one container from an explicitly selected already-local image. **HIG/API read:** [Lists and tables](https://developer.apple.com/design/human-interface-guidelines/lists-and-tables), [Toolbars](https://developer.apple.com/design/human-interface-guidelines/toolbars), [Search fields](https://developer.apple.com/design/human-interface-guidelines/search-fields), [Menus](https://developer.apple.com/design/human-interface-guidelines/menus), [Sheets](https://developer.apple.com/design/human-interface-guidelines/sheets), [Alerts](https://developer.apple.com/design/human-interface-guidelines/alerts), [Form](https://developer.apple.com/documentation/swiftui/form), [DisclosureGroup](https://developer.apple.com/documentation/swiftui/disclosuregroup), [ContentUnavailableView](https://developer.apple.com/documentation/swiftui/contentunavailableview), [LabeledContent](https://developer.apple.com/documentation/swiftui/labeledcontent), and [NSSavePanel](https://developer.apple.com/documentation/appkit/nsopenpanel); Docker [image tag](https://docs.docker.com/reference/cli/docker/image/tag/) and [image remove](https://docs.docker.com/reference/cli/docker/image/rm/). The local path is a sortable selected-record `Table` plus the system inspector at `340/400/460`; the bordered table style remains a narrow system-only visual hypothesis pending current-bundle Computer Use review. The inspector is an automatic `Form`: architecture is a scalar `LabeledContent`, a consequential mismatch receives one concise Compatibility section, and secondary Repo Tags use a count-labelled `DisclosureGroup` collapsed on selection. It has no duplicate command buttons, cards, custom materials, or manual layout. Pull Image is the first, truthful local-empty-state action; Refresh is secondary. Tag Image is a document-modal system `Form` that names the selected immutable ID separately from repository and tag, then sends only Docker's local tag request; it cannot pull, push, authenticate, browse an account, or contact a registry. Selected-record archive, run, copy, tag, and removal commands live in the Image inspector/context menu or selection-aware toolbar. Removal is explicitly confirmed and always calls Docker by immutable ID without force: the app never removes containers or references behind the person's back, and preserves Docker's exact current dependent-container/additional-tag refusal in a system alert. `.searchable` filters only local images. Public discovery stays a separate explicit system sheet, with no typed remote search, automatic pull, custom registry, credential, custom glass, card, or material behavior. The recorded dark Computer Use pass covers local-image table/selection/inspector and an opened then dismissed Pull sheet; it does **not** cover public discovery, local-image run, tag, or removal. Light/dark/narrow, keyboard/focus/VoiceOver, contrast/transparency/motion, toolbar overflow, XCUITest, archive/run/remove/tag/pull workflows, and real Docker evidence remain pending. |
+
+### 2026-08-05 Container Files tab (UX-4)
+
+**User task:** find out what is actually on a container's filesystem — running or stopped —
+read one text file, and get a file or a folder out onto this Mac. This is browsing a real
+parent/child hierarchy, selecting a record, reading a document, and exporting; it is not
+editing, and nothing in the tab implies it will be.
+
+**HIG/API read:**
+[Outline views](https://developer.apple.com/design/human-interface-guidelines/outline-views),
+[Lists and tables](https://developer.apple.com/design/human-interface-guidelines/lists-and-tables),
+[DisclosureGroup](https://developer.apple.com/documentation/swiftui/disclosuregroup),
+[ContentUnavailableView](https://developer.apple.com/documentation/swiftui/contentunavailableview),
+[LabeledContent](https://developer.apple.com/documentation/swiftui/labeledcontent),
+[Form](https://developer.apple.com/documentation/swiftui/form),
+[Sheets](https://developer.apple.com/design/human-interface-guidelines/sheets),
+[Menus](https://developer.apple.com/design/human-interface-guidelines/menus),
+[Progress indicators](https://developer.apple.com/design/human-interface-guidelines/progress-indicators),
+[NSSavePanel](https://developer.apple.com/documentation/appkit/nssavepanel); Docker Engine
+`HEAD/GET /containers/{id}/archive` and [docker cp](https://docs.docker.com/reference/cli/docker/container/cp/).
+
+**Semantic choice.** A `List` of system `DisclosureGroup`s with system selection, a system
+`Form`/`LabeledContent` strip for the selected entry, a document sheet for a file's text, a
+`Menu` for the folder-level commands, `ContentUnavailableView` for every empty/unavailable
+state, and `NSSavePanel` for export. No custom disclosure layout, no cards, no material, no
+second Finder. The single deviation is an `AnyView` at the recursion point of the row view,
+because a self-referential SwiftUI `View` cannot infer its own opaque type; flattening the
+tree into manually indented rows with a hand-drawn triangle was the alternative and is the
+anti-pattern this table's hierarchy row names.
+
+**What the engine really does, verified against Docker 29.7.1 / API 1.55 on 2026-08-05.**
+`HEAD …/archive?path=X` answers with `X-Docker-Container-Path-Stat` (base64 JSON: `name`,
+`size`, `mode` as a Go `os.FileMode`, `mtime`, `linkTarget`) and works on a **stopped**
+container. `GET` on the same path returns the whole subtree as one tar and carries the same
+stat header. Entry names are rebased on the requested path's base: `/etc` yields `etc/…`,
+`/` yields `/…`, a single file yields its bare name. There is **no** one-level listing
+request, so listing a folder means reading everything inside it — 40 MB in 0.9 s for
+`alpine:3.20`'s root over the Unix socket. That is why the scan is budgeted (512 MB /
+200,000 entries), reports its bytes live, can be stopped, and — when it stops early — states
+which directories it nevertheless finished rather than presenting a partial listing as a
+complete one.
+
+**Truthfulness rules this tab holds.** A directory's 4096 and a symlink's target length are
+never shown as content sizes; sizes are engine bytes through `Formatters.bytesString`. An
+unstated fact reads "Not reported", never `0` and never an em dash. Every incomplete listing
+names an action. Every tar entry name is untrusted: it is rebased and *rejected* — never
+repaired — if it does not land strictly beneath the requested path, and the count of
+rejections is shown. A folder export writes the engine's archive verbatim rather than
+extracting it, so no container-authored path can address anything on the host. The selected
+entry's footer states that the path is inside the container and not reachable in Finder.
+
+**Evidence.** 37 unit tests (`mac/Tests/MorbstackAppTests/ContainerFileBrowserTests.swift`),
+including real header blocks and stat headers captured from a live engine; the parser was
+additionally diffed against Python `tarfile` over a real 40 MB `path=/` response — 2,460
+entries, identical paths, kinds and sizes, zero rejections. **No visual evidence yet:** the
+tab has not been seen in a real window. Light/dark/narrow, keyboard/focus/VoiceOver,
+XCUITest, and Computer Use review of the current bundle all remain pending behind the
+machine lane.
 
 ### 2026-08-03 Local-image Run form expansion
 
@@ -1060,3 +1118,55 @@ titlebar, toolbar, sidebar, material, inspector, focus, or Liquid Glass acceptan
   and dark at ordinary and narrow widths, confirm disabled-controls help and VoiceOver
   wording, attempt the unavailable routes, and verify that no host socket, process, or
   document panel is reached.
+
+### Compose-aggregated log document — 2026-08-05 (UX-2, UX-3)
+
+- **User task:** read one Compose project's services as a single stream, to follow a
+  request or a failure across services, while continuing to operate the project. Plus
+  two reading controls on every log document: wrap long lines, and follow a URL a
+  container printed.
+- **HIG/API read:** Apple [Windows](https://developer.apple.com/design/human-interface-guidelines/windows),
+  [Designing for macOS](https://developer.apple.com/design/human-interface-guidelines/designing-for-macos/),
+  [Menus](https://developer.apple.com/design/human-interface-guidelines/menus),
+  [Color](https://developer.apple.com/design/human-interface-guidelines/color) (colour is
+  never the only channel), SwiftUI
+  [`WindowGroup`](https://developer.apple.com/documentation/swiftui/windowgroup),
+  [`openWindow`](https://developer.apple.com/documentation/swiftui/environmentvalues/openwindow),
+  [`ContentUnavailableView`](https://developer.apple.com/documentation/swiftui/contentunavailableview),
+  [`OpenURLAction`](https://developer.apple.com/documentation/swiftui/openurlaction), and
+  Docker's [`container logs`](https://docs.docker.com/reference/cli/docker/container/logs/)
+  (`timestamps=1`, one daemon clock across a project's services).
+- **Native choice — why a window.** The merged transcript is a document watched over
+  time, not metadata about a selection. An inspector pane (340–520 pt) cannot hold a
+  timestamp, service and message column; a mode inside the container Logs tab would
+  describe a project underneath a single container's record; a sidebar destination would
+  make "logs of one project" a tenth resource category and replace the browser the
+  person is working in. `WindowGroup(id:for:)` keyed on the Compose project name is
+  non-modal, restorable, allows two projects side by side, and gives the document its
+  own title. Entry points are the Stacks project menus and the Containers project group
+  header context menu — the two places in the app that address a whole project.
+- **Ordering (correctness, not cosmetics):** lines merge on the timestamp dockerd
+  recorded, held in a short reorder window and released as the longest ripe sorted
+  prefix, so a slower stream's earlier line is never overtaken. A start-up priming phase
+  holds the document until every service has answered (or 2 s), which is what stops
+  "all of web, then all of api". A line with no engine timestamp inherits its own
+  service's last one; a service that never has timestamps falls back to arrival and
+  shows "—". A line delayed past the window is appended where it arrived with its true
+  timestamp rather than inserted into history. Nothing is ever re-ordered after display,
+  and IDs are assigned at release so display order and ID order are one sequence.
+- **Colour:** the service name is always drawn as text; the palette colours only that
+  column and never the message body, which stays the ANSI parser's. Slots come from the
+  existing appearance-tuned ANSI palette minus the greys, assigned by a stable FNV-1a
+  hash of the service name so a project's colours survive restarts.
+- **Links:** only literal `http`/`https` substrings are linked, so the visible text is
+  the destination character for character; credentials, non-web schemes, bidi-carrying
+  lines and non-ASCII continuations are refused; nothing auto-opens, and a destination
+  on this Mac or this LAN gets a confirmation naming the full URL.
+- **Evidence:** 55 new unit tests (merge ordering incl. the slow-stream, no-timestamp
+  and late-line cases; palette stability; hidden-service scope; the linkifier's accept,
+  reject and hostile sets), full suite 1061 passing. **No visual evidence.** This lane
+  could not hold the machine lane, so the new window has never been seen: its title,
+  toolbar-free chrome, default size, restoration behaviour, the service column width at
+  narrow widths, the horizontal scroller when wrap is off, and link appearance in light
+  and dark all remain unverified and must be reviewed with `--tour-fixtures` and Computer
+  Use before acceptance.

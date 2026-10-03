@@ -62,6 +62,13 @@ struct MigrationRuntime: Identifiable, Sendable, Equatable {
         default: return nil
         }
     }
+
+    /// Morbstack is the fixed migration destination, not a candidate this route
+    /// detected and could transfer *from* — the other three rows' Running/Not Running
+    /// verdict answers "is this a live source", which is not a question Morbstack asks
+    /// about itself. It only ever has a `transferSourceToken` of `nil`, so that is the
+    /// one existing signal this reads.
+    var isDestination: Bool { transferSourceToken == nil }
 }
 
 struct MigrationDockerConfiguration: Sendable, Equatable {
@@ -196,7 +203,7 @@ struct MigrationRootView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        ToolbarItem(id: "migration.refresh", placement: .secondaryAction) {
+        ToolbarItem(id: "migration.refresh", placement: .primaryAction) {
             Button {
                 Task { await inspect() }
             } label: {
@@ -262,7 +269,10 @@ struct MigrationRootView: View {
                 }
                 .width(min: 140, ideal: 180, max: 260)
                 TableColumn("Status") { runtime in
-                    Text(runtime.status)
+                    // A destination is not a source that is Running or Not Running —
+                    // without this, Morbstack's own row read exactly like a detected
+                    // source, and the IA wrinkle only surfaced after selecting it.
+                    Text(runtime.isDestination ? "Destination" : runtime.status)
                         .foregroundStyle(.secondary)
                 }
                 .width(min: 92, ideal: 108, max: 132)
@@ -289,11 +299,14 @@ struct MigrationRootView: View {
             .accessibilityHint("Select a runtime to review migration readiness")
             .inspector(isPresented: $showsInspector) {
                 detailPane
-                    .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
                     // See the note on `VolumesRootView`: the trailing commands ride
                     // the inspector's toolbar region and remain present while the
                     // inspector is closed.
                     .toolbar { trailingCommandItems }
+                    // Must be the outermost modifier on the inspector's content —
+                    // see the note in `ContainersRootView`: applied beneath
+                    // `.toolbar` its preferred width was silently discarded.
+                    .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
             }
         }
     }
@@ -375,10 +388,13 @@ struct MigrationRootView: View {
                         "Would Copy",
                         value: "\(images.wouldCopy.count) image\(images.wouldCopy.count == 1 ? "" : "s") · \(Formatters.bytesString(images.wouldCopyBytes))")
                     LabeledContent("Already Present", value: "\(images.alreadyPresent.count) image\(images.alreadyPresent.count == 1 ? "" : "s")")
+                    // The section's own footer already says inspection stays read-only
+                    // until a review is confirmed; this footnote's job is only to say
+                    // what was compared, in one sentence.
                     Text(
                         images.items.isEmpty
                             ? "No tagged images matched this comparison."
-                            : "The selected source and the running Morbstack engine were compared directly. No image data was imported.")
+                            : "The selected source and the running Morbstack engine were compared directly.")
                         .foregroundStyle(.secondary)
 
                     if !images.wouldCopy.isEmpty {
@@ -386,10 +402,8 @@ struct MigrationRootView: View {
                             presentImageMigration(for: runtime, candidates: images.wouldCopy)
                         }
                         .accessibilityIdentifier("migration.selectImages")
-                        Text(
-                            "Choose one or more images for review. Morbstack never selects every image automatically."
-                        )
-                        .foregroundStyle(.secondary)
+                        Text("Choose one or more images for review — nothing is selected automatically.")
+                            .foregroundStyle(.secondary)
                     }
                 } else if let unavailableReason = plan(for: runtime)?.unavailableReason {
                     Text(unavailableReason)
@@ -404,17 +418,18 @@ struct MigrationRootView: View {
                     ProgressView("Reading named-volume inventories…")
                         .controlSize(.small)
                 } else if let volumes = plan(for: runtime)?.volumePlan {
-                    LabeledContent("Named Volume Eligibility", value: "Read Only")
-                    LabeledContent("Eligible", value: "\(volumes.eligible.count) volume\(volumes.eligible.count == 1 ? "" : "s")")
-                    LabeledContent("Destination Exists", value: "\(volumes.destinationExisting.count) volume\(volumes.destinationExisting.count == 1 ? "" : "s")")
-                    LabeledContent("Unsupported Driver", value: "\(volumes.unsupported.count) volume\(volumes.unsupported.count == 1 ? "" : "s")")
-
                     if volumes.items.isEmpty {
-                        // A form row, not a full-height unavailable panel: inside a
-                        // 340pt inspector Form the framed panel clipped its neighbours.
-                        Text("The selected source reported no named volumes.")
-                            .foregroundStyle(.secondary)
+                        // Eligible, Destination Exists, and Unsupported Driver are all
+                        // subsets of `items` — with no named volumes reported at all,
+                        // every one of those rows would read "0 volumes". One line
+                        // states the actual fact instead of three that restate a zero.
+                        LabeledContent("Named Volume Eligibility", value: "No named volumes reported")
                     } else {
+                        LabeledContent("Named Volume Eligibility", value: "Read Only")
+                        LabeledContent("Eligible", value: "\(volumes.eligible.count) volume\(volumes.eligible.count == 1 ? "" : "s")")
+                        LabeledContent("Destination Exists", value: "\(volumes.destinationExisting.count) volume\(volumes.destinationExisting.count == 1 ? "" : "s")")
+                        LabeledContent("Unsupported Driver", value: "\(volumes.unsupported.count) volume\(volumes.unsupported.count == 1 ? "" : "s")")
+
                         // Stacked rows instead of a nested Table: three columns with
                         // 372pt of minimum width cannot fit a 340pt inspector without
                         // overdrawing — the exact defect the Disk route was cited for.
@@ -437,20 +452,18 @@ struct MigrationRootView: View {
                         }
                         .frame(minHeight: 120, idealHeight: 180, maxHeight: 260)
                         .accessibilityLabel("Read-only named volume eligibility")
-                    }
 
-                    Text(
-                        "Eligibility compares names and drivers only. Volume contents, free space, overwrite safety, and merge behavior were not inspected.")
-                        .foregroundStyle(.secondary)
-
-                    if !volumes.eligible.isEmpty {
-                        Button("Select Volumes to Transfer…") {
-                            presentVolumeMigration(for: runtime, candidates: volumes.eligible)
-                        }
-                        .accessibilityIdentifier("migration.selectVolumes")
-                        Text(
-                            "Choose the exact eligible volumes to review. Existing Morbstack volumes and unsupported drivers cannot be selected.")
+                        Text("Eligibility compares only names and drivers — not contents, free space, or overwrite safety.")
                             .foregroundStyle(.secondary)
+
+                        if !volumes.eligible.isEmpty {
+                            Button("Select Volumes to Transfer…") {
+                                presentVolumeMigration(for: runtime, candidates: volumes.eligible)
+                            }
+                            .accessibilityIdentifier("migration.selectVolumes")
+                            Text("Choose the exact eligible volumes to review — existing or unsupported ones can't be selected.")
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 } else if let unavailableReason = plan(for: runtime)?.volumeUnavailableReason {
                     LabeledContent("Named Volume Eligibility", value: "Unavailable")

@@ -140,6 +140,58 @@ struct TrackCDiskImageFootprint: Hashable, Sendable {
     var isSparse: Bool { occupancy < 0.98 && savedBytes > 0 }
 }
 
+// MARK: - Disk reclaim presentation (TECH-3 / UX-16)
+
+/// What the Disk inspector says about automatic space reclaim, given the guest's most
+/// recent periodic `fstrim` sweep result (`disk::spawn_periodic_trim` in
+/// `guest/morbinit`, reported over `info` as `disk_last_trim_bytes` and surfaced here
+/// through `morbstackd`'s `status` as `guest_disk_last_trim_bytes`).
+///
+/// Before this sweep existed, the honest statement was "space freed inside the guest
+/// stays allocated on APFS until the file is trimmed or recreated" — true then, false
+/// now that reclaim runs on two independent triggers (a background sweep on its own
+/// schedule, and — TECH-3/UX-16 §8, `docs/design/DISK-RECLAIM-DECISION.md` — a bounded
+/// sweep every time the guest stops, which is what actually reclaims space for a
+/// machine that idles and auto-suspends before the background sweep's warmup elapses).
+/// This states the current fact once: reclaim already happens automatically, and
+/// either names the most recent *periodic* result or says plainly that none has
+/// landed yet this boot, without naming the guest's internal timer or sentinel value
+/// to a reader who has no way to act on either.
+enum TrackCDiskReclaimPresentation {
+
+    /// The VM-disk-file footnote, combining the sparse-file fact (`footprint`) with the
+    /// reclaim fact (`lastTrimBytes`) — the two answer the same underlying question
+    /// ("does deleting things in the guest actually give me space back") and stating
+    /// them separately would read as if they disagreed.
+    static func footprintExplanation(footprint: TrackCDiskImageFootprint, lastTrimBytes: Int64?) -> String {
+        let sizeFact = footprint.isSparse
+            ? "This sparse file reserves \(Formatters.bytesString(footprint.apparentBytes)) but currently uses \(Formatters.bytesString(footprint.actualBytes)) on APFS."
+            : "This image is close to fully allocated on APFS."
+        return "\(sizeFact) \(reclaimSentence(lastTrimBytes: lastTrimBytes))"
+    }
+
+    /// The reclaim fact on its own, for callers that do not also need the sparse-file
+    /// sentence.
+    ///
+    /// "Automatically — periodically while it runs, and every time it stops" is a
+    /// deliberately complete claim rather than just "in the background": a reader
+    /// whose Mac only ever idles the VM into an auto-suspend never sees the periodic
+    /// sweep complete (it never runs long enough to), so naming only that trigger
+    /// would describe a mechanism that, for that reader, never actually fires.
+    static func reclaimSentence(lastTrimBytes: Int64?) -> String {
+        let claim = "Morbstack reclaims space from deleted images and containers "
+            + "automatically — periodically while the guest runs, and once more every "
+            + "time it stops."
+        guard let lastTrimBytes else {
+            return "\(claim) No sweep has completed yet on this boot."
+        }
+        guard lastTrimBytes > 0 else {
+            return "\(claim) The most recent sweep found nothing to reclaim."
+        }
+        return "\(claim) The most recent sweep returned \(Formatters.bytesString(lastTrimBytes)) to this Mac."
+    }
+}
+
 // MARK: - VM disk growth presentation
 
 /// The one safe next action for a disk-growth fact set. This is intentionally a
@@ -201,6 +253,25 @@ enum TrackCDiskGrowthPresentation {
         case .guestProved:
             return "The guest proof was saved before final cleanup. Retrying re-verifies the saved target; Morbstack will not shrink the disk."
         }
+    }
+
+    /// Whether the Configured Capacity row earns its place next to Current Raw
+    /// Capacity: only when it names a different byte count. When the two agree, the
+    /// Capacity State row already says "Matches configuration" — a third row with the
+    /// same number would be the same fact stated a third time. A missing `currentBytes`
+    /// (no disk image yet) has nothing to compare against, so Configured Capacity is
+    /// the only number on screen and always shows.
+    static func showsConfiguredCapacityRow(currentBytes: Int64?, configuredBytes: Int64) -> Bool {
+        guard let currentBytes else { return true }
+        return currentBytes != configuredBytes
+    }
+
+    /// Whether `MorbDiskCapacity.Status.summary` earns its place under the Capacity
+    /// State row. `.matchesConfiguration`'s summary ("The existing disk matches the
+    /// configured capacity") restates that row's own two-word title in a sentence;
+    /// every other state's summary says something the title alone cannot.
+    static func showsCapacitySummary(for state: MorbDiskCapacity.State) -> Bool {
+        state != .matchesConfiguration
     }
 }
 

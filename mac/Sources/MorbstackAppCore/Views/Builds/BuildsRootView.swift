@@ -227,6 +227,9 @@ struct BuildsRootView: View {
     let model: AppModel
 
     @State private var query = ""
+    // UI-051: search is a glyph in the trailing group until someone asks for it.
+    // `RouteSearchModifier` attaches the system field while this is true.
+    @State private var searchIsActive = false
     @State private var scope: BuildDataScope = .cache
     @State private var sortOrder: [BuildComparator] = [BuildComparator(key: .size, order: .reverse)]
     @State private var selection: BuildCacheRecord.ID?
@@ -573,16 +576,9 @@ struct BuildsRootView: View {
                     ? "Choose BuildKit cache or Buildx history"
                     : "Buildx history is unavailable in developer fixture data")
         }
-        if !inspectorIsMounted {
-            // The inspector-less empty screens still need the trailing commands in
-            // the window toolbar; when a table is on screen they ride the inspector
-            // content instead — see `VolumesRootView.trailingCommandItems`.
-            trailingCommandItems
-        }
         // One semantic options menu instead of three loose glyphs — refresh, the
-        // builder sheet, and the infrequent destructive prune stay together and the
-        // system owns their overflow.
-        ToolbarItem(id: "builds.options", placement: .secondaryAction) {
+        // builder sheet, and the infrequent destructive prune stay together.
+        ToolbarItem(id: "builds.options", placement: .primaryAction) {
             Menu {
                 Button("Refresh", systemImage: "arrow.clockwise") {
                     Task { await refreshCurrentScope() }
@@ -613,6 +609,15 @@ struct BuildsRootView: View {
             .accessibilityLabel("Build options")
             .help("Refresh, builder, and cleanup options")
         }
+        // No `ToolbarSpacer` here, unlike Volumes/Networks/Images: this route's
+        // destructive command is an item *inside* the options menu, not a bare
+        // trash button that would sit in the same capsule as "build".
+        if !inspectorIsMounted {
+            // The inspector-less empty screens still need the trailing commands in
+            // the window toolbar; when a table is on screen they ride the inspector
+            // content instead — see `VolumesRootView.trailingCommandItems`.
+            trailingCommandItems
+        }
     }
 
     /// Whether the current scope's content branch mounts the system inspector —
@@ -628,6 +633,12 @@ struct BuildsRootView: View {
     /// See the note on `VolumesRootView.trailingCommandItems`.
     @ToolbarContentBuilder
     private var trailingCommandItems: some ToolbarContent {
+        // The glyph that reveals the search field. `.routeSearchable` on the inspector
+        // content only supplies the field; without this item nothing in the toolbar
+        // invokes it. Declared outside the `scope == .cache` branch because both scopes
+        // are searchable — the History table filters on the same query.
+        RouteSearchToolbarItem(
+            id: "builds.search", subject: "build records", isActive: $searchIsActive)
         if scope == .cache {
             ToolbarItem(id: "builds.start", placement: .primaryAction) {
                 Button {
@@ -645,8 +656,11 @@ struct BuildsRootView: View {
             }
         }
         if scope == .cache ? !records.isEmpty : !model.buildHistory.isEmpty {
-            // `.automatic`, matching every other route's inspector toggle placement.
-            ToolbarItem(id: "builds.inspector", placement: .automatic) {
+            // `.primaryAction`, like every other trailing item on every route.
+            // `.automatic` renders in the same run and the same order (probe
+            // `runOrder`), but a single placement keeps source order and visual
+            // order the same thing — see `VolumesRootView.trailingCommandItems`.
+            ToolbarItem(id: "builds.inspector", placement: .primaryAction) {
                 Button {
                     showsInspector.toggle()
                 } label: {
@@ -722,12 +736,19 @@ struct BuildsRootView: View {
             }
             .inspector(isPresented: $showsInspector) {
                 detailPane
-                    .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
                     // See the note on `VolumesRootView`: the trailing commands and
                     // search ride the inspector's toolbar region and remain present
                     // while the inspector is closed.
                     .toolbar { trailingCommandItems }
-                    .searchable(text: $query, placement: .toolbar, prompt: searchPrompt)
+                    .routeSearchable(
+                        isActive: $searchIsActive, text: $query, prompt: searchPrompt)
+                    // `.inspectorColumnWidth` must be the outermost modifier on the
+                    // inspector's content — applied beneath `.toolbar`/`.searchable`
+                    // its preferred width was silently discarded and every route
+                    // fell back to the system default (~270pt), clipping every
+                    // value regardless of the min/ideal/max declared here. Verified
+                    // empirically against the real window 2026-08-06.
+                    .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
             }
         }
     }
@@ -844,10 +865,13 @@ struct BuildsRootView: View {
                 }
                 .inspector(isPresented: $showsInspector) {
                     historyDetailPane
-                        .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
                         // See the note on `VolumesRootView`.
                         .toolbar { trailingCommandItems }
-                        .searchable(text: $query, placement: .toolbar, prompt: searchPrompt)
+                        .routeSearchable(
+                            isActive: $searchIsActive, text: $query, prompt: searchPrompt)
+                        // See the note above this pattern's other use in this file:
+                        // must be outermost or its width is silently discarded.
+                        .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
                 }
             }
         }
@@ -954,11 +978,13 @@ struct BuildsRootView: View {
                         "Last Used",
                         value: record.lastUsedAt.map(Formatters.absoluteDate) ?? "Never")
                     LabeledContent("Used", value: "\(record.usageCount) time\(record.usageCount == 1 ? "" : "s")")
-                    LabeledContent(
-                        "Storage",
-                        value: record.shared
-                            ? "Shared — excluded from deduplicated total"
-                            : "Included in deduplicated total")
+                    // Only the exception is worth a row: an unshared record is already
+                    // the default the Cache Storage section's deduplicated total
+                    // assumes, so a "yes, this one is normal" line said nothing this
+                    // pane's own numbers didn't already say.
+                    if record.shared {
+                        LabeledContent("Storage", value: "Shared — excluded from deduplicated total")
+                    }
                 }
             }
             // Automatic system Form — see the clipping note on
@@ -1009,22 +1035,32 @@ struct BuildsRootView: View {
                     }
                 }
             case .loaded(let detail):
-                // These are two representations of one selected record. The native
-                // TabView owns peer-destination behavior and keeps raw output outside
-                // the factual Form.
-                TabView(selection: $historyInspectorTab) {
-                    Tab(
-                        "Details",
-                        systemImage: "doc.text",
-                        value: BuildHistoryInspectorTab.details)
-                    {
-                        historyDetailsTab(detail)
+                // These are two representations of one selected record: the factual
+                // Form and the raw log, kept as peer destinations rather than
+                // compressed into one column. A segmented `Picker` over the pane,
+                // not a `TabView` — see UI-055, docs/design/NATIVE-MACOS-PLAYBOOK.md
+                // §8: a `TabView` draws a bordered content box that overdraws the
+                // inspector's own divider from the toolbar's lower edge down, and
+                // Apple's own inspectors use a segmented control at the top of the
+                // column instead. This history inspector has no accessibility
+                // identifiers to preserve, so the conversion is a plain swap.
+                VStack(spacing: 0) {
+                    Picker("Detail", selection: $historyInspectorTab) {
+                        Label("Details", systemImage: "doc.text")
+                            .tag(BuildHistoryInspectorTab.details)
+                        Label("Log", systemImage: "text.alignleft")
+                            .tag(BuildHistoryInspectorTab.log)
                     }
-                    Tab(
-                        "Log",
-                        systemImage: "text.alignleft",
-                        value: BuildHistoryInspectorTab.log)
-                    {
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .padding(.horizontal)
+                    .padding(.top, 8)
+                    .padding(.bottom, 8)
+
+                    switch historyInspectorTab {
+                    case .details:
+                        historyDetailsTab(detail)
+                    case .log:
                         historyLogPane(for: record)
                     }
                 }

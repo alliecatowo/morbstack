@@ -307,7 +307,23 @@ public enum K8s {
                 } else {
                     recommendedAction = .none
                     summary = "Kubernetes is ready and reachable through Morbstack’s local API forward."
-                    guidance = "No recovery action is required. Inspect cluster resources or use the generated kubeconfig."
+                    // `kubectl top` calls the metrics.k8s.io aggregated API, and the
+                    // k3s service is started with `--disable=metrics-server` — a
+                    // deliberate boot-speed trade (see guest/morbinit/src/k8s.rs and
+                    // docs/k8s.md "Why this shape"). Left unstated, the only thing a
+                    // user sees is kubectl's own "error: Metrics API not available",
+                    // which reads like a broken cluster rather than a documented
+                    // default (UX-20). Name the trade, give the exact command to
+                    // reverse it, and point at data that already exists without it:
+                    // cri-dockerd creates every Pod as an ordinary container on the
+                    // same shared Docker engine, so `docker stats` already reports
+                    // live CPU/memory for them today.
+                    guidance = "No recovery action is required. metrics-server is off by default to keep "
+                        + "cluster boot fast, so `kubectl top` fails until you install it "
+                        + "(kubectl apply -f "
+                        + "https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml); "
+                        + "for live CPU/memory right now, `docker stats` already reports every Pod’s "
+                        + "containers, since this cluster’s Pods run on the same Docker engine."
                 }
             }
         }
@@ -528,6 +544,69 @@ public enum K8s {
                 throw MorbError.protocolViolation(
                     "morbstackd returned an invalid Kubernetes resource description: \(error.localizedDescription)")
             }
+        }
+    }
+
+    // MARK: - Selected-Pod port forward
+
+    /// The client-facing view of the daemon's one active or newly-started
+    /// selected-Pod local port forward (``K8sPodPortForwardCoordinator``).
+    ///
+    /// Deliberately smaller than the coordinator's internal
+    /// `K8sPodPortForwardLease`: it carries only what a caller across the daemon
+    /// boundary may retain (see `Daemon.podPortForwardFields`) — never the Pod's
+    /// UID, the private kubeconfig, or any child-process fact. The UID is
+    /// selection authority only at `start` time; a caller that already has an
+    /// active lease has no further use for it.
+    public struct PodPortForwardLease: Equatable, Sendable {
+        public var id: UUID
+        public var namespace: String
+        public var pod: String
+        public var container: String?
+        public var localPort: Int
+        public var podPort: Int
+
+        public init(
+            id: UUID, namespace: String, pod: String, container: String?,
+            localPort: Int, podPort: Int
+        ) {
+            self.id = id
+            self.namespace = namespace
+            self.pod = pod
+            self.container = container
+            self.localPort = localPort
+            self.podPort = podPort
+        }
+
+        /// The Pod identity this lease targets, in the same `namespace/name` shape
+        /// `K8sPodInfo.id` and its row identifiers use.
+        public var podID: String { "\(namespace)/\(pod)" }
+
+        /// Decodes the daemon's fixed `k8s-port-forward-status` / `-start` reply.
+        ///
+        /// Returns `nil` only for the explicit `{"active": false}` no-lease reply.
+        /// Any other shape that fails to decode throws rather than reading as "no
+        /// forward" — a malformed reply must not be presented as an honest idle
+        /// state.
+        public static func decode(ipcFields: [String: AnyCodableValue]) throws -> PodPortForwardLease? {
+            if case .bool(let active)? = ipcFields["active"], !active { return nil }
+            guard case .string(let rawID)? = ipcFields["lease"], let id = UUID(uuidString: rawID),
+                  case .string(let namespace)? = ipcFields["namespace"], !namespace.isEmpty,
+                  case .string(let pod)? = ipcFields["pod"], !pod.isEmpty,
+                  case .int(let localPort)? = ipcFields["local_port"], (1...65_535).contains(localPort),
+                  case .int(let podPort)? = ipcFields["pod_port"], (1...65_535).contains(podPort)
+            else {
+                throw MorbError.protocolViolation(
+                    "morbstackd returned an invalid Kubernetes port-forward lease")
+            }
+            let container: String?
+            switch ipcFields["container"] {
+            case .string(let value)? where !value.isEmpty: container = value
+            default: container = nil
+            }
+            return PodPortForwardLease(
+                id: id, namespace: namespace, pod: pod, container: container,
+                localPort: localPort, podPort: podPort)
         }
     }
 

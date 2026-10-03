@@ -329,11 +329,15 @@ That emits `IN_ATTRIB`, not `IN_MODIFY` or `IN_CLOSE_WRITE`
   path for one coalescing window to break the loop — a real risk, handled, but
   only testable live.
 
-And the whole thing is off by default and unreachable through any user
-interface: `MorbConfig.swift:73` documents `liveSharePaths` as "intentionally
-empty by default", `:109` defaults it to `[]`, and the only writer anywhere is
-the TOML parser at `:640`. There is no `morb` subcommand and no Settings pane —
-a user must hand-edit `~/.morbstack/config.toml`.
+And the whole thing is off by default: `MorbConfig.swift:73` documents
+`liveSharePaths` as "intentionally empty by default" and `:109` defaults it to
+`[]`. **Update, 2026-08-05 (UX-21): the "unreachable through any user
+interface" half of this claim is stale.** Settings › Sharing has "Add Project
+Folder…" behind an `NSOpenPanel` plus per-row Remove, validated through
+`MorbLiveShareBridge.plan` before it writes
+(`mac/Sources/MorbstackAppCore/Settings/TrackDSharingSettings.swift:95,179-198`).
+There is still no `morb` subcommand — the TOML parser at `MorbConfig.swift:640`
+and the Settings pane are the only two writers.
 
 **Remaining:** rebuild the guest; run a real matrix of watchers (chokidar, Go
 fsnotify, Java `WatchService`, Ruby `listen`) and publish which ones work;

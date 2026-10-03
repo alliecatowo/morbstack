@@ -5,16 +5,24 @@
 # (e.g. symlink it into a directory that's already on $fpath, then run
 # `autoload -U compinit && compinit`). See integrations/shell/README.md.
 #
-# The command surface is derived from mac/Sources/morb/main.swift, not
-# just `morb --help` — per-subcommand flags in particular are not fully
-# documented by the help text. See the README for the discrepancies found.
+# DO NOT hand-edit the top-level `commands` array below without also
+# updating mac/Sources/morb/main.swift. ShellCompletionDriftTests
+# (mac/Tests/MorbstackKitTests/ShellCompletionDriftTests.swift) fails the
+# build when this array's names or descriptions differ from the command
+# table `morb`'s parser dispatches on. That test exists because these
+# files silently went stale by seven commands once already.
 #
-# Important caveat: `mcp`, `migrate`, `bench`, `scan` and `debug` each
-# parse their own arguments in a separate Swift module that main.swift
-# does not define ("The feature modules own their own argument parsing,
-# output and exit codes" — main.swift's own comment) and this completion
-# could not read. Only their command name and the flags morb's top-level
-# parser honors uniformly (--json, --help/-h) are completed for them.
+# Per-subcommand flags are NOT derived from `morb --help`: morb strips
+# --help/-h from the whole argument list before dispatch, so
+# `morb mcp --help` prints the global usage, never the module's own. The
+# grammars below come from mac/Sources/morb/main.swift and from the
+# feature modules it dispatches to (MorbMCP/MCPCLI.swift,
+# MorbMigrate/MigrateCLI.swift, MorbBench/BenchCLI.swift,
+# MorbScan/ScanCLI.swift, MorbScan/DebugCLI.swift,
+# MorbExport/ExportCLI.swift). That includes `migrate --to <runtime|socket>`
+# (migrate images/volumes OUT of Morbstack) and `export --all` (export every
+# local image to a directory) — both flags on the parent command itself, not
+# subcommand names, so they are completed alongside the subcommand list.
 
 _morb() {
     local curcontext="$curcontext" state line
@@ -25,21 +33,28 @@ _morb() {
         'status:Show daemon and VM state'
         'start:Boot the VM'
         'stop:Shut the VM down'
-        'suspend:Save the VM to disk and free its memory'
-        'resume:Restore a suspended VM'
+        'suspend:Release VM memory; a host that cannot restore state stops cleanly'
+        'resume:Start a suspended VM; cold-boots when state cannot be restored'
         'shares:List the shared host paths and whether the guest has them'
-        'rosetta:Show Rosetta status; "rosetta install" sets it up'
+        'rosetta:Show Rosetta status; `rosetta install` sets it up'
         'k8s:Run a local Kubernetes cluster (off by default)'
         'version:Print CLI and daemon versions'
         'doctor:Diagnose the host; works without the daemon'
+        'diagnose:Create a redacted, reviewable support bundle; never starts the daemon'
+        'disk:Inspect or grow VM disk capacity with an explicit target'
+        'ports:Check loopback port availability; never reserves or starts the daemon'
         'reset-disk:Delete the Docker data disk and start over (destructive)'
-        'context:Manage the morbstack docker context (zero-config discovery)'
-        'install-cli-plugins:Symlink docker-compose/docker-buildx into ~/.docker/cli-plugins'
         'mcp:Model Context Protocol server; read-only unless granted'
-        'migrate:Import images, volumes and config from another runtime'
+        'migrate:Import from (--from) or migrate out to (--to) another runtime'
         'bench:Run the open benchmark suite and report the numbers'
         'scan:SBOM and CVE scan an image, entirely on this machine'
-        'debug:Open a toolbox shell in a container, even a distroless one'
+        'export:Write already-local image/volume archives, or --all of them, to a user-selected file'
+        'debug:Inspect safe toolbox availability; does not open a shell yet'
+        'context:Inspect the `morbstack` Docker context and discovery socket'
+        'service:Manage Morbstack'\''s explicit per-user background service'
+        'install-cli:Install bundled docker, compose, and buildx for this user'
+        'uninstall-cli:Remove only the CLI links/socket/context/profile block Morbstack owns'
+        'install-cli-plugins:Legacy: install only compose/buildx plugins (prefer install-cli)'
     )
 
     _arguments -C \
@@ -55,19 +70,36 @@ _morb() {
             ;;
         args)
             case ${words[1]} in
-                rosetta)
-                    _morb_rosetta
+                rosetta) _morb_rosetta ;;
+                k8s) _morb_k8s ;;
+                context) _morb_context ;;
+                service) _morb_service ;;
+                disk) _morb_disk ;;
+                ports) _morb_ports ;;
+                mcp) _morb_mcp ;;
+                migrate) _morb_migrate ;;
+                bench) _morb_bench ;;
+                scan) _morb_scan ;;
+                export) _morb_export ;;
+                debug) _morb_debug ;;
+                diagnose)
+                    _arguments \
+                        '--output[Write the bundle below this absolute or ~/ directory]:directory:_files -/' \
+                        '--json[Emit raw JSON instead of human-readable output]' \
+                        '(--help -h)'{--help,-h}'[Print help and exit]'
                     ;;
-                k8s)
-                    _morb_k8s
+                install-cli)
+                    _arguments \
+                        '--force[Apply the printed plan without the confirmation prompt]' \
+                        '--print-plan[Print exactly what it would do, and stop]' \
+                        '--make-default[Put ~/.morbstack/bin before an existing docker on PATH]' \
+                        '--json[Emit raw JSON instead of human-readable output]' \
+                        '(--help -h)'{--help,-h}'[Print help and exit]'
                     ;;
-                context)
-                    _morb_context
-                    ;;
-                install-cli-plugins)
+                uninstall-cli | install-cli-plugins)
                     _arguments \
                         '--force[Skip the confirmation prompt]' \
-                        '--print-plan[Print exactly what it would symlink, and stop]' \
+                        '--print-plan[Print exactly what it would do, and stop]' \
                         '--json[Emit raw JSON instead of human-readable output]' \
                         '(--help -h)'{--help,-h}'[Print help and exit]'
                     ;;
@@ -82,19 +114,17 @@ _morb() {
                         '--json[Emit raw JSON instead of human-readable output]' \
                         '(--help -h)'{--help,-h}'[Print help and exit]'
                     ;;
-                mcp | migrate | bench | scan | debug)
-                    # No sub-subcommand or flag information is available:
-                    # each of these has its own parser in a separate
-                    # Swift module not defined in main.swift. Only the
-                    # flags morb's top-level parser itself honors
-                    # uniformly are offered.
-                    _arguments \
-                        '--json[Emit raw JSON instead of human-readable output]' \
-                        '(--help -h)'{--help,-h}'[Print help and exit]'
-                    ;;
             esac
             ;;
     esac
+}
+
+# The two flags every command accepts, because morb strips them from the
+# whole argument list before it looks at the command word.
+_morb_global_args() {
+    _arguments \
+        '--json[Emit raw JSON instead of human-readable output]' \
+        '(--help -h)'{--help,-h}'[Print help and exit]'
 }
 
 _morb_rosetta() {
@@ -124,9 +154,7 @@ _morb_rosetta() {
                         '(--help -h)'{--help,-h}'[Print help and exit]'
                     ;;
                 status)
-                    _arguments \
-                        '--json[Emit raw JSON instead of human-readable output]' \
-                        '(--help -h)'{--help,-h}'[Print help and exit]'
+                    _morb_global_args
                     ;;
             esac
             ;;
@@ -139,6 +167,9 @@ _morb_k8s() {
         'status:Show whether the cluster is installed, on, and Ready (the default)'
         'enable:Install the payload if needed, then start the cluster'
         'disable:Stop the cluster; the payload and its state are kept'
+        'diagnose:Show real cluster recovery guidance without changing it'
+        'describe:Read one selected Pod or Node through Morbstack'\''s local API'
+        'port-forward:Manage the one selected-Pod loopback TCP lease'
         'kubeconfig:Write ~/.morbstack/kubeconfig and say how to use it'
     )
 
@@ -160,10 +191,52 @@ _morb_k8s() {
                         '--json[Emit raw JSON instead of human-readable output]' \
                         '(--help -h)'{--help,-h}'[Print help and exit]'
                     ;;
-                status | enable | disable)
-                    _arguments \
-                        '--json[Emit raw JSON instead of human-readable output]' \
-                        '(--help -h)'{--help,-h}'[Print help and exit]'
+                describe)
+                    local -a kinds
+                    kinds=(
+                        'pod:Read one Pod: describe pod <namespace> <name>'
+                        'node:Read one Node: describe node <name>'
+                    )
+                    _arguments -C \
+                        '1: :->kind' \
+                        '*:: :->operands'
+                    case $state in
+                        kind) _describe -t k8s-describe-kinds 'resource kind' kinds ;;
+                        operands) _morb_global_args ;;
+                    esac
+                    ;;
+                port-forward)
+                    local -a operations
+                    operations=(
+                        'start:Start one selected-Pod loopback TCP lease'
+                        'status:Show the one current selected-Pod loopback TCP lease'
+                        'cancel:Cancel only that exact selected-Pod lease'
+                    )
+                    _arguments -C \
+                        '1: :->operation' \
+                        '*:: :->opargs'
+                    case $state in
+                        operation)
+                            _describe -t k8s-port-forward-operations 'port-forward operation' operations
+                            ;;
+                        opargs)
+                            case ${words[1]} in
+                                start)
+                                    _arguments \
+                                        '--container[Select one container inside the Pod]:container name:' \
+                                        '--local-port[Bind this loopback TCP port instead of an ephemeral one]:port:' \
+                                        '--json[Emit raw JSON instead of human-readable output]' \
+                                        '(--help -h)'{--help,-h}'[Print help and exit]'
+                                    ;;
+                                *)
+                                    _morb_global_args
+                                    ;;
+                            esac
+                            ;;
+                    esac
+                    ;;
+                status | enable | disable | diagnose)
+                    _morb_global_args
                     ;;
             esac
             ;;
@@ -205,9 +278,369 @@ _morb_context() {
                         '(--help -h)'{--help,-h}'[Print help and exit]'
                     ;;
                 status)
+                    _morb_global_args
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_morb_service() {
+    local -a subs
+    subs=(
+        'status:Show background-service registration and approval state (the default)'
+        'enable:Register the signed app'\''s per-user LaunchAgent'
+        'disable:Unregister it; does not stop a manually started daemon'
+        'settings:Open System Settings > Login Items explicitly'
+    )
+
+    _arguments -C \
+        '1: :->subcommand' \
+        '*:: :->subargs'
+
+    case $state in
+        subcommand)
+            _describe -t service-subcommands 'service subcommand' subs
+            ;;
+        subargs)
+            # `service` accepts exactly one action word and no flags of its own.
+            _morb_global_args
+            ;;
+    esac
+}
+
+_morb_disk() {
+    local -a subs
+    subs=(
+        'status:Show VM disk capacity and safe growth status (the default)'
+        'grow:Grow an existing disk to <GiB>; never shrinks'
+    )
+
+    _arguments -C \
+        '1: :->subcommand' \
+        '*:: :->subargs'
+
+    case $state in
+        subcommand)
+            _describe -t disk-subcommands 'disk subcommand' subs
+            ;;
+        subargs)
+            case ${words[1]} in
+                grow)
                     _arguments \
+                        '1:target size in GiB:' \
                         '--json[Emit raw JSON instead of human-readable output]' \
                         '(--help -h)'{--help,-h}'[Print help and exit]'
+                    ;;
+                status)
+                    _morb_global_args
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_morb_ports() {
+    local -a subs
+    subs=(
+        'check:Check one or more loopback endpoints (the default)'
+    )
+
+    _arguments -C \
+        '1: :->subcommand' \
+        '*:: :->subargs'
+
+    case $state in
+        subcommand)
+            # `check` is also the default, so offer its flags alongside it.
+            _describe -t ports-subcommands 'ports subcommand' subs
+            _arguments \
+                '*--tcp[Check this loopback TCP port]:port:' \
+                '*--udp[Check this loopback UDP port]:port:' \
+                '--json[Emit raw JSON instead of human-readable output]' \
+                '(--help -h)'{--help,-h}'[Print help and exit]'
+            ;;
+        subargs)
+            _arguments \
+                '*--tcp[Check this loopback TCP port]:port:' \
+                '*--udp[Check this loopback UDP port]:port:' \
+                '--json[Emit raw JSON instead of human-readable output]' \
+                '(--help -h)'{--help,-h}'[Print help and exit]'
+            ;;
+    esac
+}
+
+_morb_mcp() {
+    local -a subs
+    subs=(
+        'serve:Run the MCP server over stdin/stdout'
+        'init:Create ~/.morbstack/mcp.toml with a read-only-by-default profile'
+        'permissions:Show every tool'\''s effective permission and where it came from'
+        'help:Print the mcp usage text'
+    )
+
+    _arguments -C \
+        '1: :->subcommand' \
+        '*:: :->subargs'
+
+    case $state in
+        subcommand)
+            _describe -t mcp-subcommands 'mcp subcommand' subs
+            ;;
+        subargs)
+            case ${words[1]} in
+                serve | permissions)
+                    _arguments \
+                        '*--allow[Grant a tool, a group, or an argument guard]:permission:' \
+                        '--json[Emit raw JSON instead of human-readable output]' \
+                        '(--help -h)'{--help,-h}'[Print help and exit]'
+                    ;;
+                init)
+                    _arguments \
+                        '--force[Replace an existing mcp.toml with the empty template]' \
+                        '--json[Emit raw JSON instead of human-readable output]' \
+                        '(--help -h)'{--help,-h}'[Print help and exit]'
+                    ;;
+                *)
+                    _morb_global_args
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_morb_migrate() {
+    local -a subs
+    subs=(
+        'detect:Survey local container runtimes (the default)'
+        'config:Inspect Docker CLI configuration, read-only'
+        'plan:Derive a read-only image comparison and named-volume eligibility plan'
+        'run:Import an explicitly selected image set, verify it, and write a report'
+        'images:Copy images into Morbstack'
+        'volumes:Copy named volumes into Morbstack'
+        'verify:Compare images and volumes between engines'
+        'help:Print the migrate usage text'
+    )
+
+    _arguments -C \
+        '1: :->subcommand' \
+        '*:: :->subargs'
+
+    case $state in
+        subcommand)
+            _describe -t migrate-subcommands 'migrate subcommand' subs
+            _arguments \
+                '--to[Migrate every eligible image and named volume OUT of Morbstack into another runtime]:runtime or socket:' \
+                '--json[Emit raw JSON instead of human-readable output]' \
+                '(--help -h)'{--help,-h}'[Print help and exit]'
+            ;;
+        subargs)
+            case ${words[1]} in
+                --to)
+                    _arguments \
+                        '--dry-run[Print the exact plan without changing anything]' \
+                        '--yes[Skip the confirmation prompt]' \
+                        '--json[Emit raw JSON instead of human-readable output]' \
+                        '(--help -h)'{--help,-h}'[Print help and exit]'
+                    ;;
+                plan)
+                    _arguments \
+                        '--from[Docker Desktop, Colima, OrbStack, or a socket path]:runtime or socket:' \
+                        '--filter[Include matching tagged images only]:text:' \
+                        '--all[Include dangling images]' \
+                        '--json[Emit raw JSON instead of human-readable output]' \
+                        '(--help -h)'{--help,-h}'[Print help and exit]'
+                    ;;
+                images)
+                    _arguments \
+                        '--from[Docker Desktop, Colima, OrbStack, or a socket path]:runtime or socket:' \
+                        '--filter[Copy matching tagged images only]:text:' \
+                        '--all[Include dangling images]' \
+                        '--dry-run[Print the copy plan without changing anything]' \
+                        '--yes[Skip the copy confirmation]' \
+                        '--json[Emit raw JSON instead of human-readable output]' \
+                        '(--help -h)'{--help,-h}'[Print help and exit]'
+                    ;;
+                volumes)
+                    _arguments \
+                        '--from[Docker Desktop, Colima, OrbStack, or a socket path]:runtime or socket:' \
+                        '--filter[Copy matching named volumes only]:text:' \
+                        '--overwrite[Rejected: migration never merges existing destination contents]' \
+                        '--dry-run[Print the copy plan without changing anything]' \
+                        '--yes[Skip confirmations, including helper-image pulls]' \
+                        '--json[Emit raw JSON instead of human-readable output]' \
+                        '(--help -h)'{--help,-h}'[Print help and exit]'
+                    ;;
+                verify)
+                    _arguments \
+                        '--from[Source runtime or socket path]:runtime or socket:' \
+                        '--images[Image references to compare]:comma-separated references:' \
+                        '--volumes[Named volumes to compare]:comma-separated names:' \
+                        '--report[Read copied items from a migration report]:report path:_files' \
+                        '--yes[Allow required helper-image pulls]' \
+                        '--json[Emit raw JSON instead of human-readable output]' \
+                        '(--help -h)'{--help,-h}'[Print help and exit]'
+                    ;;
+                run)
+                    _arguments \
+                        '--from[Docker Desktop, Colima, OrbStack, or a socket path]:runtime or socket:' \
+                        '*--image[Select one planned image; repeat for more]:image reference:' \
+                        '--all-images[Explicitly select every currently planned tagged image]' \
+                        '--dry-run[Print the exact selected image set without changing anything]' \
+                        '--yes[Skip the terminal confirmation after reviewing the selection]' \
+                        '--json[Emit raw JSON instead of human-readable output]' \
+                        '(--help -h)'{--help,-h}'[Print help and exit]'
+                    ;;
+                *)
+                    _morb_global_args
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_morb_bench() {
+    local -a subs
+    subs=(
+        'list:Show published targets and implementation status'
+        'run:Run every implemented benchmark, or named ones only'
+        'history:Show saved benchmark runs'
+        'compare:Compare two saved runs'
+        'help:Print the bench usage text'
+    )
+
+    _arguments -C \
+        '1: :->subcommand' \
+        '*:: :->subargs'
+
+    case $state in
+        subcommand)
+            _describe -t bench-subcommands 'bench subcommand' subs
+            ;;
+        subargs)
+            case ${words[1]} in
+                run)
+                    _arguments \
+                        '--only[Run only these benchmarks]:comma-separated names:' \
+                        '--runs[Repeat each benchmark this many times]:count:' \
+                        '--window[Idle sampling window]:seconds:' \
+                        '--dry-run[Print each exact plan without measuring]' \
+                        '--json[Emit raw JSON instead of human-readable output]' \
+                        '(--help -h)'{--help,-h}'[Print help and exit]'
+                    ;;
+                history)
+                    _arguments \
+                        '--limit[How many saved runs to show (default 20)]:count:' \
+                        '--json[Emit raw JSON instead of human-readable output]' \
+                        '(--help -h)'{--help,-h}'[Print help and exit]'
+                    ;;
+                compare)
+                    _arguments \
+                        '1:baseline (path, id, latest, or previous):' \
+                        '2:candidate (path, id, latest, or previous):' \
+                        '--json[Emit raw JSON instead of human-readable output]' \
+                        '(--help -h)'{--help,-h}'[Print help and exit]'
+                    ;;
+                *)
+                    _morb_global_args
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_morb_scan() {
+    # `scan` takes options and one local image reference, not a subcommand.
+    # `morb scan help` prints the module's own usage.
+    _arguments \
+        '--check[Report local syft/grype/database prerequisites only]' \
+        '--offline[Require a valid cached Grype database; never update it]' \
+        '--sbom-only[Stop after the local syft SBOM is generated]' \
+        '--sbom[Also write the generated syft JSON SBOM here]:sbom path:_files' \
+        '--fail-on[Exit 2 at or above this severity]:severity:(negligible low medium high critical)' \
+        '--all[Show every finding instead of the first 20]' \
+        '--json[Emit raw JSON instead of human-readable output]' \
+        '(--help -h)'{--help,-h}'[Print help and exit]' \
+        '1:local image reference:'
+}
+
+_morb_export() {
+    local -a subs
+    subs=(
+        'image:Save one already-local Morbstack image to an archive'
+        'volume:Archive one existing Docker local-driver named volume'
+        'help:Print the export usage text'
+    )
+
+    _arguments -C \
+        '1: :->subcommand' \
+        '*:: :->subargs'
+
+    case $state in
+        subcommand)
+            _describe -t export-subcommands 'export subcommand' subs
+            _arguments \
+                '--all[Write every local tagged image, one archive per image, to a directory]' \
+                '--json[Emit raw JSON instead of human-readable output]' \
+                '(--help -h)'{--help,-h}'[Print help and exit]'
+            ;;
+        subargs)
+            case ${words[1]} in
+                image | volume)
+                    _arguments \
+                        '--output[Where to write the archive; required]:archive path:_files' \
+                        '--replace[Overwrite an existing file at --output]' \
+                        '--json[Emit raw JSON instead of human-readable output]' \
+                        '(--help -h)'{--help,-h}'[Print help and exit]' \
+                        "1:${words[1]} to export:"
+                    ;;
+                --all)
+                    _arguments \
+                        '--output[Directory to write one archive per image into; required]:directory:_files -/' \
+                        '--replace[Overwrite an existing file at --output]' \
+                        '--json[Emit raw JSON instead of human-readable output]' \
+                        '(--help -h)'{--help,-h}'[Print help and exit]'
+                    ;;
+                *)
+                    _morb_global_args
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_morb_debug() {
+    local -a subs
+    subs=(
+        'check:Read the local toolbox descriptor; no engine or network access'
+        'plan:Inspect one container read-only and list what was not done'
+        'help:Print the debug usage text'
+    )
+
+    _arguments -C \
+        '1: :->subcommand' \
+        '*:: :->subargs'
+
+    case $state in
+        subcommand)
+            _describe -t debug-subcommands 'debug subcommand' subs
+            ;;
+        subargs)
+            case ${words[1]} in
+                check)
+                    _arguments \
+                        '--manifest[Read this toolbox descriptor instead of the default]:manifest path:_files' \
+                        '--json[Emit raw JSON instead of human-readable output]' \
+                        '(--help -h)'{--help,-h}'[Print help and exit]'
+                    ;;
+                plan)
+                    _arguments \
+                        '1:container name or ID:' \
+                        '--json[Emit raw JSON instead of human-readable output]' \
+                        '(--help -h)'{--help,-h}'[Print help and exit]'
+                    ;;
+                *)
+                    _morb_global_args
                     ;;
             esac
             ;;

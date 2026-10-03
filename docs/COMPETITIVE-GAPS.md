@@ -69,16 +69,16 @@ WSL competitor. Compete there deliberately or not at all; do not drift into it.
 
 | Capability | Them | Us | State |
 | --- | --- | --- | --- |
-| Stock `docker` CLI works with zero setup | both | bundled toolchain, docker 29.7.1 / compose v5.3.1 / buildx v0.36.0, SHA-pinned | `runs-here` |
+| Stock `docker` CLI works with zero setup | both | bundled toolchain, docker 29.7.1 / compose v5.3.1 / buildx v0.36.0, SHA-pinned; since ECO-1 `morb install-cli` also registers the `morbstack` context and the `~/.docker/run/docker.sock` link, so context-blind clients find Morbstack with no env vars ([design/ZERO-CONFIG-DISCOVERY.md](design/ZERO-CONFIG-DISCOVERY.md)). Defers to Docker Desktop when Desktop already owns the conventional socket | `runs-here` |
 | `docker run -p` in all forms | both | fixed/dynamic/UDP/ranges; ambiguity preflight bug just fixed | matrix in progress |
-| `docker run -P` | both | patched Moby allocator; first execution today | in progress |
+| `docker run -P` | both | stock dockerd through its own `--userland-proxy-path` hook — no engine patch (TECH-1); `docker run -P nginx:alpine` served `curl` HTTP 200 in 4.3 ms against a rebuilt guest ([design/PATCH-FREE-PUBLISH-ALL.md](design/PATCH-FREE-PUBLISH-ALL.md)) | `runs-here` |
 | Compose | both | 3-service healthcheck-chained stack up in 12.9 s incl. a BuildKit build | `runs-here` |
 | BuildKit / buildx | both | bundled, real build verified | `runs-here` |
 | Bind mounts that serve the *host's* files | both | `435d09f` fail-closed fix, first runtime check in progress | verifying |
 | `host.docker.internal` | both | guest DNS | `source-only` |
 | Volumes, networks, logs, exec, cp, stats | both | present | mostly `runs-here` |
-| Testcontainers (Java/Go/Node/Python) | both | **never tested** | `absent` as evidence |
-| Dev Containers | both | **never tested** | `absent` as evidence |
+| Testcontainers (Java/Go/Node/Python) | both | tested live 2026-08-04 (EN-8): all four languages ran real Postgres round trips against server 29.7.1 with Ryuk, warm totals 1.5–5.9 s, and after ECO-1/ECO-2 with **no Docker env vars at all**. Known limit: testcontainers-java ≤1.20.x fails against *any* engine-29 daemon (its `/v1.32/info` probe vs moby 29's `MinAPIVersion`), mitigated in the guest with `DOCKER_MIN_API_VERSION=1.24` | `runs-here` ([audit/ECOSYSTEM-MATRIX.md](audit/ECOSYSTEM-MATRIX.md)); `accepted` still needs CP-06 |
+| Dev Containers | both | tested live 2026-08-04 (EN-9): @devcontainers/cli 0.88.0 `up` in 34 s incl. pull, plus exec, two-way workspace bind mount, `postCreateCommand`, and a features/derived-image build through Morbstack BuildKit — context-only discovery, no `DOCKER_HOST`. The VS Code extension flow is untested | `runs-here` ([audit/ECOSYSTEM-MATRIX.md](audit/ECOSYSTEM-MATRIX.md)); `accepted` still needs CP-07 |
 | Installs on a Mac with no Docker | both | bundle is right; **not notarized**, so Gatekeeper blocks everyone but the author | blocked |
 
 ---
@@ -87,8 +87,8 @@ WSL competitor. Compete there deliberately or not at all; do not drift into it.
 
 | # | Capability | What they give | Where we stand | State |
 | --- | --- | --- | --- | --- |
-| 1 | **Fast file sharing + working hot reload** | OrbStack's headline; inotify works inside containers | VirtioFS is fast (1.1 GB/s write). Live-share bridge exists; its mechanism is a same-mode `fchmod(2)` emitting `IN_ATTRIB` **only** — fine for chokidar/nodemon/vite and Python watchdog, filtered out by Go tools like `air`. `liveSharePaths` defaults to `[]` with **no CLI or GUI writer**. | `source-only` |
-| 2 | **Container shell one click away** | both, prominently | No `exec` in `DockerClient.swift`, no PTY view anywhere | `absent` |
+| 1 | **Fast file sharing + working hot reload** | OrbStack's headline; inotify works inside containers | VirtioFS is fast (1.1 GB/s write). Live-share bridge exists; its mechanism is a same-mode `fchmod(2)` emitting `IN_ATTRIB` **only** — fine for chokidar/nodemon/vite and Python watchdog, filtered out by Go tools like `air`. `liveSharePaths` defaults to `[]` but **does have a GUI writer**: Settings › Sharing has "Add Project Folder…" behind an `NSOpenPanel` plus per-row Remove, validated through `MorbLiveShareBridge.plan` before it is written (`mac/Sources/MorbstackAppCore/Settings/TrackDSharingSettings.swift:95,179–198`). `sharedPaths` is still "Open config.toml" only (same file, lines 43/56). | `source-only` |
+| 2 | **Container shell one click away** | both, prominently | `DockerClient.swift` has exec: `executeContainerCommand` (:1042) plus `createExec`/`resizeExec`/`inspectExec` (:1524–1547), and the app ships a non-interactive **Run Command…** sheet (`Views/Containers/ContainerExecSheet.swift`, "Terminal: Not allocated"). A full PTY stack exists at `mac/Sources/MorbstackAppCore/Terminal/` — `DockerExecPTYSession`, `TerminalEmulator`, `TerminalKeyEncoding`, `TerminalSurfaceView`, `ContainerTerminalWindowController` — with four test files, but **no UI entry point calls it yet** (DIF-2). The VS Code extension already ships the interactive shell, over the Engine API's hijacked exec stream with resize, no `docker` CLI required (`integrations/vscode/src/api.ts:329–402`). | partial — `runs-here` in the extension, `source-only` in the app |
 | 3 | **Honest, reproducible benchmarks** | neither publishes a runnable harness | `MorbBench` measures cold boot, idle CPU, wakeups, RSS for real. Missing `git-status-bindmount` and `npm-install-bindmount-vs-volume` — the two people compare | `runs-here`, incomplete |
 | 4 | **Automatic container domains** | OrbStack: `*.orb.local`, free | Mechanism decided (SP-2/SP-3, [`design/DNS-DECISION.md`](design/DNS-DECISION.md)): unprivileged mDNS `A` records under `.local`, verified on macOS 26.4 — no entitlement, no password, nothing to uninstall. ~3–4 weeks. Suffix settled as `morb.local`; no wildcard subdomains | `source-only` |
 | 5 | **HTTPS via a local CA** | OrbStack, free | Needs a name-constrained CA. `NEDNSSettings` spike done and the API is **rejected** — it accepts only DoH/DoT, so it would need a trusted cert before DNS works. ~2–3 weeks after #4; costs one Keychain trust prompt | `absent` |
@@ -96,11 +96,11 @@ WSL competitor. Compete there deliberately or not at all; do not drift into it.
 | 7 | **Native file access to volumes (Finder)** | OrbStack, free | | `absent` |
 | 8 | **Debug toolbox for distroless images** | **the one thing OrbStack actually paywalls** | Depends on #2 | `absent` |
 | 9 | **Migration from Docker Desktop with images + volumes** | OrbStack does this well | `morb migrate` exists; correctly refuses optioned local volumes rather than silently downgrading them | `source-only` |
-| 10 | **Kubernetes in seconds** | both | k3s + cri-dockerd cluster works; pinned `kubectl` that pod port-forward needs is **not in the repo** | partial |
+| 10 | **Kubernetes in seconds** | both | k3s + cri-dockerd cluster works. The `kubectl` that selected-Pod port-forward needs **is** pinned in the repo — `fetch_kubectl` in `scripts/fetch-guest-assets.sh` (v1.36.2 darwin-arm64, checked against its published sha256 sidecar), the same digest re-asserted in Swift at `MorbstackKit/KubectlTool.swift:21`, staged into `Contents/Resources/host-bin/kubernetes/kubectl` and signed by `mise-tasks/app:166,212`. Remaining gap: it is **opt-in** (`--host-kubectl-only`, not fetched by default), so a build that skipped it gets an explicit unavailable state rather than a helper; and `kubectl top` does not work because metrics-server is off (UX-20) | partial |
 | 11 | **Seamless amd64 via Rosetta** | both | Verified: amd64-only mysql:5.7 boots, SHA2 bit-identical to host, ~1.0× container start, 1.5–1.7× compute | `runs-here` |
 | 12 | **Image vulnerability scanning** | Docker Scout (paid tiers) | `morb scan` wraps syft/grype — bundles neither, and references `scripts/fetch-scan-tools.sh` five times, **which does not exist** | broken |
 | 13 | **Linux machines / distro VMs** | OrbStack, free | | `absent` |
-| 14 | **VS Code / JetBrains integration** | both | | `absent` |
+| 14 | **VS Code / JetBrains integration** | both | **VS Code: a built extension ships in-tree.** `integrations/vscode/` compiles to `morbstack-0.1.0.vsix` — containers grouped by `com.docker.compose.project`, clickable published ports, logs demultiplexed out of stdcopy framing, a read-only Kubernetes view, an engine status bar that warns when a published port could not be bound on the Mac, and an interactive shell on the Engine API's hijacked exec stream with resize (`src/api.ts:329–402`) that needs neither a `docker` CLI nor `DOCKER_HOST`. Not published to a marketplace. **JetBrains: a researched verdict, not a gap** — `integrations/jetbrains/README.md` concludes no plugin is needed (Unix-socket connection type, fully expanded path), with a feature matrix and an honest note that no IDE was installed on the machine that wrote it | VS Code built, unpublished; JetBrains needs no plugin |
 | 15 | **Low idle cost** | OrbStack's other headline | 3.0 s cold boot; auto-suspend with a budget ladder; running containers inhibit suspend | `runs-here` |
 
 ---
@@ -113,7 +113,7 @@ WSL competitor. Compete there deliberately or not at all; do not drift into it.
 - **A publishable benchmark harness.** A closed competitor structurally cannot match "here is the harness, run it yourself."
 - **Honest CLI writing.** `morb`'s help volunteers its own limits ("snapshots, not reservations", "does not open a shell yet"). Keep that voice.
 - **Old Docker API clients work against engine 29** (2026-08-04, PROTO-7). Stock moby 29 defaults its
-  minimum API version to 1.44 — an upstream default, not anyone's product decision — which 400s the
+  minimum API version to 1.40 — an upstream default, not anyone's product decision — which 400s the
   `GET /v1.32/info` probe `testcontainers-java` ≤1.20.x uses for daemon discovery; the library then
   *silently* fails over to whatever other daemon is on the machine and the suite runs green against
   the wrong engine. Morbstack sets `DOCKER_MIN_API_VERSION=1.24` (upstream's own hard floor) in the

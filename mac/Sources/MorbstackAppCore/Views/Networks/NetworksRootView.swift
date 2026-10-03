@@ -220,6 +220,9 @@ struct NetworksRootView: View {
     let model: AppModel
 
     @State private var query = ""
+    // UI-051: search is a glyph in the trailing group until someone asks for it.
+    // `RouteSearchModifier` attaches the system field while this is true.
+    @State private var searchIsActive = false
     @State private var sortOrder: [TrackCNetworkComparator] = [TrackCNetworkComparator(key: .name)]
     @State private var selection: NetworkSummary.ID?
 
@@ -394,30 +397,14 @@ struct NetworksRootView: View {
 
     // MARK: Toolbar
 
-    /// The trailing commands, mounted on the inspector content while the inspector
-    /// is available so the system carries them with the inspector's edge, and in the
-    /// window toolbar only on the inspector-less empty screen — see the note on
-    /// `VolumesRootView.trailingCommandItems`.
+    /// Slots 4–5 of the toolbar grammar — see `VolumesRootView.trailingCommandItems`
+    /// and `docs/design/NATIVE-MACOS-PLAYBOOK.md`.
     @ToolbarContentBuilder
     private var trailingCommandItems: some ToolbarContent {
-        ToolbarItem(id: "networks.create", placement: .primaryAction) {
-            Button {
-                isShowingNetworkCreate = true
-            } label: {
-                Image(systemName: "plus")
-            }
-            .disabled(isPerformingNetworkOperation)
-            .accessibilityIdentifier("networks.create")
-            .accessibilityLabel("Create network")
-            .help(
-                isPerformingNetworkOperation
-                    ? "Wait for the current network operation to finish"
-                    : "Create a bridge network")
-        }
         if !model.networks.isEmpty {
-            // Creating is the primary task; the inspector still changes navigation
-            // layout and remains system-placed with the other view controls.
-            ToolbarItem(id: "networks.inspector", placement: .automatic) {
+            RouteSearchToolbarItem(
+                id: "networks.search", subject: "networks", isActive: $searchIsActive)
+            ToolbarItem(id: "networks.inspector", placement: .primaryAction) {
                 Button {
                     showsInspector.toggle()
                 } label: {
@@ -430,12 +417,10 @@ struct NetworksRootView: View {
         }
     }
 
+    /// Slots 1–3 — see `VolumesRootView.toolbarContent`.
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        if model.networks.isEmpty {
-            trailingCommandItems
-        }
-        ToolbarItem(id: "networks.removeUnused", placement: .secondaryAction) {
+        ToolbarItem(id: "networks.removeUnused", placement: .primaryAction) {
             if busy {
                 ProgressView()
                     .controlSize(.small)
@@ -457,12 +442,29 @@ struct NetworksRootView: View {
             }
         }
         if isChangingNetworkMembership {
-            ToolbarItem(id: "networks.membershipProgress", placement: .secondaryAction) {
+            ToolbarItem(id: "networks.membershipProgress", placement: .primaryAction) {
                 ProgressView()
                     .controlSize(.small)
                     .accessibilityIdentifier("networks.membershipProgress")
                     .accessibilityLabel("Updating network membership")
             }
+        }
+        ToolbarItem(id: "networks.create", placement: .primaryAction) {
+            Button {
+                isShowingNetworkCreate = true
+            } label: {
+                Image(systemName: "plus")
+            }
+            .disabled(isPerformingNetworkOperation)
+            .accessibilityIdentifier("networks.create")
+            .accessibilityLabel("Create network")
+            .help(
+                isPerformingNetworkOperation
+                    ? "Wait for the current network operation to finish"
+                    : "Create a bridge network")
+        }
+        if model.networks.isEmpty {
+            trailingCommandItems
         }
     }
 
@@ -504,12 +506,19 @@ struct NetworksRootView: View {
             }
             .inspector(isPresented: $showsInspector) {
                 detailPane
-                    .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
                     // See the note on `VolumesRootView`: the trailing commands and
                     // search ride the inspector's toolbar region and remain present
                     // while the inspector is closed.
                     .toolbar { trailingCommandItems }
-                    .searchable(text: $query, placement: .toolbar, prompt: "Name, driver, ID")
+                    .routeSearchable(
+                        isActive: $searchIsActive,
+                        text: $query,
+                        prompt: "Name, driver, ID")
+                    // Must be the outermost modifier on the inspector's content —
+                    // see the note in `ContainersRootView`: applied beneath
+                    // `.toolbar`/`.searchable` its preferred width was silently
+                    // discarded.
+                    .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
             }
         }
     }
@@ -562,14 +571,12 @@ struct NetworksRootView: View {
             .accessibilityIdentifier("networks.row.\(network.name)")
     }
 
-    @ViewBuilder
     private func containersCell(_ network: NetworkSummary) -> some View {
-        if network.containers > 0 {
-            Text(network.containers, format: .number)
-                .monospacedDigit()
-        } else {
-            Text("None")
-        }
+        // A count column says a number, including zero — "None" beside "3" makes the
+        // reader parse two different kinds of value in the same column.
+        Text(network.containers, format: .number)
+            .monospacedDigit()
+            .foregroundStyle(network.containers > 0 ? .primary : .secondary)
     }
 
     @ViewBuilder

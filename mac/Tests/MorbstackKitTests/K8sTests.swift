@@ -395,6 +395,117 @@ final class K8sTests: XCTestCase {
         XCTAssertEqual(fields["message"], .string("waiting for the node"))
     }
 
+    // MARK: - Diagnosis (UX-20: an honest `kubectl top` story once ready)
+
+    func testReadyDiagnosisNamesTheMetricsServerTradeAndOffersDockerStats() {
+        // metrics-server is deliberately disabled for boot speed
+        // (guest/morbinit/src/k8s.rs); left unstated, `kubectl top` fails with a
+        // raw "Metrics API not available" that reads like a broken cluster. The
+        // ready-with-nothing-to-do guidance is the one place a user reliably sees
+        // after enabling Kubernetes, so it is where this gets said honestly.
+        let status = K8s.Status(
+            installed: true, enabled: true, persistent: true, phase: .ready,
+            nodes: 1, nodesReady: 1, pods: 3, podsReady: 3)
+        let diagnosis = K8s.Diagnosis(
+            status: status, hostAPIServerPort: 51234, kubeconfigExists: true)
+        XCTAssertEqual(diagnosis.recommendedAction, .none)
+        XCTAssertTrue(
+            diagnosis.guidance.contains("metrics-server"),
+            "must name the trade, not just say nothing is wrong: \(diagnosis.guidance)")
+        XCTAssertTrue(
+            diagnosis.guidance.contains("kubectl top"),
+            "must name the command that will otherwise fail with no explanation: \(diagnosis.guidance)")
+        XCTAssertTrue(
+            diagnosis.guidance.contains("docker stats"),
+            "must offer the resource data that already exists instead: \(diagnosis.guidance)")
+        // The reversal command must be syntactically real, not a placeholder.
+        XCTAssertTrue(diagnosis.guidance.contains("kubectl apply -f"))
+    }
+
+    func testOnlyTheFullyReadyNoActionGuidanceMentionsMetrics() {
+        // Every other phase is guidance toward making the cluster reachable at
+        // all; naming a `kubectl top` trade before there is a kubeconfig or an
+        // API forward to run it against would be noise, not help.
+        let notReady = K8s.Diagnosis(
+            status: K8s.Status(installed: false, enabled: false, phase: .notInstalled),
+            hostAPIServerPort: nil, kubeconfigExists: false)
+        XCTAssertFalse(notReady.guidance.contains("metrics-server"))
+
+        let readyNoKubeconfig = K8s.Diagnosis(
+            status: K8s.Status(installed: true, enabled: true, phase: .ready, nodes: 1, nodesReady: 1),
+            hostAPIServerPort: nil, kubeconfigExists: false)
+        XCTAssertFalse(readyNoKubeconfig.guidance.contains("metrics-server"))
+    }
+
+    // MARK: - Selected-Pod port-forward lease decoding
+
+    func testPortForwardLeaseDecodesTheDaemonsActiveFields() throws {
+        let id = UUID()
+        let lease = try K8s.PodPortForwardLease.decode(ipcFields: [
+            "active": .bool(true),
+            "lease": .string(id.uuidString.lowercased()),
+            "namespace": .string("default"),
+            "pod": .string("hello-web-6d9c8f7b7-x4n2q"),
+            "container": .string("hello-web"),
+            "local_address": .string("127.0.0.1"),
+            "local_port": .int(54321),
+            "pod_port": .int(8080),
+        ])
+        let unwrapped = try XCTUnwrap(lease)
+        XCTAssertEqual(unwrapped.id, id)
+        XCTAssertEqual(unwrapped.namespace, "default")
+        XCTAssertEqual(unwrapped.pod, "hello-web-6d9c8f7b7-x4n2q")
+        XCTAssertEqual(unwrapped.container, "hello-web")
+        XCTAssertEqual(unwrapped.localPort, 54321)
+        XCTAssertEqual(unwrapped.podPort, 8080)
+        XCTAssertEqual(unwrapped.podID, "default/hello-web-6d9c8f7b7-x4n2q")
+    }
+
+    func testPortForwardLeaseDecodesAnOmittedContainerAsNil() throws {
+        let lease = try K8s.PodPortForwardLease.decode(ipcFields: [
+            "active": .bool(true),
+            "lease": .string(UUID().uuidString),
+            "namespace": .string("default"),
+            "pod": .string("hello-web"),
+            "container": .null,
+            "local_port": .int(1024),
+            "pod_port": .int(80),
+        ])
+        XCTAssertNil(try XCTUnwrap(lease).container)
+    }
+
+    func testPortForwardLeaseDecodesNoActiveLeaseAsNilRatherThanThrowing() throws {
+        let lease = try K8s.PodPortForwardLease.decode(ipcFields: ["active": .bool(false)])
+        XCTAssertNil(lease)
+    }
+
+    func testPortForwardLeaseDecodeThrowsOnAMalformedActiveReplyRatherThanReadingItAsIdle() {
+        // A reply that claims to be active but is missing required fields must not
+        // be silently read as "no forward" — that would hide a real daemon/app
+        // protocol mismatch as an ordinary idle state.
+        XCTAssertThrowsError(
+            try K8s.PodPortForwardLease.decode(ipcFields: [
+                "active": .bool(true),
+                "lease": .string(UUID().uuidString),
+                "namespace": .string("default"),
+                // "pod" missing
+                "local_port": .int(1024),
+                "pod_port": .int(80),
+            ]))
+    }
+
+    func testPortForwardLeaseDecodeThrowsOnAnInvalidLeaseID() {
+        XCTAssertThrowsError(
+            try K8s.PodPortForwardLease.decode(ipcFields: [
+                "active": .bool(true),
+                "lease": .string("not-a-uuid"),
+                "namespace": .string("default"),
+                "pod": .string("hello-web"),
+                "local_port": .int(1024),
+                "pod_port": .int(80),
+            ]))
+    }
+
     // MARK: - Payload pins
 
     func testPayloadDigestsMatchTheFetchScript() throws {

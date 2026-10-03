@@ -218,46 +218,60 @@ fn wait_for_latch(flag: &AtomicBool, timeout: Duration) -> bool {
 pub const FLUSH_ALLOWANCE: Duration = Duration::from_secs(30);
 
 /// How long a `shutdown` connection waits for the supervisor to report the
-/// guest fully stopped — services down *and* storage flushed — before
-/// answering anyway.
+/// guest fully stopped — services down, disk-trimmed, *and* storage flushed —
+/// before answering anyway.
 ///
 /// ```text
 /// ======================================================================
 ///  THIS NUMBER IS DERIVED, NOT CHOSEN. DO NOT HAND-EDIT IT.
 ///
-///    SUPERVISED_SERVICE_COUNT * (STOP_GRACE + KILL_GRACE) + FLUSH_ALLOWANCE
-///  =            2             * (    10s    +     2s    ) +      30s
-///  =                       24s                            +      30s
-///  =                                 54s
+///    SUPERVISED_SERVICE_COUNT * (STOP_GRACE + KILL_GRACE)
+///      + GATED_PHASE_ALLOWANCE + disk::TRIM_SHUTDOWN_DEADLINE + FLUSH_ALLOWANCE
+///  =            2             * (    10s    +     2s    )
+///      +            5s        +              15s          +      30s
+///  =                       24s                             +      50s
+///  =                                 74s
 ///
 ///  Timing out here means writing an `ok` that is a promise about the
 ///  future rather than a report about the past — the exact bug this whole
 ///  handshake exists to prevent (see `ShutdownSignal`). So the budget must
 ///  cover *everything* that precedes the reply: the full stop ladder
-///  (sequential, so the per-service graces add up rather than overlapping)
-///  plus the disk flush that follows it in `run_shutdown_sequence`. The old
-///  hand-picked 45s covered only the 24s ladder, leaving 21s for a flush
-///  that can need more — so a heavy pull followed by a slow umount put the
-///  `ok` on the wire mid-flush and re-created the bug it was meant to close.
+///  (sequential, so the per-service graces add up rather than overlapping),
+///  the gated (Kubernetes) phase, the bounded disk-trim sweep
+///  (`disk::trim_before_shutdown`, TECH-3/UX-16 §8 —
+///  `docs/design/DISK-RECLAIM-DECISION.md`), and the disk flush that follows
+///  all of it in `run_shutdown_sequence`. Each addition to this list is a
+///  real regression this constant used to miss: the original hand-picked 45s
+///  covered only the 24s stop ladder, and put `ok` on the wire mid-flush the
+///  first time a heavy pull's writeback outran it; `GATED_PHASE_ALLOWANCE`
+///  and `disk::TRIM_SHUTDOWN_DEADLINE` were both added later for the same
+///  reason — a step the budget did not yet know about, running for real time
+///  it was not given credit for.
 ///
 ///  BUDGETS NEST, AND THE NESTING IS LOAD-BEARING. Each layer must be
 ///  strictly larger than the one inside it, or an outer layer gives up
-///  mid-flush and tears the VM down with dirty pages outstanding:
+///  mid-flush and tears the VM down with dirty pages (or a disk-trim
+///  subprocess) still outstanding:
 ///
-///    guest reply cap        54s  <- this constant
-///      < host ack timeout   65s  (VMManager.shutdownAckTimeout)
-///        < daemon stop      90s  (Daemon's awaitVMOperation("stop"))
-///          < CLI           120s
+///    guest reply cap        74s  <- this constant
+///      < host ack timeout   85s  (VMManager.shutdownAckTimeout)
+///        < daemon stop     110s  (Daemon.stopBudget)
+///          < CLI           140s  (Daemon.clientTimeout)
 ///
 ///  Raising this constant therefore requires raising all three host-side
-///  numbers in the same change. Lowering STOP_GRACE / KILL_GRACE /
-///  FLUSH_ALLOWANCE lowers it automatically and is always safe.
+///  numbers in the same change — and `LifecycleTests.swift`'s
+///  `testShutdownBudgetsNestFromTheGuestOutwards` polices exactly that from the
+///  host side, mirroring `the_reply_budget_leaves_room_for_the_host_ack_timeout_above_it`
+///  below. Lowering STOP_GRACE / KILL_GRACE / GATED_PHASE_ALLOWANCE /
+///  `disk::TRIM_SHUTDOWN_DEADLINE` / FLUSH_ALLOWANCE lowers it automatically and
+///  is always safe.
 /// ======================================================================
 /// ```
 pub const SHUTDOWN_REPLY_TIMEOUT: Duration = Duration::from_secs(
     (crate::supervisor::SUPERVISED_SERVICE_COUNT as u64)
         * (crate::supervisor::STOP_GRACE.as_secs() + crate::supervisor::KILL_GRACE.as_secs())
         + GATED_PHASE_ALLOWANCE.as_secs()
+        + crate::disk::TRIM_SHUTDOWN_DEADLINE.as_secs()
         + FLUSH_ALLOWANCE.as_secs(),
 );
 
@@ -267,10 +281,11 @@ pub const SHUTDOWN_REPLY_TIMEOUT: Duration = Duration::from_secs(
 /// signals every gated service at once and then waits once, so the phase costs
 /// a single grace period no matter how many of them there are. That is not an
 /// optimisation for its own sake — it is what makes Kubernetes fit. Before it
-/// existed the chain had about six seconds of slack:
+/// existed, and before the disk-trim sweep below it existed either, the chain
+/// had about six seconds of slack:
 ///
 /// ```text
-///   guest reply cap  54s  <  host ack  65s   (with 5s for the reply itself)
+///   guest reply cap  59s  <  host ack  65s   (with 5s for the reply itself)
 /// ```
 ///
 /// Two more services stopped sequentially at the engine's 10s+2s ladder would
@@ -343,6 +358,26 @@ pub struct ControlContext {
     /// by Docker; this is only an admission fact for a macOS `/tmp` bind source.
     /// Additive so a host can reject rather than guess when an older guest omits it.
     pub tmp_alias_mounted: bool,
+    /// What `supervisor::apply_proxy_env` actually put in dockerd's
+    /// environment this boot, decoded from the kernel command line by
+    /// `guest_proxy::parse_cmdline` (UX-18). Empty string, not absent, means
+    /// "dockerd has no proxy of this kind" — this is a *report of what was
+    /// launched*, not of the host's intent, so `morb doctor` can tell "the
+    /// setting reached the engine" from "it did not" rather than merely
+    /// echoing config.toml back. Additive fields — hosts that predate them
+    /// ignore them.
+    pub http_proxy: String,
+    pub https_proxy: String,
+    pub no_proxy: String,
+    /// Bytes reclaimed by the most recent periodic `fstrim` sweep this boot
+    /// (`disk::spawn_periodic_trim`), or ``disk::NO_TRIM_YET`` if no sweep
+    /// has completed yet — no sweep runs at all when `/var/lib/docker` is
+    /// RAM-backed. Reported in `info` as `disk_last_trim_bytes` (TECH-3 /
+    /// UX-16) so the host can show real evidence that reclaim is working
+    /// instead of a bare claim; `-1` collapses to `nil` on the host's
+    /// `GuestReply` decoder, the same sentinel convention as
+    /// ``mem_total_kb``/``mem_available_kb``.
+    pub disk_last_trim_bytes: Arc<std::sync::atomic::AtomicI64>,
     /// The Kubernetes subsystem: the enable gate, the persistence fact, and
     /// the monitor's cached cluster snapshot.
     ///
@@ -402,6 +437,19 @@ pub fn handle_request(payload: &[u8], ctx: &ControlContext) -> (Vec<u8>, bool) {
             (body.into_bytes(), false)
         }
         "info" => {
+            // Read fresh on every request, unlike the boot-time facts below: memory
+            // pressure is the one thing in this reply that changes second to
+            // second, and the host's balloon policy (UX-17) needs the current
+            // sample, not whatever was true at boot. -1 is the explicit
+            // "unavailable" sentinel (a real reading is always >= 0): either this
+            // is a non-Linux `--serve-control` dev build, or the one
+            // `/proc/meminfo` read failed. The host's `GuestReply` decoder treats
+            // anything other than two consistent non-negative values as "no
+            // sample" and changes nothing rather than acting on a guess.
+            let (mem_total_kb, mem_available_kb) = match crate::meminfo::read() {
+                Some(info) => (info.total_kb as i64, info.available_kb as i64),
+                None => (-1, -1),
+            };
             let body = jsonlite::emit(&[
                 ("type", Value::Str("info".to_string())),
                 ("morbinit_version", Value::Str(ctx.version.to_string())),
@@ -419,6 +467,9 @@ pub fn handle_request(payload: &[u8], ctx: &ControlContext) -> (Vec<u8>, bool) {
                 ),
                 ("shares", Value::Str(ctx.shares.clone())),
                 ("tmp_alias_mounted", Value::Bool(ctx.tmp_alias_mounted)),
+                ("http_proxy", Value::Str(ctx.http_proxy.clone())),
+                ("https_proxy", Value::Str(ctx.https_proxy.clone())),
+                ("no_proxy", Value::Str(ctx.no_proxy.clone())),
                 (
                     "share_event_bridge",
                     Value::Str(SHARE_EVENT_BRIDGE_CAPABILITY.to_string()),
@@ -430,6 +481,12 @@ pub fn handle_request(payload: &[u8], ctx: &ControlContext) -> (Vec<u8>, bool) {
                 (
                     "disk_resize",
                     Value::Str(DISK_RESIZE_CAPABILITY.to_string()),
+                ),
+                ("mem_total_kb", Value::Int(mem_total_kb)),
+                ("mem_available_kb", Value::Int(mem_available_kb)),
+                (
+                    "disk_last_trim_bytes",
+                    Value::Int(ctx.disk_last_trim_bytes.load(Ordering::SeqCst)),
                 ),
             ]);
             (body.into_bytes(), false)
@@ -830,6 +887,12 @@ mod tests {
                 crate::shares::MountState::Mounted,
             )]),
             tmp_alias_mounted: false,
+            http_proxy: String::new(),
+            https_proxy: String::new(),
+            no_proxy: String::new(),
+            disk_last_trim_bytes: Arc::new(std::sync::atomic::AtomicI64::new(
+                crate::disk::NO_TRIM_YET,
+            )),
             // Nothing is installed on the macOS test host, so this reports
             // `not-installed` — which is exactly the state a fresh guest is in
             // and the one the protocol tests want to pin.
@@ -937,6 +1000,43 @@ mod tests {
             fields.get("disk_resize"),
             Some(&Value::Str("ready".to_string()))
         );
+        // No proxy in `test_ctx()`, so `info` reports the empty-string sentinel
+        // rather than omitting the fields — an older host that never sends a
+        // `morb.proxy=` argument must be told "nothing was configured", not
+        // left guessing why the keys are missing.
+        assert_eq!(fields.get("http_proxy"), Some(&Value::Str(String::new())));
+        assert_eq!(fields.get("https_proxy"), Some(&Value::Str(String::new())));
+        assert_eq!(fields.get("no_proxy"), Some(&Value::Str(String::new())));
+        // Always present, and always the -1 sentinel on this non-Linux test
+        // build — `meminfo::read()` is `None` off Linux, and `handle_request`
+        // must still emit both fields rather than omitting them.
+        assert_eq!(fields.get("mem_total_kb"), Some(&Value::Int(-1)));
+        assert_eq!(fields.get("mem_available_kb"), Some(&Value::Int(-1)));
+        // `test_ctx()`'s `disk_last_trim_bytes` starts at the "no sweep yet"
+        // sentinel — nothing in this handler ever runs `fstrim` itself, so
+        // `info` must report exactly what the shared atomic holds.
+        assert_eq!(
+            fields.get("disk_last_trim_bytes"),
+            Some(&Value::Int(crate::disk::NO_TRIM_YET))
+        );
+    }
+
+    #[test]
+    fn info_reports_the_proxy_dockerd_was_launched_with() {
+        let mut ctx = test_ctx();
+        ctx.http_proxy = "http://proxy.corp:8080".to_string();
+        ctx.no_proxy = "localhost,.corp".to_string();
+        let (resp, _) = handle_request(br#"{"type":"info"}"#, &ctx);
+        let fields = jsonlite::parse(std::str::from_utf8(&resp).unwrap()).unwrap();
+        assert_eq!(
+            fields.get("http_proxy"),
+            Some(&Value::Str("http://proxy.corp:8080".to_string()))
+        );
+        assert_eq!(fields.get("https_proxy"), Some(&Value::Str(String::new())));
+        assert_eq!(
+            fields.get("no_proxy"),
+            Some(&Value::Str("localhost,.corp".to_string()))
+        );
     }
 
     #[test]
@@ -1016,6 +1116,22 @@ mod tests {
         let (resp, _) = handle_request(br#"{"type":"info"}"#, &ctx);
         let fields = jsonlite::parse(std::str::from_utf8(&resp).unwrap()).unwrap();
         assert_eq!(fields.get("docker_ready"), Some(&Value::Bool(true)));
+    }
+
+    #[test]
+    fn info_reports_the_most_recent_trim_sweep_result() {
+        // `disk::spawn_periodic_trim` writes here; `info` must read the live
+        // value rather than a value frozen at `ControlContext` construction,
+        // since the sweep can complete at any point during a long boot.
+        let ctx = test_ctx();
+        ctx.disk_last_trim_bytes
+            .store(59_050_795_008, Ordering::SeqCst);
+        let (resp, _) = handle_request(br#"{"type":"info"}"#, &ctx);
+        let fields = jsonlite::parse(std::str::from_utf8(&resp).unwrap()).unwrap();
+        assert_eq!(
+            fields.get("disk_last_trim_bytes"),
+            Some(&Value::Int(59_050_795_008))
+        );
     }
 
     #[test]
@@ -1249,6 +1365,12 @@ mod tests {
             binfmt: crate::binfmt::BinfmtStatus::disabled(),
             shares: String::new(),
             tmp_alias_mounted: false,
+            http_proxy: String::new(),
+            https_proxy: String::new(),
+            no_proxy: String::new(),
+            disk_last_trim_bytes: Arc::new(std::sync::atomic::AtomicI64::new(
+                crate::disk::NO_TRIM_YET,
+            )),
             k8s: Arc::new(crate::k8s::K8sState::from_disk(true)),
             shutdown: Arc::new(ShutdownSignal::new()),
         });
@@ -1314,13 +1436,15 @@ mod tests {
     }
 
     #[test]
-    fn the_reply_budget_covers_the_stop_ladder_and_the_flush_that_follows_it() {
-        // The regression this guards: the budget used to be a hand-picked 45s
-        // that only covered the service-stop ladder. `run_shutdown_sequence`
-        // also flushes `/var/lib/docker` before releasing the reply, and a
-        // umount after a heavy pull can take tens of seconds — so the reply
-        // would time out and go out *during* the flush, which is exactly the
-        // promise-about-the-future the handshake exists to prevent.
+    fn the_reply_budget_covers_the_stop_ladder_the_trim_sweep_and_the_flush_that_follow_it() {
+        // The regression this guards, twice over. First: the budget used to be a
+        // hand-picked 45s that only covered the service-stop ladder — a umount after
+        // a heavy pull can take tens of seconds, so the reply could time out and go
+        // out *during* the flush. Second (TECH-3/UX-16 §8,
+        // `docs/design/DISK-RECLAIM-DECISION.md`): `disk::trim_before_shutdown` was
+        // added to this same sequence *after* that fix, and needed its own line in
+        // this budget for the identical reason — a real step this constant did not
+        // yet know to wait for.
         let ladder = crate::supervisor::STOP_GRACE + crate::supervisor::KILL_GRACE;
         let worst_case = ladder * (crate::supervisor::SUPERVISED_SERVICE_COUNT as u32);
         assert_eq!(worst_case, Duration::from_secs(24));
@@ -1328,11 +1452,16 @@ mod tests {
         // and waited on once, so they contribute one 4s+1s ladder in total
         // rather than one per service. See `GATED_PHASE_ALLOWANCE`.
         assert_eq!(GATED_PHASE_ALLOWANCE, Duration::from_secs(5));
+        // ...plus the bounded shutdown-time disk-trim sweep.
+        assert_eq!(crate::disk::TRIM_SHUTDOWN_DEADLINE, Duration::from_secs(15));
         assert_eq!(
             SHUTDOWN_REPLY_TIMEOUT,
-            worst_case + GATED_PHASE_ALLOWANCE + FLUSH_ALLOWANCE
+            worst_case
+                + GATED_PHASE_ALLOWANCE
+                + crate::disk::TRIM_SHUTDOWN_DEADLINE
+                + FLUSH_ALLOWANCE
         );
-        assert_eq!(SHUTDOWN_REPLY_TIMEOUT, Duration::from_secs(59));
+        assert_eq!(SHUTDOWN_REPLY_TIMEOUT, Duration::from_secs(74));
     }
 
     #[test]
@@ -1341,17 +1470,21 @@ mod tests {
         // budget < CLI. This end asserts only its own side of the contract —
         // that the guest cap stays comfortably under the smallest host ack
         // timeout the nesting tolerates — because the host constants live in
-        // mac/ and cannot be imported here.
-        const HOST_ACK_TIMEOUT: Duration = Duration::from_secs(65);
+        // mac/ and cannot be imported here. `LifecycleTests.swift`'s
+        // `testShutdownBudgetsNestFromTheGuestOutwards` hardcodes this same
+        // `SHUTDOWN_REPLY_TIMEOUT` value as its `guestReplyCap` and asserts the rest
+        // of the chain from the host side — two suites, two languages, one ladder.
+        const HOST_ACK_TIMEOUT: Duration = Duration::from_secs(85);
         assert!(
             SHUTDOWN_REPLY_TIMEOUT < HOST_ACK_TIMEOUT,
             "guest cap {:?} must stay below the host ack timeout {:?}",
             SHUTDOWN_REPLY_TIMEOUT,
             HOST_ACK_TIMEOUT
         );
-        // And the gap must be large enough for the reply itself to make it
-        // out: `main::REPLY_FLUSH_TIMEOUT` is 5s on top of this wait.
-        assert!(SHUTDOWN_REPLY_TIMEOUT + Duration::from_secs(5) <= HOST_ACK_TIMEOUT);
+        // And the gap must be large enough for the reply itself to make it out
+        // (`main::REPLY_FLUSH_TIMEOUT` is 5s on top of this wait) with a further 6s
+        // of slack for vsock connect and scheduling — see `VMManager.shutdownAckTimeout`.
+        assert!(SHUTDOWN_REPLY_TIMEOUT + Duration::from_secs(5 + 6) <= HOST_ACK_TIMEOUT);
     }
 
     #[test]

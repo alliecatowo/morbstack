@@ -14,6 +14,7 @@
 // rows from a status summary.
 
 import Foundation
+import MorbstackKit
 import Security
 
 /// A narrowly scoped reader for Morbstack's local Kubernetes API.
@@ -132,6 +133,13 @@ private struct KubernetesAPIConfiguration {
     let certificateAuthority: Data
     let clientCertificate: Data
     let clientKey: Data
+    /// k3s (and most modern issuers) hand out ECDSA client keys by default; only
+    /// older setups issue RSA. Read from the PEM header rather than assuming one
+    /// algorithm — assuming RSA here previously made every real k3s cluster's
+    /// client key fail `SecKeyCreateWithData` and the whole route report a
+    /// generic "kubeconfig … cannot be used for a TLS-authenticated connection"
+    /// even though the file and the cluster were both fine.
+    let clientKeyType: CFString
 
     init(kubeconfigURL: URL) throws {
         guard FileManager.default.fileExists(atPath: kubeconfigURL.path) else {
@@ -184,12 +192,13 @@ private struct KubernetesAPIConfiguration {
         endpoint = parsedEndpoint.absoluteString.hasSuffix("/")
             ? parsedEndpoint
             : URL(string: parsedEndpoint.absoluteString + "/")!
-        guard let authorityDER = KubernetesPEM.der(from: authority),
-              let certificateDER = KubernetesPEM.der(from: certificate),
-              let keyDER = KubernetesPEM.der(from: key)
+        guard let authorityDER = KubernetesClientTLS.der(from: authority),
+              let certificateDER = KubernetesClientTLS.der(from: certificate),
+              let keyDER = KubernetesClientTLS.der(from: key)
         else {
             throw K8sResourceAccessError.malformedKubeconfig
         }
+        clientKeyType = KubernetesClientTLS.keyType(from: key)
         certificateAuthority = authorityDER
         clientCertificate = certificateDER
         clientKey = keyDER
@@ -205,11 +214,30 @@ private struct KubernetesAPICredential {
         guard let authority = SecCertificateCreateWithData(
             nil, configuration.certificateAuthority as CFData),
             let certificate = SecCertificateCreateWithData(
-                nil, configuration.clientCertificate as CFData),
-            let key = SecKeyCreateWithData(
-                configuration.clientKey as CFData,
+                nil, configuration.clientCertificate as CFData)
+        else {
+            throw K8sResourceAccessError.malformedKubeconfig
+        }
+        // Fixing the RSA/EC algorithm mismatch (see `clientKeyType` above) was not
+        // enough on its own: `SecKeyCreateWithData` does not take the same byte
+        // layout for every key type. `KubernetesClientTLS.der(from:)` produces the
+        // SEC1 ASN.1 DER a PEM `-----BEGIN EC PRIVATE KEY-----` document actually
+        // contains — correct as-is for RSA, whose PKCS#1 DER *is* the layout
+        // `SecKeyCreateWithData` wants, but wrong for EC, which needs Apple's own
+        // ANSI X9.63 external representation instead. Feeding it SEC1 bytes made
+        // `SecKeyCreateWithData` fail outright, which is what was still producing
+        // "cannot be used for a TLS-authenticated connection" after the RSA/EC fix.
+        guard let keyData = KubernetesClientTLS.secKeyExternalRepresentation(
+            der: configuration.clientKey,
+            keyType: configuration.clientKeyType,
+            certificate: certificate)
+        else {
+            throw K8sResourceAccessError.malformedKubeconfig
+        }
+        guard let key = SecKeyCreateWithData(
+                keyData as CFData,
                 [
-                    kSecAttrKeyType: kSecAttrKeyTypeRSA,
+                    kSecAttrKeyType: configuration.clientKeyType,
                     kSecAttrKeyClass: kSecAttrKeyClassPrivate,
                 ] as CFDictionary,
                 nil),
@@ -281,20 +309,6 @@ private enum KubernetesJSON {
     }
 }
 
-/// K3s stores PEM documents inside base64-encoded kubeconfig scalars. Security APIs
-/// accept DER, so strip the PEM envelope without writing administrator credentials to
-/// a keychain or a temporary file.
-private enum KubernetesPEM {
-    static func der(from data: Data) -> Data? {
-        guard let text = String(data: data, encoding: .utf8) else { return data }
-        guard text.contains("-----BEGIN ") else { return data }
-        let payload = text
-            .split(whereSeparator: \.isNewline)
-            .filter { !$0.hasPrefix("-----") }
-            .joined()
-        return Data(base64Encoded: payload)
-    }
-}
 
 private struct KubernetesNodeList: Decodable {
     var items: [KubernetesNodeObject]

@@ -10,14 +10,65 @@
 //
 // The list groups rows by what Docker itself reports about them, in three tiers:
 // plain `docker run` containers stay loose at the top, each Compose project becomes a
-// native `Section` named by its `com.docker.compose.project` label, and
-// kubelet-created containers collapse into one `DisclosureGroup`. The Kubernetes tier
-// exists because a single enabled cluster adds nine-plus machine-named rows
-// (`k8s_POD_…`) that bury the containers a person started deliberately. Collapsed is
-// not hidden: the group row states its true count, expands on click, and expands
-// itself whenever a search is active so a match can never be concealed. Stacks remains
-// the route that *manages* Compose projects; the section header here is only the
-// grouping fact, the same way Docker Desktop and OrbStack present it.
+// `DisclosureGroup` named by its `com.docker.compose.project` label, and kubelet-created
+// containers collapse into one more. The Kubernetes tier exists because a single enabled
+// cluster adds nine-plus machine-named rows (`k8s_POD_…`) that bury the containers a
+// person started deliberately.
+//
+// **One grouping idiom, deliberately.** Compose projects were `Section`s while the
+// Kubernetes tier was a `DisclosureGroup`, so two things that are the same kind of thing
+// — a named collection of containers — looked and behaved differently on one screen: one
+// collapsed, one did not, and only one carried a count. `StacksRootView` reaches for
+// disclosure for the identical concept, so this is consistent within the screen and
+// across the app.
+//
+// Collapsed is not hidden. Every group row carries "n of m running" — the fact that
+// would make someone open it, where a bare count answers a question nobody asked — and
+// every group forces itself open while a search is active, because a match concealed
+// behind a disclosure reads as no match at all.
+//
+// Expansion state tracks what the person has deliberately COLLAPSED, so a project that
+// appears while the app is open arrives visible. Stacks remains the route that *manages*
+// Compose projects; the grouping here is only the fact, the same way Docker Desktop and
+// OrbStack present it.
+//
+// **On the inspector's reveal animation (2026-08-07, corrected).** Reported: closing
+// the trailing inspector slides; opening it stalls and then pops in place. This comment
+// used to end in "a platform floor, not something the content layer can buy its way out
+// of". That was wrong, and the ~350ms number it rested on was real but measured the
+// wrong quantity. Retracted here; the full retraction, the subtraction matrix and both
+// new instruments are in docs/design/tahoe/HIG-FINDINGS.md and TASKS.md UI-056.
+//
+// The short version, because it is a trap worth not falling into twice: Instruments'
+// Time Profiler reports an unbroken run of main-thread samples, and that was read as a
+// ~350ms BLOCK before the first animated frame. It is not a block, it is the animation
+// running — a 300ms transition is supposed to keep the main thread busy for 300ms. An
+// in-process 2ms stall meter and an external CPU-delta meter, run on the same six real
+// AXPress clicks, disagree completely: ~300ms of CPU each, and zero gaps above 30ms.
+//
+// On this route specifically, measured on the real signed app:
+//
+//   - The column slides, in both directions. docs/design/probes/AXColumnTrace.swift
+//     reads the content column's width out of the running window over the accessibility
+//     API; four consecutive toggles drew 3, 6, 3 and 2 intermediate widths.
+//   - There is no close-is-free asymmetry. Eight alternating toggles cost 340/250/230/
+//     230/270/250/250/340ms with no direction dependence. The earlier "closing produces
+//     no measurable CPU burst" is not reproducible.
+//   - The one real block is one-time, and this route already avoids paying it visibly:
+//     it lands on whichever transition FIRST presents the column, and `showsInspector`
+//     defaults to true, so the column is built during window setup.
+//
+// The outermost-`.inspectorColumnWidth` fix stays, now for two reasons: it solved a real
+// width-clipping bug, and the matrix shows a ranged width costs nothing over a fixed one
+// (194.3ms vs 197.4ms) — there is no constraint-solve penalty to trade it away for.
+//
+// One thing here IS still ours, and it is the opposite of what the previous pass
+// believed. This list used to give every visible row its own per-second `TimelineView`;
+// it now wraps one around the whole list. Measured, the per-row shape cost nothing on a
+// toggle, and the whole-list shape invalidates every row on every tick, which is O(rows)
+// where the old one was O(1) per row. At this route's row counts it is a wash; it
+// degrades with list length where the old shape did not. Tracked as UI-059 — left in
+// place deliberately rather than churned back, with the numbers on the ticket.
 
 import Foundation
 import MorbstackKit
@@ -74,20 +125,27 @@ struct ContainersRootView: View {
     let model: AppModel
 
     @Environment(\.openURL) private var openURL
+    @Environment(\.openWindow) private var openWindow
 
     init(
         model: AppModel,
         initialDetailTab: TrackBDetailTab = .overview,
+        initialStatsMetric: ContainerStatsMetric = .cpu,
         initialHub: TrackBStatsHub? = nil
     ) {
         self.model = model
         self.initialDetailTab = initialDetailTab
+        self.initialStatsMetric = initialStatsMetric
         _hub = State(initialValue: initialHub ?? TrackBStatsHub())
     }
 
     private let initialDetailTab: TrackBDetailTab
+    private let initialStatsMetric: ContainerStatsMetric
 
     @State private var search = ""
+    // UI-051: search is a glyph in the trailing group until someone asks for it.
+    // `RouteSearchModifier` attaches the system field while this is true.
+    @State private var searchIsActive = false
     @State private var scope: ContainerScope = .all
     @State private var hub: TrackBStatsHub
     @State private var busy: Set<String> = []
@@ -101,6 +159,7 @@ struct ContainersRootView: View {
     /// the group row still names its count, so nothing is silently hidden — and
     /// forced open while a search is active so a matching row can always be seen.
     @State private var isKubernetesGroupExpanded = false
+    @State private var collapsedProjects: Set<String> = []
 
     private var stoppedCount: Int {
         model.containers.filter { !$0.isRunning }.count
@@ -151,6 +210,7 @@ struct ContainersRootView: View {
                     title: "Remove Stopped Containers…",
                     isEnabled: stoppedCount > 0 && !isPruning,
                     perform: { isShowingPruneConfirmation = true }))
+            .focusedSceneValue(\.containerRecordCommands, containerRecordCommands)
             .toolbar { toolbarContent }
             .confirmationDialog(
                 removalTarget.map { "Remove “\($0.displayName)”?" } ?? "Remove container?",
@@ -210,7 +270,9 @@ struct ContainersRootView: View {
     @ToolbarContentBuilder
     private var trailingCommandItems: some ToolbarContent {
         if !model.containers.isEmpty {
-            ToolbarItem(id: "containers.inspector", placement: .automatic) {
+            RouteSearchToolbarItem(
+                id: "containers.search", subject: "containers", isActive: $searchIsActive)
+            ToolbarItem(id: "containers.inspector", placement: .primaryAction) {
                 Button { showsInspector.toggle() } label: {
                     Image(systemName: "sidebar.right")
                 }
@@ -224,48 +286,24 @@ struct ContainersRootView: View {
         }
     }
 
+    /// Slots 1–3 of the toolbar grammar — see `VolumesRootView.toolbarContent` and
+    /// `docs/design/NATIVE-MACOS-PLAYBOOK.md`.
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        if model.containers.isEmpty {
-            trailingCommandItems
-        }
-
-        if let selected {
-            ToolbarItem(id: "containers.primaryLifecycle", placement: .primaryAction) {
-                if busy.contains(selected.id) {
-                    ProgressView()
-                        .controlSize(.small)
-                        .accessibilityIdentifier("containers.primaryLifecycle")
-                        .accessibilityLabel("Updating \(selected.displayName)")
-                } else if let action = primaryLifecycleAction(for: selected) {
-                    Button { perform(action, on: selected.id) } label: {
-                        Image(systemName: action.symbol)
-                    }
-                    // The identifier stays constant while start/stop/unpause swap; the
-                    // label names the actual state-dependent action.
-                    .accessibilityIdentifier("containers.primaryLifecycle")
-                    .accessibilityLabel("\(action.title) \(selected.displayName)")
-                    .help("\(action.title) \(selected.displayName)")
-                }
-            }
-
-            // A selected-record command belongs in macOS's managed secondary-action
-            // area, not in every list row or a hand-built command bar. The sheet itself
-            // explains why a stopped selection cannot execute before it can reach Docker.
-            ToolbarItem(id: "containers.runCommand", placement: .secondaryAction) {
-                Button("Run Command…", systemImage: "terminal") {
-                    commandTarget = selected
-                }
-                .accessibilityIdentifier("containers.runCommand")
-                .accessibilityLabel("Run command in \(selected.displayName)")
-                .help("Run a noninteractive command in \(selected.displayName)")
-            }
-        }
-
+        // The options menu is declared FIRST, ahead of the selection's commands.
+        // On macOS 26 a placement run is one glass capsule and a `Menu` is always
+        // its own capsule, splitting the run around it — `ToolbarSpacer` and
+        // `ToolbarItemGroup` do not (five stock-SwiftUI probe variants,
+        // `docs/design/probes/ToolProbe.swift`: spacerNone…menuInRun). Declared in
+        // the middle, this menu made three capsules the moment a row was selected
+        // and two when nothing was, so the bar re-fragmented on every selection.
+        // Leading, the run is always [menu] [commands · search · inspector] — two
+        // capsules, whatever is selected.
+        //
         // This is a semantic collection-options menu, not a second, manually managed
         // overflow. It keeps filtering, refresh, and the infrequent prune operation
         // together while the selected record's commands stay with that record.
-        ToolbarItem(id: "containers.options", placement: .secondaryAction) {
+        ToolbarItem(id: "containers.options", placement: .primaryAction) {
             Menu {
                 Picker("Show", selection: $scope) {
                     ForEach(ContainerScope.allCases) { item in
@@ -292,6 +330,65 @@ struct ContainersRootView: View {
             .accessibilityIdentifier("containers.options")
             .accessibilityLabel("Container options")
             .help("Show, refresh, and cleanup options")
+        }
+
+        if let selected {
+            ToolbarItem(id: "containers.primaryLifecycle", placement: .primaryAction) {
+                if busy.contains(selected.id) {
+                    ProgressView()
+                        .controlSize(.small)
+                        .accessibilityIdentifier("containers.primaryLifecycle")
+                        .accessibilityLabel("Updating \(selected.displayName)")
+                } else if let action = primaryLifecycleAction(for: selected) {
+                    Button { perform(action, on: selected.id) } label: {
+                        Image(systemName: action.symbol)
+                    }
+                    // The identifier stays constant while start/stop/unpause swap; the
+                    // label names the actual state-dependent action.
+                    .accessibilityIdentifier("containers.primaryLifecycle")
+                    .accessibilityLabel("\(action.title) \(selected.displayName)")
+                    .help("\(action.title) \(selected.displayName)")
+                }
+            }
+
+            // An interactive shell is the most-reached-for command on a running
+            // container. It rides the same `.primaryAction` run as everything else
+            // trailing — see `VolumesRootView.trailingCommandItems` for why (UI-051) —
+            // rather than macOS's managed secondary-action area, so it does not become
+            // a fourth island. Unlike Run Command it cannot explain itself in a sheet
+            // first — it opens a window onto a live process — so the precondition is
+            // carried by the control: disabled, with `.help()` naming the one step that
+            // would make it work.
+            ToolbarItem(id: "containers.openTerminal", placement: .primaryAction) {
+                Button("Open Terminal", systemImage: "apple.terminal") {
+                    openTerminal(for: selected)
+                }
+                .accessibilityIdentifier("containers.openTerminal")
+                .accessibilityLabel("Open a terminal in \(selected.displayName)")
+                .help(terminalHelp(for: selected))
+                .disabled(!terminalIsAvailable(for: selected))
+            }
+
+            // A selected-record command belongs in the system toolbar, not in every
+            // list row or a hand-built command bar. The sheet itself explains why a
+            // stopped selection cannot execute before it can reach Docker. It rides
+            // the same `.primaryAction` run as everything else trailing — see
+            // `VolumesRootView.trailingCommandItems` for why (UI-051).
+            ToolbarItem(id: "containers.runCommand", placement: .primaryAction) {
+                Button("Run Command…", systemImage: "terminal") {
+                    commandTarget = selected
+                }
+                .accessibilityIdentifier("containers.runCommand")
+                .accessibilityLabel("Run command in \(selected.displayName)")
+                .help("Run one noninteractive command in \(selected.displayName) and keep its output")
+            }
+        }
+
+        if model.containers.isEmpty {
+            // No inspector on the empty screens, so the view controls need their
+            // ordinary window-toolbar home — declared last so the empty screen keeps
+            // the populated screen's order.
+            trailingCommandItems
         }
     }
 
@@ -336,61 +433,113 @@ struct ContainersRootView: View {
             }
             .inspector(isPresented: $showsInspector) {
                 inspector
-                    .inspectorColumnWidth(min: 340, ideal: 400, max: 520)
-                    // See the note on `VolumesRootView`: the trailing commands and
-                    // search ride the inspector's toolbar region and remain present
-                    // while the inspector is closed.
+                    // See the note on `VolumesRootView`: declaring these here rather
+                    // than on the list is a lifetime decision, not a placement one.
+                    // They stay mounted and clickable while the inspector is closed.
                     .toolbar { trailingCommandItems }
-                    .searchable(text: $search, placement: .toolbar, prompt: "Name, image, or project")
+                    .routeSearchable(
+                        isActive: $searchIsActive,
+                        text: $search,
+                        prompt: "Name, image, or project")
+                    // Must be the outermost modifier on the inspector's content —
+                    // see the note in `VolumesRootView`: applied beneath
+                    // `.toolbar`/`.searchable` its preferred width was silently
+                    // discarded and the column fell back to the system default
+                    // (~270pt), which is what was clipping every value here.
+                    .inspectorColumnWidth(min: 340, ideal: 400, max: 520)
             }
         }
     }
 
     private var containerList: some View {
         let grouped = TrackBContainerGrouping.groups(of: filtered)
-        return List(selection: selectionBinding) {
-            ForEach(grouped.standalone) { container in
-                containerRow(container)
-            }
+        // One clock for the whole list, not one per row, threaded down as a plain
+        // value. This was introduced to avoid ~20 per-row AttributeGraph
+        // subscriptions being re-established on every layout pass — but that cost
+        // was assumed, not measured, and when it was finally measured it was not
+        // there: per-row clocks cost nothing on an inspector toggle (286ms of CPU
+        // against this shape's 310ms, inside the noise).
+        //
+        // What this shape does cost is a tick that invalidates the WHOLE list every
+        // second instead of one label per row: O(rows) where the per-row shape was
+        // O(1) per visible row. At the row counts this route shows it is a wash, so
+        // it stays; it degrades with list length where the old shape did not. The
+        // numbers, and the reason it was left rather than churned back, are on
+        // TASKS.md UI-059. Every other route already ticks inside the cell.
+        return TimelineView(.periodic(from: .now, by: 1)) { context in
+            List(selection: selectionBinding) {
+                ForEach(grouped.standalone) { container in
+                    containerRow(container, now: context.date)
+                }
 
-            ForEach(grouped.projects, id: \.name) { project in
-                Section(project.name) {
-                    ForEach(project.containers) { container in
-                        containerRow(container)
+                // One grouping idiom for the whole screen. A Compose project used to be a
+                // `Section` while the Kubernetes group below was a `DisclosureGroup`, so
+                // two things that are the same kind of thing — a named collection of
+                // containers — looked and behaved differently on one list: one could be
+                // collapsed, one could not, and only one carried a count. `StacksRootView`
+                // reaches for disclosure for the identical concept, so this is the shape
+                // that is consistent both within the screen and across the app.
+                ForEach(grouped.projects, id: \.name) { project in
+                    DisclosureGroup(isExpanded: projectExpansion(project.name)) {
+                        ForEach(project.containers) { container in
+                            containerRow(container, now: context.date)
+                        }
+                    } label: {
+                        HStack {
+                            Label(project.name, systemImage: "square.stack.3d.up")
+                            Spacer(minLength: 12)
+                            Text(runningSummary(project.containers))
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                        .help("Containers labelled with the Compose project \(project.name).")
+                        // The group header is the only place on this route that addresses a
+                        // whole project, so it is where the project-wide log document
+                        // belongs. Managing the project itself remains Stacks' job.
+                        .contextMenu {
+                            Button("View Merged Project Logs", systemImage: "text.alignleft") {
+                                openWindow(id: MorbWindowID.projectLogs, value: project.name)
+                            }
+                            .accessibilityIdentifier("containers.project.logs")
+                            Button("Open in Stacks") {
+                                TrackDAppBridge.reveal(.stacks, in: model)
+                            }
+                        }
                     }
+                    .accessibilityIdentifier("containers.project.\(project.name)")
+                }
+
+                if !grouped.kubernetes.isEmpty {
+                    DisclosureGroup(isExpanded: kubernetesGroupExpansion) {
+                        ForEach(grouped.kubernetes) { container in
+                            containerRow(container, now: context.date)
+                        }
+                    } label: {
+                        HStack {
+                            // The same symbol the sidebar's Kubernetes destination uses,
+                            // so the group visibly points at that screen.
+                            Label("Kubernetes-Managed", systemImage: "helm")
+                            Spacer(minLength: 12)
+                            Text(runningSummary(grouped.kubernetes))
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                        .help("Containers the Kubernetes kubelet created and manages. Their pods appear on the Kubernetes screen.")
+                    }
+                    .accessibilityIdentifier("containers.kubernetesGroup")
                 }
             }
-
-            if !grouped.kubernetes.isEmpty {
-                DisclosureGroup(isExpanded: kubernetesGroupExpansion) {
-                    ForEach(grouped.kubernetes) { container in
-                        containerRow(container)
-                    }
-                } label: {
-                    HStack {
-                        // The same symbol the sidebar's Kubernetes destination uses,
-                        // so the group visibly points at that screen.
-                        Label("Kubernetes-Managed", systemImage: "helm")
-                        Spacer(minLength: 12)
-                        Text("\(grouped.kubernetes.count) container\(grouped.kubernetes.count == 1 ? "" : "s")")
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                    }
-                    .help("Containers the Kubernetes kubelet created and manages. Their pods appear on the Kubernetes screen.")
-                }
-                .accessibilityIdentifier("containers.kubernetesGroup")
+            .onDeleteCommand {
+                if let selected { removalTarget = selected }
             }
+            // Keep a selection reachable: if the app selected a kubelet-managed container
+            // (deep link, restored state), the group opens rather than hiding the
+            // selected record behind its own disclosure.
+            .task(id: model.selectedContainerID) {
+                if selected?.isKubernetesManaged == true { isKubernetesGroupExpanded = true }
+            }
+            .accessibilityIdentifier("containers.list")
         }
-        .onDeleteCommand {
-            if let selected { removalTarget = selected }
-        }
-        // Keep a selection reachable: if the app selected a kubelet-managed container
-        // (deep link, restored state), the group opens rather than hiding the
-        // selected record behind its own disclosure.
-        .task(id: model.selectedContainerID) {
-            if selected?.isKubernetesManaged == true { isKubernetesGroupExpanded = true }
-        }
-        .accessibilityIdentifier("containers.list")
     }
 
     /// Forced open while searching; the person's own expand/collapse otherwise.
@@ -398,8 +547,63 @@ struct ContainersRootView: View {
         search.isEmpty ? $isKubernetesGroupExpanded : .constant(true)
     }
 
-    private func containerRow(_ container: ContainerSummary) -> some View {
-        HStack {
+    /// Compose projects the person has deliberately collapsed. Tracking collapse
+    /// rather than expansion means a project that appears while the app is open
+    /// arrives visible — the default is the useful one. Search forces every project
+    /// open, for the same reason the Kubernetes group opens: a match hidden behind a
+    /// disclosure reads as no match at all.
+    private func projectExpansion(_ project: String) -> Binding<Bool> {
+        guard search.isEmpty else { return .constant(true) }
+        return Binding(
+            get: { !collapsedProjects.contains(project) },
+            set: { expanded in
+                if expanded {
+                    collapsedProjects.remove(project)
+                } else {
+                    collapsedProjects.insert(project)
+                }
+            })
+    }
+
+    /// "2 of 3 running" — what a collapsed group most needs to carry, because it is
+    /// the reason someone would open it. A bare count ("3 containers") answers a
+    /// question nobody asked.
+    private func runningSummary(_ containers: [ContainerSummary]) -> String {
+        "\(containers.filter(\.isRunning).count) of \(containers.count) running"
+    }
+
+    /// The published host ports, as `docker ps` would list them, deduplicated and
+    /// ordered.
+    ///
+    /// Only *published* ports appear: a mapping with no `hostPort` is exposed inside
+    /// the container network and is not reachable from this Mac, so listing it here
+    /// would promise something the row cannot deliver. Non-TCP mappings keep their
+    /// protocol suffix because `53/udp` and `53/tcp` are different facts.
+    private func publishedPortSummary(_ ports: [PortMapping]) -> String {
+        var seen = Set<String>()
+        var parts: [String] = []
+        for port in ports.sorted(by: { ($0.hostPort ?? 0) < ($1.hostPort ?? 0) }) {
+            guard let hostPort = port.hostPort else { continue }
+            let isTCP = port.proto.lowercased() == "tcp"
+            let label = isTCP ? "\(hostPort)" : "\(hostPort)/\(port.proto.lowercased())"
+            if seen.insert(label).inserted { parts.append(label) }
+        }
+        return parts.joined(separator: " ")
+    }
+
+    /// A row carried the name, then ~900pt of nothing, then the status — and the
+    /// image was invisible *anywhere* in the list, so the one fact that answers
+    /// "what is this thing" was only reachable by selecting the row. `docker ps`
+    /// shows name, image, ports and status because that is the handful that
+    /// identifies a container at a glance; this row now shows the same four.
+    ///
+    /// Deliberately still a `List` row rather than a `Table`: rows live inside
+    /// Compose-project sections and a collapsed Kubernetes group, and `Table` has
+    /// no outline vocabulary that survives that. The columns are laid out by hand,
+    /// but every element is a plain `Text` in the content layer — nothing here
+    /// redraws a system control.
+    private func containerRow(_ container: ContainerSummary, now: Date) -> some View {
+        HStack(spacing: 12) {
             Label {
                 Text(container.displayName)
                     .lineLimit(1)
@@ -409,15 +613,34 @@ struct ContainersRootView: View {
                     .foregroundStyle(stateColor(for: container))
                     .accessibilityHidden(true)
             }
+            .layoutPriority(2)
 
-            Spacer(minLength: 12)
+            Text(container.image)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                // An image reference is `registry/namespace/name:tag`. The tag is the
+                // part that differs between two otherwise identical rows, so when
+                // space runs out the middle goes and the ends stay.
+                .truncationMode(.middle)
+                .layoutPriority(1)
 
-            TimelineView(.periodic(from: .now, by: 1)) { context in
-                Text(container.statusDisplay(at: context.date))
+            Spacer(minLength: 8)
+
+            if !container.ports.isEmpty {
+                Text(publishedPortSummary(container.ports))
                     .foregroundStyle(.secondary)
+                    .monospacedDigit()
                     .lineLimit(1)
-                    .truncationMode(.tail)
+                    .accessibilityLabel("Published ports: \(publishedPortSummary(container.ports))")
             }
+
+            // `now` comes from the single `TimelineView` clock `containerList` wraps
+            // around the whole list, not a per-row one — see the note there.
+            Text(container.statusDisplay(at: now))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .layoutPriority(2)
         }
         .tag(container.id)
         // Row identity is the engine-facing reference — the unique Docker
@@ -444,7 +667,8 @@ struct ContainersRootView: View {
                 container: selected,
                 model: model,
                 hub: hub,
-                initialTab: initialDetailTab)
+                initialTab: initialDetailTab,
+                initialStatsMetric: initialStatsMetric)
             .id(selected.id)
         } else {
             ContentUnavailableView {
@@ -461,6 +685,13 @@ struct ContainersRootView: View {
             Button(action.title) { perform(action, on: container.id) }
         }
         Divider()
+        // The two ways to run something inside a container sit together, adjacent and
+        // differently named, so the difference between them is visible at the point of
+        // choosing rather than discovered afterwards: one opens a live shell, one
+        // returns a finite result document.
+        Button("Open Terminal", systemImage: "apple.terminal") { openTerminal(for: container) }
+            .disabled(!terminalIsAvailable(for: container))
+            .help(terminalHelp(for: container))
         Button("Run Command…", systemImage: "terminal") { commandTarget = container }
         Divider()
         Button("Copy Name") { MorbPasteboard.copy(container.displayName) }
@@ -550,6 +781,40 @@ struct ContainersRootView: View {
         case "paused", "restarting": return .orange
         default: return .secondary
         }
+    }
+
+    // MARK: Terminal
+
+    private func terminalIsAvailable(for container: ContainerSummary) -> Bool {
+        ContainerTerminalAvailability.isAvailable(
+            for: container, permitsExternalOperations: model.permitsExternalOperations)
+    }
+
+    private func terminalHelp(for container: ContainerSummary) -> String {
+        ContainerTerminalAvailability.helpText(
+            for: container, permitsExternalOperations: model.permitsExternalOperations)
+    }
+
+    /// Every terminal opens its own window and its own hijacked socket; several shells
+    /// into one container are legitimate, so this deliberately does not deduplicate.
+    /// The guard is a backstop — all three call sites are already disabled when it would
+    /// fail — for the case where the container stops between the menu opening and the
+    /// click landing.
+    private func openTerminal(for container: ContainerSummary) {
+        guard terminalIsAvailable(for: container) else { return }
+        ContainerTerminalWindowController.open(for: container, client: model.client)
+    }
+
+    /// Published so the Container menu can carry the same two record commands. A command
+    /// that exists only in the toolbar becomes unreachable the moment the system
+    /// overflows it away at a narrow width — the same reason `routeMaintenanceCommand`
+    /// exists.
+    private var containerRecordCommands: ContainerRecordCommands? {
+        guard let selected else { return nil }
+        return ContainerRecordCommands(
+            canOpenTerminal: terminalIsAvailable(for: selected),
+            openTerminal: { openTerminal(for: selected) },
+            runCommand: { commandTarget = selected })
     }
 
     // MARK: Intents

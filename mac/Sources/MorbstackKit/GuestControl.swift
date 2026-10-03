@@ -112,6 +112,15 @@ public struct GuestReply: Codable, Equatable, Sendable {
     /// `/private/tmp` VirtioFS share. `nil` denotes an older guest that cannot prove
     /// this additional mount; callers must not treat absence as success.
     public var tmpAliasMounted: Bool?
+    /// What `supervisor::apply_proxy_env` actually put in dockerd's environment
+    /// this boot — present on `info` from guests that decode `morb.proxy=`
+    /// (UX-18). Empty string, not absent, means "dockerd has no proxy of this
+    /// kind"; `nil` means an older guest that predates the field. This is a
+    /// report of what was *launched*, so `morb doctor` can tell "the setting
+    /// reached the engine" apart from "we only set config.toml".
+    public var httpProxy: String?
+    public var httpsProxy: String?
+    public var noProxy: String?
     /// `true` when the guest mounted the host's Rosetta share *and* registered it
     /// with `binfmt_misc` — present on `info` from guests that do amd64 setup.
     ///
@@ -154,6 +163,29 @@ public struct GuestReply: Codable, Equatable, Sendable {
     /// guest did not report the additive capability. Neither permits the host to
     /// truncate an existing data image.
     public var diskResize: String?
+    /// The guest kernel's `/proc/meminfo` `MemTotal`, in kB, read fresh on every
+    /// `info` request — present on `info` from guests that report it (UX-17).
+    ///
+    /// `nil` covers *both* "an older guest that predates the field" and "this guest
+    /// reported the explicit `-1` unavailable sentinel" — the wire's `-1` never
+    /// survives decoding as a value a caller could mistake for a real reading.
+    /// Always present together with ``memAvailableKB``: a memory-balloon policy
+    /// needs total and available together or not at all, and there is no
+    /// legitimate guest state that has one without the other.
+    public var memTotalKB: Int64?
+    /// The guest kernel's `/proc/meminfo` `MemAvailable`, in kB — the kernel's own
+    /// reclaim-aware estimate, not `MemFree`. See ``memTotalKB``.
+    public var memAvailableKB: Int64?
+    /// Bytes reclaimed by the guest's most recent periodic `fstrim` sweep of
+    /// `/var/lib/docker` this boot (TECH-3 / UX-16, `disk::spawn_periodic_trim`)
+    /// — present on `info` from guests that report it.
+    ///
+    /// `nil` covers both "an older guest that predates the field" and "no sweep
+    /// has completed yet this boot" (the guest's own `-1` sentinel, `disk::NO_TRIM_YET`),
+    /// same convention as ``memTotalKB``/``memAvailableKB``. A guest with the data
+    /// root on tmpfs never runs the sweep at all, so this stays `nil` for the whole
+    /// boot in that case too — there is nothing on the host disk for it to describe.
+    public var diskLastTrimBytes: Int64?
     /// Failure detail — present on `error`.
     public var message: String?
 
@@ -166,12 +198,62 @@ public struct GuestReply: Codable, Equatable, Sendable {
         case dockerDataOnDisk = "docker_data_on_disk"
         case shares
         case tmpAliasMounted = "tmp_alias_mounted"
+        case httpProxy = "http_proxy"
+        case httpsProxy = "https_proxy"
+        case noProxy = "no_proxy"
         case rosetta
         case binfmtAmd64 = "binfmt_amd64"
         case shareEventBridge = "share_event_bridge"
         case shareEventBridgeContractVersion = "share_event_bridge_contract_version"
         case diskResize = "disk_resize"
+        case memTotalKB = "mem_total_kb"
+        case memAvailableKB = "mem_available_kb"
+        case diskLastTrimBytes = "disk_last_trim_bytes"
         case message
+    }
+
+    /// Hand-written rather than synthesized so the `-1` "unavailable" sentinel on
+    /// ``memTotalKB``/``memAvailableKB`` can be folded into `nil` at the one place
+    /// that reads the wire value — every other caller then only ever sees "a real
+    /// sample" or "no sample," never a value that looks numeric but is not one.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        type = try c.decode(String.self, forKey: .type)
+        uptimeMilliseconds = try c.decodeIfPresent(Int.self, forKey: .uptimeMilliseconds)
+        morbinitVersion = try c.decodeIfPresent(String.self, forKey: .morbinitVersion)
+        kernel = try c.decodeIfPresent(String.self, forKey: .kernel)
+        dockerReady = try c.decodeIfPresent(Bool.self, forKey: .dockerReady)
+        dockerDataOnDisk = try c.decodeIfPresent(Bool.self, forKey: .dockerDataOnDisk)
+        shares = try c.decodeIfPresent(String.self, forKey: .shares)
+        tmpAliasMounted = try c.decodeIfPresent(Bool.self, forKey: .tmpAliasMounted)
+        httpProxy = try c.decodeIfPresent(String.self, forKey: .httpProxy)
+        httpsProxy = try c.decodeIfPresent(String.self, forKey: .httpsProxy)
+        noProxy = try c.decodeIfPresent(String.self, forKey: .noProxy)
+        rosetta = try c.decodeIfPresent(Bool.self, forKey: .rosetta)
+        binfmtAmd64 = try c.decodeIfPresent(String.self, forKey: .binfmtAmd64)
+        shareEventBridge = try c.decodeIfPresent(String.self, forKey: .shareEventBridge)
+        shareEventBridgeContractVersion =
+            try c.decodeIfPresent(Int.self, forKey: .shareEventBridgeContractVersion)
+        diskResize = try c.decodeIfPresent(String.self, forKey: .diskResize)
+        let rawMemTotalKB = try c.decodeIfPresent(Int64.self, forKey: .memTotalKB)
+        let rawMemAvailableKB = try c.decodeIfPresent(Int64.self, forKey: .memAvailableKB)
+        // Both fields are always sent together (see the doc comment above); a guest
+        // that reports the sentinel on one but a real value on the other is treated
+        // as having no usable sample rather than half-trusted.
+        if let rawMemTotalKB, let rawMemAvailableKB, rawMemTotalKB >= 0, rawMemAvailableKB >= 0 {
+            memTotalKB = rawMemTotalKB
+            memAvailableKB = rawMemAvailableKB
+        } else {
+            memTotalKB = nil
+            memAvailableKB = nil
+        }
+        let rawDiskLastTrimBytes = try c.decodeIfPresent(Int64.self, forKey: .diskLastTrimBytes)
+        if let rawDiskLastTrimBytes, rawDiskLastTrimBytes >= 0 {
+            diskLastTrimBytes = rawDiskLastTrimBytes
+        } else {
+            diskLastTrimBytes = nil
+        }
+        message = try c.decodeIfPresent(String.self, forKey: .message)
     }
 }
 

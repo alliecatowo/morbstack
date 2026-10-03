@@ -16,6 +16,8 @@
 //!        * the Docker API relay on vsock 2375 (`proxy.rs`),
 //!        * the stream dialer on vsock 2376 (`dial.rs`),
 //!        * the datagram dialer on vsock 2378 (`datagram.rs`),
+//!        * the local ssh-agent forward listener, guest-initiated out to vsock
+//!          2383 per accepted connection (`ssh_agent_forward.rs`),
 //!        * the dockerd readiness monitor (`proxy.rs`), which also triggers
 //!          the one-shot offline image load.
 //!
@@ -49,11 +51,13 @@ mod datagram;
 mod dial;
 mod disk;
 mod dns;
+mod guest_proxy;
 mod jsonlite;
 mod k8s;
 mod live_share;
 mod live_share_receiver;
 mod log;
+mod meminfo;
 mod mounts;
 mod net;
 mod netaddr;
@@ -61,12 +65,13 @@ mod proxy;
 mod proxy_wrapper;
 mod sha256;
 mod shares;
+mod ssh_agent_forward;
 mod supervisor;
 mod sys;
 mod wire;
 
 #[cfg(target_os = "linux")]
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 #[cfg(target_os = "linux")]
 use std::sync::Arc;
 #[cfg(target_os = "linux")]
@@ -160,6 +165,13 @@ fn run_linux(args: &[String]) {
             // Nor does it mount anything, so it has no shares to report.
             shares: String::new(),
             tmp_alias_mounted: false,
+            // Nor does anything here start dockerd, so no proxy environment
+            // was ever handed to it.
+            http_proxy: String::new(),
+            https_proxy: String::new(),
+            no_proxy: String::new(),
+            // Nothing here provisions or trims a disk either.
+            disk_last_trim_bytes: Arc::new(AtomicI64::new(disk::NO_TRIM_YET)),
             // Reads whatever the disk says, so `--serve-control` can be
             // pointed at a guest image to inspect its persisted k8s state —
             // but nothing here supervises the services, so an `enable` through
@@ -206,6 +218,12 @@ fn real_init() {
     // every container sees the aliased /tmp from its very first bind mount.
     let tmp_alias_mounted = mounts::alias_tmp_to_shared_private_tmp(&share_results);
     let share_report = shares::encode_report(&share_results);
+
+    // The Mac's proxy configuration, same transport and same reason as the
+    // shares just above: dockerd is started by the supervisor further down,
+    // long before the vsock control channel can exist, so its environment
+    // has to be decided from what PID 1 was handed on the command line.
+    let advertised_proxy_env = mounts::advertised_proxy_env();
 
     // After `early_mounts`, which is what puts /dev/vda on /dev in the first
     // place, and before the supervisor, whose reaper would race the mkfs
@@ -286,11 +304,14 @@ fn real_init() {
     let binfmt_status = binfmt::setup();
 
     supervisor::prepare_runtime_dirs();
-    let services = supervisor::apply_dns_flags(
-        supervisor::default_services(docker_data_on_disk),
-        split_dns_ready,
-        guest_dns_fallback_ip,
-        host_gateway_ip,
+    let services = supervisor::apply_proxy_env(
+        supervisor::apply_dns_flags(
+            supervisor::default_services(docker_data_on_disk),
+            split_dns_ready,
+            guest_dns_fallback_ip,
+            host_gateway_ip,
+        ),
+        &advertised_proxy_env,
     );
     // Captured before the table is handed to the supervisor: the host needs
     // it in `info`, and `dial.rs`'s ECONNREFUSED diagnostic is only accurate
@@ -325,6 +346,10 @@ fn real_init() {
 
     let docker_ready = Arc::new(AtomicBool::new(false));
     let shutdown = Arc::new(control::ShutdownSignal::new());
+    // Shared with `disk::spawn_periodic_trim` below: the sweep thread writes,
+    // `info` replies read. Starts at the "no sweep yet" sentinel rather than
+    // 0, which would be indistinguishable from "swept and reclaimed nothing".
+    let disk_last_trim_bytes = Arc::new(AtomicI64::new(disk::NO_TRIM_YET));
 
     let ctx = Arc::new(control::ControlContext {
         start: Instant::now(),
@@ -336,9 +361,22 @@ fn real_init() {
         binfmt: binfmt_status,
         shares: share_report,
         tmp_alias_mounted,
+        // What `apply_proxy_env` actually put on dockerd's command line —
+        // not merely what the host asked for, so a guest that (for whatever
+        // reason) never reached that call still reports the empty string
+        // rather than a claim nothing here can back up.
+        http_proxy: advertised_proxy_env.http.clone().unwrap_or_default(),
+        https_proxy: advertised_proxy_env.https.clone().unwrap_or_default(),
+        no_proxy: advertised_proxy_env.no_proxy.clone().unwrap_or_default(),
+        disk_last_trim_bytes: Arc::clone(&disk_last_trim_bytes),
         k8s: Arc::clone(&k8s_state),
         shutdown: Arc::clone(&shutdown),
     });
+
+    // TECH-3 / UX-16: reclaim deleted images/containers back to the Mac in
+    // the background. A no-op when `docker_data_on_disk` is false (tmpfs
+    // fallback — nothing to trim).
+    disk::spawn_periodic_trim(docker_data_on_disk, Arc::clone(&disk_last_trim_bytes));
 
     // Control channel (vsock 1024). A bind failure is loud but not fatal:
     // we're PID 1, there is nothing above us to hand off to, and an init
@@ -419,6 +457,19 @@ fn real_init() {
     // port, and the wrapper leases the Mac endpoint host-side over its own
     // guest-initiated vsock connection.
 
+    // SSH agent forward (UX-19): the local /run/host-services/ssh-auth.sock
+    // listener always exists, matching Docker Desktop's static contract, but
+    // every connection is a request the host answers fresh — off by default.
+    // Same failure policy as the others: loud, not fatal.
+    if let Err(e) = ssh_agent_forward::spawn_ssh_agent_forwarder() {
+        log::log(&format!(
+            "ERROR: could not bind the ssh-agent forward listener at {}: {} — \
+             SSH_AUTH_SOCK forwarding will not be available in containers",
+            ssh_agent_forward::SSH_AUTH_SOCK_PATH,
+            e
+        ));
+    }
+
     // Kubernetes payload install (vsock 2377 -> the persistent disk). Bound
     // unconditionally even though Kubernetes is off: this is the channel the
     // host uses to *make* it installable, so refusing to listen until it is
@@ -443,7 +494,12 @@ fn real_init() {
         sup.tick();
 
         if sleep_until_tick_or_shutdown(&shutdown) {
-            run_shutdown_sequence(&mut sup, &shutdown, docker_data_on_disk);
+            run_shutdown_sequence(
+                &mut sup,
+                &shutdown,
+                docker_data_on_disk,
+                &disk_last_trim_bytes,
+            );
             return;
         }
     }
@@ -468,20 +524,33 @@ fn sleep_until_tick_or_shutdown(shutdown: &control::ShutdownSignal) -> bool {
 }
 
 /// Bring the guest down in the order the shared contract requires: stop the
-/// services (SIGTERM, then SIGKILL), get `/var/lib/docker` onto the disk,
-/// *then* let the `ok` frame go out, and only power off once it has.
+/// services (SIGTERM, then SIGKILL), reclaim what disk space we cheaply can,
+/// get `/var/lib/docker` onto the disk, *then* let the `ok` frame go out, and
+/// only power off once it has.
 ///
 /// Doing the flush before the reply is the whole point — the host treats
 /// `ok` as permission to tear the VM down, so anything still buffered when
 /// it is sent is data we have promised to have written and have not.
+///
+/// The trim runs *before* the flush, deliberately: `disk::trim_before_shutdown`
+/// needs `/var/lib/docker` still mounted read-write, and it is bounded
+/// (`disk::TRIM_SHUTDOWN_DEADLINE`) precisely because everything after it in this
+/// function — the flush, the reply, the power-off — is still waiting on it. See
+/// `docs/design/DISK-RECLAIM-DECISION.md` §8 for why this, and not a guest-side
+/// timer, is what makes reclaim on an idle-suspended guest actually happen.
 #[cfg(target_os = "linux")]
 fn run_shutdown_sequence(
     sup: &mut supervisor::Supervisor,
     shutdown: &control::ShutdownSignal,
     docker_data_on_disk: bool,
+    disk_last_trim_bytes: &AtomicI64,
 ) {
     log::log("shutdown requested — stopping services");
     sup.stop_all();
+
+    if let Some(bytes) = disk::trim_before_shutdown(docker_data_on_disk) {
+        disk_last_trim_bytes.store(bytes, Ordering::SeqCst);
+    }
 
     log::log("flushing docker's data root");
     disk::flush_docker_data(docker_data_on_disk);

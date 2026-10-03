@@ -133,6 +133,65 @@ final class VolumeInspectorTests: XCTestCase {
             .inconsistent(reported: 0, listed: 1))
     }
 
+    func testTheUsageRowCarriesTheCountAndNeverInventsAZero() {
+        XCTAssertEqual(TrackCVolumeInspector.referenceRowValue(for: nil), "Not scanned yet")
+        XCTAssertEqual(TrackCVolumeInspector.referenceRowValue(for: 0), "0 containers")
+        XCTAssertEqual(TrackCVolumeInspector.referenceRowValue(for: 1), "1 container")
+        XCTAssertEqual(TrackCVolumeInspector.referenceRowValue(for: 4), "4 containers")
+    }
+
+    func testStorageAndUseStatesAnAbsenceOnceAndNamesTheRemedy() {
+        // Docker fills UsageData only when asked, so an unreported size and an
+        // unreported reference count are one fact. The section must say it once,
+        // and the sentence must name what the reader can do about it.
+        let unscanned = TrackCVolumeInspector.usageFootnote(
+            size: nil, reportedReferenceCount: nil, evidence: .unreported)
+        XCTAssertEqual(
+            unscanned,
+            "Size and container references come from the Disk scan. Open Disk to compute them.")
+        XCTAssertTrue(try XCTUnwrap(unscanned).contains("Open Disk"))
+        // ...and the two rows that would both read "Not scanned yet" collapse to one.
+        XCTAssertTrue(
+            TrackCVolumeInspector.usageIsUnscanned(size: nil, reportedReferenceCount: nil))
+        XCTAssertFalse(
+            TrackCVolumeInspector.usageIsUnscanned(size: 10, reportedReferenceCount: nil))
+        XCTAssertFalse(
+            TrackCVolumeInspector.usageIsUnscanned(size: nil, reportedReferenceCount: 0))
+
+        XCTAssertEqual(
+            TrackCVolumeInspector.usageFootnote(
+                size: nil, reportedReferenceCount: 2, evidence: .matches),
+            "Sizes come from the Disk scan. Open Disk to compute them.")
+        XCTAssertEqual(
+            TrackCVolumeInspector.usageFootnote(
+                size: 10, reportedReferenceCount: nil, evidence: .unreported),
+            "Container references come from the Disk scan. Open Disk to compute them.")
+    }
+
+    func testAFootnoteEarnsItsSpaceOnlyByAddingToTheRows() {
+        // "Unused" and "matches" are already visible in the Size and Used By rows.
+        // Repeating them in a caption is the redundancy TASTE-4 was filed for.
+        XCTAssertNil(
+            TrackCVolumeInspector.usageFootnote(
+                size: 10, reportedReferenceCount: 0, evidence: .unused))
+        XCTAssertNil(
+            TrackCVolumeInspector.usageFootnote(
+                size: 10, reportedReferenceCount: 2, evidence: .matches))
+
+        // A disagreement between Docker's count and the current inventory is not in
+        // any row, so it keeps its sentence.
+        XCTAssertEqual(
+            TrackCVolumeInspector.usageFootnote(
+                size: 10, reportedReferenceCount: 2, evidence: .incomplete(reported: 2, listed: 1)),
+            "Docker reports 2 container references, but 1 name is in the current inventory.")
+        XCTAssertEqual(
+            TrackCVolumeInspector.usageFootnote(
+                size: 10, reportedReferenceCount: 0,
+                evidence: .inconsistent(reported: 0, listed: 1)),
+            "The current container inventory lists 1 mounts, while Docker reports 0 references. Refresh before removing this volume."
+        )
+    }
+
     func testRemovalConsequenceKeepsDataLossAndUsageUncertaintyExplicit() {
         XCTAssertEqual(
             TrackCVolumeInspector.removalConsequence(for: volume(refCount: 0)),

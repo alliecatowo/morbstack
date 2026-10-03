@@ -14,10 +14,11 @@ enum BenchCLI {
 
     // MARK: - Registry
 
-    /// Keep the registry here rather than deriving it from `Targets.all`.
-    /// A published target is not automatically a working measurement; the two
-    /// filesystem targets deliberately remain visible as unavailable in `list`
-    /// until they have concrete `Benchmark` implementations.
+    /// Keep the registry here rather than deriving it from `Targets.all`. A
+    /// published target is not automatically a working measurement — `list`
+    /// would show every row as available even for a target whose
+    /// implementation was silently dropped, which is exactly the gap this
+    /// separate registry exists to keep visible.
     private static let benchmarks: [any Benchmark] = [
         ColdBootBenchmark(),
         ResumeBenchmark(),
@@ -25,6 +26,8 @@ enum BenchCLI {
         IdleWakeupsBenchmark(),
         HostRSSBenchmark(),
         GuestMemoryFloorBenchmark(),
+        GitStatusBindmountBenchmark(),
+        NpmInstallBindmountVsVolumeBenchmark(),
     ]
 
     private static var benchmarksByName: [String: any Benchmark] {
@@ -87,7 +90,6 @@ enum BenchCLI {
         out(table.render())
         out()
         out("Run `morb bench run` to measure the available benchmarks. It is never implicit.")
-        out("The two not-implemented rows remain published targets, not PASS results.")
         return 0
     }
 

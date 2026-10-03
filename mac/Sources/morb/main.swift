@@ -41,10 +41,10 @@ let usage = """
       ports        Check loopback port availability; never reserves or starts the daemon
       reset-disk   Delete the Docker data disk and start over (destructive)
       mcp          Model Context Protocol server; read-only unless granted
-      migrate      Import images, volumes and config from another runtime
+      migrate      Import from (--from) or migrate out to (--to) another runtime
       bench        Run the open benchmark suite and report the numbers
       scan         SBOM and CVE scan an image, entirely on this machine
-      export       Write an already-local image or named-volume archive to a user-selected file
+      export       Write already-local image/volume archives, or --all of them, to a user-selected file
       debug        Inspect safe toolbox availability; does not open a shell yet
       context      Inspect the `morbstack` Docker context and discovery socket
       service      Manage Morbstack's explicit per-user background service
@@ -691,6 +691,11 @@ case "status":
             ("docker data", storage),
             ("connections", data["active_connections"]?.displayString ?? "0"),
             ("docker socket", data["docker_socket"]?.displayString ?? MorbPaths.dockerSocket.path),
+            // UX-15: the guest's own address on the `vmnet` NAT segment — "-" while
+            // the VM is not running or the daemon could not read the DHCP lease. See
+            // `docs/design/DNS-DECISION.md`'s DIF-4 step 0 gate result for what this
+            // does and does not prove about a given network.
+            ("guest address", data["guest_address"]?.displayString ?? "-"),
             ("cpus", data["cpus"]?.displayString ?? "-"),
             ("memory", (data["memory_mib"]?.displayString).map { "\($0) MiB" } ?? "-"),
             ("auto-suspend", (data["auto_suspend_minutes"]?.displayString).map { $0 == "0" ? "off" : "\($0)m" } ?? "-"),

@@ -71,10 +71,46 @@ struct LaunchOptions: Sendable, Equatable {
     /// `morbstackd`.
     var tourFixtures = false
 
+    /// `--tour-tab <overview|logs|files|stats|inspect>` — the container detail pane's
+    /// tab to land on, once `--tour-container` has resolved. Without this, a tour
+    /// launch that selects a container always shows Overview, which made the Files,
+    /// Statistics and Logs tabs unreachable without a click — the same gap that had
+    /// previously left `--tour-container` itself unconsumed anywhere in `App.swift`.
+    var tab: TrackBDetailTab?
+
+    /// `--tour-stat-metric <cpu|memory|network|disk>` — the Statistics tab's metric
+    /// picker to land on when `--tour-tab stats` is also given. Without this, the
+    /// network and disk I/O rate charts (UX-9) are only reachable by a click on the
+    /// picker.
+    var statMetric: ContainerStatsMetric?
+
+    /// `--tour-open-terminal` — once `--tour-container` resolves to a running
+    /// container, open its interactive terminal window
+    /// (`ContainerTerminalWindowController`) the same way the toolbar/menu/context-menu
+    /// actions do, without a click.
+    var openTerminal = false
+
+    /// `--tour-project-logs <project>` — open the named Compose project's merged log
+    /// window (`MorbWindowID.projectLogs`) at launch, the same window the Stacks and
+    /// Containers UI open on demand.
+    var projectLogs: String?
+
+    /// `--tour-warm-disk-scan` — run `refreshDisk()` once at launch regardless of the
+    /// selected route. The Images and Volumes "In use"/"Size" columns are merged in
+    /// from the most recent `/system/df` scan (`AppModel.mergeImageUsageFromDisk`,
+    /// `mergeVolumeUsageFromDisk`), which ordinarily only happens on a visit to Disk —
+    /// so a tour launch straight into Images or Volumes would otherwise show every row
+    /// as unscanned, which is honest for a fresh launch but not representative of the
+    /// ordinary, already-used session those routes are normally seen in.
+    var warmDiskScan = false
+
     static let none = LaunchOptions()
 
     /// `true` when the app was launched by the tour tooling rather than by a person.
-    var isTour: Bool { select != nil || container != nil || windowSize != nil }
+    var isTour: Bool {
+        select != nil || container != nil || windowSize != nil || tab != nil
+            || statMetric != nil || openTerminal || projectLogs != nil || warmDiskScan
+    }
 
     /// Developer fixture launches must carry their provenance into the window chrome.
     /// Other developer switches still exercise the actual engine, so they intentionally
@@ -118,6 +154,16 @@ struct LaunchOptions: Sendable, Equatable {
                 if let path = nextValue() { tourCapture = path }
             case "--tour-fixtures":
                 tourFixtures = true
+            case "--tour-tab":
+                if let raw = nextValue() { tab = TrackBDetailTab(rawValue: raw) }
+            case "--tour-stat-metric":
+                if let raw = nextValue() { statMetric = ContainerStatsMetric(rawValue: raw) }
+            case "--tour-open-terminal":
+                openTerminal = true
+            case "--tour-project-logs":
+                if let name = nextValue() { projectLogs = name }
+            case "--tour-warm-disk-scan":
+                warmDiskScan = true
             default:
                 break
             }
@@ -217,6 +263,13 @@ final class AppModel {
     /// detail view keeps owning its own tab state: "View logs of X" should land on Logs
     /// once, not pin every container the user subsequently clicks to the Logs tab.
     var logsTabRequest: String?
+
+    /// A request from the menu bar that the Stacks screen select this Compose project.
+    ///
+    /// One-shot for the same reason ``logsTabRequest`` is: the Stacks outline owns its
+    /// own selection, and a menu-bar jump must place the cursor once rather than
+    /// re-selecting the project every time that view happens to rebuild.
+    var stackSelectionRequest: String?
 
     // MARK: Collaborators
 
@@ -418,6 +471,7 @@ final class AppModel {
         if let newVolumes { volumes = newVolumes }
         if let newNetworks { networks = newNetworks }
         mergeVolumeUsageFromDisk()
+        mergeImageUsageFromDisk()
 
         resolvePendingTourContainer()
 
@@ -458,6 +512,7 @@ final class AppModel {
         if let usage = await fetch({ try await self.client.diskUsage() }) {
             disk = usage
             mergeVolumeUsageFromDisk()
+            mergeImageUsageFromDisk()
         }
     }
 
@@ -471,6 +526,19 @@ final class AppModel {
             guard let data = usage[volumes[index].name] else { continue }
             if volumes[index].size == nil { volumes[index].size = data.size }
             if volumes[index].refCount == nil { volumes[index].refCount = data.refCount }
+        }
+    }
+
+    /// `GET /images/json` reports `Containers` as `-1` on every engine this app has
+    /// been tested against, so the "In use" column comes from the most recent
+    /// `/system/df` scan instead — the same pattern as `mergeVolumeUsageFromDisk()`.
+    /// Only fills a still-unreported (`< 0`) count: a scan is a point-in-time fact and
+    /// must never overwrite whatever `refreshAll()` most recently learned directly.
+    private func mergeImageUsageFromDisk() {
+        guard let usage = disk?.imageUsage, !usage.isEmpty else { return }
+        for index in images.indices {
+            guard images[index].containersUsing < 0, let count = usage[images[index].id] else { continue }
+            images[index].containersUsing = count
         }
     }
 
@@ -979,5 +1047,11 @@ final class AppModel {
         guard logsTabRequest == id else { return false }
         logsTabRequest = nil
         return true
+    }
+
+    /// Consumes a pending Stacks selection request, returning the project name once.
+    func consumeStackSelectionRequest() -> String? {
+        defer { stackSelectionRequest = nil }
+        return stackSelectionRequest
     }
 }

@@ -8,16 +8,36 @@
 > see `docs/design/PATCH-FREE-PUBLISH-ALL.md`.
 
 Independent audit of `code/native-content-continuation` (273 commits, tip `54de308`), covering the
-app, the service, and the repository itself. Companion documents:
+app, the service, and the repository itself.
 
-| Document | Scope |
-| --- | --- |
-| [BRANCH-DECISION.md](BRANCH-DECISION.md) | whether this branch becomes `main` |
-| [UI-AUDIT.md](UI-AUDIT.md) | every UI defect and taste issue, with what it should be instead |
-| [FUNCTIONAL-AUDIT.md](FUNCTIONAL-AUDIT.md) | UI action → CLI verification, per feature |
-| [REPO-AUDIT.md](REPO-AUDIT.md) | architecture, code health, CI/CD, agent harness |
-| [PRODUCT-AUDIT.md](PRODUCT-AUDIT.md) | claim-by-claim verification against source |
-| [DIFFERENTIATION.md](DIFFERENTIATION.md) | what would make this genuinely competitive |
+## Index of `docs/audit/`
+
+*Index refreshed 2026-08-05. This document is the entry point to the directory, so the table below
+lists everything in `docs/audit/`, not only the six written alongside it. Each row's date is the
+evidence date: a finding here describes the tree as of that date and is preserved as dated
+evidence, with later resolutions recorded as notes rather than as rewrites.*
+
+| Document | Date | Scope |
+| --- | --- | --- |
+| **Written with this audit (2026-08-03)** | | |
+| [BRANCH-DECISION.md](BRANCH-DECISION.md) | 08-03 | whether `code/native-content-continuation` becomes `main` |
+| [UI-AUDIT.md](UI-AUDIT.md) | 08-03, open register | every UI defect and taste issue, with what it should be instead; rows get `Status` updates, never rewrites |
+| [FUNCTIONAL-AUDIT.md](FUNCTIONAL-AUDIT.md) | 08-03 | UI action → CLI verification, per feature |
+| [REPO-AUDIT.md](REPO-AUDIT.md) | 08-03 | architecture, code health, test reality, CI/CD, packaging, agent harness |
+| [PRODUCT-AUDIT.md](PRODUCT-AUDIT.md) | 08-03 | claim-by-claim verification against source |
+| [DIFFERENTIATION.md](DIFFERENTIATION.md) | 08-03 | opinionated: what would make this genuinely competitive |
+| **Added since** | | |
+| [TECHNOLOGY-AUDIT.md](TECHNOLOGY-AUDIT.md) | 08-03 | are the platform bets sound — one section per bet, each with a verdict |
+| [ENGINE-MATRIX.md](ENGINE-MATRIX.md) | 08-03 | first full runtime matrix against a rebuilt guest (ports, shares, disk) |
+| [PROXY-FRAMING.md](PROXY-FRAMING.md) | 08-03 | the fail-open admission defect in `DockerProxy`, the framing design that replaced it, and its verification |
+| [BUILD-REPAIR.md](BUILD-REPAIR.md) | 08-03/04 | every compile error and test failure fixed to make `mise run check` green on `swarm/continuation`, and every place intent had to be inferred |
+| [ARCHITECTURE-AUDIT.md](ARCHITECTURE-AUDIT.md) | 08-04 | not "what is broken" but "is this the right structure, and will it hold" |
+| [CONCURRENCY-PROTOCOL-FIXES.md](CONCURRENCY-PROTOCOL-FIXES.md) | 08-04 | CONC-2..5 / PROTO-1,3,5,6,7 / MOD-4 in `MorbstackKit` and `morbinit` |
+| [ECOSYSTEM-MATRIX.md](ECOSYSTEM-MATRIX.md) | 08-04 | Testcontainers (Java/Go/Node/Python) and Dev Containers run live against the engine (EN-8/EN-9), plus the post-ECO-1 zero-config rerun |
+| [INPUT-VALIDATION-REVIEW.md](INPUT-VALIDATION-REVIEW.md) | 08-04, 08-05 | bounds/overflow/truncation review of every framed wire parser in `guest/morbinit` — the gap this audit's §"Caveat" left open |
+| [COMPETITOR-UI-RESEARCH.md](COMPETITOR-UI-RESEARCH.md) | 08-05 | what Docker Desktop and OrbStack actually put on screen; raw evidence, per-claim sourcing labels |
+| [UI-FEATURE-GAP.md](UI-FEATURE-GAP.md) | 08-05 | the delta and verdicts derived from that research |
+| [TASTE-REVIEW.md](TASTE-REVIEW.md) | 08-05, multi-pass | "is this good", not "is this broken"; findings marked LAW vs TASTE, re-reviewed after fixes land |
 
 ## Verdict
 
@@ -60,6 +80,12 @@ scratch `MORBSTACK_HOME`; production defaults unchanged.
 
 A pre-push hook is theatre with no remote, so the gate now fires as `mise run check`
 (+ `scripts/git-hooks/pre-commit`, installed via `mise run install-hooks`), mandated by CONTRIBUTING.md.
+
+> **Resolved 2026-08-05.** The premise of this finding — no remote, no CI execution — is no longer
+> true. `origin` is `git@github.com:alliecatowo/morbstack.git` and CI runs; check it rather than
+> guessing (`gh run list`). Ranked fix #3 below is therefore done. The finding stands as the dated
+> record of what 273 ungated commits cost. Note the README's CI badge still points at a
+> `morbstack/morbstack` org that does not own this repo, so the badge is not evidence of anything.
 
 ### 2. The guest image is stale, and it invalidates a large block of the wave.
 

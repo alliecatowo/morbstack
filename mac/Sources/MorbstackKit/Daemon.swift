@@ -98,6 +98,10 @@ public final class Daemon {
     /// (vsock 2382). Held here so its EOF watchers outlive the closure
     /// registered with the VM manager.
     private let portLeaseServer: GuestPortLeaseServer
+    /// Serves the guest's SSH-agent forward channel (vsock 2383, UX-19). Held
+    /// for the same reason as ``portLeaseServer``: the closure registered with
+    /// the VM manager must not outlive the object it calls into.
+    private let sshAgentForwardServer: SSHAgentForwardServer
     private let liveShareTransport: MorbLiveShareTransport
     private let k8s: K8sManager
     private let controlServer: UnixSocketServer
@@ -151,11 +155,11 @@ public final class Daemon {
     /// inlined so ``LifecycleTests`` can assert the nesting still holds; the guest
     /// pins the other end of the same chain in
     /// `the_reply_budget_leaves_room_for_the_host_ack_timeout_above_it`.
-    static let stopBudget: TimeInterval = 90
+    static let stopBudget: TimeInterval = 110
 
     /// How long the daemon will wait for a `suspend`. Below the CLI's timeout by
     /// enough to also absorb the pre-suspend container query that precedes it.
-    static let suspendBudget: TimeInterval = 110
+    static let suspendBudget: TimeInterval = 130
 
     /// What the `morb` CLI waits for any single daemon call — the outermost budget.
     ///
@@ -163,7 +167,7 @@ public final class Daemon {
     /// argument in `morb/main.swift`: the CLI's number is only meaningful relative to
     /// the daemon's, and a chain whose ends are declared in two files is a chain that
     /// drifts. `callDaemon` uses this as its default.
-    public static let clientTimeout: TimeInterval = 120
+    public static let clientTimeout: TimeInterval = 140
 
     private var idleTimer: DispatchSourceTimer?
     private var signalSources: [DispatchSourceSignal] = []
@@ -209,6 +213,20 @@ public final class Daemon {
         self.portLeaseServer = leaseServer
         vm.setGuestInitiatedConnectionHandler(port: MorbVsockPorts.hostPortLease) { fd in
             leaseServer.handleConnection(fd: fd)
+        }
+        // The guest-initiated SSH-agent forward channel (UX-19). Off by
+        // default: `config.sshAgentForwarding` is this process's actual
+        // `ssh_agent_forwarding` setting, loaded once at startup like every
+        // other configuration value here — an edit needs a daemon restart to
+        // take effect, same as the rest of `config.toml`. Registered the same
+        // durable way as the lease server above — VMManager re-installs it on
+        // every VM generation.
+        let sshAgentForwardingEnabled = config.sshAgentForwarding
+        let sshAgentServer = SSHAgentForwardServer(
+            isEnabled: { sshAgentForwardingEnabled }, log: logger)
+        self.sshAgentForwardServer = sshAgentServer
+        vm.setGuestInitiatedConnectionHandler(port: MorbVsockPorts.sshAgentForward) { fd in
+            sshAgentServer.handleConnection(fd: fd)
         }
         self.liveShareTransport = MorbLiveShareTransport(vm: vm, config: config, log: logger)
         self.k8s = K8sManager(vm: vm, log: logger)
@@ -755,6 +773,27 @@ public final class Daemon {
                     targetBytes: diskCapacity.configuredBytes,
                     summary: "Morbstack cannot read the disk-growth recovery journal, so it will not alter the disk: \(error)")
             }
+            // UX-15: the guest's own address on the `vmnet` NAT segment, from the
+            // system DHCP lease file — `null`, never a stale guess, unless the VM
+            // is actually running. A lease can outlive a stop (macOS does not
+            // revoke it just because the VM went away), so showing it while
+            // stopped would be exactly the "field shows an unreachable address"
+            // failure this feature exists to avoid. See `GuestNetworkAddress.swift`
+            // and `docs/design/DNS-DECISION.md`'s DIF-4 step 0 gate result.
+            //
+            // Hoisted out of the dictionary literal below (rather than inlined, as it
+            // was originally written) because the literal is large enough that adding
+            // one more optional-chained ternary in place made the type checker unable
+            // to finish in reasonable time. Same reason `guestDiskLastTrimBytesField`
+            // is hoisted just below it.
+            let guestAddressField: AnyCodableValue =
+                (vm.state == .running ? GuestNetworkAddressLookup.currentAddress() : nil)
+                .map { AnyCodableValue.string($0.ipv4) } ?? .null
+            // Bytes reclaimed by the guest's most recent periodic `fstrim` sweep
+            // (TECH-3 / UX-16) — `null` while no sweep has landed yet this boot,
+            // never `0` for "unknown" vs. a real "nothing to reclaim" answer.
+            let guestDiskLastTrimBytesField: AnyCodableValue =
+                vm.guestDiskLastTrimBytes.map { AnyCodableValue.int(Int($0)) } ?? .null
             return .success([
                 "failed_port_forwards": .array(failedForwards.map { AnyCodableValue.string($0) }),
                 "state": .string(vm.state.token),
@@ -799,6 +838,16 @@ public final class Daemon {
                 // A readiness report only. In particular it does not turn a larger
                 // configured value into a host file resize while `status` is read.
                 "disk_resize": .object(diskResize.ipcFields),
+                // What the running guest reports it actually launched dockerd
+                // with (UX-18) — `null` while no guest has answered `info` on
+                // this boot, distinct from the empty string the guest itself
+                // sends for "no proxy of this kind". `morb doctor` compares
+                // this against what the *next* boot would configure.
+                "guest_http_proxy": vm.guestHTTPProxy.map { AnyCodableValue.string($0) } ?? .null,
+                "guest_https_proxy": vm.guestHTTPSProxy.map { AnyCodableValue.string($0) } ?? .null,
+                "guest_no_proxy": vm.guestNoProxy.map { AnyCodableValue.string($0) } ?? .null,
+                "guest_address": guestAddressField,
+                "guest_disk_last_trim_bytes": guestDiskLastTrimBytesField,
             ])
 
         case "shares":
@@ -851,24 +900,29 @@ public final class Daemon {
             proxy.beginOrderlyShutdown()
             defer { proxy.endOrderlyShutdown() }
             // Budget must clear the clean-shutdown worst case: up to
-            // `VMManager.shutdownAckTimeout` (65 s) for the guest's ack, plus
+            // `VMManager.shutdownAckTimeout` (85 s) for the guest's ack, plus
             // `guestPowerOffTimeout` (5 s) waiting for it to halt itself, plus
-            // vsock connect and teardown overhead. The `morb` CLI waits 120 s,
+            // vsock connect and teardown overhead. The `morb` CLI waits 140 s,
             // so this replies with a real error before the client gives up.
             //
             // BUDGETS NEST AND THE NESTING IS LOAD-BEARING — an outer layer that
-            // gives up first tears the VM down with the guest's dirty pages still
-            // outstanding, which is the data-loss bug this whole handshake exists
-            // to prevent. Outermost last, every step strictly larger:
+            // gives up first tears the VM down with the guest's dirty pages (or a
+            // disk-trim subprocess) still outstanding, which is the data-loss bug
+            // this whole handshake exists to prevent. Outermost last, every step
+            // strictly larger:
             //
-            //   guest reply cap    54 s  (morbinit control::SHUTDOWN_REPLY_TIMEOUT,
-            //                             itself derived: 2 * (10 s + 2 s) + 30 s)
-            //     < host ack       65 s  (VMManager.shutdownAckTimeout)
-            //       < this         90 s
-            //         < CLI       120 s  (callDaemon's default in morb/main.swift)
+            //   guest reply cap    74 s  (morbinit control::SHUTDOWN_REPLY_TIMEOUT,
+            //                             itself derived: 2 * (10 s + 2 s)
+            //                             + GATED_PHASE_ALLOWANCE (5 s)
+            //                             + disk::TRIM_SHUTDOWN_DEADLINE (15 s)
+            //                             + FLUSH_ALLOWANCE (30 s) — TECH-3/UX-16 §8,
+            //                             docs/design/DISK-RECLAIM-DECISION.md)
+            //     < host ack       85 s  (VMManager.shutdownAckTimeout)
+            //       < this        110 s
+            //         < CLI       140 s  (callDaemon's default in morb/main.swift)
             //
-            // The 90 is sized from the inside out, not picked: worst case here is
-            // ack (65) + power-off wait (5) = 70 s of guest-driven waiting, and the
+            // The 110 is sized from the inside out, not picked: worst case here is
+            // ack (85) + power-off wait (5) = 90 s of guest-driven waiting, and the
             // remaining 20 s absorbs vsock connect, teardown and queue hops while
             // still leaving 30 s before the CLI stops listening.
             return awaitVMOperation("stop", timeout: Daemon.stopBudget) {
@@ -897,14 +951,14 @@ public final class Daemon {
             }
             proxy.beginOrderlyShutdown()
             defer { proxy.endOrderlyShutdown() }
-            // 110, not 120. The container query above can spend up to
+            // 130, not 140. The container query above can spend up to
             // `idleContainerQueryTimeout` before this even starts, and the whole reply
-            // still has to beat the CLI's 120 s so the user sees a real error rather
+            // still has to beat the CLI's 140 s so the user sees a real error rather
             // than a client-side timeout. Nesting, outermost last:
-            //   query (3 s) + this (110 s) < CLI (120 s)
+            //   query (3 s) + this (130 s) < CLI (140 s)
             // and inside it, when suspend degrades to a stop on a host that cannot
             // restore, the same ladder the `stop` case documents has to fit:
-            //   guest reply cap (54 s) < shutdownAckTimeout (65 s) < this (110 s)
+            //   guest reply cap (74 s) < shutdownAckTimeout (85 s) < this (130 s)
             var response = awaitVMOperation("suspend", timeout: Daemon.suspendBudget) {
                 self.vm.suspend(completion: $0)
             }

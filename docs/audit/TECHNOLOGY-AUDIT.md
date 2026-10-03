@@ -441,8 +441,8 @@ that standard, mechanism by mechanism (all VERIFIED against the tree today):
   live-socket double-check (`Daemon.swift`). Per-connection IPC error containment.
 - **Crash of the daemon** — launchd `KeepAlive` with `ThrottleInterval`; socket activation
   means clients re-trigger service.
-- **Shutdown integrity** — the nested budget ladder (guest 54s ⊂ host 65s ⊂ stop 90s ⊂ CLI
-  120s), pinned by tests on both sides, with `ok`-after-flush semantics. This is the single
+- **Shutdown integrity** — the nested budget ladder (guest 74s ⊂ host 85s ⊂ stop 110s ⊂ CLI
+  140s), pinned by tests on both sides, with `ok`-after-flush semantics. This is the single
   most "proper" artifact in the repo.
 - **Restore failure** — detected once, recorded (`save-restore-unsupported` marker), degraded
   to a path that is itself fast; never retried blindly.

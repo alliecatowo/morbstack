@@ -303,11 +303,190 @@ enum LocalArchiveOutput {
         return standardized
     }
 
+    /// The directory counterpart of ``validateDestination(_:replaceExisting:)``, used
+    /// by ``ImageArchiveExporter/exportAll(to:replaceExisting:engine:onItem:)``. A
+    /// directory export writes many files, so the one thing this validates up front —
+    /// rather than once per file — is that the directory itself is not inside
+    /// Morbstack-owned data. It does not require the directory to already exist: the
+    /// caller creates it after this check passes.
+    static func validateDirectoryDestination(_ requested: URL) throws -> URL {
+        guard requested.isFileURL else { throw LocalArchiveOutputError.invalidOutputURL }
+        let manager = FileManager.default
+        let standardized: URL
+        if requested.path.hasPrefix("/") {
+            standardized = requested.standardizedFileURL
+        } else {
+            standardized = URL(fileURLWithPath: manager.currentDirectoryPath, isDirectory: true)
+                .appendingPathComponent(requested.path, isDirectory: true)
+                .standardizedFileURL
+        }
+        guard standardized.path != "/" else { throw LocalArchiveOutputError.invalidOutputURL }
+
+        let canonicalRoot = MorbPaths.root.standardizedFileURL.resolvingSymlinksInPath()
+        // The directory may not exist yet, so there is nothing for
+        // `resolvingSymlinksInPath` to resolve through; checking both the requested
+        // path and its (possibly identical) resolved form matches
+        // `validateDestination`'s same pre/post-symlink pair of checks.
+        let resolved = standardized.resolvingSymlinksInPath()
+        guard !isDescendant(standardized, of: canonicalRoot), !isDescendant(resolved, of: canonicalRoot) else {
+            throw LocalArchiveOutputError.outputIsMorbstackOwned
+        }
+        return standardized
+    }
+
     private static func isDescendant(_ candidate: URL, of root: URL) -> Bool {
         let candidatePath = candidate.standardizedFileURL.path
         let rootPath = root.standardizedFileURL.path
         if rootPath == "/" { return true }
         return candidatePath == rootPath || candidatePath.hasPrefix(rootPath + "/")
+    }
+}
+
+// MARK: - `morb export --all`
+
+/// One image's outcome inside a `--all` directory export. A batch of many images must
+/// not let one failure discard archives already written for every other image, so
+/// this records success or failure per item rather than aborting the loop.
+public struct ImageArchiveExportAllItem: Sendable, Equatable {
+    public let reference: String
+    public let result: ImageArchiveExportResult?
+    public let error: String?
+
+    public init(reference: String, result: ImageArchiveExportResult?, error: String?) {
+        self.reference = reference
+        self.result = result
+        self.error = error
+    }
+}
+
+public struct ImageArchiveExportAllResult: Sendable, Equatable {
+    public let directory: URL
+    public let items: [ImageArchiveExportAllItem]
+    public let manifestPath: URL
+
+    public init(directory: URL, items: [ImageArchiveExportAllItem], manifestPath: URL) {
+        self.directory = directory
+        self.items = items
+        self.manifestPath = manifestPath
+    }
+
+    public var succeeded: [ImageArchiveExportAllItem] { items.filter { $0.result != nil } }
+    public var failed: [ImageArchiveExportAllItem] { items.filter { $0.result == nil } }
+}
+
+extension ImageArchiveExporter {
+
+    /// Exports every currently local tagged image (dangling, untagged images are
+    /// excluded — the same default `morb migrate` uses) into `directory`: one
+    /// Docker-save-compatible tar per image, plus a manifest that says exactly how a
+    /// stock `docker load` restores them. This is deliberately not a new archive
+    /// format or a single combined tar — each file goes through the same
+    /// ``export(imageReference:to:replaceExisting:engine:timeout:onProgress:)`` this
+    /// type already uses for one image, so it keeps that function's atomic per-file
+    /// publish, no-clobber policy, and Morbstack-owned-path refusal. One image's
+    /// export failing does not stop the rest; it is recorded and the loop continues.
+    public static func exportAll(
+        to directory: URL,
+        replaceExisting: Bool,
+        engine: EngineClient = EngineClient(),
+        onItem: ((String) -> Void)? = nil
+    ) throws -> ImageArchiveExportAllResult {
+        let standardizedDirectory = try translatingOutputError { try LocalArchiveOutput.validateDirectoryDestination(directory) }
+        do {
+            try FileManager.default.createDirectory(at: standardizedDirectory, withIntermediateDirectories: true)
+        } catch {
+            throw ImageArchiveExportError.outputDirectoryUnavailable
+        }
+
+        let images = try engine.jsonArray("GET", "/images/json", query: [("all", "0")], timeout: 30)
+        var references = Set<String>()
+        for image in images {
+            let tags = (image["RepoTags"] as? [String]) ?? []
+            for tag in tags where tag != "<none>:<none>" {
+                references.insert(tag)
+            }
+        }
+
+        var items: [ImageArchiveExportAllItem] = []
+        var usedFileNames = Set<String>()
+        for reference in references.sorted() {
+            onItem?(reference)
+            let output = standardizedDirectory.appendingPathComponent(
+                uniqueFileName(for: reference, avoiding: &usedFileNames), isDirectory: false)
+            do {
+                let result = try export(imageReference: reference, to: output, replaceExisting: replaceExisting, engine: engine)
+                items.append(ImageArchiveExportAllItem(reference: reference, result: result, error: nil))
+            } catch {
+                items.append(ImageArchiveExportAllItem(reference: reference, result: nil, error: "\(error)"))
+            }
+        }
+
+        let manifestPath = standardizedDirectory.appendingPathComponent("MANIFEST.txt", isDirectory: false)
+        try writeManifest(items: items, destination: standardizedDirectory, to: manifestPath, replaceExisting: replaceExisting)
+
+        return ImageArchiveExportAllResult(directory: standardizedDirectory, items: items, manifestPath: manifestPath)
+    }
+
+    private static func uniqueFileName(for reference: String, avoiding used: inout Set<String>) -> String {
+        let base = sanitizedFileName(for: reference)
+        var candidate = base + ".tar"
+        var suffix = 2
+        while used.contains(candidate) {
+            candidate = "\(base)-\(suffix).tar"
+            suffix += 1
+        }
+        used.insert(candidate)
+        return candidate
+    }
+
+    private static func sanitizedFileName(for reference: String) -> String {
+        let mapped = reference.unicodeScalars.map { scalar -> Character in
+            switch scalar {
+            case "0"..."9", "a"..."z", "A"..."Z", "-", ".", "_":
+                return Character(scalar)
+            default:
+                return "_"
+            }
+        }
+        let name = String(mapped).trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        return name.isEmpty ? "image" : String(name.prefix(200))
+    }
+
+    private static func writeManifest(
+        items: [ImageArchiveExportAllItem], destination: URL, to path: URL, replaceExisting: Bool
+    ) throws {
+        var lines = [
+            "Morbstack image export (morb export --all)",
+            "One Docker-save-compatible tar per image. Restore any of them with a",
+            "stock Docker CLI — Morbstack is not required on the receiving machine:",
+            "",
+            "  docker load -i <file>.tar",
+            "",
+            "FILE\tIMAGE\tBYTES",
+        ]
+        for item in items {
+            if let result = item.result {
+                lines.append("\(result.destination.lastPathComponent)\t\(item.reference)\t\(result.bytes)")
+            } else {
+                lines.append("#FAILED\t\(item.reference)\t\(item.error ?? "unknown error")")
+            }
+        }
+        let text = lines.joined(separator: "\n") + "\n"
+        guard let data = text.data(using: .utf8) else { throw ImageArchiveExportError.writeFailed }
+        if replaceExisting {
+            try? FileManager.default.removeItem(at: path)
+        }
+        guard FileManager.default.createFile(atPath: path.path, contents: data) else {
+            throw ImageArchiveExportError.writeFailed
+        }
+    }
+
+    private static func translatingOutputError<T>(_ body: () throws -> T) throws -> T {
+        do {
+            return try body()
+        } catch {
+            throw translateOutputError(error)
+        }
     }
 }
 

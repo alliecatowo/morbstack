@@ -13,6 +13,7 @@
 //! which is a great deal more logic than "mount these six things in order".
 #![cfg(target_os = "linux")]
 
+use crate::guest_proxy::{self, ProxyEnv};
 use crate::log;
 use crate::shares::{self, MountState, ShareSpec};
 use crate::sys;
@@ -82,6 +83,23 @@ pub fn advertised_shares() -> Vec<ShareSpec> {
                 e
             ));
             Vec::new()
+        }
+    }
+}
+
+/// Read the same kernel command line ``advertised_shares`` reads, decoded for
+/// the proxy environment instead. Same file, same failure policy: an unset or
+/// unreadable command line just means dockerd starts with no proxy.
+pub fn advertised_proxy_env() -> ProxyEnv {
+    match fs::read_to_string(shares::CMDLINE_PATH) {
+        Ok(cmdline) => guest_proxy::parse_cmdline(&cmdline),
+        Err(e) => {
+            log::log(&format!(
+                "WARNING: could not read {}: {} — dockerd will start with no proxy configured",
+                shares::CMDLINE_PATH,
+                e
+            ));
+            ProxyEnv::default()
         }
     }
 }

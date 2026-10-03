@@ -65,7 +65,8 @@ public enum Doctor {
         config: MorbConfig? = nil,
         includeLiveShares: Bool = true,
         includeDockerIntegrationChecks: Bool = true,
-        includeDaemonChecks: Bool = true
+        includeDaemonChecks: Bool = true,
+        hostProxy: HostProxyConfiguration = .current()
     ) -> DoctorReport {
         var checks: [DoctorCheck] = []
         let fm = FileManager.default
@@ -220,6 +221,14 @@ public enum Doctor {
                 detail: "\(loadedConfig.detectedBootMode.rawValue): "
                     + "\"\(bootCmdlineDescription(loadedConfig, shares: sharePlan.shares))\""
                     + (loadedConfig.kernelCmdline == nil ? "" : " (overridden in config.toml)")))
+
+        // 5d. Proxy (UX-18): what the *next* boot would hand dockerd. This is
+        // intent, computed the same pure way `VMManager` computes it before
+        // booting; the daemon-liveness section below adds the corresponding
+        // "did it actually reach the engine" check for a guest that is
+        // already running.
+        let effectiveProxy = loadedConfig.effectiveGuestProxy(host: hostProxy)
+        checks.append(proxyConfigCheck(config: loadedConfig, effectiveProxy: effectiveProxy))
 
         // 6. Root disk: apparent vs. actually allocated size.
         let diskPath = MorbPaths.diskImage.path
@@ -379,6 +388,20 @@ public enum Doctor {
                             detail: "no guest has reported a morbinit version on this boot "
                                 + "(the VM is stopped, still booting, or the image predates the field)"))
                 }
+
+                // 11c. Proxy, live: not "did we set a variable" but "did dockerd
+                // actually come up with it", read off the running guest's own
+                // `info` report rather than merely echoed back from config.toml.
+                checks.append(
+                    proxyLiveCheck(expected: effectiveProxy, reported: guestReportedProxy()))
+
+                // 11d. Disk reclaim, live (TECH-3 / UX-16): real evidence that the
+                // periodic guest `fstrim` sweep is actually returning space to the
+                // Mac, not a bare claim. `nil` legitimately covers several states
+                // (no sweep yet, RAM-backed data root, older guest) that this check
+                // cannot and does not try to distinguish further — `morb status`'s
+                // `guest_disk_last_trim_bytes` already carries whichever is true.
+                checks.append(diskTrimCheck(reportedBytes: guestReportedDiskLastTrimBytes()))
             } else {
                 checks.append(
                     DoctorCheck(
@@ -445,6 +468,172 @@ public enum Doctor {
         let mode = config.detectedBootMode
         return (try? config.resolvedKernelCmdline(for: mode, shares: shares))
             ?? config.resolvedKernelCmdline(for: mode)
+    }
+
+    // MARK: - Proxy (UX-18)
+
+    /// What the *next* boot would hand dockerd, computed the same pure way
+    /// `VMManager` computes it before booting.
+    static func proxyConfigCheck(config: MorbConfig, effectiveProxy: GuestProxyConfiguration) -> DoctorCheck {
+        guard config.proxyEnabled else {
+            return DoctorCheck(
+                name: "proxy",
+                status: .info,
+                detail: "disabled (proxy_enabled = false in \(MorbPaths.configFile.path)) — "
+                    + "the guest will get no proxy regardless of the Mac's system setting")
+        }
+        if effectiveProxy.pacOnly {
+            // A PAC file is a JavaScript program that picks a proxy per
+            // request; Morbstack has no JavaScript engine and does not run
+            // one to answer this, so it must say so plainly rather than
+            // silently inheriting nothing. See `GuestProxyConfiguration.pacOnly`.
+            return DoctorCheck(
+                name: "proxy",
+                status: .warn,
+                detail: "the Mac is configured for proxy auto-configuration"
+                    + (effectiveProxy.pacURLString.map { " (\($0))" } ?? " (auto-discovery)")
+                    + " — Morbstack cannot evaluate a PAC script, so no proxy will reach the "
+                    + "guest; set http_proxy/https_proxy in \(MorbPaths.configFile.path) to work "
+                    + "around this")
+        }
+        if effectiveProxy.isEmpty {
+            return DoctorCheck(
+                name: "proxy",
+                status: .info,
+                detail: "no proxy configured on this Mac, and no override in "
+                    + "\(MorbPaths.configFile.path) — the guest will boot with none")
+        }
+        return DoctorCheck(
+            name: "proxy",
+            status: .pass,
+            detail: "the next boot will configure dockerd with "
+                + describeProxyFields(
+                    http: effectiveProxy.httpProxy, https: effectiveProxy.httpsProxy,
+                    noProxy: effectiveProxy.noProxy))
+    }
+
+    /// Compares `expected` (what the next boot would configure) against what a
+    /// currently running guest actually reports it launched dockerd with.
+    ///
+    /// This is the "did the setting reach the engine" half UX-18 asks for: a
+    /// mismatch is exactly the state after editing `config.toml` (or the
+    /// Mac's own proxy) without restarting the VM, which `morb doctor` should
+    /// name rather than leave as a silent surprise the next `docker pull`
+    /// hits.
+    static func proxyLiveCheck(
+        expected: GuestProxyConfiguration, reported: (http: String, https: String, noProxy: String)?
+    ) -> DoctorCheck {
+        guard let reported else {
+            return DoctorCheck(
+                name: "proxy-live",
+                status: .info,
+                detail: "no guest has reported its dockerd proxy environment on this boot "
+                    + "(the VM is stopped, still booting, or the image predates the field)")
+        }
+        let matches = reported.http == (expected.httpProxy ?? "")
+            && reported.https == (expected.httpsProxy ?? "")
+            && reported.noProxy == (expected.noProxy ?? "")
+        if matches {
+            if reported.http.isEmpty, reported.https.isEmpty, reported.noProxy.isEmpty {
+                return DoctorCheck(
+                    name: "proxy-live",
+                    status: .info,
+                    detail: "the running guest confirms dockerd has no proxy configured")
+            }
+            return DoctorCheck(
+                name: "proxy-live",
+                status: .pass,
+                detail: "the running guest confirms dockerd was launched with "
+                    + describeProxyFields(
+                        http: reported.http.isEmpty ? nil : reported.http,
+                        https: reported.https.isEmpty ? nil : reported.https,
+                        noProxy: reported.noProxy.isEmpty ? nil : reported.noProxy))
+        }
+        return DoctorCheck(
+            name: "proxy-live",
+            status: .warn,
+            detail: "the running guest's dockerd was launched with "
+                + describeProxyFields(
+                    http: reported.http.isEmpty ? nil : reported.http,
+                    https: reported.https.isEmpty ? nil : reported.https,
+                    noProxy: reported.noProxy.isEmpty ? nil : reported.noProxy)
+                + ", which no longer matches the configured proxy — restart the VM to pick up "
+                + "the change")
+    }
+
+    // MARK: - Disk reclaim (TECH-3 / UX-16)
+
+    /// Reports whether the running guest has real evidence that deleted
+    /// images/containers are coming back to the Mac, using its most recent
+    /// periodic `fstrim` sweep result.
+    ///
+    /// Deliberately never `.fail` and never `.warn` on `nil`: the periodic sweep runs
+    /// on a slow, deliberately staggered cadence (`disk::TRIM_WARMUP_DELAY` then
+    /// `disk::TRIM_INTERVAL` in the guest), so "no result yet" is the ordinary
+    /// state for a VM that has been up only briefly, not a problem to flag.
+    ///
+    /// `nil` here specifically means "the *periodic* in-guest sweep hasn't reported a
+    /// result this boot" — it says nothing about whether space is actually being
+    /// reclaimed, because it cannot see the guest's other reclaim trigger:
+    /// `disk::trim_before_shutdown` runs unconditionally every time the guest stops
+    /// (an idle auto-suspend included), independent of `auto_suspend_minutes` and of
+    /// this per-boot counter. That is a real gap in what this one line can prove
+    /// (TECH-3/UX-16 §8, `docs/design/DISK-RECLAIM-DECISION.md`), not a gap in
+    /// whether reclaim happens — the detail says so rather than letting a reader
+    /// conclude "nothing is being reclaimed for me" from a boot that simply hasn't
+    /// run its own periodic sweep yet.
+    static func diskTrimCheck(reportedBytes: Int64?) -> DoctorCheck {
+        guard let reportedBytes else {
+            return DoctorCheck(
+                name: "disk-trim",
+                status: .info,
+                detail: "no guest has reported a periodic disk-trim sweep result yet on this "
+                    + "boot (none has run yet, the data root is RAM-backed, or the image "
+                    + "predates the field) — this counts only the periodic sweep; Morbstack "
+                    + "also reclaims space every time the guest stops, which this line cannot "
+                    + "see")
+        }
+        return DoctorCheck(
+            name: "disk-trim",
+            status: .pass,
+            detail: "the guest's most recent background sweep returned "
+                + formatBytes(reportedBytes) + " to the Mac")
+    }
+
+    /// Asks a running daemon for the guest's most recent `fstrim` sweep result, or
+    /// `nil` when there is no daemon to ask or none has landed yet.
+    private static func guestReportedDiskLastTrimBytes() -> Int64? {
+        guard FileManager.default.fileExists(atPath: MorbPaths.controlSocket.path),
+            let response = try? UnixSocketClient.roundTrip(
+                path: MorbPaths.controlSocket.path, request: DaemonRequest(cmd: "status"), timeout: 5),
+            response.ok,
+            case .int(let bytes)? = response.data?["guest_disk_last_trim_bytes"]
+        else { return nil }
+        return Int64(bytes)
+    }
+
+    private static func describeProxyFields(http: String?, https: String?, noProxy: String?) -> String {
+        var parts: [String] = []
+        if let http { parts.append("http_proxy=\(http)") }
+        if let https { parts.append("https_proxy=\(https)") }
+        if let noProxy { parts.append("no_proxy=\(noProxy)") }
+        return parts.isEmpty ? "nothing" : parts.joined(separator: ", ")
+    }
+
+    /// Asks a running daemon what the guest reports it actually launched
+    /// dockerd's proxy environment with, or `nil` when there is no daemon to
+    /// ask, the daemon does not answer, or the guest has not reported on this
+    /// boot.
+    private static func guestReportedProxy() -> (http: String, https: String, noProxy: String)? {
+        guard FileManager.default.fileExists(atPath: MorbPaths.controlSocket.path),
+            let response = try? UnixSocketClient.roundTrip(
+                path: MorbPaths.controlSocket.path, request: DaemonRequest(cmd: "status"), timeout: 5),
+            response.ok,
+            case .string(let http)? = response.data?["guest_http_proxy"],
+            case .string(let https)? = response.data?["guest_https_proxy"],
+            case .string(let noProxy)? = response.data?["guest_no_proxy"]
+        else { return nil }
+        return (http, https, noProxy)
     }
 
     /// Reports one line per configured shared root, plus a summary line.

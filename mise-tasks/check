@@ -3,9 +3,11 @@
 set -euo pipefail
 cd "${MISE_PROJECT_ROOT:-$PWD}"
 
-# This repository has no git remote, so CI has never run. Until it does, THIS is
-# the gate. Keep it fast — compile plus unit tests, no bundle assembly, no guest
-# image, no VM — so nobody is tempted to skip it.
+# CI runs now (github.com/alliecatowo/morbstack) — this header used to say it
+# never had, which a comment further down already contradicted by name. THIS is
+# still the gate that matters, because it is the one that runs before the commit
+# rather than after the push. Keep it fast — compile plus unit tests, no bundle
+# assembly, no guest image, no VM — so nobody is tempted to skip it.
 #
 # `swift build` alone does NOT compile the test target. Four test files in this
 # repository were committed in a state where they could never compile, precisely
@@ -75,8 +77,22 @@ echo "==> shellcheck"
 if command -v shellcheck >/dev/null 2>&1; then
 	shellcheck scripts/*.sh scripts/git-hooks/pre-commit || status=1
 	shellcheck --shell=bash mise-tasks/* || status=1
+	shellcheck integrations/shell/morb.bash || status=1
 else
 	echo "warning: shellcheck not found; run 'mise install' (CI will still lint)" >&2
+fi
+
+# The other two completions are not shell dialects shellcheck knows, so they get
+# their own interpreter's parser instead. What each file *declares* is checked by
+# ShellCompletionDriftTests in the Swift suite above -- this only proves they
+# parse. fish is genuinely optional and is skipped rather than faked.
+echo "==> shell completions parse"
+bash -n integrations/shell/morb.bash || status=1
+zsh -n integrations/shell/_morb || status=1
+if command -v fish >/dev/null 2>&1; then
+	fish --no-execute integrations/shell/morb.fish || status=1
+else
+	echo "note: fish not installed; morb.fish was not parse-checked" >&2
 fi
 
 # Third thing CI's lint job treats as fatal, and the last one this gate was

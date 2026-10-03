@@ -59,6 +59,13 @@
 use crate::log;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+// Only `spawn_periodic_trim` (Linux-only: it starts a real background thread that
+// mounts nothing meaningfully on the macOS dev host) touches the shared atomic, so the
+// import itself must be gated the same way — otherwise `cargo clippy -D warnings` on
+// the macOS host build (part of `mise run check`) fails on an unused import that is
+// very much used on the real target.
+#[cfg(target_os = "linux")]
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Mutex;
 
 /// The guest's raw data disk, as attached by morbstackd on the host side.
@@ -268,6 +275,21 @@ impl FsKind {
     /// already-compressed blobs, so a higher level costs CPU for very little
     /// space) and `discard=async`, which lets deletes propagate back to the
     /// sparse host image without stalling the filesystem.
+    ///
+    /// ext4 deliberately does **not** get a live `discard` mount option here
+    /// (TECH-3/UX-16, `docs/design/DISK-RECLAIM-DECISION.md`). Both
+    /// mechanisms were measured to work — a live `discard` mount reclaims
+    /// per delete, `fstrim` reclaims in one bounded sweep — but continuous
+    /// `discard` on ext4 issues a synchronous `FITRIM`-equivalent for every
+    /// freed extent inline with the delete that freed it, which is exactly
+    /// the well-known reason production Linux images (systemd's
+    /// `fstrim.timer`, most cloud distro defaults) schedule `fstrim`
+    /// periodically instead of mounting `discard` live: `docker system
+    /// prune`, `docker rmi`, and ordinary layer-store GC are delete-heavy
+    /// and latency-sensitive, and paying a TRIM round trip inline with every
+    /// one of those deletes is a cost this guest does not need to take when
+    /// a periodic sweep (`spawn_periodic_trim`, driven from `main.rs`)
+    /// reclaims the same space in the background instead.
     pub fn mount_data(self) -> Option<&'static str> {
         match self {
             FsKind::Btrfs => Some("compress=zstd:1,discard=async"),
@@ -784,6 +806,323 @@ pub fn flush_docker_data(on_disk: bool) {
         ));
     }
     crate::sys::sync();
+}
+
+// ---------------------------------------------------------------------------
+// Periodic trim (TECH-3 / UX-16): the reclaim half of disk space, run from a
+// background thread rather than a live `discard` mount — see the reasoning
+// on `FsKind::mount_data`.
+// ---------------------------------------------------------------------------
+
+/// How long to wait after boot before the very first sweep. `fstrim` is a
+/// whole-filesystem scan that costs real I/O while it runs (measured:
+/// `docs/design/DISK-RECLAIM-DECISION.md` §4 step 8 swept ~9.3 GiB in one
+/// pass); running it immediately at boot would compete with the image pulls
+/// and container starts a fresh VM is normally used for in its first minute.
+const TRIM_WARMUP_DELAY: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// Steady-state interval between sweeps. Deliberately much slower than a
+/// delete-driven trigger: `fstrim` reclaims whatever has accumulated since
+/// the last sweep regardless of how long that took to build up, so there is
+/// nothing to gain from checking more often than a user could plausibly
+/// notice disk pressure changing, and real cost (I/O contention with
+/// whatever the guest is doing) to checking more often than that.
+const TRIM_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// How long the *shutdown-time* trim (`trim_before_shutdown`) is allowed to run
+/// before it is killed and the shutdown proceeds without it.
+///
+/// `TRIM_WARMUP_DELAY` above is 10 minutes — comfortably *longer* than
+/// `MorbConfig`'s own default `auto_suspend_minutes` (5). That is not a bug left
+/// in place: it is the reason the periodic sweep alone was inert for an
+/// idle-then-suspended guest (see `docs/design/DISK-RECLAIM-DECISION.md` §8), and
+/// no fixed warmup can close that gap for good, since a user is free to set
+/// `auto_suspend_minutes` to anything above zero. So reclaim on an idle-cycled
+/// guest does not come from this thread at all — it comes from
+/// `trim_before_shutdown`, called unconditionally from `run_shutdown_sequence` on
+/// every guest teardown, with no relationship to elapsed uptime or to
+/// `auto_suspend_minutes` whatsoever.
+///
+/// That trim, unlike the periodic one, sits on the critical path the host is
+/// waiting on before it dares tear the VM down (`control::SHUTDOWN_REPLY_TIMEOUT`
+/// budgets exactly this many seconds for it), so it needs a hard ceiling rather
+/// than the periodic sweep's "run to completion" contract. A killed `fstrim` is
+/// not a partial failure: `FITRIM` only ever discards extents it has already
+/// decided to discard, so cutting it off part-way through loses reclaim
+/// opportunity, never correctness — the next periodic sweep or the next shutdown
+/// picks up whatever this one did not reach.
+pub(crate) const TRIM_SHUTDOWN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// How often the bounded wait below polls the child rather than blocking on it.
+/// Short relative to `TRIM_SHUTDOWN_DEADLINE` so the deadline is honored closely,
+/// long enough not to burn CPU spinning on a `waitpid`.
+const FSTRIM_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Sentinel `disk_last_trim_bytes` value meaning "no sweep has completed yet
+/// this boot" — collapsed to `nil` by the host's `GuestReply` decoder, same
+/// convention as ``mem_total_kb``/``mem_available_kb``. A real `fstrim`
+/// result is always `>= 0`.
+pub const NO_TRIM_YET: i64 = -1;
+
+/// Parses the byte count out of `fstrim -v`'s one line of output.
+///
+/// util-linux has shipped two shapes across versions actually seen in the
+/// wild:
+///   - `"/var/lib/docker: 59050795008 bytes trimmed"` (older / busybox-style)
+///   - `"/var/lib/docker: 55 GiB (59050795008 bytes) trimmed on /dev/vda"` (2.36+)
+///
+/// Rather than special-case either shape, this looks for a run of ASCII
+/// digits immediately followed by `" bytes"` — inside parentheses or not —
+/// and takes the *last* such match on the line, since the parenthesized
+/// exact-byte figure (when present) always follows the rounded human-readable
+/// one. Pure and portable so it is testable without a Linux host or a real
+/// `fstrim` binary.
+pub fn parse_fstrim_trimmed_bytes(output: &str) -> Option<i64> {
+    let line = output.lines().find(|line| line.contains(" bytes"))?;
+    // Operates on bytes throughout, never on a `&str` slice at an
+    // arbitrary offset: a digit run is always pure ASCII and therefore a
+    // valid UTF-8 boundary on both ends, but the *suffix* check below must
+    // not risk slicing `line` mid-codepoint if the line ever contains
+    // non-ASCII (a locale-dependent `fstrim` message, for instance). This is
+    // local subprocess output, not peer input, but a background thread
+    // panicking is still worse than silently reporting "no trim result".
+    let bytes = line.as_bytes();
+    let mut best: Option<i64> = None;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if !bytes[index].is_ascii_digit() {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < bytes.len() && bytes[index].is_ascii_digit() {
+            index += 1;
+        }
+        if bytes[index..].starts_with(b" bytes") {
+            // `start..index` is a contiguous run of ASCII digit bytes, so this
+            // is always valid UTF-8 — the `unwrap` cannot fail.
+            if let Ok(value) = std::str::from_utf8(&bytes[start..index])
+                .unwrap()
+                .parse::<i64>()
+            {
+                best = Some(value);
+            }
+        }
+    }
+    best
+}
+
+/// Polls `poll` until it returns `Some`, or gives up once `deadline` (measured from
+/// the first call, via `elapsed`) has passed — sleeping `interval` between attempts.
+/// `None` deadline means "wait forever" (poll until done, never time out).
+///
+/// Pure with respect to time: `elapsed` and `sleep` are injected rather than calling
+/// `Instant::now`/`std::thread::sleep` directly, which is what lets the *bounding*
+/// behaviour itself (not the real `fstrim` subprocess it is used for) be unit tested
+/// on the macOS dev host in a fraction of a second — see the tests below. The one
+/// production caller (`run_fstrim`) passes real wall-clock time and a real sleep.
+///
+/// Split out from `run_fstrim` because "does this actually stop waiting once the
+/// deadline passes" is exactly the kind of property that is cheap to get subtly
+/// wrong (off-by-one on which call starts the clock, forgetting to check *before*
+/// sleeping again) and expensive to notice by hand — it only shows up as an
+/// occasional slow shutdown days later.
+fn poll_with_deadline<T>(
+    deadline: Option<std::time::Duration>,
+    interval: std::time::Duration,
+    mut elapsed: impl FnMut() -> std::time::Duration,
+    mut sleep: impl FnMut(std::time::Duration),
+    mut poll: impl FnMut() -> Option<T>,
+) -> Option<T> {
+    loop {
+        if let Some(value) = poll() {
+            return Some(value);
+        }
+        if let Some(deadline) = deadline {
+            if elapsed() >= deadline {
+                return None;
+            }
+        }
+        sleep(interval);
+    }
+}
+
+/// Runs one `fstrim` sweep of `DOCKER_DATA_ROOT` and returns the bytes it reported
+/// reclaiming, or `None` on any failure (missing binary, a filesystem that does not
+/// support `FITRIM`, a nonzero exit, unparseable output, or — when `deadline` is
+/// given — the sweep not finishing in time) — every failure is logged but never
+/// fatal, matching every other best-effort step in this module.
+///
+/// `deadline`: `None` for the periodic sweep, which has nothing else waiting on it
+/// and simply runs to completion; `Some(TRIM_SHUTDOWN_DEADLINE)` for
+/// `trim_before_shutdown`, which does.
+#[cfg(target_os = "linux")]
+fn run_fstrim(deadline: Option<std::time::Duration>) -> Option<i64> {
+    use std::process::{Command, Stdio};
+
+    let Some(binary) = which("fstrim") else {
+        log::log("fstrim is not on GUEST_PATH — skipping the trim sweep");
+        return None;
+    };
+    let mut child = match Command::new(&binary)
+        .args(["-v", DOCKER_DATA_ROOT])
+        .env("PATH", crate::supervisor::GUEST_PATH)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => {
+            log::log(&format!("could not run fstrim: {}", e));
+            return None;
+        }
+    };
+
+    let start = std::time::Instant::now();
+    // `Result<ExitStatus, ()>` rather than a bare `Option<ExitStatus>` for the polled
+    // value: `poll_with_deadline` treats a plain `None` from `poll` as "still
+    // running, keep waiting", which a `try_wait` error is *not* — it means the
+    // child can no longer be observed at all, and looping until the deadline on
+    // that would just delay reporting a failure we already know about.
+    let outcome = poll_with_deadline(
+        deadline,
+        FSTRIM_POLL_INTERVAL,
+        || start.elapsed(),
+        std::thread::sleep,
+        || match child.try_wait() {
+            Ok(Some(status)) => Some(Ok(status)),
+            Ok(None) => None,
+            Err(e) => Some(Err(e)),
+        },
+    );
+
+    let status = match outcome {
+        Some(Ok(status)) => status,
+        Some(Err(e)) => {
+            log::log(&format!(
+                "could not wait for fstrim {}: {}",
+                DOCKER_DATA_ROOT, e
+            ));
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        None => {
+            // The deadline passed first — `deadline` must be `Some` here, since a
+            // `None` deadline means `poll_with_deadline` never gives up.
+            log::log(&format!(
+                "fstrim {} did not finish within {:?} — killing it; a later sweep will \
+                 pick up whatever this one did not reach",
+                DOCKER_DATA_ROOT,
+                deadline.unwrap_or_default()
+            ));
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+    };
+
+    let mut stdout = String::new();
+    if let Some(mut out) = child.stdout.take() {
+        let _ = out.read_to_string(&mut stdout);
+    }
+    if !status.success() {
+        let mut stderr = String::new();
+        if let Some(mut err) = child.stderr.take() {
+            let _ = err.read_to_string(&mut stderr);
+        }
+        log::log(&format!(
+            "fstrim {} exited with {} ({})",
+            DOCKER_DATA_ROOT,
+            status,
+            stderr.trim()
+        ));
+        return None;
+    }
+    match parse_fstrim_trimmed_bytes(&stdout) {
+        Some(bytes) => {
+            log::log(&format!(
+                "fstrim {}: {} bytes trimmed",
+                DOCKER_DATA_ROOT, bytes
+            ));
+            Some(bytes)
+        }
+        None => {
+            log::log(&format!(
+                "fstrim {} succeeded but its output could not be parsed: {:?}",
+                DOCKER_DATA_ROOT,
+                stdout.trim()
+            ));
+            None
+        }
+    }
+}
+
+/// Starts the background sweep thread. A no-op when `/var/lib/docker` is not
+/// on the real disk (`on_disk == false`, i.e. the tmpfs fallback): trimming a
+/// tmpfs is meaningless, and there is no `disk.img` on the host for the
+/// reclaim to matter to.
+///
+/// `last_trim_bytes` is shared with `ControlContext` so `info` replies can
+/// report the most recent sweep's result without this thread needing any
+/// awareness of the control protocol.
+///
+/// This thread is a bonus for a guest that stays up (busy or not) past
+/// `TRIM_WARMUP_DELAY` without stopping — it is deliberately *not* what an
+/// idle-then-suspended guest depends on for reclaim. See `trim_before_shutdown`.
+#[cfg(target_os = "linux")]
+pub fn spawn_periodic_trim(on_disk: bool, last_trim_bytes: std::sync::Arc<AtomicI64>) {
+    if !on_disk {
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("disk-trim".to_string())
+        .spawn(move || {
+            std::thread::sleep(TRIM_WARMUP_DELAY);
+            loop {
+                if let Some(bytes) = run_fstrim(None) {
+                    last_trim_bytes.store(bytes, Ordering::SeqCst);
+                }
+                std::thread::sleep(TRIM_INTERVAL);
+            }
+        });
+    if let Err(e) = spawned {
+        log::log(&format!(
+            "WARNING: could not start the periodic disk-trim thread: {} — deleted \
+             images and containers will not return space to the Mac until the next \
+             restart",
+            e
+        ));
+    }
+}
+
+/// Runs one bounded `fstrim` sweep as part of the guest's own shutdown sequence —
+/// see `docs/design/DISK-RECLAIM-DECISION.md` §8.
+///
+/// Called unconditionally from `run_shutdown_sequence` on every clean guest
+/// teardown: an explicit `morb stop`, an app quit, and — the case that matters
+/// most in practice — an idle auto-suspend that degrades to a stop because
+/// save/restore is unavailable (`VMManager.isSaveRestoreBroken`). None of those
+/// depend on `TRIM_WARMUP_DELAY`, `TRIM_INTERVAL`, or the host's configured
+/// `auto_suspend_minutes`: this is the one reclaim trigger that cannot lose a race
+/// against a value a user is free to set to anything above zero, because it is not
+/// racing anything — it runs exactly once, every time the guest is about to stop,
+/// full stop.
+///
+/// The moment is also the cheapest one available: `sup.stop_all()` has already
+/// returned by the time this runs, so nothing is contending for the disk the way a
+/// fresh boot's image pulls would (the reason `TRIM_WARMUP_DELAY` exists at all).
+///
+/// A no-op when `/var/lib/docker` is the tmpfs fallback, matching
+/// `spawn_periodic_trim`.
+#[cfg(target_os = "linux")]
+pub fn trim_before_shutdown(on_disk: bool) -> Option<i64> {
+    if !on_disk {
+        return None;
+    }
+    log::log("shutdown: running a bounded disk-trim sweep before flushing");
+    run_fstrim(Some(TRIM_SHUTDOWN_DEADLINE))
 }
 
 // ---------------------------------------------------------------------------
@@ -1636,5 +1975,185 @@ mod tests {
         for kind in CANDIDATE_FILESYSTEMS {
             assert!(!kind.mkfs_binary().contains('/'));
         }
+    }
+
+    // MARK: - fstrim output parsing (TECH-3 / UX-16)
+
+    #[test]
+    fn parses_the_older_bare_bytes_fstrim_format() {
+        // The exact shape observed live in the TECH-3 spike
+        // (`docs/design/DISK-RECLAIM-DECISION.md` §4 step 8).
+        assert_eq!(
+            parse_fstrim_trimmed_bytes("/var/lib/docker: 59050795008 bytes trimmed\n"),
+            Some(59_050_795_008)
+        );
+    }
+
+    #[test]
+    fn parses_the_util_linux_2_36_human_readable_plus_parenthesized_format() {
+        assert_eq!(
+            parse_fstrim_trimmed_bytes(
+                "/var/lib/docker: 3.5 GiB (3758096384 bytes) trimmed on /dev/vda\n"
+            ),
+            Some(3_758_096_384)
+        );
+    }
+
+    #[test]
+    fn a_zero_byte_sweep_is_a_real_result_not_a_missing_one() {
+        // Zero is a legitimate answer ("nothing to reclaim this sweep") and
+        // must decode as `Some(0)`, distinct from `NO_TRIM_YET` (-1).
+        assert_eq!(
+            parse_fstrim_trimmed_bytes("/var/lib/docker: 0 bytes trimmed\n"),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn unparseable_output_yields_no_result_rather_than_a_panic() {
+        assert_eq!(parse_fstrim_trimmed_bytes(""), None);
+        assert_eq!(
+            parse_fstrim_trimmed_bytes("fstrim: no FITRIM support\n"),
+            None
+        );
+        // A number that is not immediately followed by "bytes" (a byte count
+        // in a different unit, a PID, a percentage) must not be mistaken for
+        // the trimmed-bytes figure.
+        assert_eq!(
+            parse_fstrim_trimmed_bytes("/var/lib/docker: something else 42%\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn multiple_candidate_numbers_prefer_the_one_actually_labelled_bytes() {
+        // "3.5 GiB (3758096384 bytes)" — the rounded human figure "3" or "5"
+        // must not be picked over the exact parenthesized byte count.
+        assert_eq!(
+            parse_fstrim_trimmed_bytes("/mnt: 3.5 GiB (3758096384 bytes) trimmed on /dev/sda1\n"),
+            Some(3_758_096_384)
+        );
+    }
+
+    #[test]
+    fn a_non_ascii_line_does_not_panic_the_parser() {
+        // Local subprocess output, not peer input — but a background thread
+        // panicking on it would still be a self-inflicted denial of service.
+        assert_eq!(
+            parse_fstrim_trimmed_bytes("/var/lib/docker: 42 bytes trimmed — café\n"),
+            Some(42)
+        );
+    }
+
+    // MARK: - poll_with_deadline (the shutdown-time trim's bounding, TECH-3 / UX-16)
+
+    /// A fake clock plus a scripted sequence of poll results, so the deadline
+    /// behaviour can be exercised without a real subprocess or a real wait.
+    struct ScriptedPoll {
+        /// Fake elapsed time, advanced by `sleep`.
+        now: std::time::Duration,
+        /// One entry consumed per `poll()` call; `None` means "still running".
+        results: std::collections::VecDeque<Option<&'static str>>,
+    }
+
+    #[test]
+    fn returns_the_value_the_moment_poll_succeeds() {
+        let state = std::cell::RefCell::new(ScriptedPoll {
+            now: std::time::Duration::ZERO,
+            results: std::collections::VecDeque::from([None, None, Some("done")]),
+        });
+        let mut sleeps = 0;
+        let result = poll_with_deadline(
+            Some(std::time::Duration::from_secs(10)),
+            std::time::Duration::from_millis(1),
+            || state.borrow().now,
+            |d| {
+                sleeps += 1;
+                state.borrow_mut().now += d;
+            },
+            || state.borrow_mut().results.pop_front().flatten(),
+        );
+        assert_eq!(result, Some("done"));
+        // Two "still running" polls, so exactly two sleeps before the third poll
+        // succeeds — the deadline must never be consulted again once poll returns.
+        assert_eq!(sleeps, 2);
+    }
+
+    #[test]
+    fn gives_up_once_the_deadline_elapses_without_ever_finding_a_value() {
+        let state = std::cell::RefCell::new(ScriptedPoll {
+            now: std::time::Duration::ZERO,
+            results: std::collections::VecDeque::new(), // never produces a value
+        });
+        let deadline = std::time::Duration::from_millis(30);
+        let result = poll_with_deadline::<()>(
+            Some(deadline),
+            std::time::Duration::from_millis(10),
+            || state.borrow().now,
+            |d| state.borrow_mut().now += d,
+            || None, // permanently "still running"
+        );
+        assert_eq!(result, None);
+        // Real regression this guards: a deadline that is only checked *before*
+        // sleeping, or only on alternating iterations, either times out early or
+        // never at all. `elapsed()` here is driven entirely by the injected `sleep`,
+        // so this proving `None` at all is proof the loop actually terminated.
+        assert!(state.borrow().now >= deadline);
+    }
+
+    #[test]
+    fn a_none_deadline_polls_forever_rather_than_giving_up() {
+        let mut remaining_none_polls = 5;
+        let result = poll_with_deadline(
+            None,
+            std::time::Duration::ZERO,
+            || std::time::Duration::from_secs(u64::MAX), // "infinite time has passed"
+            |_| {},
+            || {
+                if remaining_none_polls > 0 {
+                    remaining_none_polls -= 1;
+                    None
+                } else {
+                    Some("finally")
+                }
+            },
+        );
+        // Even though `elapsed()` always reports the maximum possible duration, a
+        // `None` deadline must never be compared against it — `poll` alone decides
+        // when this returns.
+        assert_eq!(result, Some("finally"));
+        assert_eq!(remaining_none_polls, 0);
+    }
+
+    // MARK: - the class of bug this module was bitten by twice (see
+    // docs/design/DISK-RECLAIM-DECISION.md §8)
+
+    #[test]
+    fn the_periodic_sweeps_warmup_outlives_the_default_auto_suspend_threshold_on_purpose() {
+        // This is not a bug left unfixed — it is the reason the periodic sweep alone
+        // was inert for an idle-then-suspended guest before `trim_before_shutdown`
+        // existed. `MorbConfig.autoSuspendMinutes`'s default (5 minutes; see
+        // `mac/Sources/MorbstackKit/MorbConfig.swift`) is a host setting a user is
+        // free to lower further, so no fixed value here could ever be made to outlast
+        // it reliably — shortening `TRIM_WARMUP_DELAY` to "fix" this would only move
+        // the race to whatever shorter value someone picks next.
+        //
+        // Reclaim for an idle-cycled guest was therefore moved entirely off this
+        // timer and onto `trim_before_shutdown`, which `run_shutdown_sequence` calls
+        // unconditionally on every guest teardown — no elapsed-time check, no
+        // dependency on `auto_suspend_minutes` at all. If this assertion ever starts
+        // failing because `TRIM_WARMUP_DELAY` shrank, or because someone is tempted to
+        // delete it because it "looks racy": it is supposed to lose this race. Go
+        // check `trim_before_shutdown` is still wired into `run_shutdown_sequence`
+        // before touching either constant.
+        const DEFAULT_AUTO_SUSPEND_MINUTES: u64 = 5;
+        assert!(
+            TRIM_WARMUP_DELAY > std::time::Duration::from_secs(DEFAULT_AUTO_SUSPEND_MINUTES * 60),
+            "TRIM_WARMUP_DELAY {:?} no longer outlives the default auto-suspend threshold — \
+             harmless on its own since reclaim on idle-suspend no longer depends on this timer, \
+             but update this comment (and double check trim_before_shutdown is still what \
+             actually guarantees reclaim) before relying on the new relationship",
+            TRIM_WARMUP_DELAY
+        );
     }
 }

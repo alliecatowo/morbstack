@@ -110,12 +110,15 @@ final class ContainerTerminalWindowController: NSWindowController, NSWindowDeleg
     }
 
     private func presentNoShell(probed: [String]) {
-        _ = probed // Named in the copy generically; the specific candidates aren't user-facing.
+        // The candidates are named because they are the actionable part: someone
+        // rebuilding this image can add exactly one of them. Naming a planned toolbox
+        // that does not exist would be a promise, not a fact.
+        let candidates = probed.isEmpty ? TerminalShellResolution.defaultCandidates : probed
         let text = """
-            This container has neither /bin/bash nor /bin/sh, so there is no shell to attach.
-            Its image likely ships no tools at all — a distroless build. A debug toolbox that \
-            brings its own shell is planned on top of this terminal (see morb debug); it does \
-            not exist yet.
+            \(container.displayName) has none of \(candidates.joined(separator: " or ")), so there is \
+            no shell to attach to. Images built without one — distroless and scratch builds — are \
+            like this by design.
+            Use Run Command to run a binary the image does ship.
             """
         presentUnattachable(text: text)
     }
@@ -123,7 +126,7 @@ final class ContainerTerminalWindowController: NSWindowController, NSWindowDeleg
     private func presentFailed(message: String) {
         var text = message
         if !container.isRunning {
-            text += "\nThe container must be running to open a terminal."
+            text += "\nStart \(container.displayName), then open a terminal in it."
         }
         presentUnattachable(text: text)
     }
@@ -249,25 +252,10 @@ final class ContainerTerminalWindowController: NSWindowController, NSWindowDeleg
 
     private func tearDown(reason: DockerExecPTYSession.TerminationReason) {
         contentView?.surfaceView.onInput = nil
-
-        let statusText: String?
-        switch reason {
-        case .exited(let code):
-            switch code {
-            case .some(0): statusText = "The shell exited."
-            case .some(let status): statusText = "The shell exited with status \(status)."
-            case .none: statusText = "The session ended; Docker did not report an exit status."
-            }
-        case .containerStopped:
-            statusText = "The container stopped, which ended this session."
-        case .transportFailure(let message):
-            statusText = message
-        case .closedByUser:
-            // The window is already going away; nothing to show.
-            statusText = nil
-        }
-
-        if let statusText {
+        // The wording lives in `ContainerTerminalStatus` so each ending is a table a
+        // test can read back; `nil` is `.closedByUser`, where the window is already
+        // going away and there is no one to tell.
+        if let statusText = ContainerTerminalStatus.text(for: reason) {
             contentView?.showStatusBar(text: statusText)
         }
     }

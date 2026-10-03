@@ -65,6 +65,46 @@ public struct MorbConfig: Equatable, Codable, Sendable {
     /// here does not claim that inotify delivery exists yet.
     public var liveSharePaths: [String]
 
+    /// Whether Morbstack passes a proxy to dockerd at all (UX-18).
+    ///
+    /// The off switch: `false` means no `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`
+    /// reaches the guest regardless of what the Mac has configured or what
+    /// the override fields below say. Defaults to `true` — inherit the Mac's
+    /// proxy — because a corporate network with an unconfigured proxy is a
+    /// guest that cannot pull images at all, and that failure mode should be
+    /// the one somebody has to opt into, not the shipped default.
+    public var proxyEnabled: Bool
+
+    /// Explicit HTTP proxy URL, overriding whatever the Mac has configured.
+    /// `nil`/empty means "use the Mac's system HTTP proxy, if any".
+    public var httpProxyOverride: String?
+
+    /// Explicit HTTPS proxy URL, overriding whatever the Mac has configured.
+    /// `nil`/empty means "use the Mac's system HTTPS proxy, if any".
+    public var httpsProxyOverride: String?
+
+    /// Explicit `NO_PROXY` value, overriding whatever the Mac's proxy
+    /// exceptions list says. `nil`/empty means "use the Mac's exceptions
+    /// list, if any" — not "bypass nothing"; see
+    /// ``effectiveGuestProxy(host:)``.
+    public var noProxyOverride: String?
+
+    /// Whether the guest's `/run/host-services/ssh-auth.sock` listener (UX-19) is
+    /// allowed to forward to this Mac's real `SSH_AUTH_SOCK`.
+    ///
+    /// **Off by default, and this is a real security boundary, not a convenience
+    /// default.** Once `true`, any running container that bind-mounts that fixed
+    /// guest path and sets `SSH_AUTH_SOCK` to it can ask the host's SSH agent to
+    /// sign with the user's own keys for as long as `morbstackd` is running — the
+    /// same shape Docker Desktop and OrbStack both already ship, but nothing about
+    /// starting a container should silently imply "and it can now authenticate as
+    /// me." The guest-side socket path always exists regardless of this flag, so a
+    /// Compose file copied from a Docker Desktop machine finds the path it expects;
+    /// every connection to it is refused with an explicit reason
+    /// (``SSHAgentForward``) until this is turned on. See
+    /// `docs/design/SSH-AGENT-FORWARDING.md`.
+    public var sshAgentForwarding: Bool
+
     /// How the guest is brought up.
     public enum BootMode: String, Equatable, Sendable {
         /// Kernel + initramfs; `morbinit` runs as `/init` and the rootfs lives in RAM.
@@ -98,7 +138,12 @@ public struct MorbConfig: Equatable, Codable, Sendable {
         autoSuspendMinutes: Int = 5,
         allowLANPortPublishing: Bool = true,
         sharedPaths: [String] = MorbShares.defaultSharedPaths,
-        liveSharePaths: [String] = []
+        liveSharePaths: [String] = [],
+        proxyEnabled: Bool = true,
+        httpProxyOverride: String? = nil,
+        httpsProxyOverride: String? = nil,
+        noProxyOverride: String? = nil,
+        sshAgentForwarding: Bool = false
     ) {
         self.cpus = cpus
         self.memoryMiB = memoryMiB
@@ -111,6 +156,11 @@ public struct MorbConfig: Equatable, Codable, Sendable {
         self.allowLANPortPublishing = allowLANPortPublishing
         self.sharedPaths = sharedPaths
         self.liveSharePaths = liveSharePaths
+        self.proxyEnabled = proxyEnabled
+        self.httpProxyOverride = httpProxyOverride
+        self.httpsProxyOverride = httpsProxyOverride
+        self.noProxyOverride = noProxyOverride
+        self.sshAgentForwarding = sshAgentForwarding
     }
 
     /// The concrete CPU count to hand to the hypervisor, resolving the `0` sentinel.
@@ -168,6 +218,23 @@ public struct MorbConfig: Equatable, Codable, Sendable {
         try MorbShares.appendToCmdline(resolvedKernelCmdline(for: mode), shares: shares)
     }
 
+    /// The full kernel command line: shares (see the overload above) plus one
+    /// `morb.proxy=<field>:<value>` argument per configured proxy field
+    /// (UX-18).
+    ///
+    /// `proxy` defaults to empty so every existing caller that only cares
+    /// about shares keeps compiling and keeps booting a guest with no proxy
+    /// arguments, unchanged. `VMManager` is the one caller that resolves a
+    /// real ``GuestProxyConfiguration`` and passes it here.
+    public func resolvedKernelCmdline(
+        for mode: BootMode,
+        shares: [MorbDirectoryShare],
+        proxy: GuestProxyConfiguration = GuestProxyConfiguration()
+    ) throws -> String {
+        try MorbGuestProxy.appendToCmdline(
+            resolvedKernelCmdline(for: mode, shares: shares), proxy: proxy)
+    }
+
     /// The VirtioFS sharing plan implied by ``sharedPaths``.
     ///
     /// - Parameter probe: Filesystem classifier, injected for testing.
@@ -197,6 +264,11 @@ public struct MorbConfig: Equatable, Codable, Sendable {
         case allowLANPortPublishing = "allow_lan_port_publishing"
         case sharedPaths = "shared_paths"
         case liveSharePaths = "live_share_paths"
+        case proxyEnabled = "proxy_enabled"
+        case httpProxyOverride = "http_proxy"
+        case httpsProxyOverride = "https_proxy"
+        case noProxyOverride = "no_proxy"
+        case sshAgentForwarding = "ssh_agent_forwarding"
     }
 
     /// Loads a configuration from disk, returning defaults when the file does not exist.
@@ -244,6 +316,11 @@ public struct MorbConfig: Equatable, Codable, Sendable {
         if baseline.allowLANPortPublishing != candidate.allowLANPortPublishing { changed.insert(.allowLANPortPublishing) }
         if baseline.sharedPaths != candidate.sharedPaths { changed.insert(.sharedPaths) }
         if baseline.liveSharePaths != candidate.liveSharePaths { changed.insert(.liveSharePaths) }
+        if baseline.proxyEnabled != candidate.proxyEnabled { changed.insert(.proxyEnabled) }
+        if baseline.httpProxyOverride != candidate.httpProxyOverride { changed.insert(.httpProxyOverride) }
+        if baseline.httpsProxyOverride != candidate.httpsProxyOverride { changed.insert(.httpsProxyOverride) }
+        if baseline.noProxyOverride != candidate.noProxyOverride { changed.insert(.noProxyOverride) }
+        if baseline.sshAgentForwarding != candidate.sshAgentForwarding { changed.insert(.sshAgentForwarding) }
         return changed
     }
 
@@ -328,6 +405,11 @@ public struct MorbConfig: Equatable, Codable, Sendable {
         case .allowLANPortPublishing: .boolean(allowLANPortPublishing)
         case .sharedPaths: .stringArray(sharedPaths)
         case .liveSharePaths: .stringArray(liveSharePaths)
+        case .proxyEnabled: .boolean(proxyEnabled)
+        case .httpProxyOverride: .string(httpProxyOverride ?? "")
+        case .httpsProxyOverride: .string(httpsProxyOverride ?? "")
+        case .noProxyOverride: .string(noProxyOverride ?? "")
+        case .sshAgentForwarding: .boolean(sshAgentForwarding)
         }
     }
 
@@ -344,6 +426,11 @@ public struct MorbConfig: Equatable, Codable, Sendable {
         case (.allowLANPortPublishing, .boolean(let value)): allowLANPortPublishing = value
         case (.sharedPaths, .stringArray(let value)): sharedPaths = value
         case (.liveSharePaths, .stringArray(let value)): liveSharePaths = value
+        case (.proxyEnabled, .boolean(let value)): proxyEnabled = value
+        case (.httpProxyOverride, .string(let value)): httpProxyOverride = value.isEmpty ? nil : value
+        case (.httpsProxyOverride, .string(let value)): httpsProxyOverride = value.isEmpty ? nil : value
+        case (.noProxyOverride, .string(let value)): noProxyOverride = value.isEmpty ? nil : value
+        case (.sshAgentForwarding, .boolean(let value)): sshAgentForwarding = value
         default:
             assertionFailure("PersistedKey and TOMLValue no longer agree")
         }
@@ -532,6 +619,44 @@ public struct MorbConfig: Equatable, Codable, Sendable {
         out += "# off by default; each path must be a\n"
         out += "# strict descendant of one shared_paths root. Must be written on one line.\n"
         out += "live_share_paths = \(MorbConfig.quoteArray(liveSharePaths))\n"
+        out += "\n"
+        out += "# Pass the Mac's configured HTTP/HTTPS proxy through to dockerd. Set false\n"
+        out += "# to boot with no proxy regardless of what macOS or the overrides below say.\n"
+        out += "proxy_enabled = \(proxyEnabled)\n"
+        out += "\n"
+        if let httpProxyOverride, !httpProxyOverride.isEmpty {
+            out += "# Override the HTTP proxy URL instead of using the Mac's system setting.\n"
+            out += "http_proxy = \(MorbConfig.quote(httpProxyOverride))\n"
+        } else {
+            out += "# Override the HTTP proxy URL instead of using the Mac's system setting,\n"
+            out += "# e.g. \"http://proxy.example.com:8080\".\n"
+            out += "# http_proxy = \"\"\n"
+        }
+        out += "\n"
+        if let httpsProxyOverride, !httpsProxyOverride.isEmpty {
+            out += "# Override the HTTPS proxy URL instead of using the Mac's system setting.\n"
+            out += "https_proxy = \(MorbConfig.quote(httpsProxyOverride))\n"
+        } else {
+            out += "# Override the HTTPS proxy URL instead of using the Mac's system setting.\n"
+            out += "# https_proxy = \"\"\n"
+        }
+        out += "\n"
+        if let noProxyOverride, !noProxyOverride.isEmpty {
+            out += "# Override NO_PROXY instead of using the Mac's proxy exceptions list.\n"
+            out += "no_proxy = \(MorbConfig.quote(noProxyOverride))\n"
+        } else {
+            out += "# Override NO_PROXY instead of using the Mac's proxy exceptions list,\n"
+            out += "# e.g. \"localhost,127.0.0.1,.internal.example.com\".\n"
+            out += "# no_proxy = \"\"\n"
+        }
+        out += "\n"
+        out += "# Forward this Mac's SSH agent into the guest at\n"
+        out += "# /run/host-services/ssh-auth.sock (Docker Desktop's own path). Off by\n"
+        out += "# default: once true, any container that bind-mounts that path and sets\n"
+        out += "# SSH_AUTH_SOCK to it can ask the host agent to sign with the user's own\n"
+        out += "# keys for as long as morbstackd is running. See\n"
+        out += "# docs/design/SSH-AGENT-FORWARDING.md before enabling this.\n"
+        out += "ssh_agent_forwarding = \(sshAgentForwarding)\n"
         return out
     }
 
@@ -616,6 +741,19 @@ public struct MorbConfig: Equatable, Codable, Sendable {
                 // live-share bridge validates strict containment before it creates a
                 // watcher; parsing only preserves the person's declared selection.
                 config.liveSharePaths = try requireStringArray(value, key: key, line: lineNumber)
+            case .proxyEnabled:
+                config.proxyEnabled = try requireBool(value, key: key, line: lineNumber)
+            case .httpProxyOverride:
+                let url = try requireString(value, key: key, line: lineNumber)
+                config.httpProxyOverride = url.isEmpty ? nil : url
+            case .httpsProxyOverride:
+                let url = try requireString(value, key: key, line: lineNumber)
+                config.httpsProxyOverride = url.isEmpty ? nil : url
+            case .noProxyOverride:
+                let noProxy = try requireString(value, key: key, line: lineNumber)
+                config.noProxyOverride = noProxy.isEmpty ? nil : noProxy
+            case .sshAgentForwarding:
+                config.sshAgentForwarding = try requireBool(value, key: key, line: lineNumber)
             }
         }
         return config

@@ -490,6 +490,8 @@ enum ShotFixtures {
         memBase: Int64,
         memSwing: Int64,
         memLimit: Int64,
+        networkPerSecond: (received: Int64, transmitted: Int64)? = (received: 96_000, transmitted: 48_000),
+        blockPerSecond: (read: Int64, written: Int64)? = (read: 32_768, written: 131_072),
         count: Int = 60
     ) -> [StatsSample] {
         var state = UInt64(truncatingIfNeeded: name.utf8.reduce(7) { $0 &* 31 &+ Int($1) })
@@ -499,6 +501,16 @@ enum ShotFixtures {
             state ^= state << 17
             return Double(state % 10_000) / 10_000
         }
+
+        // Cumulative, exactly as the Engine reports them: the fixture accumulates
+        // totals and lets the app derive the rates, so a fixture-backed run exercises
+        // the same delta arithmetic a live stream does instead of handing the chart
+        // pre-computed throughput it would never receive in production.
+        var receivedTotal: Int64 = 4_194_304
+        var transmittedTotal: Int64 = 1_048_576
+        var readTotal: Int64 = 8_388_608
+        var writtenTotal: Int64 = 2_097_152
+        let secondsPerSample = 2.0
 
         var samples: [StatsSample] = []
         for index in 0..<count {
@@ -511,12 +523,26 @@ enum ShotFixtures {
             let memWave = wave * 0.6 + next() * 0.4
             let mem = memBase + Int64(Double(memSwing) * memWave)
 
+            let trafficWave = 0.35 + wave * 0.9 + next() * 0.4
+            if let networkPerSecond {
+                receivedTotal += Int64(Double(networkPerSecond.received) * secondsPerSample * trafficWave)
+                transmittedTotal += Int64(Double(networkPerSecond.transmitted) * secondsPerSample * trafficWave)
+            }
+            if let blockPerSecond {
+                readTotal += Int64(Double(blockPerSecond.read) * secondsPerSample * next())
+                writtenTotal += Int64(Double(blockPerSecond.written) * secondsPerSample * trafficWave)
+            }
+
             samples.append(
                 StatsSample(
                     cpuPercent: cpu,
                     memBytes: mem,
                     memLimit: memLimit,
-                    ts: ago(minutes: Double(count - index) * (2.0 / 60.0))))
+                    networkReceivedBytes: networkPerSecond == nil ? nil : receivedTotal,
+                    networkTransmittedBytes: networkPerSecond == nil ? nil : transmittedTotal,
+                    blockReadBytes: blockPerSecond == nil ? nil : readTotal,
+                    blockWrittenBytes: blockPerSecond == nil ? nil : writtenTotal,
+                    ts: ago(minutes: Double(count - index) * (secondsPerSample / 60.0))))
         }
         return samples
     }
@@ -524,10 +550,18 @@ enum ShotFixtures {
     /// The per-container time series available to fixture-backed runs.  The data is
     /// useful to chart/accessibility tests but is not rendered by this module.
     static let statsByContainer: [(name: String, samples: [StatsSample])] = [
-        ("shopfront-web-1", stats(for: "web", cpuBase: 1.2, cpuSwing: 6, memBase: 24_117_248, memSwing: 8_388_608, memLimit: 2_147_483_648)),
+        // No block counters on purpose. `io.stat` lists a device only once the cgroup
+        // has moved bytes over it, so a container that has served everything it needs
+        // out of the page cache reports an empty `io_service_bytes_recursive` array —
+        // this is the fixture that makes the Disk tab's "No Disk Activity Recorded"
+        // state reachable without a live engine.
+        ("shopfront-web-1", stats(for: "web", cpuBase: 1.2, cpuSwing: 6, memBase: 24_117_248, memSwing: 8_388_608, memLimit: 2_147_483_648, blockPerSecond: nil)),
         ("shopfront-api-1", stats(for: "api", cpuBase: 8, cpuSwing: 34, memBase: 268_435_456, memSwing: 96_468_992, memLimit: 1_073_741_824)),
         ("shopfront-worker-1", stats(for: "worker", cpuBase: 22, cpuSwing: 48, memBase: 402_653_184, memSwing: 121_634_816, memLimit: 1_073_741_824)),
-        ("shopfront-redis-1", stats(for: "redis", cpuBase: 0.6, cpuSwing: 3, memBase: 12_582_912, memSwing: 3_145_728, memLimit: 536_870_912)),
+        // No interface counters on purpose: a container the Engine reports no networks
+        // for — `--network none`, or host networking — which is the fixture behind the
+        // Network tab's "Network Statistics Unavailable" state.
+        ("shopfront-redis-1", stats(for: "redis", cpuBase: 0.6, cpuSwing: 3, memBase: 12_582_912, memSwing: 3_145_728, memLimit: 536_870_912, networkPerSecond: nil)),
         ("shopfront-postgres-1", stats(for: "postgres", cpuBase: 3, cpuSwing: 14, memBase: 184_549_376, memSwing: 41_943_040, memLimit: 2_147_483_648)),
         ("analytics-grafana-1", stats(for: "grafana", cpuBase: 2, cpuSwing: 9, memBase: 96_468_992, memSwing: 20_971_520, memLimit: 1_073_741_824)),
         // A wide memory swing on purpose: this is the container the Stats tab is
@@ -535,6 +569,26 @@ enum ShotFixtures {
         // 4 GiB limit draws a chart indistinguishable from a ruled line.
         ("analytics-clickhouse-1", stats(for: "clickhouse", cpuBase: 12, cpuSwing: 61, memBase: 1_181_116_006, memSwing: 1_073_741_824, memLimit: 4_294_967_296)),
         ("analytics-vector-1", stats(for: "vector", cpuBase: 4, cpuSwing: 11, memBase: 58_720_256, memSwing: 12_582_912, memLimit: 536_870_912)),
+        // The two kubelet-managed records complete the running set, and between them
+        // they model how Docker actually reports a pod. The app container joins the
+        // sandbox's network namespace (`--network container:…`), so the Engine reports
+        // no interfaces of its own for it; the pause container that owns the namespace
+        // is the one carrying the counters, and it does no block I/O at all.
+        (
+            "k8s_coredns_coredns-7f9c69d9d8-4wqxr_kube-system_1c1c86b5-90a4-4e6f-a2d8-6a70428f6a9f_0",
+            stats(
+                for: "coredns", cpuBase: 0.8, cpuSwing: 4,
+                memBase: 31_457_280, memSwing: 6_291_456, memLimit: 178_257_920,
+                networkPerSecond: nil)
+        ),
+        (
+            "k8s_POD_coredns-7f9c69d9d8-4wqxr_kube-system_1c1c86b5-90a4-4e6f-a2d8-6a70428f6a9f_0",
+            stats(
+                for: "coredns-sandbox", cpuBase: 0.1, cpuSwing: 0.3,
+                memBase: 561_152, memSwing: 65_536, memLimit: 178_257_920,
+                networkPerSecond: (received: 12_000, transmitted: 9_000),
+                blockPerSecond: nil)
+        ),
     ]
 
     // MARK: - Inspect documents

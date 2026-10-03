@@ -87,6 +87,32 @@ final class ConfigTests: XCTestCase {
         XCTAssertTrue(parsed.toTOML().contains("allow_lan_port_publishing = false"))
     }
 
+    func testSSHAgentForwardingDefaultsToOff() throws {
+        // A real security boundary (UX-19), not a convenience default: forwarding
+        // the host's SSH agent into every container must never happen because
+        // somebody merely installed Morbstack.
+        XCTAssertFalse(MorbConfig().sshAgentForwarding)
+        let parsed = try MorbConfig.parse("")
+        XCTAssertFalse(parsed.sshAgentForwarding)
+    }
+
+    func testSSHAgentForwardingRoundTrips() throws {
+        let original = MorbConfig(sshAgentForwarding: true)
+        let parsed = try MorbConfig.parse(original.toTOML())
+        XCTAssertTrue(parsed.sshAgentForwarding)
+        XCTAssertTrue(parsed.toTOML().contains("ssh_agent_forwarding = true"))
+
+        let off = try MorbConfig.parse(MorbConfig(sshAgentForwarding: false).toTOML())
+        XCTAssertFalse(off.sshAgentForwarding)
+    }
+
+    func testSSHAgentForwardingChangeIsDetected() {
+        let off = MorbConfig(sshAgentForwarding: false)
+        let on = MorbConfig(sshAgentForwarding: true)
+        XCTAssertEqual(MorbConfig.changedKeys(from: off, to: on), [.sshAgentForwarding])
+        XCTAssertEqual(MorbConfig.changedKeys(from: off, to: off), [])
+    }
+
     func testRoundTripOfCustomConfiguration() throws {
         let original = MorbConfig(
             cpus: 6,
@@ -197,5 +223,50 @@ final class ConfigTests: XCTestCase {
 
     func testAutoSuspendZeroIsAllowed() throws {
         XCTAssertEqual(try MorbConfig.parse("auto_suspend_minutes = 0").autoSuspendMinutes, 0)
+    }
+
+    // MARK: - Proxy (UX-18)
+
+    func testProxyEnabledDefaultsToTrue() {
+        XCTAssertTrue(MorbConfig().proxyEnabled)
+        XCTAssertNil(MorbConfig().httpProxyOverride)
+        XCTAssertNil(MorbConfig().httpsProxyOverride)
+        XCTAssertNil(MorbConfig().noProxyOverride)
+    }
+
+    func testProxyEnabledCanBeParsedOff() throws {
+        XCTAssertFalse(try MorbConfig.parse("proxy_enabled = false").proxyEnabled)
+    }
+
+    func testProxyOverridesRoundTrip() throws {
+        let original = MorbConfig(
+            proxyEnabled: true,
+            httpProxyOverride: "http://proxy.corp.example:8080",
+            httpsProxyOverride: "http://proxy.corp.example:8443",
+            noProxyOverride: "localhost,127.0.0.1,.corp.example")
+        let parsed = try MorbConfig.parse(original.toTOML())
+        XCTAssertEqual(parsed, original)
+    }
+
+    func testEmptyProxyOverridesBecomeNil() throws {
+        let config = try MorbConfig.parse(
+            """
+            http_proxy = ""
+            https_proxy = ""
+            no_proxy = ""
+            """)
+        XCTAssertNil(config.httpProxyOverride)
+        XCTAssertNil(config.httpsProxyOverride)
+        XCTAssertNil(config.noProxyOverride)
+    }
+
+    func testProxyChangedKeysAreDetected() {
+        let baseline = MorbConfig()
+        var candidate = baseline
+        candidate.proxyEnabled = false
+        candidate.httpProxyOverride = "http://proxy:8080"
+        XCTAssertEqual(
+            MorbConfig.changedKeys(from: baseline, to: candidate),
+            [.proxyEnabled, .httpProxyOverride])
     }
 }

@@ -26,8 +26,82 @@ enum ExportCLI {
             return exportImage(arguments: Array(arguments.dropFirst()), json: json)
         case "volume":
             return exportVolume(arguments: Array(arguments.dropFirst()), json: json)
+        case "--all":
+            // Unlike `image`/`volume`, `--all` is a flag on `morb export` itself, not
+            // a subcommand name — it needs the full, undropped argument list so it can
+            // parse its own `--output`/`--replace` the same way the other two do.
+            return exportAll(arguments: arguments, json: json)
         default:
             return usageError("unknown export subcommand `\(subcommand)`", json: json)
+        }
+    }
+
+    /// `morb export --all --output <directory>` — every currently local tagged image,
+    /// written as one archive per image into a directory a stock `docker load`
+    /// restores. This is the bulk sibling of `image`; it reuses
+    /// `ImageArchiveExporter.exportAll`, not a second export implementation, so it
+    /// keeps that function's per-file atomic publish and no-clobber guarantees.
+    private static func exportAll(arguments: [String], json: Bool) -> Int32 {
+        let request: AllRequest
+        do {
+            request = try AllRequest(arguments)
+        } catch {
+            return usageError(describe(error), json: json)
+        }
+
+        if !json {
+            out("Exporting every local tagged image (no registry or credentials access)")
+            out("  output       \(terminalSafe(request.output.path))")
+            out("  replace      \(request.replaceExisting ? "yes, per file, after a complete download" : "no")")
+            out("  engine       GET /images/json, then one GET /images/get per image")
+        }
+
+        do {
+            let result = try ImageArchiveExporter.exportAll(
+                to: request.output, replaceExisting: request.replaceExisting,
+                onItem: { reference in if !json { out("  exporting \(terminalSafe(reference))…") } })
+            let failed = result.failed
+            if json {
+                emitJSON([
+                    "ok": failed.isEmpty,
+                    "directory": result.directory.path,
+                    "manifest": result.manifestPath.path,
+                    "exported": result.succeeded.count,
+                    "failed": failed.count,
+                    "items": result.items.map {
+                        [
+                            "reference": $0.reference,
+                            "file": $0.result?.destination.lastPathComponent ?? NSNull(),
+                            "bytes": $0.result?.bytes ?? NSNull(),
+                            "error": $0.error ?? NSNull(),
+                        ] as [String: Any]
+                    },
+                    "engine_mutated": false,
+                    "network_access": "not used",
+                    "credentials_access": "not used",
+                ])
+            } else {
+                out("")
+                out("[ok] exported \(result.succeeded.count) image(s) to \(terminalSafe(result.directory.path))")
+                if !failed.isEmpty {
+                    out("[!!] \(failed.count) image(s) failed:")
+                    for item in failed { out("  \(terminalSafe(item.reference)): \(item.error ?? "unknown error")") }
+                }
+                out("Manifest: \(terminalSafe(result.manifestPath.path))")
+                out("Restore any archive on a stock Docker install with: docker load -i <file>.tar")
+            }
+            return failed.isEmpty ? 0 : 1
+        } catch {
+            let message = describe(error)
+            if json {
+                emitJSON([
+                    "ok": false, "output": request.output.path, "error": message,
+                    "engine_mutated": false, "network_access": "not used", "credentials_access": "not used",
+                ])
+            } else {
+                err("morb export --all: \(message)")
+            }
+            return 2
         }
     }
 
@@ -193,6 +267,43 @@ enum ExportCLI {
         }
     }
 
+    private struct AllRequest {
+        let output: URL
+        let replaceExisting: Bool
+
+        init(_ arguments: [String]) throws {
+            var outputPath: String?
+            var replaceExisting = false
+            var index = 0
+            while index < arguments.count {
+                let argument = arguments[index]
+                switch argument {
+                case "--all":
+                    index += 1
+                case "--output":
+                    guard index + 1 < arguments.count,
+                          !arguments[index + 1].isEmpty,
+                          !arguments[index + 1].hasPrefix("--")
+                    else {
+                        throw ArgumentError.missingValue("--output")
+                    }
+                    guard outputPath == nil else { throw ArgumentError.repeatedOption("--output") }
+                    outputPath = arguments[index + 1]
+                    index += 2
+                case "--replace":
+                    guard !replaceExisting else { throw ArgumentError.repeatedOption("--replace") }
+                    replaceExisting = true
+                    index += 1
+                default:
+                    throw ArgumentError.unexpectedArgument(argument)
+                }
+            }
+            guard let outputPath else { throw ArgumentError.outputRequired }
+            output = resolvedOutputURL(outputPath)
+            self.replaceExisting = replaceExisting
+        }
+    }
+
     private struct VolumeRequest {
         let name: String
         let output: URL
@@ -293,11 +404,15 @@ enum ExportCLI {
         Usage:
           morb export image <reference> --output <path> [--replace]
           morb export volume <name> --output <path> [--replace]
+          morb export --all --output <directory> [--replace]
 
         `image` saves one already-local Morbstack image through one GET /images/get
         request. `volume` archives one explicit existing Docker local-driver volume
         through one owned stopped read-only helper container. Volume export requires
-        an already-local helper image and never pulls one.
+        an already-local helper image and never pulls one. `--all` writes every local
+        tagged image as one archive per image into a directory, plus a MANIFEST.txt;
+        a stock Docker CLI restores any of them with `docker load -i <file>.tar`, no
+        Morbstack required on the receiving machine.
 
         The parent directory must already exist. `--output` is required, may be an
         absolute, ~/ or relative path, and must not be inside Morbstack-owned data.

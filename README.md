@@ -19,6 +19,10 @@ app — is thin, native Swift glue.
 ![macOS 26+](https://img.shields.io/badge/macOS-26%2B-lightgrey)
 ![Apple Silicon](https://img.shields.io/badge/arch-Apple%20Silicon-lightgrey)
 
+- **1.79 s cold boot, 0 % idle CPU — and you can check it yourself.**
+  `morb bench run` is the same one-command harness that produced those
+  numbers; it measures your own machine rather than asking you to trust
+  ours. Full run and methodology: [`docs/audit/ENGINE-MATRIX.md`](docs/audit/ENGINE-MATRIX.md) §10.
 - **Free forever**, Apache-2.0 — no license nags, no seat count, no
   "personal use only."
 - **No account.** Nothing to sign in to, nothing phoning home to gate a
@@ -39,6 +43,52 @@ app — is thin, native Swift glue.
 - **Native SwiftUI, zero web views.** The app is AppKit/SwiftUI, not an
   embedded browser — see "The five differentiation domains" in
   [`docs/architecture.md`](docs/architecture.md).
+- **Leaving is one command, and it is tested.** `morb migrate --to
+  <runtime|socket>` moves your images and volumes back out to Docker
+  Desktop, Colima, OrbStack, or any socket, then verifies every copy with
+  a config-ID and sha256sum check before it says done. No other Docker
+  Desktop alternative ships a supported way out at all — OrbStack's own
+  [issue #2517](https://github.com/orbstack/orbstack/issues/2517) asking
+  for one is still open.
+
+## What it looks like
+
+Real windows, captured off a running engine — not mockups, not offscreen
+renders. [**The full gallery**](docs/gallery/) covers every route that has been
+photographed (and, for the surfaces where motion is the actual claim, animated
+with [`scripts/capture-gif.sh`](scripts/capture-gif.sh) — same one-window,
+never-a-screen-region capture as the stills, just looped into a GIF), and names
+the ones that haven't.
+
+[![Containers, grouped by Compose project](docs/gallery/containers-compose-grouping.png)](docs/gallery/)
+
+38 containers, sixteen of them Kubernetes' own `k8s_POD_*`/`k8s_*` scaffolding — and
+the scaffolding is one collapsed row headed "8 of 16 running", not sixteen rows of
+60-character names burying the containers you started. Compose projects group under
+their own name, headed by how many of their services are actually up. Nothing on
+this screen is custom chrome: a `NavigationSplitView`, a system list, and real
+`docker ps` data.
+
+[![Images](docs/gallery/images.png)](docs/gallery/)
+
+A real `Table` with sortable columns and a real `.inspector`, not a hand-drawn
+grid. Architecture is a first-class field, so an `amd64` image is flagged before
+you run it rather than after `exec format error`.
+
+[![Disk](docs/gallery/disk.png)](docs/gallery/)
+
+The number that matters is the pair: the VM disk reserves **77.31 GB** and
+actually occupies **6.57 GB** on APFS. Most "why is Docker eating my disk"
+confusion is one of those two figures shown alone. Reclaim is automatic — the
+screen states when the last sweep ran and what it found.
+
+[![Container terminal, a real command running](docs/gallery/container-terminal.gif)](docs/gallery/)
+
+A live `exec` session, not a mock: the GIF above types a command into a real
+shell in a running container and shows the output arriving one line at a time.
+The gallery has four more of these — including an honest one of the trailing
+`.inspector`'s reveal, which pops rather than slides and is now measured and
+documented as a macOS platform floor, not glossed over as fixed.
 
 ## Status: pre-release (milestone M0)
 
@@ -120,16 +170,21 @@ succeeds where Docker Desktop fails synchronously, for example).
 
 ## Native-window validation
 
-The repository deliberately does not publish synthetic inner-content screenshots as
-evidence of the native UI. A headless SwiftUI/AppKit image cannot represent the macOS
-window frame, traffic lights, unified toolbar, sidebar material, inspector, focus, or
-Liquid Glass composition that WindowServer owns.
+Every image in [`docs/gallery/`](docs/gallery/) is a real window, captured by
+[`scripts/capture-window.sh`](scripts/capture-window.sh), which asks WindowServer for one
+window's own composited content — so the frame, traffic lights, unified toolbar, sidebar
+material, inspector and Liquid Glass in those files are the real thing, and nothing else on
+the desktop can leak into the frame.
 
-`swift run MorbShots` validates deterministic fixture data only; it writes no images.
-For a visual review, launch the fixture-backed app in a real window and inspect it with
-Computer Use in both appearances and at normal/narrow widths. The repository also carries
-a macOS XCUITest host for repeatable accessibility and screenshot evidence; macOS must
-authorize Xcode Helper under Accessibility before it can drive the app. See
+The repository deliberately does **not** publish synthetic inner-content screenshots as
+evidence of the native UI. A headless SwiftUI/AppKit image cannot represent any of the
+chrome above, and this project has been misled by one before. `swift run MorbShots`
+validates deterministic fixture data only; it writes no images.
+
+For a visual review, launch the app in a real window and inspect it with Computer Use in
+both appearances and at normal/narrow widths. The repository also carries a macOS XCUITest
+host for repeatable accessibility and screenshot evidence; macOS must authorize Xcode Helper
+under Accessibility before it can drive the app. See
 [`docs/development/codex.md`](docs/development/codex.md).
 
 ## Requirements
@@ -160,10 +215,11 @@ mise run test                 # runs the Swift and Rust test suites
 See "Running" below for the full walkthrough from there to a working
 `docker run`.
 
-**A DMG and a Homebrew cask are not available yet.** Packaging and
-signed releases are tracked separately — see
-[`docs/RELEASING.md`](docs/RELEASING.md) once it exists. Nothing on this
-page should be read as "download a build"; there isn't one yet.
+**A DMG and a Homebrew cask are not available yet.** Packaging and signed
+releases are tracked as REL-1 through REL-5 in [`TASKS.md`](TASKS.md); the
+blocker is notarization, and an unnotarized DMG is Gatekeeper-blocked for
+everyone except whoever built it. Nothing on this page should be read as
+"download a build"; there isn't one yet.
 
 ## Running
 
@@ -237,6 +293,11 @@ Full detail, including troubleshooting the `credsStore`/`docker-credential-deskt
 hang and the port-forwarder retry behavior, lives in
 [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`docs/architecture.md`](docs/architecture.md).
 
+Coming from Docker Desktop, Colima, or OrbStack? See
+[`docs/switching-from-docker-desktop.md`](docs/switching-from-docker-desktop.md)
+for the handful of things that behave differently in the first ten minutes —
+the credential-helper hang above is one of five.
+
 ## Architecture
 
 ```mermaid
@@ -308,6 +369,10 @@ Rancher Desktop) is in [`docs/comparison.md`](docs/comparison.md).
 
 ## Documentation
 
+[`docs/README.md`](docs/README.md) is the full index. The short list:
+
+- [`docs/gallery/`](docs/gallery/) — real captures of every route that has
+  one, and an honest list of the ones that don't.
 - [`docs/architecture.md`](docs/architecture.md) — how the pieces fit and
   why the load-bearing decisions were made that way.
 - [`docs/sharing.md`](docs/sharing.md) — file sharing: the same-path

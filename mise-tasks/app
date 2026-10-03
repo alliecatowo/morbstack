@@ -107,12 +107,16 @@ EOF
 
 verify_host_toolchain dist/host-bin source
 
-# `kubectl` is intentionally optional today: there is no port-forward feature to
-# ship until its bounded coordinator and clean-cluster acceptance exist. If a
-# release pipeline has explicitly staged the future helper, however, verify the
-# exact provenance pin here before copying/signing it. A missing helper remains a
-# truthful unavailable state in MorbstackKit; a mismatched or symlinked helper
-# must never become a sealed part of an app bundle.
+# `kubectl` backs the shipped `morb k8s port-forward` command and is fetched
+# into dist/host-bin by default (scripts/fetch-guest-assets.sh). This check
+# stays tolerant of its absence rather than hard-failing the whole app build,
+# since a bundle assembled from an older or partial asset cache must still
+# produce a working app — `MorbKubernetesKubectl.bundledKubectl()` reports a
+# truthful, explicit "unavailable" error at the point `k8s port-forward
+# start` is actually used, so a missing helper here is never a silent gap. If
+# it *is* staged, verify the exact provenance pin before copying/signing it —
+# a mismatched or symlinked helper must never become a sealed part of an app
+# bundle.
 KUBECTL=dist/host-bin/kubernetes/kubectl
 if [ -e "$KUBECTL" ] || [ -L "$KUBECTL" ]; then
 	if [ ! -x "$KUBECTL" ] || [ -L "$KUBECTL" ]; then

@@ -227,3 +227,47 @@ final class MCPInputValidationTests: XCTestCase {
         return directory
     }
 }
+
+// MARK: - SEC-4: tool output never reaches the audit log
+
+extension MCPInputValidationTests {
+
+    /// The audit log scrubs `arguments` through `Redactor.redact` and used to write
+    /// up to 500 characters of raw tool *output* in the field beside it. For
+    /// `container_logs` and `container_exec` that output is whatever a container
+    /// printed, so the careful redaction next to it was decorative.
+    func testASuccessfulResultIsDescribedByShapeNeverByContent() {
+        let secret = "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+        let result = ToolCallResult(content: [["type": "text", "text": secret]], isError: false)
+
+        let summary = MCPServer.auditSummary(of: result)
+
+        XCTAssertFalse(summary.contains("wJalrXUtnFEMI"), "the secret reached the audit log")
+        XCTAssertFalse(summary.contains("AWS_SECRET_ACCESS_KEY"))
+        XCTAssertEqual(summary, "ok, \(secret.utf8.count) bytes, 1 line")
+    }
+
+    func testTheLineCountIsReportedWithoutTheLines() {
+        let body = "alpha\nbeta\ngamma"
+        let result = ToolCallResult(content: [["type": "text", "text": body]], isError: false)
+
+        let summary = MCPServer.auditSummary(of: result)
+
+        XCTAssertEqual(summary, "ok, 16 bytes, 3 lines")
+        XCTAssertFalse(summary.contains("alpha"))
+    }
+
+    func testAnEmptyResultSaysSoRatherThanReportingZeroBytes() {
+        let result = ToolCallResult(content: [], isError: false)
+        XCTAssertEqual(MCPServer.auditSummary(of: result), "ok, no content")
+    }
+
+    /// Error text is ours, not the container's, and is the whole reason to read the
+    /// log after a failure — so it is deliberately kept verbatim.
+    func testErrorTextIsKeptBecauseWeWroteIt() {
+        let result = ToolCallResult.errorText("denied: container_exec needs an explicit grant")
+        XCTAssertEqual(
+            MCPServer.auditSummary(of: result),
+            "denied: container_exec needs an explicit grant")
+    }
+}

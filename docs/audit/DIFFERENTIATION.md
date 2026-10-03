@@ -54,6 +54,62 @@ These are ordered by "how fast does a new user hit this".
 | T7 | Add a shared folder without editing a TOML | ABSENT | `TrackDSharingSettings.swift:5-7` admits the config file is the editing surface. |
 | T8 | Disk reclaims space | ABSENT | Docker Desktop's ever-growing disk is a top-3 user complaint. Reproducing it is not neutral, it is a known defect. |
 
+> **Three of these have been met since, 2026-08-05 (UX-21).** The table is kept
+> as the dated snapshot; this is what the code did to it.
+>
+> - **T3 — met, and it is now a lead.** Fixture and harness both exist
+>   (`integrations/fixtures/devcontainer`, `scripts/ecosystem-acceptance.sh`),
+>   and Testcontainers **Node 12.1.0, Go v0.43.0, Java 1.21.4 and Python
+>   4.15.0** all passed real Postgres round trips with Ryuk against server
+>   29.7.1 — under `env -i`, **no `DOCKER_*` or `TESTCONTAINERS_*` variables at
+>   all**, no `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE`
+>   ([ECOSYSTEM-MATRIX.md](ECOSYSTEM-MATRIX.md) zero-config rerun; ECO-1/ECO-2,
+>   design in [../design/ZERO-CONFIG-DISCOVERY.md](../design/ZERO-CONFIG-DISCOVERY.md)).
+>   OrbStack has an open Testcontainers issue (#2035, since 2025-07-10) and
+>   Docker meters Testcontainers Cloud; see [CAPABILITY-GAP.md](CAPABILITY-GAP.md) §12.
+> - **T4 — met.** TECH-1 ships stock upstream dockerd driven through its own
+>   `--userland-proxy-path` hook, no engine patch; `docker run -P nginx:alpine`
+>   served `curl` an HTTP 200 in 4.3 ms against a rebuilt guest
+>   ([../design/PATCH-FREE-PUBLISH-ALL.md](../design/PATCH-FREE-PUBLISH-ALL.md)).
+> - **T6 — the stated evidence is now false, though the user-visible gate is
+>   only half open.** `DockerClient.swift` has exec (`executeContainerCommand`
+>   :1042, `createExec`/`resizeExec`/`inspectExec` :1524-1547) and there *is* a
+>   PTY view: `mac/Sources/MorbstackAppCore/Terminal/` holds
+>   `DockerExecPTYSession`, `TerminalEmulator`, `TerminalKeyEncoding`,
+>   `TerminalSurfaceView` and `ContainerTerminalWindowController` with four test
+>   files. No UI entry point calls it yet, so "one click away" is still DIF-2's
+>   to close — but the VS Code extension already ships the interactive shell
+>   over a hijacked exec stream (`integrations/vscode/src/api.ts:329-402`).
+>
+> **T7 stands as written.** `sharedPaths` is still config-file-only.
+>
+> - **T8 — mechanism shipped 2026-08-06, rebuilt-guest-verified 2026-08-06
+>   (same day, follow-up session).** `guest/morbinit/src/disk.rs`'s
+>   `spawn_periodic_trim` runs an hourly `fstrim /var/lib/docker` from a
+>   background thread, reported through `info`/`status` as
+>   `disk_last_trim_bytes`/`guest_disk_last_trim_bytes` and surfaced in both
+>   `morb doctor` (`Doctor.diskTrimCheck`) and the Disk inspector's VM-disk
+>   footnote. This is not a live `-o discard` mount — `disk.rs`'s `mount_data`
+>   doc comment has the reasoning: a continuous `discard` mount pays a
+>   synchronous TRIM inline with every delete, which is exactly the cost
+>   `fstrim.timer`-style periodic sweeps exist to avoid on delete-heavy
+>   workloads like `docker system prune`.
+>
+>   The rebuild-and-remeasure step this bullet used to be waiting on found a
+>   real bug: the periodic sweep's 10-minute warmup outlives the default
+>   `auto_suspend_minutes` (5), so on a real developer machine the guest was
+>   always idle-stopped before the sweep ever got to run once — the mechanism
+>   above was correct code that could not fire in practice. Fixed by
+>   `disk::trim_before_shutdown`, a bounded sweep the guest's own shutdown
+>   sequence now runs unconditionally on every teardown, independent of any
+>   timer or of `auto_suspend_minutes`. Verified live against the exact
+>   original failure mode (default 5-minute auto-suspend, a guest whose
+>   restore genuinely fails on this host): `disk.img` reclaimed ~4.00 GiB the
+>   moment the guest idle-stopped, with no `fstrim` run by hand. Full
+>   transcript, numbers, and the options considered:
+>   [../design/DISK-RECLAIM-DECISION.md](../design/DISK-RECLAIM-DECISION.md)
+>   §8. **Now a real, verified differentiator** — `done` in `TASKS.md` UX-16.
+
 **T1 is the one that should be uncomfortable.** 75,000 lines of Swift, 739 test
 functions, a genuinely careful port-lease design, an excellent security posture
 — and zero people have ever run it. Every additional week of feature work
@@ -129,11 +185,14 @@ What to do, in order:
    unqualified assertion, and nobody else in this market publishes one.
 3. For whatever fails, decide between a guest-side inotify shim and accepting
    the gap loudly.
-4. Turn it on. Today `liveSharePaths` defaults to `[]` (`MorbConfig.swift:109`)
-   and there is no CLI or GUI writer anywhere. A feature reachable only by
-   hand-editing TOML is a feature nobody uses. The right default is probably
-   "the bind-mount sources of currently running containers", derived
-   automatically, with an opt-out.
+4. Turn it on. Today `liveSharePaths` defaults to `[]` (`MorbConfig.swift:109`).
+   **Update, 2026-08-05 (UX-21): this item is half done** — Settings › Sharing
+   now has a GUI writer ("Add Project Folder…" via `NSOpenPanel`, per-row
+   Remove; see §"A GUI for shared folders" below for the full citation). There
+   is still no `morb` CLI writer, and the default is still `[]` rather than
+   derived from running containers' bind-mount sources — a feature reachable
+   only by opening Settings (previously only by hand-editing TOML) is better
+   but still not on by default.
 
 This is the best impact-per-effort item on the list: the hard engineering is
 done, what remains is a rebuild and a test matrix.
@@ -205,18 +264,60 @@ performance target with no implementation behind it.
   `@devcontainers/cli`, JetBrains Gateway, DevPod all implement it). Being a
   *good host* for it is mostly free once T2/T3 pass — it needs a pinned fixture
   and a CI job, not a feature.
+
+  > **Mostly done, 2026-08-05 (UX-21).** The pinned fixture exists
+  > (`integrations/fixtures/devcontainer`), the harness exists
+  > (`scripts/ecosystem-acceptance.sh`, suite `devcontainers-cli`), and
+  > `@devcontainers/cli` 0.88.0 passed live and **zero-config** — context-only,
+  > no `DOCKER_HOST` — including exec, a two-way workspace bind mount,
+  > `postCreateCommand`, and a features/derived-image build through Morbstack
+  > BuildKit ([ECOSYSTEM-MATRIX.md](ECOSYSTEM-MATRIX.md), EN-9). What is still
+  > missing is only the CI job: `.github/workflows/ci.yml` has no ecosystem
+  > suite, which is why [../COMPETITIVE-GAPS.md](../COMPETITIVE-GAPS.md) reads
+  > `runs-here` and not `accepted` (CP-07).
+
 - **A GUI for shared folders (T7) and live-share paths.** Half a week each.
   Currently both are TOML-only, which no competitor requires.
+
+  > **Half done, 2026-08-05 (UX-21).** Live-share paths have their GUI:
+  > Settings › Sharing writes `liveSharePaths` through an `NSOpenPanel` "Add
+  > Project Folder…" with per-row Remove, validated by `MorbLiveShareBridge.plan`
+  > before it saves (`mac/Sources/MorbstackAppCore/Settings/TrackDSharingSettings.swift:95,179-198`).
+  > `sharedPaths` (T7) is the half still standing: same screen, "Open
+  > config.toml" only (lines 43, 56).
+
 - **Volume browsing.** Full Finder mounting (FSKit) is a large project with
   hard consistency and durability semantics. A *read-only browser* inside the
   app, on top of the existing archive/export machinery, gets 80% of the value
   for 10% of the risk. `docs/competitive-capability-roadmap.md:100` already
   sequences it this way; agree.
-- **Disk reclaim.** `discard=async` is already on the guest mount
-  (`guest/morbinit/src/disk.rs:269-273`), so a `docker system prune` →
-  `fstrim` → host sparse-file release path is more plumbing than research.
-  Being the container tool whose disk *gives space back* is a small, memorable
-  win against the incumbent's most-complained-about behaviour.
+- **Disk reclaim.** Corrected 2026-08-06 (TECH-3/UX-16) — this bullet
+  previously claimed `discard=async` was "already on the guest mount", which
+  was wrong in our own favour. `disk.rs:271-275` puts `discard=async` on the
+  **btrfs arm only**, and the shipped kata kernel has no btrfs
+  (`docs/architecture.md:183`; regression-tested at `disk.rs:1299-1302`), so
+  the option is dead code: the guest actually mounts ext4 with no `discard`,
+  there is no `fstrim` anywhere in the tree, and resize is grow-only. Disk
+  space genuinely never returns to macOS today — Docker Desktop's own
+  most-complained-about behaviour, reproduced faithfully. Before any plumbing
+  work: the open, undocumented-by-Apple question is whether
+  `VZDiskImageStorageDeviceAttachment` even translates a guest `discard` into
+  hole-punching on the raw file at all. See
+  `docs/design/DISK-RECLAIM-DECISION.md` for the experiment and its verdict.
+  If discard passes through, this is close to "more plumbing than research"
+  after all; if it does not, the honest scope is compact-by-copy, which is
+  not free.
+
+  > **Answered, shipped, and rebuilt-guest-verified, 2026-08-06.** Discard
+  > passes through — see the T8 note above and
+  > `docs/design/DISK-RECLAIM-DECISION.md` §4/§7/§8. "There is no `fstrim`
+  > anywhere in the tree" is no longer true: `disk.rs` runs one on an hourly
+  > background schedule *and* one unconditionally on every guest shutdown —
+  > the second one was added after the rebuild-and-remeasure step found the
+  > first one alone could never fire against the default auto-suspend
+  > setting (§8). Both were confirmed live on a rebuilt guest, with real
+  > `stat -f %b` numbers on `disk.img` before and after, not the earlier
+  > spike's manual commands.
 - **Fix the leaks in what exists.** `scripts/fetch-scan-tools.sh` referenced
   five times and absent; shell completions stale by 7 commands and factually
   wrong about `debug`; JetBrains "integration" is a README. Each is under a day

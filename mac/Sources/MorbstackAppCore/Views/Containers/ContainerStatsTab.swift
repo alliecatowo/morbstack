@@ -19,6 +19,7 @@ enum ContainerStatsMetric: String, CaseIterable, Identifiable, Sendable {
     case cpu
     case memory
     case network
+    case disk
 
     var id: Self { self }
 
@@ -27,6 +28,7 @@ enum ContainerStatsMetric: String, CaseIterable, Identifiable, Sendable {
         case .cpu: return "CPU Usage"
         case .memory: return "Memory Usage"
         case .network: return "Network Activity"
+        case .disk: return "Disk Activity"
         }
     }
 
@@ -35,8 +37,75 @@ enum ContainerStatsMetric: String, CaseIterable, Identifiable, Sendable {
         case .cpu: return "cpu"
         case .memory: return "memorychip"
         case .network: return "network"
+        case .disk: return "internaldrive"
         }
     }
+}
+
+/// The words one cumulative-counter metric uses.
+///
+/// Network and disk are the same measurement performed on different counters: two
+/// monotonic totals, two derived rates, the same reset and missing-reading discipline.
+/// Keeping their copy in one value keeps the two charts from drifting apart, and keeps
+/// the difference between them where a reader can see it side by side rather than
+/// spread across two near-identical view bodies.
+struct ByteRateVocabulary: Sendable {
+    let metric: ContainerStatsMetric
+    /// Names what the Engine is counting, for the chart's spoken summary.
+    let counterNoun: String
+    let caption: String
+    let inboundLabel: String
+    let outboundLabel: String
+    let inboundRateLabel: String
+    let outboundRateLabel: String
+    let totalsFootnote: String
+    let emptyTitle: String
+    let emptySymbol: String
+    let emptyDescription: String
+    let emptyIdentifier: String
+    let collectingLabel: String
+    let sampleTableTitle: String
+
+    var title: String { metric.title }
+    var symbol: String { metric.symbol }
+
+    static let network = ByteRateVocabulary(
+        metric: .network,
+        counterNoun: "interface",
+        caption: "Recent receive and send rates derived from Docker interface counters.",
+        inboundLabel: "Received",
+        outboundLabel: "Sent",
+        inboundRateLabel: "Receive Rate",
+        outboundRateLabel: "Send Rate",
+        totalsFootnote: "Received and sent are cumulative values reported by the Docker Engine.",
+        emptyTitle: "Network Statistics Unavailable",
+        emptySymbol: "network.slash",
+        emptyDescription: "The Docker Engine did not report complete interface counters for this container.",
+        emptyIdentifier: "containers.stats.empty.networkUnavailable",
+        collectingLabel: "Collecting another complete network reading",
+        sampleTableTitle: "Network Rate Samples")
+
+    /// The disk empty state is deliberately *not* worded as a failure. The Engine lists
+    /// a block device only once the container has moved bytes over it, so an idle
+    /// container produces an empty array through no fault of anything — and a container
+    /// on an engine that does not account block I/O produces the same empty array. The
+    /// sentence states the mechanism, which is true in both cases, instead of picking a
+    /// cause the stats payload cannot distinguish.
+    static let disk = ByteRateVocabulary(
+        metric: .disk,
+        counterNoun: "block-device",
+        caption: "Recent read and write rates derived from Docker block-device counters.",
+        inboundLabel: "Read",
+        outboundLabel: "Written",
+        inboundRateLabel: "Read Rate",
+        outboundRateLabel: "Write Rate",
+        totalsFootnote: "Read and written are cumulative block-device totals reported by the Docker Engine. Reads and writes served from memory never reach a block device and do not appear here.",
+        emptyTitle: "No Disk Activity Recorded",
+        emptySymbol: "internaldrive",
+        emptyDescription: "The Docker Engine lists a block device only after a container reads from or writes to it, and it listed none for this container.",
+        emptyIdentifier: "containers.stats.empty.diskUnrecorded",
+        collectingLabel: "Collecting another complete disk reading",
+        sampleTableTitle: "Disk Rate Samples")
 }
 
 /// Pure display decisions for the resource-history surface. Keeping the truth gates out
@@ -67,10 +136,13 @@ enum ContainerStatsPresentation {
         sampleCount >= 2
     }
 
-    static func hasNetworkTrend(samples: [NetworkRateSample]) -> Bool {
-        let receivedCount = samples.lazy.filter { $0.receivedBytesPerSecond != nil }.count
-        let transmittedCount = samples.lazy.filter { $0.transmittedBytesPerSecond != nil }.count
-        return receivedCount >= 2 || transmittedCount >= 2
+    /// A rate chart needs two readings *in one direction* before it is a trend. One
+    /// receive interval and one send interval are two points on two different series,
+    /// and drawing them is drawing a slope that was never measured.
+    static func hasRateTrend(samples: [ByteRateSample]) -> Bool {
+        let inbound = samples.lazy.filter { $0.inboundBytesPerSecond != nil }.count
+        let outbound = samples.lazy.filter { $0.outboundBytesPerSecond != nil }.count
+        return inbound >= 2 || outbound >= 2
     }
 
     /// Tick labels must resolve the window they describe. A 30-second window labelled
@@ -89,6 +161,18 @@ struct ContainerStatsTab: View {
     let container: ContainerSummary
     let hub: TrackBStatsHub
     let client: DockerClient
+
+    init(
+        container: ContainerSummary,
+        hub: TrackBStatsHub,
+        client: DockerClient,
+        initialMetric: ContainerStatsMetric = .cpu
+    ) {
+        self.container = container
+        self.hub = hub
+        self.client = client
+        _selectedMetric = State(initialValue: initialMetric)
+    }
 
     @State private var probe: TrackBStatsProbe?
     @State private var selectedMetric: ContainerStatsMetric = .cpu
@@ -173,11 +257,12 @@ struct ContainerStatsTab: View {
                 }
                 .accessibilityLabel("Resource history metric")
                 .accessibilityHint("Selects the Docker resource statistic shown below")
+                .accessibilityIdentifier("containers.stats.metric")
                 .padding(.bottom, 8)
 
                 selectedMetricContent(probe)
 
-                Text(sampleCadenceDescription(probe))
+                Text(sampleCadenceDescription)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(.top, 12)
@@ -247,11 +332,28 @@ struct ContainerStatsTab: View {
 
         case .network:
             if let latest = probe.latest {
-                NetworkActivitySection(
-                    latest: latest,
+                ByteRateSection(
+                    vocabulary: .network,
+                    latestTimestamp: latest.ts,
+                    inboundTotal: latest.networkReceivedBytes,
+                    outboundTotal: latest.networkTransmittedBytes,
                     samples: probe.networkRates)
             } else {
                 ProgressView("Waiting for the first network statistic")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical)
+            }
+
+        case .disk:
+            if let latest = probe.latest {
+                ByteRateSection(
+                    vocabulary: .disk,
+                    latestTimestamp: latest.ts,
+                    inboundTotal: latest.blockReadBytes,
+                    outboundTotal: latest.blockWrittenBytes,
+                    samples: probe.blockIORates)
+            } else {
+                ProgressView("Waiting for the first disk statistic")
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical)
             }
@@ -297,13 +399,12 @@ struct ContainerStatsTab: View {
         return step * magnitude
     }
 
-    private func sampleCadenceDescription(_ probe: TrackBStatsProbe) -> String {
+    /// The interval only — how many readings and over what span is already stated once,
+    /// directly under the selected chart's own headline (`StatsChartSection.windowDescription`).
+    /// Restating the count here duplicated it three sections apart for no reader benefit.
+    private var sampleCadenceDescription: String {
         let seconds = Int(hub.minimumInterval)
-        let secondsLabel = "\(seconds) second\(seconds == 1 ? "" : "s")"
-        if probe.history.count < 2 {
-            return "Statistics update about every \(secondsLabel)."
-        }
-        return "Showing \(probe.history.count) reading\(probe.history.count == 1 ? "" : "s"), sampled about every \(secondsLabel)."
+        return "Statistics update about every \(seconds) second\(seconds == 1 ? "" : "s")."
     }
 
     private func subscribe() {
@@ -324,91 +425,98 @@ struct ContainerStatsTab: View {
     }
 }
 
-/// The Engine API gives the app cumulative counters for every container interface, not
-/// a ready-made throughput measurement. This section keeps the two facts distinct:
-/// totals are shown as reported, while the chart and its table only show rates that can
-/// be derived from a pair of complete, monotonic readings.
-private struct NetworkActivitySection: View {
-    let latest: StatsSample
-    let samples: [NetworkRateSample]
+/// The Engine API gives the app cumulative counters — per interface for the network, per
+/// block device for disk — not a ready-made throughput measurement. This section keeps
+/// the two facts distinct: totals are shown as reported, while the chart and its table
+/// only show rates that can be derived from a pair of complete, monotonic readings.
+///
+/// One view serves both metrics. The alternative — a second, nearly identical section —
+/// is how the reset handling, the axis rounding and the "two readings in one direction"
+/// rule end up subtly different between two charts that must mean the same thing.
+private struct ByteRateSection: View {
+    let vocabulary: ByteRateVocabulary
+    /// The timestamp of the newest sample, used to decide whether the newest derived
+    /// interval actually describes the reading currently on screen.
+    let latestTimestamp: Date
+    let inboundTotal: Int64?
+    let outboundTotal: Int64?
+    let samples: [ByteRateSample]
 
-    private var receivedRates: [Double] { samples.compactMap(\.receivedBytesPerSecond) }
-    private var transmittedRates: [Double] { samples.compactMap(\.transmittedBytesPerSecond) }
-    private var hasTrend: Bool { ContainerStatsPresentation.hasNetworkTrend(samples: samples) }
+    private var inboundRates: [Double] { samples.compactMap(\.inboundBytesPerSecond) }
+    private var outboundRates: [Double] { samples.compactMap(\.outboundBytesPerSecond) }
+    private var hasTrend: Bool { ContainerStatsPresentation.hasRateTrend(samples: samples) }
 
-    private var latestReceivedRate: Double? {
-        guard samples.last?.timestamp == latest.ts else { return nil }
-        return samples.last?.receivedBytesPerSecond
+    private var latestInboundRate: Double? {
+        guard samples.last?.timestamp == latestTimestamp else { return nil }
+        return samples.last?.inboundBytesPerSecond
     }
 
-    private var latestTransmittedRate: Double? {
-        guard samples.last?.timestamp == latest.ts else { return nil }
-        return samples.last?.transmittedBytesPerSecond
+    private var latestOutboundRate: Double? {
+        guard samples.last?.timestamp == latestTimestamp else { return nil }
+        return samples.last?.outboundBytesPerSecond
     }
 
     private var yAxisRange: ClosedRange<Double> {
-        let peak = (receivedRates + transmittedRates).max() ?? 0
+        let peak = (inboundRates + outboundRates).max() ?? 0
         return 0...roundedUpperBound(max(1_024, peak * 1.2))
     }
 
     private var chartSummary: String {
         let intervalDescription = samples.count == 1 ? "1 interval" : "\(samples.count) intervals"
-        return "\(intervalDescription) calculated from Docker's cumulative interface counters. "
-            + "Current receive rate is \(spokenNetworkRateLabel(latestReceivedRate)). "
-            + "Current send rate is \(spokenNetworkRateLabel(latestTransmittedRate))."
+        return "\(intervalDescription) calculated from Docker's cumulative \(vocabulary.counterNoun) counters. "
+            + "Current \(vocabulary.inboundRateLabel.lowercased()) is \(spokenByteRateLabel(latestInboundRate)). "
+            + "Current \(vocabulary.outboundRateLabel.lowercased()) is \(spokenByteRateLabel(latestOutboundRate))."
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
-                Label("Network Activity", systemImage: "network")
+                Label(vocabulary.title, systemImage: vocabulary.symbol)
                     .font(.headline)
                     .accessibilityHeading(.h2)
-                Text("Recent receive and send rates derived from Docker interface counters.")
+                Text(vocabulary.caption)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
-            if let received = latest.networkReceivedBytes,
-               let transmitted = latest.networkTransmittedBytes
-            {
-                LabeledContent("Received") {
-                    Text(Formatters.bytesString(received))
+            if let inboundTotal, let outboundTotal {
+                LabeledContent(vocabulary.inboundLabel) {
+                    Text(Formatters.bytesString(inboundTotal))
                         .monospacedDigit()
                         .textSelection(.enabled)
                 }
-                LabeledContent("Sent") {
-                    Text(Formatters.bytesString(transmitted))
+                LabeledContent(vocabulary.outboundLabel) {
+                    Text(Formatters.bytesString(outboundTotal))
                         .monospacedDigit()
                         .textSelection(.enabled)
                 }
-                LabeledContent("Receive Rate") {
-                    Text(networkRateLabel(latestReceivedRate))
+                LabeledContent(vocabulary.inboundRateLabel) {
+                    Text(byteRateLabel(latestInboundRate))
                         .monospacedDigit()
                 }
-                LabeledContent("Send Rate") {
-                    Text(networkRateLabel(latestTransmittedRate))
+                LabeledContent(vocabulary.outboundRateLabel) {
+                    Text(byteRateLabel(latestOutboundRate))
                         .monospacedDigit()
                 }
 
-                Text("Received and sent are cumulative values reported by the Docker Engine.")
+                Text(vocabulary.totalsFootnote)
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
                 if hasTrend {
                     Chart {
                         ForEach(samples) { sample in
-                            if let received = sample.receivedBytesPerSecond {
+                            if let inbound = sample.inboundBytesPerSecond {
                                 PointMark(
                                     x: .value("Time", sample.timestamp),
-                                    y: .value("Throughput", received))
-                                    .foregroundStyle(by: .value("Direction", "Received"))
+                                    y: .value("Throughput", inbound))
+                                    .foregroundStyle(by: .value("Direction", vocabulary.inboundLabel))
                             }
-                            if let transmitted = sample.transmittedBytesPerSecond {
+                            if let outbound = sample.outboundBytesPerSecond {
                                 PointMark(
                                     x: .value("Time", sample.timestamp),
-                                    y: .value("Throughput", transmitted))
-                                    .foregroundStyle(by: .value("Direction", "Sent"))
+                                    y: .value("Throughput", outbound))
+                                    .foregroundStyle(by: .value("Direction", vocabulary.outboundLabel))
                             }
                         }
                     }
@@ -429,7 +537,7 @@ private struct NetworkActivitySection: View {
                             AxisTick()
                             AxisValueLabel {
                                 if let number = value.as(Double.self) {
-                                    Text(networkRateLabel(number))
+                                    Text(byteRateLabel(number))
                                 }
                             }
                         }
@@ -437,45 +545,46 @@ private struct NetworkActivitySection: View {
                     .frame(height: 180)
                     // Each mark is one exact interval derived from the Engine counters.
                     // Points deliberately do not connect across an omitted reset/missing
-                    // interval. The category colour and legend distinguish receive from
-                    // send, rather than supplying dashboard decoration.
+                    // interval. The category colour and legend distinguish the two
+                    // directions, rather than supplying dashboard decoration.
                     .accessibilityChartDescriptor(
-                        NetworkActivityChartDescriptor(
+                        ByteRateChartDescriptor(
+                            vocabulary: vocabulary,
                             samples: samples,
                             yAxisRange: yAxisRange,
                             summary: chartSummary))
                 } else {
-                    ProgressView("Collecting another complete network reading")
+                    ProgressView(vocabulary.collectingLabel)
                         .controlSize(.small)
                 }
 
                 if !samples.isEmpty {
-                    DisclosureGroup("Network Rate Samples") {
+                    DisclosureGroup(vocabulary.sampleTableTitle) {
                         Table(samples) {
                             TableColumn("Time") { sample in
                                 Text(sample.timestamp, format: .dateTime.hour().minute().second())
                                     .monospacedDigit()
                             }
-                            TableColumn("Received") { sample in
-                                Text(networkRateLabel(sample.receivedBytesPerSecond))
+                            TableColumn(vocabulary.inboundLabel) { sample in
+                                Text(byteRateLabel(sample.inboundBytesPerSecond))
                                     .monospacedDigit()
                             }
-                            TableColumn("Sent") { sample in
-                                Text(networkRateLabel(sample.transmittedBytesPerSecond))
+                            TableColumn(vocabulary.outboundLabel) { sample in
+                                Text(byteRateLabel(sample.outboundBytesPerSecond))
                                     .monospacedDigit()
                             }
                         }
                         .frame(height: min(max(CGFloat(samples.count) * 24 + 28, 96), 220))
-                        .accessibilityLabel("Network activity sample values")
+                        .accessibilityLabel("\(vocabulary.title) sample values")
                     }
                 }
             } else {
                 ContentUnavailableView {
-                    Label("Network Statistics Unavailable", systemImage: "network.slash")
+                    Label(vocabulary.emptyTitle, systemImage: vocabulary.emptySymbol)
                 } description: {
-                    Text("The Docker Engine did not report complete interface counters for this container.")
+                    Text(vocabulary.emptyDescription)
                 }
-                .accessibilityIdentifier("containers.stats.empty.networkUnavailable")
+                .accessibilityIdentifier(vocabulary.emptyIdentifier)
                 .frame(maxWidth: .infinity)
             }
         }
@@ -498,9 +607,10 @@ private struct NetworkActivitySection: View {
 }
 
 /// A two-series Audio Graph and VoiceOver representation of the exact rate samples in
-/// `NetworkActivitySection`. It gives the category colours a textual meaning too.
-private struct NetworkActivityChartDescriptor: AXChartDescriptorRepresentable {
-    let samples: [NetworkRateSample]
+/// `ByteRateSection`. It gives the category colours a textual meaning too.
+private struct ByteRateChartDescriptor: AXChartDescriptorRepresentable {
+    let vocabulary: ByteRateVocabulary
+    let samples: [ByteRateSample]
     let yAxisRange: ClosedRange<Double>
     let summary: String
 
@@ -521,30 +631,30 @@ private struct NetworkActivityChartDescriptor: AXChartDescriptorRepresentable {
             title: "Throughput",
             range: yAxisRange,
             gridlinePositions: [],
-            valueDescriptionProvider: { spokenNetworkRateLabel($0) })
+            valueDescriptionProvider: { spokenByteRateLabel($0) })
 
         func makeSeries(
             _ name: String,
-            values: (NetworkRateSample) -> Double?
+            values: (ByteRateSample) -> Double?
         ) -> AXDataSeriesDescriptor? {
             let points = samples.compactMap { sample -> AXDataPoint? in
                 guard let value = values(sample) else { return nil }
                 return AXDataPoint(
                     x: sample.timestamp.timeIntervalSinceReferenceDate,
                     y: value,
-                    label: "\(sample.timestamp.formatted(.dateTime.hour().minute().second())): \(spokenNetworkRateLabel(value))")
+                    label: "\(sample.timestamp.formatted(.dateTime.hour().minute().second())): \(spokenByteRateLabel(value))")
             }
             guard !points.isEmpty else { return nil }
             return AXDataSeriesDescriptor(name: name, isContinuous: true, dataPoints: points)
         }
 
         let chartSeries = [
-            makeSeries("Received", values: \.receivedBytesPerSecond),
-            makeSeries("Sent", values: \.transmittedBytesPerSecond),
+            makeSeries(vocabulary.inboundLabel, values: \.inboundBytesPerSecond),
+            makeSeries(vocabulary.outboundLabel, values: \.outboundBytesPerSecond),
         ].compactMap { $0 }
 
         let descriptor = AXChartDescriptor(
-            title: "Network Activity",
+            title: vocabulary.title,
             summary: summary,
             xAxis: xAxis,
             yAxis: yAxis,
@@ -781,12 +891,14 @@ private func spokenMemoryValueLabel(_ value: Double) -> String {
     return "\(Formatters.bytesString(bytes)), \(bytes.formatted()) bytes"
 }
 
-private func networkRateLabel(_ value: Double?) -> String {
+/// An em dash for an interval the Engine gave no usable pair of counters for. A rate of
+/// zero is a measurement; a missing rate is not, and the two must not print the same.
+private func byteRateLabel(_ value: Double?) -> String {
     guard let value, value.isFinite, value >= 0 else { return "—" }
-    return "\(Formatters.bytesString(Int64(value.rounded())))/s"
+    return Formatters.byteRateString(value)
 }
 
-private func spokenNetworkRateLabel(_ value: Double?) -> String {
+private func spokenByteRateLabel(_ value: Double?) -> String {
     guard let value, value.isFinite, value >= 0 else { return "unavailable" }
-    return "\(Formatters.bytesString(Int64(value.rounded()))) per second"
+    return "\(Formatters.bytesString(Formatters.clampedByteCount(value))) per second"
 }

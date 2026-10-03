@@ -239,6 +239,21 @@ final class TrackCDiskMathTests: XCTestCase {
             .stopEngine)
     }
 
+    /// The exact pass-2 scenario TASTE-10 fixed: the engine can be running and
+    /// needing a guest resize before Morbstack ever gets a readiness diagnostic back
+    /// from it. The action must still be `.stopEngine` with `diagnostic: nil`, or the
+    /// view has no pure signal to tell it the "has not checked yet" sentence would be
+    /// lying about what the Stop Engine button underneath it does.
+    func testAConfiguredIncreaseWithNoDiagnosticYetStillOffersStopEngine() {
+        XCTAssertEqual(
+            TrackCDiskGrowthPresentation.action(
+                capacity: capacity(.increaseRequiresGuestResize),
+                diagnostic: nil,
+                hasRecoveryJournal: false,
+                engineIsRunning: true),
+            .stopEngine)
+    }
+
     func testAStoppedGuestWithNoPriorReportCanOnlyReachReviewedGrowth() {
         XCTAssertEqual(
             TrackCDiskGrowthPresentation.action(
@@ -274,6 +289,42 @@ final class TrackCDiskMathTests: XCTestCase {
                 hasRecoveryJournal: true,
                 engineIsRunning: false),
             .reviewRecovery)
+    }
+
+    // MARK: - Capacity row/summary collapse (TASTE-10)
+
+    func testConfiguredCapacityRowIsHiddenWhenItMatchesCurrent() {
+        XCTAssertFalse(
+            TrackCDiskGrowthPresentation.showsConfiguredCapacityRow(
+                currentBytes: 128 * MorbDiskCapacity.bytesPerGiB,
+                configuredBytes: 128 * MorbDiskCapacity.bytesPerGiB))
+    }
+
+    func testConfiguredCapacityRowShowsWhenItDiffersFromCurrent() {
+        XCTAssertTrue(
+            TrackCDiskGrowthPresentation.showsConfiguredCapacityRow(
+                currentBytes: 64 * MorbDiskCapacity.bytesPerGiB,
+                configuredBytes: 128 * MorbDiskCapacity.bytesPerGiB))
+    }
+
+    /// No existing image means there is nothing to compare the configured figure
+    /// against, so it is the only number on screen and always shows.
+    func testConfiguredCapacityRowShowsWhenThereIsNoCurrentImage() {
+        XCTAssertTrue(
+            TrackCDiskGrowthPresentation.showsConfiguredCapacityRow(
+                currentBytes: nil,
+                configuredBytes: 128 * MorbDiskCapacity.bytesPerGiB))
+    }
+
+    func testCapacitySummaryIsSuppressedOnlyWhenItMatchesConfiguration() {
+        XCTAssertFalse(TrackCDiskGrowthPresentation.showsCapacitySummary(for: .matchesConfiguration))
+        for state: MorbDiskCapacity.State in [
+            .willCreate, .increaseRequiresGuestResize, .decreaseUnsupported, .unavailable,
+        ] {
+            XCTAssertTrue(
+                TrackCDiskGrowthPresentation.showsCapacitySummary(for: state),
+                "\(state) should still show its summary")
+        }
     }
 
     // MARK: - Anonymous volume names
@@ -457,5 +508,64 @@ final class TrackCDiskMathTests: XCTestCase {
         XCTAssertEqual(result.apparentBytes, 4_096)
         XCTAssertGreaterThan(result.actualBytes, 0, "a written file must have allocated blocks")
         XCTAssertEqual(result.path, url.path)
+    }
+
+    // MARK: - Disk reclaim presentation (TECH-3 / UX-16)
+
+    func testReclaimSentenceNamesNoSweepYetRatherThanAnInternalSentinel() {
+        let sentence = TrackCDiskReclaimPresentation.reclaimSentence(lastTrimBytes: nil)
+        XCTAssertTrue(sentence.contains("No sweep has completed yet"))
+        // The guest's own sentinel is -1; a reader has no use for that number and it
+        // must never leak into the sentence.
+        XCTAssertFalse(sentence.contains("-1"))
+    }
+
+    func testReclaimSentenceReportsAZeroByteSweepAsARealResultNotAMissingOne() {
+        // Zero is a legitimate "nothing to reclaim this sweep" answer, distinct from
+        // "no sweep has run at all" — see `disk::NO_TRIM_YET` on the guest side.
+        let sentence = TrackCDiskReclaimPresentation.reclaimSentence(lastTrimBytes: 0)
+        XCTAssertTrue(sentence.contains("found nothing to reclaim"))
+        XCTAssertFalse(sentence.contains("No sweep has completed"))
+    }
+
+    func testReclaimSentenceNamesTheRealByteCountOfARecentSweep() {
+        let sentence = TrackCDiskReclaimPresentation.reclaimSentence(lastTrimBytes: 59_050_795_008)
+        XCTAssertTrue(sentence.contains(Formatters.bytesString(59_050_795_008)))
+        XCTAssertTrue(sentence.contains("returned"))
+    }
+
+    func testReclaimSentenceNamesBothTriggersNotJustTheBackgroundSweep() {
+        // TECH-3/UX-16 §8 (`docs/design/DISK-RECLAIM-DECISION.md`): a machine that
+        // idles and auto-suspends never sees the periodic sweep complete, so the
+        // claim must not describe only that trigger — it must also name the
+        // shutdown-time reclaim that actually fires for that reader.
+        for bytes: Int64? in [nil, 0, 59_050_795_008] {
+            let sentence = TrackCDiskReclaimPresentation.reclaimSentence(lastTrimBytes: bytes)
+            XCTAssertTrue(
+                sentence.contains("every time it stops") || sentence.contains("every time the guest stops"),
+                "\(String(describing: bytes)) -> \(sentence)")
+        }
+    }
+
+    func testFootprintExplanationStatesTheSparseFactAndTheReclaimFactTogether() {
+        let footprint = TrackCDiskMath.footprint(
+            path: "/tmp/disk.img", apparentBytes: 64 * 1_000_000_000, blocks512: 3 * 1_000_000_000 / 512)
+        let explanation = TrackCDiskReclaimPresentation.footprintExplanation(
+            footprint: footprint, lastTrimBytes: 4_010_000_000)
+
+        XCTAssertTrue(explanation.contains("reserves"), "the sparse-file fact must still be present")
+        XCTAssertTrue(explanation.contains(Formatters.bytesString(4_010_000_000)))
+    }
+
+    func testFootprintExplanationOnAFullyAllocatedImageNoLongerClaimsSpaceIsStuck() {
+        // Regression: the pre-reclaim wording ("remains allocated ... until the file
+        // is trimmed or recreated") became false the moment the periodic sweep shipped
+        // and must not survive as dead text a reader could act on incorrectly.
+        let footprint = TrackCDiskMath.footprint(path: "/tmp/disk.img", apparentBytes: 100 * 512, blocks512: 99)
+        let explanation = TrackCDiskReclaimPresentation.footprintExplanation(
+            footprint: footprint, lastTrimBytes: nil)
+
+        XCTAssertFalse(explanation.contains("until the file is trimmed or recreated"))
+        XCTAssertTrue(explanation.contains("automatically"))
     }
 }

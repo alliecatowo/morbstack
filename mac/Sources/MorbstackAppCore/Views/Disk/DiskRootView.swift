@@ -273,6 +273,10 @@ struct DiskRootView: View {
     @State private var diskResizeDiagnostic: MorbDiskResize.Diagnostic?
     @State private var diskGrowthJournal: MorbDiskGrowth.Journal?
     @State private var diskCapacityError: String?
+    /// The guest's most recent periodic reclaim-sweep result (TECH-3 / UX-16), read
+    /// alongside the other disk-growth facts. `nil` covers "no daemon", "no sweep yet",
+    /// and "older daemon" alike — see ``DaemonClient/guestDiskLastTrimBytes()``.
+    @State private var diskLastTrimBytes: Int64?
     @State private var isGrowingDisk = false
     @State private var diskGrowthError: String?
     @State private var showsDiskGrowthConfirmation = false
@@ -416,19 +420,24 @@ struct DiskRootView: View {
             .accessibilityIdentifier("disk.empty.engineNotRunning")
         } else {
             diskTable
-                // The table's four semantic columns need a readable leading-content
-                // width when the system presents its trailing inspector. Keeping that
-                // constraint on the system Table lets the inspector collapse through
-                // its own native adaptation instead of allowing either surface to
-                // encroach on the other at narrow window widths.
-                .frame(minWidth: 520)
+                // No hard `.frame(minWidth:)` here. The columns below carry their own
+                // minimums, exactly as ImagesRootView does. A previous hard 520pt frame
+                // on this Table over-constrained the split at narrow window widths: the
+                // system honoured the frame, laid the inspector out at its ideal width
+                // anyway, and pushed the inspector's trailing ~50pt off the window edge
+                // (verified live at 1100×700 — values rendered as "Storage cate…",
+                // "77.3…"). With only column minimums the system Table and the system
+                // inspector negotiate the same window without clipping either surface.
                 .inspector(isPresented: $showsInspector) {
                     inspector
-                        .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
                         // See the note on `VolumesRootView`: the trailing commands
                         // ride the inspector's toolbar region and remain present
                         // while the inspector is closed.
                         .toolbar { trailingCommandItems }
+                        // Must be the outermost modifier on the inspector's content
+                        // — see the note in `ContainersRootView`: applied beneath
+                        // `.toolbar` its preferred width was silently discarded.
+                        .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
                 }
                 .onChange(of: model.disk) { _, disk in
                     if disk != nil { selectFirstRowIfNeeded() }
@@ -712,7 +721,9 @@ struct DiskRootView: View {
             } header: {
                 Text("Virtual Machine Disk")
             } footer: {
-                Text(footprintExplanation(footprint))
+                Text(
+                    TrackCDiskReclaimPresentation.footprintExplanation(
+                        footprint: footprint, lastTrimBytes: diskLastTrimBytes))
             }
         } else {
             Section {
@@ -745,13 +756,19 @@ struct DiskRootView: View {
                 } else {
                     LabeledContent("Current Raw Capacity", value: "No disk image")
                 }
-                LabeledContent("Configured Capacity") {
-                    Text(Formatters.bytesString(diskCapacity.configuredBytes))
-                        .monospacedDigit()
+                if TrackCDiskGrowthPresentation.showsConfiguredCapacityRow(
+                    currentBytes: diskCapacity.currentBytes, configuredBytes: diskCapacity.configuredBytes)
+                {
+                    LabeledContent("Configured Capacity") {
+                        Text(Formatters.bytesString(diskCapacity.configuredBytes))
+                            .monospacedDigit()
+                    }
                 }
                 LabeledContent("Capacity State", value: capacityStateTitle(diskCapacity.state))
-                Text(diskCapacity.summary)
-                    .foregroundStyle(.secondary)
+                if TrackCDiskGrowthPresentation.showsCapacitySummary(for: diskCapacity.state) {
+                    Text(diskCapacity.summary)
+                        .foregroundStyle(.secondary)
+                }
 
                 if let inspectionError = diskCapacity.inspectionError {
                     Text(inspectionError)
@@ -759,27 +776,55 @@ struct DiskRootView: View {
                         .textSelection(.enabled)
                 }
 
+                // The state machine behind disk growth is real and worth keeping — a
+                // journal, a readiness probe, a guest capability, recovery phases. But
+                // its vocabulary is ours, not the reader's: "Transaction Readiness",
+                // "Recovery Phase — host-grown" and "reviewed growth transaction"
+                // describe our implementation, and someone looking at this pane wants
+                // to know one thing, which is whether they can make the disk bigger.
+                //
+                // So: one plain sentence at the top, and the machinery behind a
+                // disclosure for whoever is actually debugging it. Nothing is removed;
+                // it stops being the first thing you read.
                 if let diskResizeDiagnostic {
-                    LabeledContent(
-                        "Transaction Readiness",
-                        value: diskResizeStateTitle(diskResizeDiagnostic.state))
-                    LabeledContent(
-                        "Guest Resize",
-                        value: diskResizeDiagnostic.guestCapability.rawValue.capitalized)
-                    Text(diskResizeDiagnostic.summary)
+                    Text(growthReadinessSentence(diskResizeDiagnostic))
+                        .foregroundStyle(.secondary)
+
+                    DisclosureGroup("Growth Details") {
+                        LabeledContent(
+                            "Readiness",
+                            value: diskResizeStateTitle(diskResizeDiagnostic.state))
+                        LabeledContent(
+                            "Guest Resize",
+                            value: diskResizeDiagnostic.guestCapability.rawValue.capitalized)
+                        Text(diskResizeDiagnostic.summary)
+                            .foregroundStyle(.secondary)
+
+                        if let diskGrowthJournal {
+                            LabeledContent(
+                                "Interrupted At",
+                                value: diskGrowthJournal.phase.rawValue)
+                            LabeledContent("Target") {
+                                Text(Formatters.bytesString(diskGrowthJournal.targetBytes))
+                                    .monospacedDigit()
+                            }
+                            Text(
+                                TrackCDiskGrowthPresentation.journalPhaseDescription(
+                                    diskGrowthJournal.phase))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .accessibilityIdentifier("disk.growthDetails")
+                } else if diskGrowthAction == .stopEngine {
+                    // The engine can be running and needing a guest resize before
+                    // Morbstack ever gets a readiness diagnostic back from it — the
+                    // fallback case below would then lead with "has not checked yet"
+                    // directly above a Stop Engine button it never mentions. Name the
+                    // remedy the button actually offers instead.
+                    Text("Stop the engine to grow the disk. Resizing a disk the VM is running from is not safe.")
                         .foregroundStyle(.secondary)
                 } else {
-                    Text("The daemon has not reported disk-growth readiness. Morbstack checks the same preconditions again before any reviewed growth transaction.")
-                        .foregroundStyle(.secondary)
-                }
-
-                if let diskGrowthJournal {
-                    LabeledContent("Recovery Phase", value: diskGrowthJournal.phase.rawValue)
-                    LabeledContent("Saved Target") {
-                        Text(Formatters.bytesString(diskGrowthJournal.targetBytes))
-                            .monospacedDigit()
-                    }
-                    Text(TrackCDiskGrowthPresentation.journalPhaseDescription(diskGrowthJournal.phase))
+                    Text("Morbstack has not checked yet whether this disk can grow. It checks again before any growth you confirm.")
                         .foregroundStyle(.secondary)
                 }
             } else if let diskCapacityError {
@@ -910,6 +955,33 @@ struct DiskRootView: View {
         }
     }
 
+    /// The one sentence a person reading this pane actually wants: can the disk grow,
+    /// and if not, what would change that.
+    ///
+    /// Each case answers in the reader's terms rather than the state machine's, and
+    /// every "no" names the thing they can do about it. `diskResizeStateTitle` still
+    /// exists and still says "Stop VM first" — that is the right label for a
+    /// two-word status field inside the details disclosure; it is the wrong thing to
+    /// lead with.
+    private func growthReadinessSentence(_ diagnostic: MorbDiskResize.Diagnostic) -> String {
+        switch diagnostic.state {
+        case .readyForExplicitTransaction:
+            return "This disk can grow. Growth is never automatic — you confirm the new size, and it is never made smaller."
+        case .notNeeded:
+            return "The disk already matches the size you configured, so there is nothing to grow."
+        case .decreaseUnsupported:
+            return "The configured size is smaller than the disk. Morbstack only ever grows a disk, never shrinks one, so nothing will change."
+        case .vmMustStop:
+            return "Stop the engine to grow the disk. Resizing a disk the VM is running from is not safe."
+        case .guestCapabilityUnknown, .capacityUnavailable:
+            return "Morbstack cannot tell yet whether this disk can grow. Start the engine so it can ask the guest."
+        case .guestResizeUnavailable:
+            return "This guest image cannot resize its own filesystem, so growing the disk would add space nothing can use."
+        case .recoveryRequired:
+            return "A previous growth was interrupted. Morbstack will finish or roll it back before starting another."
+        }
+    }
+
     private func diskResizeStateTitle(_ state: MorbDiskResize.State) -> String {
         switch state {
         case .notNeeded: return "No transaction needed"
@@ -921,13 +993,6 @@ struct DiskRootView: View {
         case .recoveryRequired: return "Recovery required"
         case .readyForExplicitTransaction: return "Ready for review"
         }
-    }
-
-    private func footprintExplanation(_ footprint: TrackCDiskImageFootprint) -> String {
-        if footprint.isSparse {
-            return "This sparse file reserves \(Formatters.bytesString(footprint.apparentBytes)) but currently uses \(Formatters.bytesString(footprint.actualBytes)) on APFS."
-        }
-        return "This image is close to fully allocated. Space freed inside the guest remains allocated on APFS until the file is trimmed or recreated."
     }
 
     // MARK: Operations
@@ -997,6 +1062,7 @@ struct DiskRootView: View {
                 diskResizeDiagnostic = nil
                 diskGrowthJournal = nil
                 diskCapacityError = nil
+                diskLastTrimBytes = nil
             }
             return
         }
@@ -1024,12 +1090,14 @@ struct DiskRootView: View {
             }
         }.value
         let daemonDiagnostic = await model.daemon.diskResizeDiagnostic()
+        let lastTrimBytes = await model.daemon.guestDiskLastTrimBytes()
 
         await MainActor.run {
             diskCapacity = localFacts.capacity
             diskGrowthJournal = localFacts.journal
             diskCapacityError = localFacts.errorMessage
             diskResizeDiagnostic = daemonDiagnostic
+            diskLastTrimBytes = lastTrimBytes
         }
     }
 

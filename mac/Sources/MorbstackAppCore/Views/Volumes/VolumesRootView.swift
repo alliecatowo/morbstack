@@ -211,6 +211,60 @@ enum TrackCVolumeInspector {
         return .inconsistent(reported: reportedReferenceCount, listed: listedReferences)
     }
 
+    /// The single row that answers "what is using this volume". Docker's own
+    /// `In use` / `Unused` wording is derived from this same count, so printing both
+    /// states one fact twice; the count is the one that also carries how many.
+    static func referenceRowValue(for reportedReferenceCount: Int?) -> String {
+        guard let reportedReferenceCount else { return unscannedValue }
+        return reportedReferenceCount == 1 ? "1 container" : "\(reportedReferenceCount) containers"
+    }
+
+    /// True when Docker reported neither number. Both rows would then carry the same
+    /// non-value, so the section collapses them into one and the footnote names what a
+    /// scan would fill in — the absence is stated once instead of twice.
+    static func usageIsUnscanned(size: Int64?, reportedReferenceCount: Int?) -> Bool {
+        size == nil && reportedReferenceCount == nil
+    }
+
+    /// Shown wherever a number would be if the Disk scan had run. Deliberately not
+    /// "Not reported", "Unknown" or an em dash: those read as "Docker has no answer",
+    /// when the truth is that nobody has asked it yet and the reader can.
+    static let unscannedValue = "Not scanned yet"
+
+    /// At most one footnote for the Storage and Use section, or none.
+    ///
+    /// Docker fills a volume's `UsageData` only when something asks it to — the Disk
+    /// route's scan — so a missing size and a missing reference count are the same
+    /// fact, and the section says it once and names what changes it. When both numbers
+    /// are real, the rows already state agreement; a footnote earns its space only by
+    /// reporting a disagreement the rows cannot show.
+    static func usageFootnote(
+        size: Int64?,
+        reportedReferenceCount: Int?,
+        evidence: TrackCVolumeUsageEvidence
+    ) -> String? {
+        switch (size, reportedReferenceCount) {
+        case (nil, nil):
+            return "Size and container references come from the Disk scan. Open Disk to compute them."
+        case (nil, _):
+            return "Sizes come from the Disk scan. Open Disk to compute them."
+        case (_, nil):
+            return "Container references come from the Disk scan. Open Disk to compute them."
+        default:
+            break
+        }
+        switch evidence {
+        case .unreported, .unused, .matches:
+            return nil
+        case .incomplete(let reported, let listed):
+            return
+                "Docker reports \(reported) container \(reported == 1 ? "reference" : "references"), but \(listed) name\(listed == 1 ? " is" : "s are") in the current inventory."
+        case .inconsistent(let reported, let listed):
+            return
+                "The current container inventory lists \(listed) mounts, while Docker reports \(reported) references. Refresh before removing this volume."
+        }
+    }
+
     static func removalConsequence(for volume: VolumeSummary) -> String {
         switch volume.refCount {
         case 0:
@@ -332,6 +386,9 @@ struct VolumesRootView: View {
     let model: AppModel
 
     @State private var query = ""
+    // UI-051: search is a glyph in the trailing group until someone asks for it.
+    // `RouteSearchModifier` attaches the system field while this is true.
+    @State private var searchIsActive = false
     @State private var sortOrder: [TrackCVolumeComparator] = [TrackCVolumeComparator(key: .name)]
     @State private var selection: VolumeSummary.ID?
 
@@ -540,34 +597,29 @@ struct VolumesRootView: View {
 
     // MARK: Toolbar
 
-    /// The trailing commands — create, and the inspector toggle — declared once and
-    /// mounted in one of two places. While the inspector is open they are declared on
-    /// its content, which puts them in the inspector's own toolbar section so the
-    /// system slides them in and out *with* the inspector — the same absorb behavior
-    /// the sidebar toggle gets on the leading edge. When the inspector is closed they
-    /// return to the window toolbar's trailing region so both commands stay reachable.
-    /// Identifiers are identical in both mounts.
+    /// The two view controls — search and the inspector toggle — declared once and
+    /// mounted on whichever content is on screen, so they survive the no-volumes state
+    /// where the inspector is not mounted at all. Identifiers are identical in both
+    /// mounts.
+    ///
+    /// Slot 4 and slot 5 of the toolbar grammar in
+    /// `docs/design/NATIVE-MACOS-PLAYBOOK.md`. Items declared on the *inspector's*
+    /// toolbar render after items declared on the route's own toolbar within the same
+    /// placement run, which is what puts these two hard against the window's trailing
+    /// edge, above the inspector column — measured, not assumed.
     @ToolbarContentBuilder
     private var trailingCommandItems: some ToolbarContent {
-        ToolbarItem(id: "volumes.create", placement: .primaryAction) {
-            Button {
-                presentVolumeCreateSheet()
-            } label: {
-                Image(systemName: "plus")
-            }
-            .disabled(isPerformingVolumeOperation)
-            .accessibilityIdentifier("volumes.create")
-            .accessibilityLabel("Create volume")
-            .help(
-                isPerformingVolumeOperation
-                    ? "Wait for the current volume operation to finish"
-                    : "Create a named local Docker volume")
-        }
         if !model.volumes.isEmpty {
-            // The inspector changes the window's navigation layout; it is not the
-            // primary task on a volume inventory screen.  Let the system place it
-            // with other view controls instead of promoting it above record actions.
-            ToolbarItem(id: "volumes.inspector", placement: .automatic) {
+            RouteSearchToolbarItem(
+                id: "volumes.search", subject: "volumes", isActive: $searchIsActive)
+            // Every trailing item is `.primaryAction`, including the view controls.
+            // Not because `.automatic` would land anywhere else — the `runOrder`
+            // probe interleaved the two placements across both toolbar modifiers and
+            // got 1 2 3 4 5 in one capsule, so they do not sort against each other —
+            // but because when order is *only* declaration order, one placement for
+            // the whole run is the only spelling in which the source reads in the
+            // same order as the bar.
+            ToolbarItem(id: "volumes.inspector", placement: .primaryAction) {
                 Button {
                     showsInspector.toggle()
                 } label: {
@@ -580,14 +632,30 @@ struct VolumesRootView: View {
         }
     }
 
+    /// Slots 1–3: record actions, then collection actions, then the view controls.
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        if model.volumes.isEmpty {
-            // The inspector is not mounted on the no-volumes screen, so the trailing
-            // commands need their ordinary window-toolbar home here.
-            trailingCommandItems
+        // 1 · record action — acts on the selected volume.
+        ToolbarItem(id: "volumes.export", placement: .primaryAction) {
+            Button {
+                chooseVolumeArchiveDestination()
+            } label: {
+                // SF Symbol convention: up = export/share, down = import/save.
+                Image(systemName: "square.and.arrow.up")
+            }
+            .accessibilityIdentifier("volumes.export")
+            .accessibilityLabel("Export selected volume")
+            .help(volumeArchiveExportHelp)
+            .disabled(!canExportSelectedVolume)
         }
-        ToolbarItem(id: "volumes.removeUnused", placement: .secondaryAction) {
+        // 2 · collection actions, destructive first so the prune is never adjacent to
+        // "create". `ToolbarSpacer(.fixed)` used to sit between them with a comment
+        // claiming it drew two capsules; it does not. On macOS 26.4 a placement run is
+        // one glass capsule and neither `ToolbarSpacer(.fixed)`, `(.flexible)` nor
+        // `ToolbarItemGroup` divides it — five probe variants, byte-identical captures
+        // (`docs/design/probes/ToolProbe.swift`, spacerNone…spacerSharedHidden).
+        // Ordering is the only separation the platform actually gives us.
+        ToolbarItem(id: "volumes.removeUnused", placement: .primaryAction) {
             if let removalProgress {
                 ProgressView()
                     .controlSize(.small)
@@ -608,17 +676,25 @@ struct VolumesRootView: View {
                         : "Review and remove \(unusedCount) unused volume\(unusedCount == 1 ? "" : "s")")
             }
         }
-        ToolbarItem(id: "volumes.export", placement: .secondaryAction) {
+        ToolbarItem(id: "volumes.create", placement: .primaryAction) {
             Button {
-                chooseVolumeArchiveDestination()
+                presentVolumeCreateSheet()
             } label: {
-                // SF Symbol convention: up = export/share, down = import/save.
-                Image(systemName: "square.and.arrow.up")
+                Image(systemName: "plus")
             }
-            .accessibilityIdentifier("volumes.export")
-            .accessibilityLabel("Export selected volume")
-            .help(volumeArchiveExportHelp)
-            .disabled(!canExportSelectedVolume)
+            .disabled(isPerformingVolumeOperation)
+            .accessibilityIdentifier("volumes.create")
+            .accessibilityLabel("Create volume")
+            .help(
+                isPerformingVolumeOperation
+                    ? "Wait for the current volume operation to finish"
+                    : "Create a named local Docker volume")
+        }
+        if model.volumes.isEmpty {
+            // The inspector is not mounted on the no-volumes screen, so the view
+            // controls need their ordinary window-toolbar home here — declared last so
+            // the empty screen keeps the populated screen's order.
+            trailingCommandItems
         }
     }
 
@@ -660,7 +736,6 @@ struct VolumesRootView: View {
             }
             .inspector(isPresented: $showsInspector) {
                 detailPane
-                    .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
                     // Mounting the trailing commands and search on the inspector
                     // content hands them to the inspector's region of the unified
                     // toolbar: at rest they sit against the inspector's edge instead
@@ -670,10 +745,23 @@ struct VolumesRootView: View {
                     // window: they remain present and clickable while the inspector
                     // is closed.
                     .toolbar { trailingCommandItems }
-                    .searchable(
+                    .routeSearchable(
+                        isActive: $searchIsActive,
                         text: $query,
-                        placement: .toolbar,
                         prompt: "Name, driver, label, or mount point")
+                    // `.inspectorColumnWidth` must be the OUTERMOST modifier on the
+                    // inspector's content. Apple's own documentation says to "apply
+                    // this modifier on the content of a .inspector(...)", and this
+                    // route (and seven others copied from it) put it innermost,
+                    // before `.toolbar`/`.searchable` — those are also modifiers on
+                    // "the content" so the width preference set beneath them was
+                    // silently discarded, and every one of those routes' inspectors
+                    // rendered at SwiftUI's undeclared system default (~270pt) no
+                    // matter what min/ideal/max was written here. Verified against
+                    // the real window 2026-08-06: reordering this one line took the
+                    // Containers inspector from 269pt (clipping every value) to the
+                    // declared 400pt ideal, with no other change.
+                    .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
             }
         }
     }
@@ -731,7 +819,7 @@ struct VolumesRootView: View {
                 .monospacedDigit()
         } else if volume.refCount == nil {
             Text("—")
-                .accessibilityLabel("Usage unreported")
+                .accessibilityLabel(TrackCVolumeInspector.unscannedValue)
                 .help("Usage comes from the Disk scan. Open Disk to compute it.")
         } else {
             Text("Unused")
@@ -785,9 +873,6 @@ struct VolumesRootView: View {
                     LabeledContent(
                         "Volume",
                         value: TrackCDiskMath.isAnonymousVolumeName(volume.name) ? "Anonymous" : "Named")
-                    LabeledContent(
-                        "Prune",
-                        value: TrackCDiskMath.isAnonymousVolumeName(volume.name) ? "Eligible" : "Retained")
                 }
 
                 if !labels.isEmpty {
@@ -813,11 +898,19 @@ struct VolumesRootView: View {
                 }
 
                 Section("Storage and Use") {
-                    LabeledContent("Size", value: volume.size.map(Formatters.bytesString) ?? "Not reported")
-                    LabeledContent("Docker Usage", value: volume.usageStatus)
-                    LabeledContent("Docker References") {
-                        Text(volume.refCount.map { "\($0) container\($0 == 1 ? "" : "s")" } ?? "Not reported")
-                            .monospacedDigit()
+                    if TrackCVolumeInspector.usageIsUnscanned(
+                        size: volume.size, reportedReferenceCount: volume.refCount)
+                    {
+                        LabeledContent("Usage", value: TrackCVolumeInspector.unscannedValue)
+                    } else {
+                        LabeledContent(
+                            "Size",
+                            value: volume.size.map(Formatters.bytesString)
+                                ?? TrackCVolumeInspector.unscannedValue)
+                        LabeledContent("Used By") {
+                            Text(TrackCVolumeInspector.referenceRowValue(for: volume.refCount))
+                                .monospacedDigit()
+                        }
                     }
                     LabeledContent("Guest Mount Point") {
                         Text(volume.mountpoint.isEmpty ? "Not reported" : volume.mountpoint)
@@ -827,13 +920,18 @@ struct VolumesRootView: View {
                             .truncationMode(.middle)
                     }
 
-                    if volume.size == nil {
-                        Text("Docker did not report this volume’s disk usage.")
+                    // One footnote at most. Absence is already stated by the rows; this
+                    // exists to name the remedy, or to report a disagreement the rows
+                    // cannot show. See TrackCVolumeInspector.usageFootnote.
+                    if let footnote = TrackCVolumeInspector.usageFootnote(
+                        size: volume.size,
+                        reportedReferenceCount: volume.refCount,
+                        evidence: usageEvidence)
+                    {
+                        Text(footnote)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-
-                    usageEvidenceText(usageEvidence)
                 }
 
                 if !references.isEmpty {
@@ -903,32 +1001,6 @@ struct VolumesRootView: View {
                 "No Volume Selected",
                 systemImage: "externaldrive",
                 description: Text("Select a volume to see its guest mount point and what is using it."))
-        }
-    }
-
-    @ViewBuilder
-    private func usageEvidenceText(_ evidence: TrackCVolumeUsageEvidence) -> some View {
-        switch evidence {
-        case .unreported:
-            Text("Docker did not report a usage count. This volume is not treated as unused.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        case .unused:
-            Text("Docker reports that no containers reference this volume.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        case .matches:
-            EmptyView()
-        case .incomplete(let reported, let listed):
-            Text(
-                "Docker reports \(reported) container \(reported == 1 ? "reference" : "references"), but \(listed) name\(listed == 1 ? " is" : "s are") in the current inventory.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        case .inconsistent(let reported, let listed):
-            Text(
-                "The current container inventory lists \(listed) mounts, while Docker reports \(reported) references. Refresh before removing this volume.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
     }
 

@@ -113,7 +113,10 @@ enum VerifyCommand {
 
     // MARK: - Images
 
-    private static func verifyImage(reference: String, source: EngineClient, destination: EngineClient) -> VerifyItem {
+    /// Shared with ``MigrateOutCommand``: the same config-ID comparison used to verify
+    /// an inbound migration verifies an outbound one, just with `source` and
+    /// `destination` naming whichever engine actually holds the pre-transfer copy.
+    static func verifyImage(reference: String, source: EngineClient, destination: EngineClient) -> VerifyItem {
         let sourceInfo = try? source.jsonObject("GET", "/images/\(reference)/json", timeout: 15)
         let destInfo = try? destination.jsonObject("GET", "/images/\(reference)/json", timeout: 15)
         guard let sourceID = sourceInfo.flatMap({ JSONRead.string($0, "Id") }) else {
@@ -140,9 +143,10 @@ enum VerifyCommand {
 
     // MARK: - Volumes
 
-    private static let manifestCmd = ["sh", "-c", "cd /data && find . -type f -exec sha256sum {} + 2>/dev/null | sort"]
+    static let manifestCmd = ["sh", "-c", "cd /data && find . -type f -exec sha256sum {} + 2>/dev/null | sort"]
 
-    private static func verifyVolume(
+    /// Shared with ``MigrateOutCommand`` — see ``verifyImage(reference:source:destination:)``.
+    static func verifyVolume(
         name: String, source: EngineClient, sourceImage: String?, destination: EngineClient, destImage: String?
     ) -> VerifyItem {
         guard let sourceImage else {
@@ -187,7 +191,8 @@ enum VerifyCommand {
         return Array(sourceNames.intersection(destNames)).sorted()
     }
 
-    private static func ensureVerifyImage(client: EngineClient, label: String, assumeYes: Bool) -> String? {
+    /// Shared with ``MigrateOutCommand`` — see ``verifyImage(reference:source:destination:)``.
+    static func ensureVerifyImage(client: EngineClient, label: String, assumeYes: Bool) -> String? {
         if let existing = HelperImage.existingWithCoreutils(on: client) { return existing }
         out("No image with find/sha256sum is present on \(label); verify would pull `alpine:3.20` there.")
         if !assumeYes {
@@ -196,7 +201,9 @@ enum VerifyCommand {
         return (try? HelperImage.pull("alpine:3.20", on: client)).map { "alpine:3.20" }
     }
 
-    private static func printResults(_ results: [VerifyItem]) {
+    /// Shared with ``MigrateOutCommand`` so an outbound migration's verification table
+    /// reads identically to `morb migrate verify`'s.
+    static func printResults(_ results: [VerifyItem]) {
         var table = TextTable(headers: ["KIND", "NAME", "RESULT", "DETAIL"])
         for item in results {
             table.add([item.kind, item.name, item.outcome.rawValue, Format.truncate(item.detail ?? "", 60)])

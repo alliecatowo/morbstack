@@ -168,6 +168,23 @@ protocol K8sClusterProviding: AnyObject {
     /// Writes only Morbstack's private, app-owned kubeconfig. It never edits
     /// `~/.kube/config`; that remains the CLI's separately confirmed merge action.
     func generateKubeconfig() async throws -> URL
+
+    /// Reads the daemon's current selected-Pod port-forward lease, independent of
+    /// which row the table has selected right now. This is a daemon-owned lease —
+    /// `morb k8s port-forward` can create or observe the exact same one.
+    func podPortForwardStatus() async throws -> K8s.PodPortForwardLease?
+    /// Starts the daemon's one selected-Pod local port forward for exactly this
+    /// Pod's current identity and the requested ports. Kubernetes port-forward
+    /// targets the Pod network namespace, so `container` disambiguates only which
+    /// running container the daemon revalidates before starting; the forward
+    /// itself reaches every container's ports.
+    func startPodPortForward(
+        for pod: K8sPodInfo, container: String?, localPort: Int?, podPort: Int
+    ) async throws -> K8s.PodPortForwardLease
+    /// Cancels exactly the lease with this ID. Returns whether this call is what
+    /// ended a forward; a stale ID is not an error.
+    @discardableResult
+    func cancelPodPortForward(id: UUID) async throws -> Bool
 }
 
 // MARK: - Production provider
@@ -224,6 +241,27 @@ final class K8sDaemonClient: K8sClusterProviding {
     func generateKubeconfig() async throws -> URL {
         try await daemon.writeKubernetesKubeconfig()
     }
+
+    func podPortForwardStatus() async throws -> K8s.PodPortForwardLease? {
+        try await daemon.kubernetesPodPortForwardStatus()
+    }
+
+    func startPodPortForward(
+        for pod: K8sPodInfo, container: String?, localPort: Int?, podPort: Int
+    ) async throws -> K8s.PodPortForwardLease {
+        guard let uid = pod.uid, !uid.isEmpty else {
+            throw K8sResourceAccessError.unavailable(
+                "The Kubernetes API did not return an identity for this pod, so Morbstack cannot start a port forward safely.")
+        }
+        return try await daemon.startKubernetesPodPortForward(
+            namespace: pod.namespace, pod: pod.name, uid: uid, container: container,
+            localPort: localPort, podPort: podPort)
+    }
+
+    @discardableResult
+    func cancelPodPortForward(id: UUID) async throws -> Bool {
+        try await daemon.cancelKubernetesPodPortForward(lease: id)
+    }
 }
 
 // MARK: - Fixture
@@ -240,6 +278,10 @@ final class K8sFixtureClient: K8sClusterProviding {
     private var status: K8s.Status
     private let allNodes: [K8sNodeInfo]
     private let allPods: [K8sPodInfo]
+    /// Mirrors the daemon's real constraint: at most one lease at a time, so the
+    /// tour fixture exercises the same "already active" and "cancel to replace"
+    /// states a real cluster does.
+    private var portForwardLease: K8s.PodPortForwardLease?
 
     init(
         startsEnabled: Bool = true,
@@ -361,6 +403,32 @@ final class K8sFixtureClient: K8sClusterProviding {
     func generateKubeconfig() async throws -> URL {
         throw K8sResourceAccessError.unavailable(
             "Kubeconfig generation is unavailable in the deterministic tour fixture.")
+    }
+
+    func podPortForwardStatus() async throws -> K8s.PodPortForwardLease? { portForwardLease }
+
+    func startPodPortForward(
+        for pod: K8sPodInfo, container: String?, localPort: Int?, podPort: Int
+    ) async throws -> K8s.PodPortForwardLease {
+        guard status.phase == .ready else {
+            throw K8sResourceAccessError.unavailable("Kubernetes is not ready.")
+        }
+        guard portForwardLease == nil else {
+            throw MorbError.io(
+                "a selected Kubernetes Pod port-forward is already starting or active; cancel it before starting another")
+        }
+        let lease = K8s.PodPortForwardLease(
+            id: UUID(), namespace: pod.namespace, pod: pod.name, container: container,
+            localPort: localPort ?? 40_000 + Int.random(in: 0...999), podPort: podPort)
+        portForwardLease = lease
+        return lease
+    }
+
+    @discardableResult
+    func cancelPodPortForward(id: UUID) async throws -> Bool {
+        guard portForwardLease?.id == id else { return false }
+        portForwardLease = nil
+        return true
     }
 
     private static func fixtureLog(for pod: K8sPodInfo, container: String) -> String {

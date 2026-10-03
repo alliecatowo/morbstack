@@ -64,7 +64,7 @@ guest; replies are guest -> host.
 | host->guest | `ping`     | *(none)*                                     | Liveness check |
 | guest->host | `pong`     | `uptime_ms: int`                             | Reply to `ping` |
 | host->guest | `info`     | *(none)*                                     | Request static guest facts |
-| guest->host | `info`     | `morbinit_version: string`, `kernel: string`, `docker_ready: bool`, `docker_data_on_disk: bool`, `userland_proxy: bool`, `shares: string`, `disk_resize: string` | Reply to `info` request; `disk_resize` is additive capability state |
+| guest->host | `info`     | `morbinit_version: string`, `kernel: string`, `docker_ready: bool`, `docker_data_on_disk: bool`, `userland_proxy: bool`, `shares: string`, `disk_resize: string`, `mem_total_kb: int`, `mem_available_kb: int` | Reply to `info` request; `disk_resize` is additive capability state; `mem_total_kb`/`mem_available_kb` are read fresh every request, not boot-time facts |
 | host->guest | `clock_sync` | `unix_nanos: int`                          | Push host wall-clock time |
 | guest->host | `ok`       | *(none)*                                     | Generic success reply (used for `clock_sync`, `shutdown`) |
 | host->guest | `shutdown` | *(none)*                                     | Request orderly guest shutdown |
@@ -112,6 +112,24 @@ send. Both are exposed to CLI/daemon consumers: `morb doctor`'s
 disk-persistence check and the `docker_data_on_disk` field in `morb
 status`'s JSON output (see `mac/Sources/MorbstackKit/Daemon.swift`).
 
+`mem_total_kb` and `mem_available_kb` (UX-17) are the guest kernel's own
+`MemTotal`/`MemAvailable` estimate from `/proc/meminfo` at the moment of the
+request, in kB — `MemAvailable`, not `MemFree`, because it is the kernel's
+own reclaim-aware estimate (free pages plus page cache/slab that can be
+dropped without swapping), which is the number a memory-balloon driver needs
+before it can safely ask the guest to give memory back. Unlike every other
+`info` field, this is **not** a boot-time fact frozen once — `morbinit`
+re-reads `/proc/meminfo` on every `info` request, because memory pressure is
+the one thing here that changes second to second. `-1` on both fields is the
+explicit "unavailable" sentinel (a real reading is always non-negative):
+either a non-Linux `--serve-control` dev build, or the one `/proc/meminfo`
+read failed. The host's `GuestReply` decoder
+(`mac/Sources/MorbstackKit/GuestControl.swift`) surfaces both as `Int64?`,
+`nil` for a guest that predates the fields *or* reports the `-1` sentinel —
+either way, "no sample," never a guessed value. Consumed by
+``MemoryBalloonPolicy`` to drive the memory-balloon device's
+`targetVirtualMachineMemorySize`; see `docs/design/MEMORY-BALLOON.md`.
+
 `disk_resize` is an additive capability for the future **stop-only,
 grow-only** expansion transaction. The current guest reports `"unavailable"`.
 Although the initramfs stages btrfs/e2fs utilities, there is no current control
@@ -136,7 +154,7 @@ Info:
 
 ```
 host -> guest: MRB0 + length + {"type":"info"}
-guest -> host: MRB0 + length + {"type":"info","morbinit_version":"0.1.0-m0","kernel":"6.18.15","docker_ready":true,"docker_data_on_disk":true,"userland_proxy":true}
+guest -> host: MRB0 + length + {"type":"info","morbinit_version":"0.1.0-m0","kernel":"6.18.15","docker_ready":true,"docker_data_on_disk":true,"userland_proxy":true,"mem_total_kb":8137368,"mem_available_kb":6234112}
 ```
 
 Clock sync:
@@ -181,16 +199,21 @@ dirty pages outstanding, which is data loss rather than a timeout:
 
 | Layer | Budget | Where |
 |-------|--------|-------|
-| guest reply cap | 54 s | `control::SHUTDOWN_REPLY_TIMEOUT` (`guest/morbinit/src/control.rs`) |
+| guest reply cap | 74 s | `control::SHUTDOWN_REPLY_TIMEOUT` (`guest/morbinit/src/control.rs`) |
 | guest reply flush | +5 s | `REPLY_FLUSH_TIMEOUT` (`guest/morbinit/src/main.rs`) |
-| host ack timeout | 65 s | `VMManager.shutdownAckTimeout` |
-| daemon stop budget | 90 s | `Daemon.stopBudget` |
-| CLI timeout | 120 s | `Daemon.clientTimeout` |
+| host ack timeout | 85 s | `VMManager.shutdownAckTimeout` |
+| daemon stop budget | 110 s | `Daemon.stopBudget` |
+| CLI timeout | 140 s | `Daemon.clientTimeout` |
 
 The guest cap is *derived*, not chosen: `SUPERVISED_SERVICE_COUNT *
-(STOP_GRACE + KILL_GRACE) + FLUSH_ALLOWANCE` = `2 * (10 s + 2 s) + 30 s`.
-Raising any of those guest constants raises the cap and requires raising
-every host number above it in the same change. Both ends are pinned by
+(STOP_GRACE + KILL_GRACE) + GATED_PHASE_ALLOWANCE + disk::TRIM_SHUTDOWN_DEADLINE
++ FLUSH_ALLOWANCE` = `2 * (10 s + 2 s) + 5 s + 15 s + 30 s`. The
+`disk::TRIM_SHUTDOWN_DEADLINE` term is a bounded `fstrim` sweep that
+`run_shutdown_sequence` runs before the flush — see
+`docs/design/DISK-RECLAIM-DECISION.md` §8 for why reclaim on an idle-suspended
+guest has to happen here rather than on the periodic background sweep's own
+schedule. Raising any of those guest constants raises the cap and requires
+raising every host number above it in the same change. Both ends are pinned by
 tests — `the_reply_budget_leaves_room_for_the_host_ack_timeout_above_it` in
 `control.rs` and `testShutdownBudgetsNestFromTheGuestOutwards` in
 `mac/Tests/MorbstackKitTests/LifecycleTests.swift` — so the ladder cannot
@@ -317,6 +340,7 @@ Failure:
 | 2378 | Datagram-dial: framed UDP relay for published container ports |
 | 2381 | Live-share receiver: authenticated host FSEvents invalidations for explicitly selected VirtioFS project roots |
 | 2382 | Host-side port lease: the guest userland-proxy wrapper asks the host to bind a published port; guest-initiated |
+| 2383 | Host-side SSH-agent forward: the guest's `/run/host-services/ssh-auth.sock` listener asks the host to splice to the host's real SSH agent; guest-initiated, off by default |
 
 Port 2375 is the conventional plaintext Docker Engine API port; it is used
 here only on the host<->guest vsock link, which is not reachable from the
@@ -340,7 +364,7 @@ persistent ext4 disk keeps the cost proportional to the feature's use. See
 §3.4.
 
 New ports must be added to this table before use. Do not reuse 1024, 2375,
-2376, 2377, 2378, 2381, or 2382 for anything else. Ports 2379 and 2380 are
+2376, 2377, 2378, 2381, 2382, or 2383 for anything else. Ports 2379 and 2380 are
 retired — 2379 was the publish-all allocator for a patched Moby that no
 longer ships (see §3.6); 2380 never shipped past a decision draft. Neither
 may be reused: this document has a specific, dated failure mode of
@@ -818,6 +842,66 @@ as a direct pass-through to the stock proxy: a `-v`/`-version` probe (there
 is nothing to lease), and `-proto sctp` (macOS has no SCTP listener to
 offer — matching Docker Desktop's own behavior — though the guest-side
 proxy still runs, so container-to-container SCTP traffic works).
+
+### 3.7 The vsock 2383 SSH-agent forward protocol (UX-19)
+
+Transport: vsock, guest-initiated like §3.6 — **port 2383 is a listener on
+the host**, and the guest connects out to it. Full design and threat model:
+[`docs/design/SSH-AGENT-FORWARDING.md`](design/SSH-AGENT-FORWARDING.md).
+
+`morbinit` always binds a Unix listener at
+`/run/host-services/ssh-auth.sock` inside the guest — Docker Desktop's own
+documented path, matched exactly so a Compose file or devcontainer config
+copied from a Docker Desktop machine finds the socket it expects instead of
+failing to locate it. Every accepted local connection to that socket opens a
+**fresh** vsock connection to the host and speaks one bounded ASCII request,
+answered with one bounded ASCII reply:
+
+```text
+guest -> host:  "SSHAUTH\n"
+host  -> guest: "OK\n"             then the connection splices to $SSH_AUTH_SOCK
+           or:  "ERR <reason>\n"   then the connection closes
+```
+
+Unlike §3.6's `LEASE` line, the request carries no fields — the mapping is
+always "the one host SSH agent" — so `SSHAUTH` is the entire grammar. This is
+deliberately treated as an untrusted-input surface (the guest is running
+arbitrary containers, any of which can dial the local socket): the host's
+parser accepts only that exact line and bounds it at 64 bytes including the
+newline (`SSHAgentForward.maxRequestLineBytes`,
+`mac/Sources/MorbstackKit/SSHAgentForward.swift`), with a 10 s deadline to
+deliver it.
+
+On `OK`, the host has already dialed the Mac's `SSH_AUTH_SOCK` (resolved
+fresh from `morbstackd`'s own process environment, not cached) and the
+connection becomes a raw two-way splice, exactly as `dial.rs`'s stream-dial
+splice works for published container ports — half-close propagated in both
+directions, no framing beyond that point. `ERR` covers three distinct,
+honestly-worded cases the guest logs verbatim and then closes the local
+connection, which an SSH client inside the container reports as an ordinary
+connection reset:
+
+- **Forwarding is disabled** (the default —
+  `MorbConfig.sshAgentForwarding == false`): `"ssh agent forwarding is
+  disabled; set ssh_agent_forwarding = true in ~/.morbstack/config.toml to
+  enable it"`.
+- **No agent configured on the host**: `"no SSH agent is available on the
+  host (SSH_AUTH_SOCK is not set)"`.
+- **The configured agent is unreachable**: a `connect` failure detail against
+  the resolved `SSH_AUTH_SOCK` path.
+
+An unreachable host (the vsock connect itself fails) is handled the same way
+as an `ERR`: the guest logs the reason and closes the local connection rather
+than retrying or hanging, so a container blocked on `git clone` sees a fast,
+legible failure instead of a stall.
+
+**This forwards the Mac's SSH agent into the guest VM.** Once enabled, every
+container that bind-mounts `/run/host-services/ssh-auth.sock` and sets
+`SSH_AUTH_SOCK` to it can ask the host agent to sign with the user's own keys
+for as long as `morbstackd` is running. Off by default is a deliberate
+security posture, not a placeholder — see
+`docs/design/SSH-AGENT-FORWARDING.md` for the full threat model before
+turning it on.
 
 ## 4. Versioning and compatibility rules
 

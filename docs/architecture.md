@@ -498,7 +498,15 @@ Three tiers, increasing in ambition:
 
 - **Rosetta binfmt (today, M0)** — Rosetta registered as the amd64
   interpreter inside the guest.
-- **qemu fallback** — for cases Rosetta can't handle.
+- **qemu fallback (registration code only; inert today)** — when the Rosetta
+  share is absent (Rosetta not installed, `rosetta = false`, or an Intel Mac),
+  `binfmt.rs` looks for `qemu-x86_64-static`/`qemu-x86_64` on the guest `PATH`
+  and registers it with the same magic, mask and flags. **The initramfs ships
+  no such binary**, so this path always reports `Amd64Binfmt::None` and
+  `--platform linux/amd64` fails with `exec format error` on a machine without
+  Rosetta. Dropping a static `qemu-x86_64` into the image is the only change
+  needed to light it up (`guest/morbinit/src/binfmt.rs:52-60`, `:147`). Do not
+  read this bullet as a shipped capability.
 - **FEX-Emu contingency** — held in reserve in case Apple sunsets Rosetta
   for this use case; FEX-Emu is the fallback translation layer if that
   happens.

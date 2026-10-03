@@ -53,12 +53,18 @@
 #                functional; shipping this client-side plugin is what turns
 #                that into a working `docker build`/`docker buildx build`
 #                out of the box.
-#   9. kubectl:  Kubernetes v1.36.2 client for the HOST darwin-arm64. This
-#                is a deliberately private, optional helper at
-#                dist/host-bin/kubernetes/kubectl. It is not installed into
-#                PATH, is not part of the ordinary Docker toolchain, and is
-#                not fetched by the default asset set while selected-Pod
-#                port-forward remains unimplemented. See docs/k8s.md.
+#   9. kubectl:  Kubernetes v1.36.2 client for the HOST darwin-arm64, backing
+#                the shipped `morb k8s port-forward` command. It is a
+#                deliberately private helper at dist/host-bin/kubernetes/kubectl
+#                — not installed into PATH and not part of the ordinary Docker
+#                toolchain — but it IS fetched by the default asset set,
+#                same as every other pinned artifact here: the sha256 sidecar
+#                check already proves it before it touches disk, so the only
+#                remaining cost is download size. Its absence from a bundle is
+#                still a truthful, explicit "unavailable" error at the point
+#                `k8s port-forward start` is used (MorbKubernetesKubectl),
+#                which stays in place as a safety net for a build assembled
+#                from a stale or partial asset cache. See docs/k8s.md.
 #
 #   dist/host-bin/ mirrors exactly how Morbstack.app itself bundles these
 #   three (Contents/Resources/host-bin/{docker,cli-plugins/docker-compose,
@@ -92,7 +98,7 @@
 #   scripts/fetch-guest-assets.sh --cli-only       # host docker CLI binary only
 #   scripts/fetch-guest-assets.sh --compose-only   # host docker-compose only
 #   scripts/fetch-guest-assets.sh --buildx-only    # host docker-buildx only
-#   scripts/fetch-guest-assets.sh --host-kubectl-only # private future helper only
+#   scripts/fetch-guest-assets.sh --host-kubectl-only # private kubectl helper only
 #   scripts/fetch-guest-assets.sh --k8s-only       # k3s + cri-dockerd only
 #   scripts/fetch-guest-assets.sh -h               # help
 #
@@ -271,7 +277,7 @@ Fetch and verify all pinned third-party guest assets:
   cli      -> ${REPO_ROOT}/dist/host-bin/docker
   compose  -> ${REPO_ROOT}/dist/host-bin/cli-plugins/docker-compose
   buildx   -> ${REPO_ROOT}/dist/host-bin/cli-plugins/docker-buildx
-  kubectl  -> ${REPO_ROOT}/dist/host-bin/kubernetes/kubectl (optional; not fetched by default)
+  kubectl  -> ${REPO_ROOT}/dist/host-bin/kubernetes/kubectl (private; backs "morb k8s port-forward")
   k8s      -> ${REPO_ROOT}/dist/guest-k8s/  and  ${MORBSTACK_HOME}/data/k8s/
 
 Options:
@@ -284,8 +290,8 @@ Options:
   --compose-only   Only fetch/verify the host docker-compose CLI plugin
   --buildx-only    Only fetch/verify the host docker-buildx CLI plugin
   --host-kubectl-only
-                    Only fetch/verify the private host kubectl helper for a future
-                    selected-Pod port-forward; it does not enable that feature
+                    Only fetch/verify the private host kubectl helper backing
+                    "morb k8s port-forward"; fetched by default otherwise too
   --k8s-only       Only fetch/verify the k3s + cri-dockerd Kubernetes payload
   -h               Show this help and exit
 EOF
@@ -802,11 +808,11 @@ fetch_buildx() {
 }
 
 # ---------------------------------------------------------------------------
-# Step: kubectl (HOST darwin-arm64, private future port-forward helper)
+# Step: kubectl (HOST darwin-arm64, private port-forward helper)
 # ---------------------------------------------------------------------------
 
 fetch_kubectl() {
-	echo "== kubectl (${KUBECTL_VERSION}, HOST darwin-arm64, optional private helper) =="
+	echo "== kubectl (${KUBECTL_VERSION}, HOST darwin-arm64, private helper) =="
 
 	local dest_dir="${REPO_ROOT}/dist/host-bin/kubernetes"
 	local dest_file="${dest_dir}/kubectl"
@@ -845,7 +851,7 @@ fetch_kubectl() {
 
 	install -m 0755 "${tmp}" "${dest_file}"
 	check "installed and verified private helper: ${dest_file}"
-	info "this only stages a future helper; it does not enable or expose Kubernetes port-forwarding"
+	info "this backs \`morb k8s port-forward\`; it is never installed into PATH or exposed as a general-purpose kubectl"
 
 	trap - RETURN
 	rm -f "${tmp}"
@@ -1057,7 +1063,14 @@ DO_FSUTILS=1
 DO_CLI=1
 DO_COMPOSE=1
 DO_BUILDX=1
-DO_KUBECTL=0
+# kubectl is fetched by default, like every other asset here: it is
+# sha256-pinned and sidecar-verified before it ever touches disk, so the only
+# cost of fetching it is download size. Withholding it by default used to
+# leave `morb k8s port-forward` — which is a complete, shipped feature, not a
+# stub — silently unavailable in a stock build with no signal at fetch time
+# about why. DO_K8S (k3s + cri-dockerd) is already on by default; this keeps
+# the two artifacts a working Kubernetes route needs in step.
+DO_KUBECTL=1
 DO_K8S=1
 
 disable_all_fetches() {

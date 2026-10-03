@@ -152,6 +152,13 @@ private struct Configuration {
     let certificateAuthority: Data
     let clientCertificate: Data
     let clientKey: Data
+    /// k3s (and most modern issuers) hand out ECDSA client keys by default; only
+    /// older setups issue RSA. Read from the PEM header rather than assuming one
+    /// algorithm — assuming RSA here previously made every real k3s cluster's
+    /// client key fail `SecKeyCreateWithData`, the same bug `KubernetesAPIClient`
+    /// (the app's own reader) had before it was fixed there. See
+    /// `KubernetesClientTLS` for the shared implementation both readers now use.
+    let clientKeyType: CFString
 
     init(kubeconfigURL: URL) throws {
         guard FileManager.default.fileExists(atPath: kubeconfigURL.path) else {
@@ -185,9 +192,9 @@ private struct Configuration {
               let authority = embeddedData("certificate-authority-data"),
               let certificate = embeddedData("client-certificate-data"),
               let key = embeddedData("client-key-data"),
-              let authorityDER = PEM.der(from: authority),
-              let certificateDER = PEM.der(from: certificate),
-              let keyDER = PEM.der(from: key)
+              let authorityDER = KubernetesClientTLS.der(from: authority),
+              let certificateDER = KubernetesClientTLS.der(from: certificate),
+              let keyDER = KubernetesClientTLS.der(from: key)
         else {
             throw MorbError.protocolViolation("Morbstack’s kubeconfig is incomplete or not a trusted loopback configuration")
         }
@@ -197,6 +204,7 @@ private struct Configuration {
         certificateAuthority = authorityDER
         clientCertificate = certificateDER
         clientKey = keyDER
+        clientKeyType = KubernetesClientTLS.keyType(from: key)
     }
 }
 
@@ -209,11 +217,26 @@ private struct Credential {
         guard let authority = SecCertificateCreateWithData(
             nil, configuration.certificateAuthority as CFData),
             let certificate = SecCertificateCreateWithData(
-                nil, configuration.clientCertificate as CFData),
-            let key = SecKeyCreateWithData(
-                configuration.clientKey as CFData,
+                nil, configuration.clientCertificate as CFData)
+        else {
+            throw MorbError.protocolViolation("Morbstack’s kubeconfig credentials could not establish a TLS identity")
+        }
+        // `SecKeyCreateWithData` does not take the same byte layout for every key
+        // type: RSA's PKCS#1 DER is used as-is, but an EC key (k3s's default) needs
+        // Apple's ANSI X9.63 external representation instead of the SEC1 DER a
+        // `-----BEGIN EC PRIVATE KEY-----` document actually contains. See
+        // `KubernetesClientTLS` for the derivation.
+        guard let keyData = KubernetesClientTLS.secKeyExternalRepresentation(
+            der: configuration.clientKey,
+            keyType: configuration.clientKeyType,
+            certificate: certificate)
+        else {
+            throw MorbError.protocolViolation("Morbstack’s kubeconfig credentials could not establish a TLS identity")
+        }
+        guard let key = SecKeyCreateWithData(
+                keyData as CFData,
                 [
-                    kSecAttrKeyType: kSecAttrKeyTypeRSA,
+                    kSecAttrKeyType: configuration.clientKeyType,
                     kSecAttrKeyClass: kSecAttrKeyClassPrivate,
                 ] as CFDictionary,
                 nil),
@@ -283,18 +306,6 @@ private final class SynchronousResult<Value>: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return value
-    }
-}
-
-private enum PEM {
-    static func der(from data: Data) -> Data? {
-        guard let text = String(data: data, encoding: .utf8), text.contains("-----BEGIN ") else {
-            return data
-        }
-        return Data(base64Encoded: text
-            .split(whereSeparator: \.isNewline)
-            .filter { !$0.hasPrefix("-----") }
-            .joined())
     }
 }
 

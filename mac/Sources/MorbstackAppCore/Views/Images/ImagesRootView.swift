@@ -97,6 +97,9 @@ struct ImagesRootView: View {
     let model: AppModel
 
     @State private var query = ""
+    // UI-051: search is a glyph in the trailing group until someone asks for it.
+    // `RouteSearchModifier` attaches the system field while this is true.
+    @State private var searchIsActive = false
     @State private var sortOrder: [ImageTableComparator] = [ImageTableComparator(key: .created, order: .reverse)]
     @State private var selection: ImageSummary.ID?
 
@@ -477,21 +480,13 @@ struct ImagesRootView: View {
     /// the inspector-less empty screen.
     @ToolbarContentBuilder
     private var trailingCommandItems: some ToolbarContent {
-        ToolbarItem(id: "images.pull", placement: .primaryAction) {
-            Button {
-                presentPull()
-            } label: {
-                Image(systemName: "plus")
-            }
+        if !model.images.isEmpty {
             // Identifiers follow docs/design/ACCESSIBILITY-IDENTIFIERS.md: a toolbar
             // control reuses its `ToolbarItem(id:)` string verbatim, and the label —
             // never the identifier — carries the user-facing state.
-            .accessibilityIdentifier("images.pull")
-            .accessibilityLabel("Pull an image")
-            .help("Pull an image")
-        }
-        if !model.images.isEmpty {
-            ToolbarItem(id: "images.inspector", placement: .automatic) {
+            RouteSearchToolbarItem(
+                id: "images.search", subject: "images", isActive: $searchIsActive)
+            ToolbarItem(id: "images.inspector", placement: .primaryAction) {
                 Button {
                     showsInspector.toggle()
                 } label: {
@@ -504,28 +499,30 @@ struct ImagesRootView: View {
         }
     }
 
+    /// Slots 1–3 of the toolbar grammar — see `VolumesRootView.toolbarContent` and
+    /// `docs/design/NATIVE-MACOS-PLAYBOOK.md`.
+    ///
+    /// **UI-054.** `archive` is declared FIRST, ahead of every button. On macOS 26 a
+    /// `Menu` is always its own glass capsule and splits the placement run around it
+    /// (`docs/design/NATIVE-MACOS-PLAYBOOK.md` §4); declared after the four buttons,
+    /// as it used to be, the run was `[runLocal pruneDangling explorePublic pull]
+    /// [archive] [search inspector]` — three capsules, unconditionally, because
+    /// `archive` is not selection-gated and never goes away.
+    ///
+    /// Moving it is a semantic call, not just a mechanical one: `archive` reads as a
+    /// *record* menu because one of its two items ("Export Selected Image…") acts on
+    /// the selection. But the menu itself behaves exactly like Containers'
+    /// `containers.options` — a small, always-present document-operations menu whose
+    /// individual items are enabled or disabled by selection, never a menu that
+    /// appears or disappears. ("Load Image Archive…" has nothing to do with the
+    /// selection at all.) A menu's *items* may vary with state the way a File menu's
+    /// items do; the menu's *position* must not, or the run refragments — see the
+    /// Stacks case below for what happens when a route tries to keep two such menus.
+    /// Leading, the run is always `[archive] [runLocal · pruneDangling ·
+    /// explorePublic · pull · search · inspector]` — two capsules, always.
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        if model.images.isEmpty {
-            trailingCommandItems
-        }
-        ToolbarItem(id: "images.pruneDangling", placement: .secondaryAction) {
-            pruneDanglingButton
-        }
-        ToolbarItem(id: "images.explorePublic", placement: .secondaryAction) {
-            Button {
-                showingPublicImageDiscovery = true
-            } label: {
-                Image(systemName: "magnifyingglass")
-            }
-            .accessibilityIdentifier("images.explorePublic")
-            .accessibilityLabel("Explore public images")
-            .help("Search public Docker Hub repositories")
-        }
-        // Import and export are two document operations in one small, native Menu.
-        // Grouping them keeps the toolbar from accumulating unrelated one-off glyphs;
-        // the full commands remain discoverable in the Image menu and inspector.
-        ToolbarItem(id: "images.archive", placement: .secondaryAction) {
+        ToolbarItem(id: "images.archive", placement: .primaryAction) {
             Menu {
                 Button("Load Image Archive…") {
                     chooseImageArchiveForLoading()
@@ -545,7 +542,8 @@ struct ImagesRootView: View {
             .accessibilityLabel("Image archive actions")
             .help(imageArchiveMenuHelp)
         }
-        ToolbarItem(id: "images.runLocal", placement: .secondaryAction) {
+        // 1 · record actions — act on the selected image.
+        ToolbarItem(id: "images.runLocal", placement: .primaryAction) {
             Button {
                 runLocalImageAction?()
             } label: {
@@ -558,6 +556,38 @@ struct ImagesRootView: View {
                     ? "Select a local image while the engine is running"
                     : "Create and start one container using the selected local image")
             .disabled(runLocalImageAction == nil)
+        }
+        // 2 · collection actions, destructive first so it is never adjacent to "pull".
+        ToolbarItem(id: "images.pruneDangling", placement: .primaryAction) {
+            pruneDanglingButton
+        }
+        ToolbarItem(id: "images.explorePublic", placement: .primaryAction) {
+            Button {
+                showingPublicImageDiscovery = true
+            } label: {
+                // Not `magnifyingglass`: slot 4 of this route's own toolbar is now the
+                // local filter's magnifying glass, and two identical glyphs in one
+                // capsule meaning "filter what you have" and "browse a remote registry"
+                // is exactly the ambiguity the HIG's "make the meaning of each control
+                // clear" is about. A globe says remote.
+                Image(systemName: "globe")
+            }
+            .accessibilityIdentifier("images.explorePublic")
+            .accessibilityLabel("Explore public images")
+            .help("Search public Docker Hub repositories")
+        }
+        ToolbarItem(id: "images.pull", placement: .primaryAction) {
+            Button {
+                presentPull()
+            } label: {
+                Image(systemName: "plus")
+            }
+            .accessibilityIdentifier("images.pull")
+            .accessibilityLabel("Pull an image")
+            .help("Pull an image")
+        }
+        if model.images.isEmpty {
+            trailingCommandItems
         }
     }
 
@@ -758,12 +788,19 @@ struct ImagesRootView: View {
             }
             .inspector(isPresented: $showsInspector) {
                 detailPane
-                    .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
                     // See the note on `VolumesRootView`: the trailing commands and
                     // search ride the inspector's toolbar region and remain present
                     // while the inspector is closed.
                     .toolbar { trailingCommandItems }
-                    .searchable(text: $query, placement: .toolbar, prompt: "Repository, tag, digest")
+                    .routeSearchable(
+                        isActive: $searchIsActive,
+                        text: $query,
+                        prompt: "Repository, tag, digest")
+                    // Must be the outermost modifier on the inspector's content —
+                    // see the note in `ContainersRootView`: applied beneath
+                    // `.toolbar`/`.searchable` its preferred width was silently
+                    // discarded.
+                    .inspectorColumnWidth(min: 340, ideal: 400, max: 460)
             }
         }
     }
@@ -892,12 +929,15 @@ struct ImagesRootView: View {
 
     @ViewBuilder
     private func usageCell(_ image: ImageSummary) -> some View {
-        // `-1` is the engine declining to say, which is not the same as zero and should
-        // not be rendered as a confident "unused".
+        // `-1` means `/images/json` didn't carry a count and the Disk scan hasn't
+        // filled it in yet (`AppModel.mergeImageUsageFromDisk`) — not the same fact as
+        // zero, and it must not render as a confident "unused". Same vocabulary as the
+        // Volumes "In use" column, which has the identical two-source shape.
         if image.containersUsing < 0 {
             Text("—")
                 .foregroundStyle(.tertiary)
-                .accessibilityLabel("Container usage not reported")
+                .accessibilityLabel(TrackCImageInspector.unscannedValue)
+                .help("In-use counts come from the Disk scan. Open Disk to compute them.")
         } else if image.containersUsing == 0 {
             Text("0")
                 .monospacedDigit()
@@ -1046,15 +1086,16 @@ struct ImagesRootView: View {
         Section("Container References") {
             switch usage {
             case .unreported(let known):
-                LabeledContent("Reported use", value: "Not reported")
-                if known.isEmpty {
-                    Text("Docker did not report container usage for this image.")
-                        .foregroundStyle(.secondary)
-                } else {
+                // `image.containersUsing < 0` means the Disk scan that fills it in
+                // (`AppModel.mergeImageUsageFromDisk`, TASTE-5) has not run yet — a
+                // remedy, not a dead end, so this uses the same word and the same
+                // one-footnote-naming-the-remedy shape as Volumes' unscanned Usage row.
+                LabeledContent("Reported use", value: TrackCImageInspector.unscannedValue)
+                if !known.isEmpty {
                     containerReferenceRows(known)
-                    Text("Docker did not report a total. The listed containers match the current image ID or tag exactly.")
-                        .foregroundStyle(.secondary)
                 }
+                Text("Container references come from the Disk scan. Open Disk to compute them.")
+                    .foregroundStyle(.secondary)
 
             case .none:
                 LabeledContent("Reported use", value: "No containers")

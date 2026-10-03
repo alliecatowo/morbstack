@@ -185,12 +185,16 @@ struct KubernetesRootView: View {
 
     let model: AppModel
     private var provider: any K8sClusterProviding { model.kubernetes }
+    @Environment(\.openURL) private var openURL
 
     @State private var status = K8s.Status(phase: .stopped)
     @State private var nodes: [K8sNodeInfo] = []
     @State private var pods: [K8sPodInfo] = []
     @State private var resource: KubernetesResource = .pods
     @State private var query = ""
+    // UI-051: search is a glyph in the trailing group until someone asks for it.
+    // `RouteSearchModifier` attaches the system field while this is true.
+    @State private var searchIsActive = false
     @State private var nodeSortOrder: [KubernetesNodeComparator] = [
         KubernetesNodeComparator(key: .name),
     ]
@@ -213,6 +217,15 @@ struct KubernetesRootView: View {
     @State private var resourceDescriptionError: String?
     @State private var isLoadingResourceDescription = false
     @State private var resourceDescriptionRequestID = UUID()
+    /// The daemon's one selected-Pod port forward, or `nil`. This is a
+    /// daemon-process-local lease rather than per-pod app state — see
+    /// `podPortForwardSection`.
+    @State private var portForwardLease: K8s.PodPortForwardLease?
+    @State private var portForwardPodPortText = ""
+    @State private var portForwardLocalPortText = ""
+    @State private var isStartingPortForward = false
+    @State private var isCancellingPortForward = false
+    @State private var portForwardError: String?
     @State private var showsInspector = true
     @State private var lifecycleRequest: KubernetesLifecycleRequest?
     /// A confirmed enable/disable request is still in progress until the daemon
@@ -380,12 +393,19 @@ struct KubernetesRootView: View {
                 await settle()
             }
             .onChange(of: resource) {
+                cancelOwnedPortForwardIfNeeded(departingPodID: selectedPodID)
                 selectedNodeID = nil
                 selectedPodID = nil
                 clearPodObservation()
             }
             .onChange(of: query) {
                 reconcileSelectionWithVisibleResource()
+            }
+            // Leaving the route entirely (switching sidebar sections) is the same
+            // "selection change" the port-forward acceptance contract requires to
+            // close a forward this route started — see `cancelOwnedPortForwardIfNeeded`.
+            .onDisappear {
+                cancelOwnedPortForwardIfNeeded(departingPodID: selectedPodID)
             }
     }
 
@@ -418,7 +438,7 @@ struct KubernetesRootView: View {
             }
         }
 
-        ToolbarItem(id: "kubernetes.refresh", placement: .secondaryAction) {
+        ToolbarItem(id: "kubernetes.refresh", placement: .primaryAction) {
             Button {
                 Task { await refreshCluster() }
             } label: {
@@ -430,7 +450,7 @@ struct KubernetesRootView: View {
             .disabled(!model.engine.isRunning)
         }
 
-        ToolbarItem(id: "kubernetes.actions", placement: .secondaryAction) {
+        ToolbarItem(id: "kubernetes.actions", placement: .primaryAction) {
             Menu {
                 if status.enabled {
                     Button("Disable Kubernetes…", role: .destructive) {
@@ -476,6 +496,12 @@ struct KubernetesRootView: View {
     @ToolbarContentBuilder
     private var trailingCommandItems: some ToolbarContent {
         if resourceControlsAreAvailable {
+            // The glyph that reveals the search field. `.routeSearchable` below only
+            // supplies the field; without this item there is nothing in the toolbar to
+            // invoke it, which is how this route shipped searchable and unsearchable at
+            // the same time — the modifier was attached and the control was not.
+            RouteSearchToolbarItem(
+                id: "kubernetes.search", subject: "resources", isActive: $searchIsActive)
             // `.automatic`, like every other route's inspector toggle: the toggle is
             // chrome, not this screen's primary action, and placement consistency is
             // what lets motor memory find it.
@@ -668,6 +694,10 @@ struct KubernetesRootView: View {
         if let container = pod.containers.first {
             Task { await loadPodLog(for: pod, container: container.name) }
         }
+        portForwardPodPortText = ""
+        portForwardLocalPortText = ""
+        portForwardError = nil
+        Task { await loadPortForwardStatus() }
     }
 
     private func clearPodObservation() {
@@ -681,6 +711,9 @@ struct KubernetesRootView: View {
         podLogError = nil
         isLoadingPodLog = false
         clearResourceDescription()
+        portForwardPodPortText = ""
+        portForwardLocalPortText = ""
+        portForwardError = nil
     }
 
     // MARK: - Selected-resource description
@@ -773,6 +806,96 @@ struct KubernetesRootView: View {
         }
     }
 
+    // MARK: - Selected-Pod port forward
+    //
+    // The daemon allows exactly one active lease process-wide
+    // (`K8sPodPortForwardCoordinator`), not one per pod — so this state is read and
+    // shown independent of which pod the table has selected, and the inspector
+    // says so explicitly when the active lease belongs to a different pod than the
+    // one currently selected.
+
+    private func loadPortForwardStatus() async {
+        do {
+            portForwardLease = try await provider.podPortForwardStatus()
+        } catch {
+            // A status read failure does not block the rest of the inspector; the
+            // start/cancel actions below still report their own truth if tried.
+            portForwardError = MorbErrorMessage.text(for: error)
+        }
+    }
+
+    private func startPortForward(for pod: K8sPodInfo) async {
+        guard !isStartingPortForward else { return }
+        guard let podPort = Self.parsePort(portForwardPodPortText) else {
+            portForwardError = "Enter the Pod’s TCP port, from 1 through 65535."
+            return
+        }
+        let trimmedLocal = portForwardLocalPortText.trimmingCharacters(in: .whitespaces)
+        let localPort: Int?
+        if trimmedLocal.isEmpty {
+            localPort = nil
+        } else if let parsed = Self.parsePort(trimmedLocal) {
+            localPort = parsed
+        } else {
+            portForwardError = "Enter a local TCP port from 1 through 65535, or leave it blank for an ephemeral port."
+            return
+        }
+
+        isStartingPortForward = true
+        portForwardError = nil
+        defer { isStartingPortForward = false }
+        do {
+            // A Pod with more than one regular container requires the daemon's own
+            // selection authority to pick one; reuse whichever container the
+            // Containers picker above already has selected, the same running
+            // container the log and events reads already target.
+            let container = pod.containers.count > 1 ? selectedPodContainerName : nil
+            portForwardLease = try await provider.startPodPortForward(
+                for: pod, container: container, localPort: localPort, podPort: podPort)
+            portForwardPodPortText = ""
+            portForwardLocalPortText = ""
+        } catch {
+            portForwardError = MorbErrorMessage.text(for: error)
+        }
+    }
+
+    private func cancelPortForward(_ lease: K8s.PodPortForwardLease) async {
+        guard !isCancellingPortForward else { return }
+        isCancellingPortForward = true
+        portForwardError = nil
+        defer { isCancellingPortForward = false }
+        do {
+            _ = try await provider.cancelPodPortForward(id: lease.id)
+            if portForwardLease?.id == lease.id { portForwardLease = nil }
+        } catch {
+            portForwardError = MorbErrorMessage.text(for: error)
+        }
+    }
+
+    /// Cancels the currently known lease only when it belongs to the pod this
+    /// route is about to stop observing — a selection change, a switch to Nodes,
+    /// or leaving the route entirely. A lease that belongs to a different pod (for
+    /// example one started with `morb k8s port-forward`, or left over from a pod
+    /// selected earlier in this same session) is left alone: browsing away from
+    /// *viewing* a fact about it must never be read as cancelling it.
+    private func cancelOwnedPortForwardIfNeeded(departingPodID: K8sPodInfo.ID?) {
+        guard let departingPodID, let lease = portForwardLease, lease.podID == departingPodID
+        else { return }
+        portForwardLease = nil
+        Task { _ = try? await provider.cancelPodPortForward(id: lease.id) }
+    }
+
+    /// Strict decimal TCP port parsing shared by both fields: no signs, no
+    /// leading zeroes, no whitespace-embedded digits — the same discipline the
+    /// daemon's own `strictPort` applies before this ever reaches it.
+    private static func parsePort(_ raw: String) -> Int? {
+        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, trimmed.allSatisfy(\.isNumber),
+              let port = Int(trimmed), (1...65_535).contains(port), trimmed == String(port)
+        else { return nil }
+        return port
+    }
+
     // MARK: - Content
 
     @ViewBuilder
@@ -812,16 +935,20 @@ struct KubernetesRootView: View {
                 resourceTable
                     .inspector(isPresented: $showsInspector) {
                         inspector
-                            .inspectorColumnWidth(min: 280, ideal: 340, max: 460)
                             // See the note on `VolumesRootView`: the trailing
                             // commands and search ride the inspector's toolbar
                             // region and remain present while the inspector is
                             // closed.
                             .toolbar { trailingCommandItems }
-                            .searchable(
+                            .routeSearchable(
+                                isActive: $searchIsActive,
                                 text: $query,
-                                placement: .toolbar,
                                 prompt: "Search \(resource.rawValue.lowercased())")
+                            // Must be the outermost modifier on the inspector's
+                            // content — see the note in `ContainersRootView`:
+                            // applied beneath `.toolbar`/`.searchable` its
+                            // preferred width was silently discarded.
+                            .inspectorColumnWidth(min: 280, ideal: 340, max: 460)
                     }
             }
         }
@@ -846,7 +973,7 @@ struct KubernetesRootView: View {
         ContentUnavailableView {
             Label("Kubernetes Is Off", systemImage: "cube.transparent")
         } description: {
-            Text("Enable a local single-node k3s cluster in Morbstack’s virtual machine.")
+            Text("Enable a local single-node k3s cluster that runs on this Mac’s Docker engine, so an image from docker build is already runnable in a Pod — no registry push, no separate image load.")
         } actions: {
             Button("Enable Kubernetes") {
                 lifecycleRequest = .enable
@@ -1017,7 +1144,8 @@ struct KubernetesRootView: View {
         // Pods and nodes are two mutually exclusive presentations of the same
         // resource table slot, so they share one identifier.
         .accessibilityIdentifier("kubernetes.table")
-        .onChange(of: selectedPodID) { _, selectedID in
+        .onChange(of: selectedPodID) { previous, selectedID in
+            cancelOwnedPortForwardIfNeeded(departingPodID: previous)
             guard let selectedID, let pod = pods.first(where: { $0.id == selectedID }) else {
                 clearPodObservation()
                 return
@@ -1119,6 +1247,7 @@ struct KubernetesRootView: View {
                     LabeledContent("Age", value: pod.age.map(Formatters.absoluteDate) ?? "Unavailable")
                 }
                 podContainersSection(for: pod)
+                podPortForwardSection(for: pod)
                 resourceDescriptionSections
                 podLogSection(for: pod)
                 podEventsSection
@@ -1297,6 +1426,84 @@ struct KubernetesRootView: View {
                 }
             }
         }
+    }
+
+    /// The daemon owns exactly one selected-Pod local port forward at a time
+    /// (`K8sPodPortForwardCoordinator`), a real, tested capability with no native
+    /// action before this — see `docs/k8s.md` "Planned selected-Pod local
+    /// port-forward". This is that action: start, observe, and cancel it against
+    /// the exact selected Pod, its current UID, and (for a multi-container Pod)
+    /// whichever running container the Containers picker above already selected.
+    @ViewBuilder
+    private func podPortForwardSection(for pod: K8sPodInfo) -> some View {
+        Section {
+            if let lease = portForwardLease, lease.podID == pod.id {
+                LabeledContent("Local Address") {
+                    Text(verbatim: "127.0.0.1:\(lease.localPort)")
+                        .font(.system(.body, design: .monospaced))
+                        .textSelection(.enabled)
+                }
+                LabeledContent("Pod Port", value: "\(lease.podPort)")
+                if let container = lease.container {
+                    LabeledContent("Container", value: container)
+                }
+                HStack(spacing: 8) {
+                    Button("Open in Browser") {
+                        if let url = Self.portForwardBrowserURL(for: lease) { openURL(url) }
+                    }
+                    .accessibilityIdentifier("kubernetes.portForward.openInBrowser")
+                    Button("Copy Address") {
+                        MorbPasteboard.copy("127.0.0.1:\(lease.localPort)")
+                    }
+                    .accessibilityIdentifier("kubernetes.portForward.copyAddress")
+                }
+                Button("Cancel Forward", role: .destructive) {
+                    Task { await cancelPortForward(lease) }
+                }
+                .disabled(isCancellingPortForward)
+                .accessibilityIdentifier("kubernetes.portForward.cancel")
+            } else if let lease = portForwardLease {
+                Text("A port forward to \(lease.podID) is active. Cancel it to forward this pod instead.")
+                    .foregroundStyle(.secondary)
+                Button("Cancel That Forward", role: .destructive) {
+                    Task { await cancelPortForward(lease) }
+                }
+                .disabled(isCancellingPortForward)
+                .accessibilityIdentifier("kubernetes.portForward.cancel")
+            } else {
+                TextField("Pod Port", text: $portForwardPodPortText, prompt: Text("e.g. 8080"))
+                    .font(.system(.body, design: .monospaced))
+                    .accessibilityIdentifier("kubernetes.portForward.podPort")
+                TextField("Local Port", text: $portForwardLocalPortText, prompt: Text("Ephemeral"))
+                    .font(.system(.body, design: .monospaced))
+                    .accessibilityIdentifier("kubernetes.portForward.localPort")
+                Button("Start Port Forward") {
+                    Task { await startPortForward(for: pod) }
+                }
+                .disabled(isStartingPortForward || Self.parsePort(portForwardPodPortText) == nil)
+                .accessibilityIdentifier("kubernetes.portForward.start")
+                if isStartingPortForward {
+                    ProgressView("Starting the forward")
+                        .controlSize(.small)
+                }
+            }
+            if let portForwardError {
+                Label(portForwardError, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.secondary)
+            }
+        } header: {
+            Text("Port Forward")
+        } footer: {
+            Text("Forwards this Pod’s port to a loopback address on this Mac using Morbstack’s bundled kubectl. Cancelling, selecting another row, or leaving Kubernetes closes it — it is never restored automatically.")
+        }
+    }
+
+    /// Loopback-only, matching the daemon's own listener boundary
+    /// (`K8sPodPortForwardCoordinator` binds only `127.0.0.1`): an address to try,
+    /// not a protocol or health probe, the same rule `PortMapping.browserAddress`
+    /// already applies to published container ports.
+    private static func portForwardBrowserURL(for lease: K8s.PodPortForwardLease) -> URL? {
+        URL(string: "http://127.0.0.1:\(lease.localPort)")
     }
 
     @ViewBuilder

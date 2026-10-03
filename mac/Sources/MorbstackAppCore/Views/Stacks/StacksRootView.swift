@@ -119,10 +119,17 @@ struct StacksRootView: View {
 
     let model: AppModel
 
+    @Environment(\.openWindow) private var openWindow
     @State private var metadata = TrackDComposeMetadata()
     @State private var query = ""
+    // UI-051: search is a glyph in the trailing group until someone asks for it.
+    // `RouteSearchModifier` attaches the system field while this is true.
+    @State private var searchIsActive = false
     @State private var selection: StackOutlineID?
     @State private var showsInspector = true
+    /// Projects the person has deliberately collapsed. Absence means expanded, so a
+    /// newly discovered project arrives open rather than hidden.
+    @State private var collapsedProjects: Set<String> = []
     /// Compose files are supporting metadata, not equal-weight inspector facts.
     @State private var composeFilesExpanded = false
     @State private var busyProjects: Set<String> = []
@@ -288,6 +295,10 @@ struct StacksRootView: View {
             }
             .onChange(of: visibleRowIDs) { _, _ in
                 reconcileSelectionWithVisibleRows()
+                applyPendingStackSelection()
+            }
+            .task(id: model.stackSelectionRequest) {
+                applyPendingStackSelection()
             }
             .sheet(
                 isPresented: Binding(
@@ -324,44 +335,43 @@ struct StacksRootView: View {
 
     // MARK: Toolbar
 
+    /// Slots 1–3 of the toolbar grammar — see `VolumesRootView.toolbarContent` and
+    /// `docs/design/NATIVE-MACOS-PLAYBOOK.md`.
+    ///
+    /// **UI-054.** Docker Compose gives this route two menus' worth of content: the
+    /// selected service's or project's own commands, and the route's own
+    /// Refresh/Edit Compose File. The obvious spelling — the selection's menu, then
+    /// the route's own menu, both `Menu`s adjacent — does not reach one capsule:
+    /// `docs/design/probes/ToolProbe.swift`'s `twoMenusAdjacent` variant puts two
+    /// back-to-back `Menu`s in their own capsules each (a row scan at y 26 reads
+    /// three capsule fills separated by two background-tone gaps at the exact seams
+    /// between them, `1b1f20` against a `1f24xx` fill). A `Menu` earns its own
+    /// capsule regardless of what is or is not next to it — reordering alone, the
+    /// fix that worked for Containers and Images, cannot produce one capsule when a
+    /// route has two menus' worth of content.
+    ///
+    /// So this is one menu, `stacks.actions`, always present, sectioned by a
+    /// `Divider`: the selected record's own commands above (whichever record is
+    /// selected), the route's own Refresh/Edit Compose File below — the same way one
+    /// File menu holds both document-scoped and app-scoped commands rather than
+    /// splitting into two menus that come and go with what document is open. Three
+    /// identifiers for what is now one control — `stacks.actions`,
+    /// `stacks.project-actions`, `stacks.options` — collapse into the one the merged
+    /// menu keeps. Nothing in `mac/UITests` or `mac/Tests` queries the other two by
+    /// name.
+    ///
+    /// The one-tap lifecycle toggle stays a plain button outside the menu, in the
+    /// slot Containers uses for `containers.primaryLifecycle`: a non-`Menu` item
+    /// never splits a run, so it can appear and disappear with the selection without
+    /// changing the capsule count.
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        // A Compose project has no one universal primary command: the useful action
-        // depends on the selected project or service and already lives in its
-        // contextual menu below.  Utility work — refresh and the Compose file editor —
-        // shares one semantic options menu so the toolbar stays at a handful of
-        // stable groups instead of a row of loose glyphs.
-        ToolbarItem(id: "stacks.options", placement: .secondaryAction) {
-            Menu {
-                Button("Refresh", systemImage: "arrow.clockwise") {
-                    Task { await model.refreshAll() }
-                }
-
-                if selectedStack != nil {
-                    Button("Edit Compose File…", systemImage: "doc.text") {
-                        chooseComposeFile()
-                    }
-                    .disabled(!composeSourceSelectionIsAvailable)
-                    .help(externalStackOperationsAreAvailable
-                        ? "Choose and edit a Compose YAML file"
-                        : fixtureStackOperationMessage)
-                }
-            } label: {
-                Label("Stack options", systemImage: "slider.horizontal.3")
-            }
-            .accessibilityIdentifier("stacks.options")
-            .accessibilityLabel("Stack options")
-            .help("Refresh and Compose file options")
+        ToolbarItem(id: "stacks.actions", placement: .primaryAction) {
+            stacksActionsMenu
         }
 
-        if services.isEmpty {
-            trailingCommandItems
-        }
-
-        if let stack = selectedStack {
-            if let service = selectedService,
-                isServiceBusy(service) || isProjectBusy(for: service)
-            {
+        if let service = selectedService, selectedStack != nil {
+            if isServiceBusy(service) || isProjectBusy(for: service) {
                 ToolbarItem(id: "stacks.primaryLifecycle", placement: .primaryAction) {
                     ProgressView()
                         .controlSize(.small)
@@ -369,33 +379,28 @@ struct StacksRootView: View {
                         .accessibilityLabel("Updating \(service.composeService ?? service.displayName)")
                         .help("Updating \(service.composeService ?? service.displayName)")
                 }
-            } else if let service = selectedService {
-                if let action = primaryLifecycleAction(for: service) {
-                    ToolbarItem(id: "stacks.primaryLifecycle", placement: .primaryAction) {
-                        Button { perform(action, on: service) } label: {
-                            Image(systemName: action.symbol)
-                        }
-                        .accessibilityIdentifier("stacks.primaryLifecycle")
-                        .accessibilityLabel(action.title)
-                        .help("\(action.title) \(service.composeService ?? service.displayName)")
+            } else if let action = primaryLifecycleAction(for: service) {
+                ToolbarItem(id: "stacks.primaryLifecycle", placement: .primaryAction) {
+                    Button { perform(action, on: service) } label: {
+                        Image(systemName: action.symbol)
                     }
-                }
-                ToolbarItem(id: "stacks.actions", placement: .secondaryAction) {
-                    selectionActionsMenu(service: service, stack: stack)
-                }
-            } else if busyProjects.contains(stack.id) {
-                ToolbarItem(id: "stacks.project-progress", placement: .secondaryAction) {
-                    ProgressView()
-                        .controlSize(.small)
-                        .accessibilityIdentifier("stacks.project-progress")
-                        .accessibilityLabel("Updating \(stack.title)")
-                        .help("Updating \(stack.title)")
-                }
-            } else {
-                ToolbarItem(id: "stacks.project-actions", placement: .secondaryAction) {
-                    projectActionsMenu(for: stack)
+                    .accessibilityIdentifier("stacks.primaryLifecycle")
+                    .accessibilityLabel(action.title)
+                    .help("\(action.title) \(service.composeService ?? service.displayName)")
                 }
             }
+        } else if selectedService == nil, let stack = selectedStack, busyProjects.contains(stack.id) {
+            ToolbarItem(id: "stacks.project-progress", placement: .primaryAction) {
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityIdentifier("stacks.project-progress")
+                    .accessibilityLabel("Updating \(stack.title)")
+                    .help("Updating \(stack.title)")
+            }
+        }
+
+        if services.isEmpty {
+            trailingCommandItems
         }
     }
 
@@ -405,7 +410,9 @@ struct StacksRootView: View {
     @ToolbarContentBuilder
     private var trailingCommandItems: some ToolbarContent {
         if !services.isEmpty {
-            ToolbarItem(id: "stacks.inspector", placement: .automatic) {
+            RouteSearchToolbarItem(
+                id: "stacks.search", subject: "stacks", isActive: $searchIsActive)
+            ToolbarItem(id: "stacks.inspector", placement: .primaryAction) {
                 Button { showsInspector.toggle() } label: {
                     Image(systemName: "sidebar.right")
                 }
@@ -449,59 +456,118 @@ struct StacksRootView: View {
             && !isProjectBusy(for: service)
     }
 
-    private func selectionActionsMenu(service: ContainerSummary, stack: ComposeGroup) -> some View {
-        Menu {
-            let secondaryActions = secondaryLifecycleActions(for: service)
-            if isServiceBusy(service) {
-                // NSMenu cannot animate a ProgressView; it rendered as a dead blank
-                // row. A disabled text item states the same fact legibly.
-                Button("Updating \(service.composeService ?? service.displayName)…") {}
-                    .disabled(true)
-            } else {
-                ForEach(secondaryActions, id: \.rawValue) { action in
-                    Button(action.title, systemImage: action.symbol) {
-                        perform(action, on: service)
-                    }
-                    .disabled(!externalStackOperationsAreAvailable || isProjectBusy(for: service))
-                    .help(externalStackOperationsAreAvailable
-                        ? action.title
-                        : fixtureStackOperationMessage)
-                }
-            }
-            if isServiceBusy(service) || !secondaryActions.isEmpty {
-                Divider()
-            }
-            Menu("Project Actions") {
-                projectActionItems(for: stack)
-            }
-            Divider()
-            Button("Open in Containers") {
-                TrackDAppBridge.reveal(containerID: service.id, in: model)
-            }
-            Button("View Logs") {
-                revealContainerLogs(for: service)
-            }
-            if canRemove(service) {
-                Divider()
-                Button("Remove Service…", role: .destructive) { removalTarget = service }
-            }
-        } label: {
-            Image(systemName: "ellipsis")
-        }
-        .accessibilityIdentifier("stacks.actions")
-        .accessibilityLabel("Actions for \(service.composeService ?? service.displayName)")
-        .help("Actions for \(service.composeService ?? service.displayName)")
+    /// The one always-present route menu — see the note on `toolbarContent`. Its
+    /// content is sectioned, not swapped: whichever record is selected gets its
+    /// commands above a `Divider`, then Refresh and Edit Compose File stay in the
+    /// same position whether or not anything is selected.
+    /// When a project (and no more specific service) is selected and not busy, the
+    /// record section above already renders `projectActionItems`'s own "Edit Compose
+    /// File…"/"Edit Project Environment File…" pair in full — see `projectActionItems`.
+    /// Every other state (nothing selected, a service selected, a busy project) has
+    /// no other route to "Edit Compose File…" in this menu, so the collection
+    /// section's own copy is the only one and stays. This flag is what keeps the two
+    /// from ever rendering side by side in the same menu.
+    private var projectOnlyRecordSectionAlreadyOffersComposeFileEditing: Bool {
+        guard selectedService == nil, let stack = selectedStack else { return false }
+        return !busyProjects.contains(stack.id)
     }
 
-    private func projectActionsMenu(for stack: ComposeGroup) -> some View {
+    @ViewBuilder
+    private var stacksActionsMenu: some View {
         Menu {
-            projectActionItems(for: stack)
+            if let service = selectedService, let stack = selectedStack {
+                serviceActionItems(service: service, stack: stack)
+                Divider()
+            } else if let stack = selectedStack {
+                if busyProjects.contains(stack.id) {
+                    // NSMenu cannot animate a ProgressView; it rendered as a dead
+                    // blank row. A disabled text item states the same fact legibly.
+                    Button("Updating \(stack.title)…") {}.disabled(true)
+                } else {
+                    projectActionItems(for: stack)
+                }
+                Divider()
+            }
+
+            Button("Refresh", systemImage: "arrow.clockwise") {
+                Task { await model.refreshAll() }
+            }
+
+            if selectedStack != nil, !projectOnlyRecordSectionAlreadyOffersComposeFileEditing {
+                Button("Edit Compose File…", systemImage: "doc.text") {
+                    chooseComposeFile()
+                }
+                .disabled(!composeSourceSelectionIsAvailable)
+                .help(externalStackOperationsAreAvailable
+                    ? "Choose and edit a Compose YAML file"
+                    : fixtureStackOperationMessage)
+            }
         } label: {
-            Image(systemName: "ellipsis")
+            Label(stacksActionsLabel, systemImage: "slider.horizontal.3")
         }
-        .accessibilityIdentifier("stacks.project-actions")
-        .accessibilityLabel("Actions for \(stack.title)")
-        .help("Actions for \(stack.title)")
+        .accessibilityIdentifier("stacks.actions")
+        .accessibilityLabel(stacksActionsLabel)
+        .help(stacksActionsHelp)
+    }
+
+    /// The selected service's own commands: its secondary lifecycle actions, its
+    /// project's actions nested one level down (there is a service section above
+    /// them here, so nesting keeps the flat items from being confused for the
+    /// service's own), and its record-local navigation and removal.
+    @ViewBuilder
+    private func serviceActionItems(service: ContainerSummary, stack: ComposeGroup) -> some View {
+        let secondaryActions = secondaryLifecycleActions(for: service)
+        if isServiceBusy(service) {
+            Button("Updating \(service.composeService ?? service.displayName)…") {}
+                .disabled(true)
+        } else {
+            ForEach(secondaryActions, id: \.rawValue) { action in
+                Button(action.title, systemImage: action.symbol) {
+                    perform(action, on: service)
+                }
+                .disabled(!externalStackOperationsAreAvailable || isProjectBusy(for: service))
+                .help(externalStackOperationsAreAvailable
+                    ? action.title
+                    : fixtureStackOperationMessage)
+            }
+        }
+        if isServiceBusy(service) || !secondaryActions.isEmpty {
+            Divider()
+        }
+        Menu("Project Actions") {
+            projectActionItems(for: stack)
+        }
+        Divider()
+        Button("Open in Containers") {
+            TrackDAppBridge.reveal(containerID: service.id, in: model)
+        }
+        Button("View Logs") {
+            revealContainerLogs(for: service)
+        }
+        if let project = stack.project {
+            Button("View Merged Project Logs") { openProjectLogs(for: project) }
+        }
+        if canRemove(service) {
+            Divider()
+            Button("Remove Service…", role: .destructive) { removalTarget = service }
+        }
+    }
+
+    private var stacksActionsLabel: String {
+        if let service = selectedService, selectedStack != nil {
+            return "Actions for \(service.composeService ?? service.displayName)"
+        }
+        if let stack = selectedStack {
+            return "Actions for \(stack.title)"
+        }
+        return "Stack actions"
+    }
+
+    private var stacksActionsHelp: String {
+        if selectedStack != nil {
+            return stacksActionsLabel
+        }
+        return "Refresh and Compose file options"
     }
 
     // MARK: Content
@@ -525,29 +591,120 @@ struct StacksRootView: View {
             }
             .inspector(isPresented: $showsInspector) {
                 inspector
-                    .inspectorColumnWidth(min: 340, ideal: 400, max: 520)
                     // See the note on `VolumesRootView`: the trailing commands and
                     // search ride the inspector's toolbar region and remain present
                     // while the inspector is closed.
                     .toolbar { trailingCommandItems }
-                    .searchable(text: $query, placement: .toolbar, prompt: "Project, service, image")
+                    .routeSearchable(
+                        isActive: $searchIsActive,
+                        text: $query,
+                        prompt: "Project, service, image")
+                    // Must be the outermost modifier on the inspector's content —
+                    // see the note in `ContainersRootView`: applied beneath
+                    // `.toolbar`/`.searchable` its preferred width was silently
+                    // discarded.
+                    .inspectorColumnWidth(min: 340, ideal: 400, max: 520)
             }
         }
     }
 
+    /// One row, whether it is a project or one of its services.
+    ///
+    /// A service carries its image and status for the same reason the Containers
+    /// list does: without them the row is a name and nothing else, and "is this
+    /// running, and what is it" are the two questions the screen exists to answer.
+    /// A project carries the count it already knows.
+    @ViewBuilder
+    private func stackRow(_ row: StackOutlineRow) -> some View {
+        HStack(spacing: 12) {
+            Label {
+                Text(row.displayName)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            } icon: {
+                Image(systemName: row.service.map { stateSymbol(for: $0) } ?? "square.stack.3d.up")
+                    .foregroundStyle(row.service.map { stateColor(for: $0) } ?? .secondary)
+                    .accessibilityHidden(true)
+            }
+            .layoutPriority(2)
+
+            if let service = row.service {
+                Text(service.image)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .layoutPriority(1)
+            }
+
+            Spacer(minLength: 8)
+
+            if let service = row.service {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    Text(service.statusDisplay(at: context.date))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                .layoutPriority(2)
+            } else if let count = row.children?.count {
+                Text(runningSummary(row.children ?? []))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                    .accessibilityLabel("\(count) services")
+            }
+        }
+        .tag(row.id)
+        .help(row.service.map { $0.status.isEmpty ? $0.state : $0.status } ?? "Compose project")
+        // Row identity is the engine-facing reference, per
+        // docs/design/ACCESSIBILITY-IDENTIFIERS.md: a project's Compose
+        // project name, or a service's unique Docker container name. Unchanged by
+        // the move from OutlineGroup to DisclosureGroup.
+        .accessibilityIdentifier(
+            "stacks.row.\(row.service?.displayName ?? row.projectName ?? row.displayName)")
+    }
+
+    /// "2 of 3 running" — the fact a collapsed project most needs to carry, because
+    /// it is the reason someone would expand it.
+    private func runningSummary(_ services: [StackOutlineRow]) -> String {
+        let all = services.compactMap(\.service)
+        let running = all.filter(\.isRunning).count
+        return "\(running) of \(all.count) running"
+    }
+
+    /// Projects a person has deliberately collapsed. Absence means expanded, so a
+    /// newly discovered project arrives open.
+    ///
+    /// `OutlineGroup` collapses everything by default, which made the whole route a
+    /// list of closed bars: a running three-service project rendered as one row in
+    /// an otherwise empty window, and the services — the only thing on this screen
+    /// anybody came to see — were a click away with no indication they existed.
+    /// A Compose project's *services are its content*, not a detail of it.
+    private func projectExpansion(_ project: String) -> Binding<Bool> {
+        Binding(
+            get: { !collapsedProjects.contains(project) },
+            set: { expanded in
+                if expanded {
+                    collapsedProjects.remove(project)
+                } else {
+                    collapsedProjects.insert(project)
+                }
+            })
+    }
+
     private var outline: some View {
         List(selection: $selection) {
-            OutlineGroup(visibleRows, children: \.children) { row in
-                Label(
-                    row.displayName,
-                    systemImage: row.service.map { stateSymbol(for: $0) } ?? "square.stack.3d.up")
-                    .tag(row.id)
-                    .help(row.service.map { $0.status.isEmpty ? $0.state : $0.status } ?? "Compose project")
-                    // Row identity is the engine-facing reference, per
-                    // docs/design/ACCESSIBILITY-IDENTIFIERS.md: a project's Compose
-                    // project name, or a service's unique Docker container name.
-                    .accessibilityIdentifier(
-                        "stacks.row.\(row.service?.displayName ?? row.projectName ?? row.displayName)")
+            ForEach(visibleRows) { row in
+                if let services = row.children, let project = row.projectName {
+                    DisclosureGroup(isExpanded: projectExpansion(project)) {
+                        ForEach(services) { service in
+                            stackRow(service)
+                        }
+                    } label: {
+                        stackRow(row)
+                    }
+                } else {
+                    stackRow(row)
+                }
             }
         }
         .contextMenu(forSelectionType: StackOutlineID.self) { ids in
@@ -721,6 +878,9 @@ struct StacksRootView: View {
                     Button("View Logs") {
                         revealContainerLogs(for: service)
                     }
+                    if let project = stack.project {
+                        Button("View Merged Project Logs") { openProjectLogs(for: project) }
+                    }
                     if externalStackOperationsAreAvailable,
                         let url = service.ports.compactMap(\.url).first
                     {
@@ -735,13 +895,19 @@ struct StacksRootView: View {
         }
     }
 
-    /// Stacks only knows that a container bears a Compose project label; it has not
-    /// requested or assembled a project transcript. Keep this as a selected-container
-    /// handoff so the Containers log document retains its own explicit tail, follow,
-    /// filter, stream, and bounded-retention scope.
+    /// One service's own transcript stays a selected-container handoff, so the
+    /// Containers log document keeps its explicit tail, follow, filter, stream and
+    /// bounded-retention scope.
     @MainActor
     private func revealContainerLogs(for service: ContainerSummary) {
         TrackDAppBridge.reveal(containerID: service.id, in: model, showingLogs: true)
+    }
+
+    /// The whole project's merged transcript, in its own window. See
+    /// `ComposeProjectLogsView` for why this is a window and not a pane here.
+    @MainActor
+    private func openProjectLogs(for project: String) {
+        openWindow(id: MorbWindowID.projectLogs, value: project)
     }
 
     @ViewBuilder
@@ -801,10 +967,21 @@ struct StacksRootView: View {
                     : fixtureStackOperationMessage)
             }
 
+            if let project = stack.project {
+                Divider()
+                // Reading a project's merged output is not a lifecycle operation and is
+                // available whatever state its services are in — a stopped service's
+                // history is often the reason someone opens this.
+                Button("View Merged Project Logs", systemImage: "text.alignleft") {
+                    openProjectLogs(for: project)
+                }
+                .accessibilityIdentifier("stacks.projectLogs.open")
+                .help("Open one merged, per-service log document for \(stack.title)")
+            }
+
             if let project = stack.project,
                 let file = metadata.configFiles[project]?.first
             {
-                Divider()
                 Button("Copy Compose File Path") { MorbPasteboard.copy(file) }
             }
             Divider()
@@ -998,6 +1175,18 @@ struct StacksRootView: View {
         return busyProjects.contains(project)
     }
 
+    /// Mirrors `ContainersRootView.stateColor`. Duplicated deliberately rather than
+    /// hoisted: both are three lines, and the alternative is a shared "UI helpers"
+    /// file that becomes a dumping ground. If a third route needs it, hoist then.
+    private func stateColor(for service: ContainerSummary) -> Color {
+        if service.isUnhealthy || service.state == "dead" { return .red }
+        switch service.state {
+        case "running": return .green
+        case "paused", "restarting": return .orange
+        default: return .secondary
+        }
+    }
+
     private func stateSymbol(for service: ContainerSummary) -> String {
         switch service.state {
         case "running": "play.circle.fill"
@@ -1019,6 +1208,22 @@ struct StacksRootView: View {
     private func reconcileSelectionWithVisibleRows() {
         guard let selection, !visibleRowIDs.contains(selection) else { return }
         self.selection = nil
+    }
+
+    /// Places the cursor on a project the menu bar jumped to.
+    ///
+    /// The request is only consumed once the project is actually on screen: this view
+    /// can appear before the first `/containers/json` answers, and a request thrown
+    /// away against an empty list would land the person on Stacks with nothing selected
+    /// and no way to tell that the jump had happened at all. An active search is
+    /// cleared, because a filter that hides the row would do the same thing.
+    private func applyPendingStackSelection() {
+        guard let project = model.stackSelectionRequest,
+            stacks.contains(where: { $0.id == project })
+        else { return }
+        _ = model.consumeStackSelectionRequest()
+        query = ""
+        selection = .project(project)
     }
 
     /// The project label shown in the inspector is observational Docker metadata. A
