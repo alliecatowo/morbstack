@@ -76,7 +76,7 @@ jobs:
       # dependency-free), so this cache buys incremental *compilation*
       # reuse across runs, not dependency-resolution time.
       - name: Cache SwiftPM build
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: mac/.build
           key: swiftpm-${{ runner.os }}-${{ hashFiles('mac/Package.swift') }}-${{ github.sha }}
@@ -88,7 +88,7 @@ jobs:
       # Cargo.lock even though [dependencies] is empty today (std-only —
       # see NOTICE), so this starts paying off the moment that changes.
       - name: Cache Cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -231,7 +231,7 @@ jobs:
         run: rustup target add aarch64-unknown-linux-musl
 
       - name: Cache guest-image build artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             guest/morbinit/target
