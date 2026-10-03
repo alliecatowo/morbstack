@@ -69,7 +69,7 @@ jobs:
       - name: Show Xcode version
         run: xcodebuild -version
 
-      - uses: jdx/mise-action@v2
+      - uses: jdx/mise-action@v5
 
       # SwiftPM build products. There are no third-party SwiftPM
       # dependencies to resolve (mac/Package.swift is deliberately
@@ -153,7 +153,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
-      - uses: jdx/mise-action@v2
+      - uses: jdx/mise-action@v5
 
       - name: Set up toolchain
         run: mise trust && mise install
@@ -217,7 +217,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
-      - uses: jdx/mise-action@v2
+      - uses: jdx/mise-action@v5
 
       - name: Install aarch64-unknown-linux-musl cross toolchain
         run: |
