@@ -30,7 +30,7 @@ jobs:
     outputs:
       guest_image: ${{ steps.filter.outputs.guest_image }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v3
         id: filter
         with:
@@ -55,7 +55,7 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # macos-26 ships Xcode 26.5, 26.4.1 (default), 26.3, 26.2, and
       # 26.1.1. mac/Package.swift declares swift-tools-version 6.0 and a
@@ -152,7 +152,7 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: jdx/mise-action@v2
 
       - name: Set up toolchain
@@ -216,7 +216,7 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: jdx/mise-action@v2
 
       - name: Install aarch64-unknown-linux-musl cross toolchain
