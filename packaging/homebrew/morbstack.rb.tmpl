@@ -1,0 +1,43 @@
+# Homebrew Cask for Morbstack, a native macOS Docker engine (OrbStack-like).
+# brew install --cask alliecatowo/tap/morbstack
+#
+# Rendered from packaging/homebrew/morbstack.rb.tmpl in alliecatowo/morbstack by the
+# update-homebrew job of .github/workflows/release.yml on every release.
+# Do not edit by hand.
+cask "morbstack" do
+  version "@VERSION@"
+  sha256 "@SHA256@"
+
+  url "https://github.com/alliecatowo/morbstack/releases/download/v#{version}/Morbstack-#{version}-macos-arm64.zip"
+  name "Morbstack"
+  desc "Native macOS Docker engine and container runtime built on Virtualization.framework"
+  homepage "https://github.com/alliecatowo/morbstack"
+
+  depends_on macos: ">= :tahoe"
+  depends_on arch: :arm64
+
+  app "Morbstack.app"
+  binary "#{appdir}/Morbstack.app/Contents/MacOS/morb"
+
+  # Morbstack is ad-hoc signed but not notarized (no paid Apple Developer
+  # Program account behind this project). Without this, Gatekeeper blocks first
+  # launch, since brew --cask quarantines installed apps. Scoped to
+  # Morbstack.app only.
+  postflight do
+    system_command "/usr/bin/xattr",
+                   args: ["-dr", "com.apple.quarantine", "#{appdir}/Morbstack.app"]
+  end
+
+  zap trash: [
+    "~/.morbstack",
+    "~/Library/LaunchAgents/dev.morbstack.daemon.plist",
+  ]
+
+  caveats <<~EOS
+    Morbstack is ad-hoc signed but not notarized by Apple. This cask clears the
+    com.apple.quarantine flag on #{appdir}/Morbstack.app during install so
+    Gatekeeper does not block first launch. To see the warning and decide for
+    yourself, download the zip from the Releases page instead:
+      https://github.com/alliecatowo/morbstack/releases
+  EOS
+end
