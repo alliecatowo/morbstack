@@ -107,7 +107,7 @@ clean-profile VM pass is marked that way rather than promoted to a claim.
   or it fails to mount, those sources can still be empty; `morb doctor`
   reports the condition.
 - **UDP publishes use the event-confirmed datagram relay.** UDP is loopback-only like
-  TCP, and supports real datagram/reply flows once Docker reveals the concrete port;
+  TCP by default, and supports real datagram/reply flows once Docker reveals the concrete port;
   it deliberately does not claim TCP-style synchronous reservation for dynamic or
   ranged publishes. `morb.local` DNS/domains remain unavailable.
 
@@ -279,7 +279,9 @@ graph TB
   `morbstackd` over a Unix control socket. `morbstackd` owns the VM's
   lifecycle via `Virtualization.framework`, relays
   `~/.morbstack/run/docker.sock` to the guest over vsock, and mirrors
-  published container ports onto `127.0.0.1` (never `0.0.0.0`).
+  published container ports onto `127.0.0.1` by default (set
+  `allow_lan_port_publishing = true` in `~/.morbstack/config.toml` to let
+  `0.0.0.0` publishes bind the Mac's network interfaces).
 - **Guest**: `morbinit`, a static Rust binary, runs as PID 1, brings up
   networking and the data disk, and supervises unmodified upstream
   `dockerd` and `containerd`. `dockerd` is started with

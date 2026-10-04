@@ -298,9 +298,16 @@ func callDaemon(
         }
     }
 
-    // Poll for up to three seconds while the daemon binds its socket.
-    let deadline = Date().addingTimeInterval(3)
-    while Date() < deadline {
+    // Poll for up to three seconds while the daemon binds its socket, and keep
+    // waiting (up to two minutes) while a process holding the daemon lock is alive:
+    // a first launch after an update installs the runtime payload before it
+    // listens, and retrying would only race a second daemon against it.
+    let startedAt = Date()
+    while true {
+        let elapsed = Date().timeIntervalSince(startedAt)
+        if elapsed >= 3 && !(elapsed < 120 && FileLock.ownerAppearsAlive(path: MorbPaths.lockFile.path)) {
+            break
+        }
         if let response = try? UnixSocketClient.roundTrip(path: socketPath, request: request, timeout: timeout) {
             return compatibilityAwareResponse(response, for: request, socketPath: socketPath)
         }

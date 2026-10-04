@@ -42,8 +42,8 @@ public struct MorbConfig: Equatable, Codable, Sendable {
     public var autoSuspendMinutes: Int
 
     /// Whether a Docker wildcard or non-loopback `HostIp` binds that same address on
-    /// the Mac. Docker-compatible by default: `docker run -p 8080:80` publishes on
-    /// `0.0.0.0`, while people who need local-only development can opt out.
+    /// the Mac. Off by default so published ports are loopback-only; set to `true`
+    /// to get Docker's `0.0.0.0` behaviour for `docker run -p 8080:80`.
     public var allowLANPortPublishing: Bool
 
     /// Host directories exposed to the guest over VirtioFS, each mounted inside the
@@ -96,7 +96,7 @@ public struct MorbConfig: Equatable, Codable, Sendable {
         kernelCmdline: String? = nil,
         rosetta: Bool = true,
         autoSuspendMinutes: Int = 5,
-        allowLANPortPublishing: Bool = true,
+        allowLANPortPublishing: Bool = false,
         sharedPaths: [String] = MorbShares.defaultSharedPaths,
         liveSharePaths: [String] = []
     ) {

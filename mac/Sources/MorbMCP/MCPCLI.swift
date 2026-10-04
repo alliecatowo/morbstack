@@ -80,6 +80,15 @@ enum MCPCLI {
             return commandError(message.description)
         }
 
+        // A typo in `deny` fails open (the intended restriction silently does not
+        // apply), so refuse to start. Unknown `allow` keys only fail closed.
+        let unknownDeny = profile.unknownDenyKeys
+        if !unknownDeny.isEmpty {
+            let list = unknownDeny.map { "`\($0.key)` at \($0.origin)" }.joined(separator: ", ")
+            return commandError("refusing to start: unknown permission key in deny (\(list)); "
+                + "a mistyped deny entry would leave the tool enabled")
+        }
+
         let warnings = profileWarnings(profile)
         for warning in warnings { writeError("warning: \(warning)") }
 
