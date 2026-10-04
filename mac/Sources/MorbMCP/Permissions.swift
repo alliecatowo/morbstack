@@ -159,6 +159,13 @@ public struct PermissionProfile: Sendable {
     /// (stderr, at startup) and `permissions`.
     public var unknownKeys: [GrantEntry]
 
+    /// Unknown keys that came from `deny`. These fail open, so `morb mcp serve`
+    /// refuses to start when any exist.
+    public var unknownDenyKeys: [GrantEntry] {
+        let denyKeys = Set(deny.map(\.key))
+        return unknownKeys.filter { denyKeys.contains($0.key) }
+    }
+
     public init(allow: [GrantEntry], deny: [GrantEntry], unknownKeys: [GrantEntry] = []) {
         self.allow = allow
         self.deny = deny

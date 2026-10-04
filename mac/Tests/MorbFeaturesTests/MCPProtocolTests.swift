@@ -42,4 +42,15 @@ final class MCPProtocolTests: XCTestCase {
         let remove = PermissionSubject(name: "container_remove", group: .containersWrite)
         XCTAssertFalse(profile.decide(remove).allowed, "an explicit deny must override a group grant")
     }
+
+    func testUnknownDenyKeyIsReportedSoServeCanRefuseToStart() throws {
+        let config = try MCPConfigFile.parse("""
+        allow = ["all", "typo_allow"]
+        deny = ["container_remove:forse"]
+        """)
+        let profile = PermissionProfile.build(
+            configAllow: config.allow, configDeny: config.deny, cliAllow: [],
+            knownKeys: ["all", "container_remove:force"])
+        XCTAssertEqual(profile.unknownDenyKeys.map(\.key), ["container_remove:forse"])
+    }
 }

@@ -386,8 +386,14 @@ class DaemonClient: @unchecked Sendable {
 
     /// Polls for the control socket to start answering, up to `deadline` seconds.
     private func waitForSocket(deadline: TimeInterval) async -> Bool {
-        let expiry = Date().addingTimeInterval(deadline)
-        while Date() < expiry {
+        let started = Date()
+        let expiry = started.addingTimeInterval(deadline)
+        // Keep waiting (up to two minutes) while a live process holds the daemon
+        // lock: it is still installing the runtime payload before it listens.
+        while Date() < expiry
+            || (Date().timeIntervalSince(started) < 120
+                && FileLock.ownerAppearsAlive(path: MorbPaths.lockFile.path))
+        {
             if UnixSocketClient.isAlive(path: socketPath, timeout: 0.3) { return true }
             try? await Task.sleep(nanoseconds: 200_000_000)
         }

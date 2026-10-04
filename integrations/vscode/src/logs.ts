@@ -47,7 +47,7 @@ export class LogViewer implements vscode.Disposable {
     const demuxer = new Demuxer((_kind, payload) => write(payload.toString('utf8')));
 
     const handle = this.client.openStream(
-      `/containers/${encodeURIComponent(containerId)}/logs?stdout=1&stderr=1&follow=1&timestamps=0&tail=${tail}`,
+      `/containers/${encodeURIComponent(containerId)}/logs?stdout=1&stderr=1&follow=1&timestamps=0&tail=${Math.trunc(Number(tail)) || 500}`,
       (res) => {
         res.on('data', (chunk: Buffer) => {
           if (tty) {

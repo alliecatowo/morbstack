@@ -274,7 +274,8 @@ export function activate(context: vscode.ExtensionContext): void {
 
   register('morbstack.container.logs', async (node: Node) => {
     const c = containerOf(node);
-    const tail = vscode.workspace.getConfiguration('morbstack').get<number>('logTail', 500);
+    const rawTail = vscode.workspace.getConfiguration('morbstack').get<number>('logTail', 500);
+    const tail = Number.isFinite(rawTail) ? Math.min(100000, Math.max(1, Math.trunc(rawTail))) : 500;
     await logs.show(c.Id, displayName(c), tail);
   });
 

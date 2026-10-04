@@ -33,6 +33,12 @@ func printError(_ message: String) {
     FileHandle.standardError.write(Data((message + "\n").utf8))
 }
 
+// Run in our own session and ignore SIGHUP: a daemon auto-spawned from a terminal
+// must not die (unsuspended, mid-write) when that terminal closes. `setsid` fails
+// harmlessly with EPERM when launchd already made us a group leader.
+_ = setsid()
+signal(SIGHUP, SIG_IGN)
+
 var quiet = false
 
 /// Who launched this daemon, when it was not launched by hand.

@@ -95,4 +95,16 @@ public final class FileLock {
         POSIXSocketSupport.retryOnInterrupt { flock(owned, LOCK_UN) }
         Darwin.close(owned)
     }
+
+    /// Best-effort: is the process that stamped its pid into the lock file at `path`
+    /// still alive (and not us)? Used by a CLI to decide whether to keep waiting for a
+    /// daemon that is still starting up. Deliberately does not take the lock itself,
+    /// since even a momentary probe lock could make a starting daemon lose the race.
+    public static func ownerAppearsAlive(path: String) -> Bool {
+        guard let text = try? String(contentsOfFile: path, encoding: .utf8),
+            let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)),
+            pid > 1, pid != getpid()
+        else { return false }
+        return kill(pid, 0) == 0 || errno == EPERM
+    }
 }
