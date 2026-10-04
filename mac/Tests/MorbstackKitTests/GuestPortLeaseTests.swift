@@ -50,7 +50,69 @@ final class GuestPortLeaseTests: XCTestCase {
     }
 
     private func makeForwarder() -> PortForwarder {
-        PortForwarder(vm: VMManager(config: MorbConfig(), log: makeLog()), log: makeLog())
+        let forwarder = PortForwarder(vm: VMManager(config: MorbConfig(), log: makeLog()), log: makeLog())
+        // No Engine in unit tests: pretend Docker publishes whatever is asked.
+        forwarder.leaseAuthorizerOverride = { _ in
+            PortForwarder.LeaseAuthorization(publishers: ["a"], live: ["a"])
+        }
+        return forwarder
+    }
+
+    func testLeaseRefusedWhenDockerDoesNotPublishTheEndpoint() throws {
+        let forwarder = makeForwarder()
+        forwarder.leaseAuthorizerOverride = { _ in
+            throw PortForwarder.PortLeaseError.unavailable("no container publishes it")
+        }
+        let port = try freeLoopbackPort()
+        XCTAssertThrowsError(try forwarder.leaseGuestProxyPort(request(.tcp, port: port)))
+        XCTAssertFalse(forwarder.activeForwards.contains { $0.contains("\(port)") })
+    }
+
+    func testAuthorizationFromInspectDocuments() {
+        let explicit = Data("""
+            {"Id":"abc","HostConfig":{"PortBindings":{"80/tcp":[{"HostIp":"","HostPort":"8080"}]}}}
+            """.utf8)
+        func req(_ port: Int, _ cport: Int = 80, _ t: GuestPortLease.Transport = .tcp) -> GuestPortLease.Request {
+            .init(transport: t, hostIP: "0.0.0.0", hostPort: port, containerIP: "-", containerPort: cport)
+        }
+        XCTAssertEqual(GuestLeaseAuthorization.publisher(inspectJSON: explicit, request: req(8080)), "abc")
+        XCTAssertNil(GuestLeaseAuthorization.publisher(inspectJSON: explicit, request: req(443)))
+        XCTAssertNil(GuestLeaseAuthorization.publisher(inspectJSON: explicit, request: req(8080, 80, .udp)))
+        XCTAssertNil(GuestLeaseAuthorization.publisher(inspectJSON: explicit, request: req(8080, 81)))
+
+        let publishAll = Data("""
+            {"Id":"def","HostConfig":{"PublishAllPorts":true},"Config":{"ExposedPorts":{"80/tcp":{}}}}
+            """.utf8)
+        XCTAssertEqual(GuestLeaseAuthorization.publisher(inspectJSON: publishAll, request: req(49153)), "def")
+        XCTAssertNil(GuestLeaseAuthorization.publisher(inspectJSON: publishAll, request: req(443)))
+        XCTAssertNil(GuestLeaseAuthorization.publisher(inspectJSON: publishAll, request: req(49153, 22)))
+
+        let none = Data(#"{"Id":"x","HostConfig":{}}"#.utf8)
+        XCTAssertNil(GuestLeaseAuthorization.publisher(inspectJSON: none, request: req(8080)))
+        XCTAssertNil(GuestLeaseAuthorization.publisher(inspectJSON: Data("junk".utf8), request: req(8080)))
+    }
+
+    func testDisplacementOnlyForOwnOrDeadContainers() {
+        let auth = PortForwarder.LeaseAuthorization(publishers: ["a"], live: ["a", "b"])
+        XCTAssertTrue(auth.allowsDisplacing(containerID: "a"))
+        XCTAssertFalse(auth.allowsDisplacing(containerID: "b"))
+        XCTAssertTrue(auth.allowsDisplacing(containerID: "gone"))
+    }
+
+    func testAdmissionCapsTotalAndPerSource() {
+        let admission = ConnectionAdmission(maxTotal: 3, maxPerSource: 2)
+        let a1 = admission.admit(source: "a")
+        let a2 = admission.admit(source: "a")
+        XCTAssertNotNil(a1)
+        XCTAssertNotNil(a2)
+        XCTAssertNil(admission.admit(source: "a"), "per-source cap")
+        let b1 = admission.admit(source: "b")
+        XCTAssertNotNil(b1)
+        XCTAssertNil(admission.admit(source: "c"), "global cap")
+        a1?.release()
+        a1?.release()  // idempotent
+        XCTAssertEqual(admission.activeCount, 2)
+        XCTAssertNotNil(admission.admit(source: "c"))
     }
 
     /// Asks the kernel for a free loopback port and gives it straight back.

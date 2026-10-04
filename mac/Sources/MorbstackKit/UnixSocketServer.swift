@@ -142,10 +142,17 @@ final class POSIXListenSocket {
 
     /// One non-blocking `accept(2)`, or `-1` once the socket has been closed.
     func acceptOne() -> Int32 {
+        acceptOneReportingErrno().fd
+    }
+
+    /// Like ``acceptOne()`` but also returns the `errno` of a failed accept, so a
+    /// caller can tell descriptor exhaustion (`EMFILE`/`ENFILE`) from `EAGAIN`.
+    func acceptOneReportingErrno() -> (fd: Int32, errorCode: Int32) {
         lock.lock()
         defer { lock.unlock() }
-        guard !closed else { return -1 }
-        return POSIXSocketSupport.retryOnInterrupt { Darwin.accept(fd, nil, nil) }
+        guard !closed else { return (-1, EBADF) }
+        let client = POSIXSocketSupport.retryOnInterrupt { Darwin.accept(fd, nil, nil) }
+        return (client, client < 0 ? errno : 0)
     }
 }
 

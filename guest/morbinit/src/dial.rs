@@ -48,7 +48,7 @@ pub const VSOCK_STREAM_DIAL_PORT: u32 = 2376;
 /// Upper bound on simultaneously spliced connections, per the contract.
 /// Each costs two threads, and PID 1 must not be DoS-able into thread
 /// exhaustion.
-const MAX_CONNECTIONS: usize = 128;
+const MAX_CONNECTIONS: usize = 512;
 
 /// Longest preamble line we will read before giving up, including the
 /// newline. `"TCP 65535\n"` is 10 bytes; the rest is slack for nothing in

@@ -91,6 +91,7 @@ public final class TCPListener {
     private var listenSocket: POSIXListenSocket?
     private var acceptSource: DispatchSourceRead?
     private var running = false
+    private var acceptsPaused = false
 
     /// Creates a listener. Nothing is bound until ``start()``.
     ///
@@ -311,6 +312,26 @@ public final class TCPListener {
         }
     }
 
+    /// Suspends accepting briefly after `EMFILE`/`ENFILE`. The suspend is always
+    /// balanced by a resume of the same source object, even if ``stop()`` ran in
+    /// between: releasing a suspended dispatch source is a libdispatch crash.
+    private func pauseAccepts() {
+        lock.lock()
+        guard let source = acceptSource, !acceptsPaused else {
+            lock.unlock()
+            return
+        }
+        acceptsPaused = true
+        lock.unlock()
+        source.suspend()
+        queue.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            self?.lock.lock()
+            self?.acceptsPaused = false
+            self?.lock.unlock()
+            source.resume()
+        }
+    }
+
     private func drainAccepts() {
         while true {
             lock.lock()
@@ -319,8 +340,18 @@ public final class TCPListener {
             lock.unlock()
             guard let bound else { return }
 
-            let client = bound.acceptOne()
-            if client < 0 { return }  // EAGAIN, or the listener was stopped
+            let accepted = bound.acceptOneReportingErrno()
+            let client = accepted.fd
+            if client < 0 {
+                // EAGAIN, or the listener was stopped. Out of descriptors is the
+                // dangerous case: the read source is level-triggered and the
+                // pending connection never drains, so without a pause this spins
+                // a core until a relay closes.
+                if accepted.errorCode == EMFILE || accepted.errorCode == ENFILE {
+                    pauseAccepts()
+                }
+                return
+            }
 
             POSIXSocketSupport.setNonBlocking(client, false)
             POSIXSocketSupport.suppressSIGPIPE(client)

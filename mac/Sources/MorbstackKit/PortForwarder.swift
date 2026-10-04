@@ -323,6 +323,8 @@ public final class PortForwarder {
 
     private let vm: VMManager
     private let log: MorbLog
+    /// Caps on established published-port relays (global and per source IP).
+    private let admission = ConnectionAdmission()
 
     /// Invoked whenever a connection is accepted on a published port.
     ///
@@ -1204,17 +1206,89 @@ public final class PortForwarder {
             containerID: "",
             containerName: request.containerIP)
 
+        // An endpoint already held by a create/start lease was authorised by
+        // the Docker create request itself. Anything else must be published by
+        // a real container; the lease channel is reachable by any guest
+        // process, so syntax alone never earns a Mac listener.
+        let authorization: LeaseAuthorization? =
+            hasAdoptingLease(endpoint: endpoint, transport: request.transport)
+            ? nil : try authorizeGuestLease(request)
+
         switch request.transport {
         case .tcp:
-            return try leaseGuestProxyTCP(endpoint: endpoint, binding: binding)
+            return try leaseGuestProxyTCP(
+                endpoint: endpoint, binding: binding, authorization: authorization)
         case .udp:
-            return try leaseGuestProxyUDP(endpoint: endpoint, binding: binding)
+            return try leaseGuestProxyUDP(
+                endpoint: endpoint, binding: binding, authorization: authorization)
         }
+    }
+
+    /// What Docker said about a lease request: which containers publish it and
+    /// which containers are live (so a stale forward can be told from a rival).
+    struct LeaseAuthorization {
+        let publishers: Set<String>
+        let live: Set<String>
+
+        /// An existing event-discovered forward may be displaced only by its own
+        /// container restarting, or when its container is no longer live. A
+        /// different live container's forward is never taken over.
+        func allowsDisplacing(containerID: String) -> Bool {
+            publishers.contains(containerID) || !live.contains(containerID)
+        }
+    }
+
+    private func hasAdoptingLease(endpoint: DockerHostEndpoint, transport: GuestPortLease.Transport) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        switch transport {
+        case .tcp:
+            return leases.values.contains {
+                $0.tcpListeners[endpoint] != nil && !$0.withdrawnTCPHostEndpoints.contains(endpoint)
+            }
+        case .udp:
+            return leases.values.contains {
+                $0.udpListeners[endpoint] != nil && !$0.withdrawnUDPHostEndpoints.contains(endpoint)
+            }
+        }
+    }
+
+    /// Asks the Engine whether a container publishes `request`. Blocking; runs
+    /// on the lease server's own queue, never the VM queue. Fails closed.
+    /// Test seam: replaces the Engine query when set.
+    var leaseAuthorizerOverride: ((GuestPortLease.Request) throws -> LeaseAuthorization)?
+
+    func authorizeGuestLease(_ request: GuestPortLease.Request) throws -> LeaseAuthorization {
+        if let override = leaseAuthorizerOverride { return try override(request) }
+        let candidates: (all: [String], live: Set<String>)
+        do {
+            let list = try getEngineJSON(path: DockerAPIDecoding.allContainersPath, timeout: 8)
+            candidates = GuestLeaseAuthorization.candidateContainers(listJSON: list)
+        } catch {
+            throw PortLeaseError.unavailable("could not verify the published port with Docker: \(error)")
+        }
+        var publishers: Set<String> = []
+        for id in candidates.all where DockerPortPublicationPreflight.isFullContainerID(id) {
+            guard let body = try? getEngineJSON(
+                path: DockerAPIDecoding.containerInspectPath(containerID: id), timeout: 5)
+            else { continue }
+            if let found = GuestLeaseAuthorization.publisher(inspectJSON: body, request: request) {
+                publishers.insert(found)
+            }
+        }
+        guard !publishers.isEmpty else {
+            log.warn(
+                "refused guest port lease \(request.hostIP):\(request.hostPort)/\(request.transport.rawValue): no container publishes it")
+            throw PortLeaseError.unavailable(
+                "no container publishes \(request.hostIP):\(request.hostPort)/\(request.transport.rawValue)")
+        }
+        return LeaseAuthorization(publishers: publishers, live: candidates.live)
     }
 
     private func leaseGuestProxyTCP(
         endpoint: DockerHostEndpoint,
-        binding: DockerPortBinding
+        binding: DockerPortBinding,
+        authorization: LeaseAuthorization?
     ) throws -> UInt64 {
         var displaced: TCPListener?
         lock.lock()
@@ -1235,7 +1309,9 @@ public final class PortForwarder {
             return token
         }
         if let forward = forwards[endpoint] {
-            guard forward.leaseID == nil else {
+            guard forward.leaseID == nil,
+                  authorization?.allowsDisplacing(containerID: forward.binding.containerID) == true
+            else {
                 lock.unlock()
                 throw PortLeaseError.addressInUse(endpoint: endpoint, protocolName: "tcp")
             }
@@ -1278,7 +1354,8 @@ public final class PortForwarder {
 
     private func leaseGuestProxyUDP(
         endpoint: DockerHostEndpoint,
-        binding: DockerPortBinding
+        binding: DockerPortBinding,
+        authorization: LeaseAuthorization?
     ) throws -> UInt64 {
         var displaced: UDPForward?
         lock.lock()
@@ -1298,7 +1375,9 @@ public final class PortForwarder {
             return token
         }
         if let forward = udpForwards[endpoint] {
-            guard forward.leaseID == nil else {
+            guard forward.leaseID == nil,
+                  authorization?.allowsDisplacing(containerID: forward.binding.containerID) == true
+            else {
                 lock.unlock()
                 throw PortLeaseError.addressInUse(endpoint: endpoint, protocolName: "udp")
             }
@@ -2454,6 +2533,17 @@ public final class PortForwarder {
             return
         }
 
+        // Bound established relays globally and per source before anything else
+        // is spent on this client (threads, a guest dial, a VM wake).
+        guard let ticket = admission.admit(source: ConnectionAdmission.sourceKey(fd: clientFD)) else {
+            if admission.shouldLogRefusal() {
+                log.warn("shedding connections to published ports: too many open relays (global or per-source cap)")
+            }
+            Darwin.close(clientFD)
+            connectionFinished(generation)
+            return
+        }
+
         vm.ensureRunning(timeout: PortForwarder.dialBootTimeout) { [weak self] result in
             guard let self else {
                 Darwin.close(clientFD)
@@ -2489,7 +2579,8 @@ public final class PortForwarder {
                     self.dialPermits.signal()
                     self.releaseDialSlot()
                 }
-                self.dialAndSplice(clientFD: clientFD, binding: binding, generation: generation)
+                self.dialAndSplice(
+                    clientFD: clientFD, binding: binding, generation: generation, ticket: ticket)
             }
         }
     }
@@ -2529,7 +2620,10 @@ public final class PortForwarder {
 
     /// Opens the stream-dial, performs the preamble handshake and starts the relay.
     /// Blocking; runs on ``dialQueue``.
-    private func dialAndSplice(clientFD: Int32, binding: DockerPortBinding, generation: Int) {
+    private func dialAndSplice(
+        clientFD: Int32, binding: DockerPortBinding, generation: Int,
+        ticket: ConnectionAdmission.Ticket
+    ) {
         guard isCurrent(generation) else {
             Darwin.close(clientFD)
             connectionFinished(generation)
@@ -2557,10 +2651,13 @@ public final class PortForwarder {
             return
         }
 
-        startRelay(clientFD: clientFD, guestFD: guestFD, generation: generation)
+        startRelay(clientFD: clientFD, guestFD: guestFD, generation: generation, ticket: ticket)
     }
 
-    private func startRelay(clientFD: Int32, guestFD: Int32, generation: Int) {
+    private func startRelay(
+        clientFD: Int32, guestFD: Int32, generation: Int,
+        ticket: ConnectionAdmission.Ticket
+    ) {
         let perRelayQueue = DispatchQueue(label: "dev.morbstack.portforward.splice", target: relayQueue)
 
         // Registered under a key minted before the relay exists, and inserted under
@@ -2569,7 +2666,11 @@ public final class PortForwarder {
         lock.lock()
         relaySequence &+= 1
         let key = relaySequence
-        let relay = FDRelay(fdA: clientFD, fdB: guestFD, queue: perRelayQueue) { [weak self] in
+        let relay = FDRelay(
+            fdA: clientFD, fdB: guestFD, queue: perRelayQueue,
+            idleTimeout: ConnectionAdmission.defaultIdleTimeout
+        ) { [weak self] in
+            ticket.release()
             guard let self else { return }
             self.lock.lock()
             self.relays.removeValue(forKey: key)
