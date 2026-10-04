@@ -111,6 +111,12 @@ public final class FDRelay {
     private var cancellationRequested = false
     private var terminal = false
     private var completedWorkers = 0
+    /// Longest the relay may carry no bytes in either direction before it is torn
+    /// down. `nil` (the default) never times out, which is what Engine API
+    /// exec/attach/logs streams need; published-port relays opt in.
+    private let idleTimeout: TimeInterval?
+    private var lastActivity = Date()
+    private var idleTimer: DispatchSourceTimer?
 
     /// Creates a relay. Call ``start()`` to begin pumping.
     ///
@@ -125,8 +131,10 @@ public final class FDRelay {
         fdB: Int32,
         queue: DispatchQueue,
         observer: ((Direction, Data) -> Void)? = nil,
+        idleTimeout: TimeInterval? = nil,
         completion: @escaping () -> Void
     ) {
+        self.idleTimeout = idleTimeout
         self.queue = queue
         self.completion = completion
         self.owned = RelayDescriptors(fdA, fdB)
@@ -157,7 +165,9 @@ public final class FDRelay {
             return
         }
         started = true
+        lastActivity = Date()
         stateLock.unlock()
+        armIdleTimer()
 
         // A serial callback queue is intentional at the call sites. The copy workers
         // must nevertheless run concurrently: a full stdout socket must not prevent
@@ -211,6 +221,7 @@ public final class FDRelay {
             }
 
             if count > 0 {
+                noteActivity()
                 // This copy exists only on the narrow response-observer paths. The
                 // raw transport itself writes directly from its fixed worker buffer.
                 if let observer {
@@ -255,6 +266,44 @@ public final class FDRelay {
         return true
     }
 
+    private func noteActivity() {
+        guard idleTimeout != nil else { return }
+        stateLock.lock()
+        lastActivity = Date()
+        stateLock.unlock()
+    }
+
+    /// Starts the idle watchdog. It only ever calls `shutdown(2)` through
+    /// ``requestAbort()``; the workers still own the final close.
+    private func armIdleTimer() {
+        guard let idleTimeout, idleTimeout > 0 else { return }
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        let period = max(0.05, idleTimeout / 4)
+        timer.schedule(deadline: .now() + period, repeating: period)
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            self.stateLock.lock()
+            let idle = Date().timeIntervalSince(self.lastActivity)
+            let done = self.terminal
+            self.stateLock.unlock()
+            if !done, idle >= idleTimeout { self.requestAbort() }
+        }
+        stateLock.lock()
+        let alreadyDone = terminal
+        if !alreadyDone { idleTimer = timer }
+        stateLock.unlock()
+        if alreadyDone { return }
+        timer.resume()
+    }
+
+    private func cancelIdleTimer() {
+        stateLock.lock()
+        let timer = idleTimer
+        idleTimer = nil
+        stateLock.unlock()
+        timer?.cancel()
+    }
+
     private var isCancellationRequested: Bool {
         stateLock.lock()
         defer { stateLock.unlock() }
@@ -289,6 +338,7 @@ public final class FDRelay {
 
     /// Runs completion on the caller-supplied queue and breaks its retained closure.
     private func deliverCompletion() {
+        cancelIdleTimer()
         queue.async { [self] in
             stateLock.lock()
             let handler = completion

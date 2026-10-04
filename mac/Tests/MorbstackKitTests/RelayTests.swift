@@ -189,4 +189,21 @@ final class RelayTests: XCTestCase {
         relay.cancel()
         wait(for: [finished], timeout: 5)
     }
+
+    /// A relay that moves no bytes is torn down once its idle timeout passes.
+    func testIdleRelayIsTornDown() throws {
+        let (clientOuter, clientInner) = try makePair()
+        let (guestOuter, guestInner) = try makePair()
+        toClose.append(clientOuter)
+        toClose.append(guestOuter)
+
+        let finished = expectation(description: "idle relay finished")
+        let relay = FDRelay(
+            fdA: clientInner, fdB: guestInner,
+            queue: DispatchQueue(label: "test.relay.idle"),
+            idleTimeout: 0.4
+        ) { finished.fulfill() }
+        relay.start()
+        wait(for: [finished], timeout: 10)
+    }
 }

@@ -80,6 +80,8 @@ while !pendingArguments.isEmpty {
 var daemon: Daemon?
 
 do {
+    // launchd jobs start at 256 descriptors; each published-port relay needs two.
+    FileDescriptorLimit.raise()
     try MorbPaths.ensureDirectories()
     let log = MorbLog(fileURL: MorbPaths.daemonLog, echoToStderr: !quiet)
 
