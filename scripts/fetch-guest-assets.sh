@@ -137,6 +137,9 @@ https://ftp.halifax.rwth-aachen.de/alpine
 ALPINE_RELEASE_PATH="v3.24/releases/aarch64/alpine-minirootfs-3.24.1-aarch64.tar.gz"
 ALPINE_RELEASE_URL="https://dl-cdn.alpinelinux.org/alpine/${ALPINE_RELEASE_PATH}"
 ALPINE_SHA256_SIDECAR_URL="${ALPINE_RELEASE_URL}.sha256"
+# Point releases are immutable, so the hash is pinned here; the same-mirror sidecar
+# is only a cross-check and can no longer vouch for a tampered tarball.
+ALPINE_ROOTFS_SHA256="f55a90f69052c5bd6f92cb09a8f47065970830b194c917a006fb94028e721259"
 
 # --- fsutils: Alpine v3.24 aarch64 apks (btrfs-progs + e2fsprogs +
 # iptables-legacy and their full transitive so:-dependency closure). See
@@ -516,15 +519,17 @@ fetch_alpine() {
 	sidecar_sha="$(awk '{print $1}' "${sidecar_tmp}")"
 	rm -f "${sidecar_tmp}"
 	[ -n "${sidecar_sha}" ] || fail "failed to fetch/parse Alpine sha256 sidecar from ${ALPINE_SHA256_SIDECAR_URL}"
+	[ "${sidecar_sha}" = "${ALPINE_ROOTFS_SHA256}" ] ||
+		fail "alpine sha256 sidecar (${sidecar_sha}) does not match the pin in this script (${ALPINE_ROOTFS_SHA256}); mirror tampered or release re-cut"
 
 	if [ -f "${dest_file}" ]; then
 		local have_sha
 		have_sha="$(sha256_of "${dest_file}")"
-		if [ "${have_sha}" = "${sidecar_sha}" ]; then
+		if [ "${have_sha}" = "${ALPINE_ROOTFS_SHA256}" ]; then
 			check "alpine-minirootfs.tar.gz already present and verified: ${dest_file}"
 			return 0
 		fi
-		echo "  existing ${dest_file} has sha256 ${have_sha}, sidecar says ${sidecar_sha}; re-fetching" >&2
+		echo "  existing ${dest_file} has sha256 ${have_sha}, pin says ${ALPINE_ROOTFS_SHA256}; re-fetching" >&2
 	fi
 
 	mkdir -p "${dest_dir}"
@@ -539,9 +544,9 @@ fetch_alpine() {
 
 	local got_sha
 	got_sha="$(sha256_of "${tmp_file}")"
-	[ "${got_sha}" = "${sidecar_sha}" ] ||
-		fail "alpine minirootfs sha256 mismatch: got ${got_sha}, sidecar says ${sidecar_sha} (possible corruption or upstream tamper)"
-	check "sha256 verified against Alpine CDN sidecar"
+	[ "${got_sha}" = "${ALPINE_ROOTFS_SHA256}" ] ||
+		fail "alpine minirootfs sha256 mismatch: got ${got_sha}, pinned ${ALPINE_ROOTFS_SHA256} (possible corruption or upstream tamper)"
+	check "sha256 verified against the pin in this script (and the Alpine sidecar)"
 
 	mv "${tmp_file}" "${dest_file}"
 	chmod 644 "${dest_file}"
@@ -553,10 +558,11 @@ Morbstack base rootfs provenance
 
 File: alpine-minirootfs.tar.gz
 Source: ${ALPINE_RELEASE_URL}
-sha256: ${sidecar_sha}
+sha256: ${ALPINE_ROOTFS_SHA256}
 
-Verification: sha256 fetched fresh from Alpine's own CDN sidecar
-(${ALPINE_SHA256_SIDECAR_URL}) and matched the locally computed hash.
+Verification: sha256 pinned in scripts/fetch-guest-assets.sh and matched the
+locally computed hash; the CDN sidecar (${ALPINE_SHA256_SIDECAR_URL}) was
+checked as a cross-check only.
 Alpine's "latest-stable" directory doesn't offer a permanently pinned
 version URL the way GitHub Releases / download.docker.com do, so this
 asset is sidecar-verified on every fetch rather than hash-pinned in

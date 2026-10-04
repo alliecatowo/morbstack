@@ -45,6 +45,27 @@ jobs:
               - 'mise.toml'
 
   # ---------------------------------------------------------------------
+  # The VS Code extension. Nothing else builds it, which is how an
+  # @types/vscode bump that vsce refuses to package reached main.
+  # ---------------------------------------------------------------------
+  extension:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: integrations/vscode
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: integrations/vscode/package-lock.json
+      - run: npm ci --ignore-scripts
+      - run: npm run lint
+      - run: npm run package
+
+  # ---------------------------------------------------------------------
   # The dev-loop build: host-arch morbinit (no cross toolchain needed —
   # see mise.toml's build-guest vs cross-build-guest task split) plus both
   # Swift binaries, then both test suites. This is the job every PR must

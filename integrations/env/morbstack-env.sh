@@ -23,12 +23,18 @@
 
 set -eu
 
+# Single-quote a value for safe use under eval (paths may hold spaces, quotes
+# or shell metacharacters).
+shquote() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
 morbstack_home="${MORBSTACK_HOME:-$HOME/.morbstack}"
 sock="$morbstack_home/run/docker.sock"
 kubeconfig="$morbstack_home/kubeconfig"
 
 if [ -S "$sock" ]; then
-    echo "export DOCKER_HOST=unix://$sock"
+    printf 'export DOCKER_HOST=%s\n' "$(shquote "unix://$sock")"
     echo "# morbstack-env: DOCKER_HOST -> $sock" >&2
 else
     echo "# morbstack-env: WARNING: no socket at $sock — is the Morbstack engine running? (morb start)" >&2
@@ -45,7 +51,7 @@ fi
 # docs/design/ZERO-CONFIG-DISCOVERY.md and ecosystem.md.
 
 if [ -f "$kubeconfig" ]; then
-    echo "export KUBECONFIG=$kubeconfig"
+    printf 'export KUBECONFIG=%s\n' "$(shquote "$kubeconfig")"
     echo "# morbstack-env: KUBECONFIG -> $kubeconfig" >&2
 else
     echo "# morbstack-env: no kubeconfig at $kubeconfig — run 'morb k8s enable' first if you need it" >&2
