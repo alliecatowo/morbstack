@@ -1,0 +1,190 @@
+name: Release
+
+# Push a version tag (git tag v0.1.0-m0 && git push origin v0.1.0-m0) to cut a
+# release. The version must equal MorbstackVersion.string in
+# mac/Sources/MorbstackKit/Version.swift. Run by hand (Actions > Release > Run
+# workflow) with `publish` off to dry-run the build; with `publish` on it
+# creates the tag and GitHub Release and updates the Homebrew cask in
+# alliecatowo/homebrew-tap through a deploy key.
+#
+# The app is ad-hoc signed and NOT notarized (no Apple Developer Program
+# account). The cask clears the quarantine flag, like the other casks in the tap.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version without the leading v (must match Version.swift, for example 0.1.0-m0)"
+        required: true
+        type: string
+      publish:
+        description: "Create the tag and GitHub Release and update the Homebrew cask. Leave off for a build-only test."
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Resolve version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      publish: ${{ steps.v.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: v
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_PUBLISH: ${{ inputs.publish }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "push" ]; then
+            version="${GITHUB_REF_NAME#v}"
+            publish=true
+          else
+            version="${INPUT_VERSION#v}"
+            publish="$INPUT_PUBLISH"
+          fi
+          case "$version" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::version '$version' is not X.Y.Z[-suffix]"; exit 1 ;;
+          esac
+          source_version="$(sed -n 's/.*public static let string = "\(.*\)".*/\1/p' mac/Sources/MorbstackKit/Version.swift)"
+          if [ "$version" != "$source_version" ]; then
+            echo "::error::release version '$version' does not match Version.swift ('$source_version')"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+
+  macos-app:
+    name: macOS app (ad-hoc signed)
+    needs: version
+    runs-on: macos-26
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+
+      - name: Install aarch64-unknown-linux-musl cross toolchain
+        run: |
+          brew tap messense/macos-cross-toolchains
+          brew install messense/macos-cross-toolchains/aarch64-unknown-linux-musl
+
+      - name: Set up toolchain
+        run: |
+          mise trust && mise install
+          rustup target add aarch64-unknown-linux-musl
+
+      # Every asset is hash-pinned inside the script; the app packager only
+      # copies bytes that these steps produced.
+      - name: Fetch pinned guest and host assets
+        run: ./scripts/fetch-guest-assets.sh
+
+      - name: Build the guest initramfs
+        run: mise run guest-image
+
+      - name: Build and assemble Morbstack.app
+        run: mise run app
+
+      - name: Zip
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          ditto -c -k --keepParent dist/Morbstack.app "release/Morbstack-${VERSION}-macos-arm64.zip"
+          ls -lh release
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-app
+          path: release/*.zip
+          if-no-files-found: error
+
+  publish:
+    name: GitHub Release
+    needs: [version, macos-app]
+    if: needs.version.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: macos-app
+          path: artifacts
+      - name: Checksums
+        working-directory: artifacts
+        run: |
+          sha256sum *.zip > checksums.txt
+          cat checksums.txt
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag="v${VERSION}"
+          notes="Unsigned build: Morbstack.app is ad-hoc signed and not notarized, for Apple Silicon on macOS 26 or later. Install with \`brew install --cask alliecatowo/tap/morbstack\` (clears quarantine) or download the zip and right-click Open. Verify downloads against checksums.txt."
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" artifacts/* --clobber
+          else
+            gh release create "$tag" artifacts/* --target "$GITHUB_SHA" --title "Morbstack ${VERSION}" --notes "$notes" --prerelease
+          fi
+
+  update-homebrew:
+    name: Update Homebrew cask
+    needs: [version, publish]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: macos-app
+          path: artifacts
+      - name: Render cask and push to the tap
+        env:
+          HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -z "${HOMEBREW_TAP_DEPLOY_KEY:-}" ]; then
+            echo "::error::HOMEBREW_TAP_DEPLOY_KEY secret is not set; cannot update the tap"
+            exit 1
+          fi
+          sha="$(sha256sum "artifacts/Morbstack-${VERSION}-macos-arm64.zip" | cut -d' ' -f1)"
+          install -d -m 700 ~/.ssh
+          keyfile="$(mktemp)"
+          trap 'rm -f "$keyfile"' EXIT
+          printf '%s\n' "$HOMEBREW_TAP_DEPLOY_KEY" > "$keyfile"
+          chmod 600 "$keyfile"
+          ssh-keyscan -t ed25519,rsa github.com >> ~/.ssh/known_hosts 2>/dev/null
+          export GIT_SSH_COMMAND="ssh -i $keyfile -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
+          git clone --depth 1 git@github.com:alliecatowo/homebrew-tap.git tap
+          mkdir -p tap/Casks
+          # Render from the template every run so the next release still has tokens to replace.
+          sed -e "s|@VERSION@|${VERSION}|" -e "s|@SHA256@|${sha}|" packaging/homebrew/morbstack.rb.tmpl > tap/Casks/morbstack.rb
+          cd tap
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "Tap already up to date."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/morbstack.rb
+          git commit -m "morbstack ${VERSION}"
+          for _ in 1 2 3; do
+            git push origin HEAD:main && exit 0
+            git pull --rebase origin main
+          done
+          exit 1
