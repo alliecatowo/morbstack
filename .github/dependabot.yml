@@ -8,6 +8,11 @@ updates:
     directory: /integrations/vscode
     schedule:
       interval: weekly
+    ignore:
+      # vsce refuses to package when @types/vscode is newer than engines.vscode;
+      # bump engines.vscode and the types together, by hand.
+      - dependency-name: "@types/vscode"
+        update-types: ["version-update:semver-major", "version-update:semver-minor", "version-update:semver-patch"]
   - package-ecosystem: cargo
     directory: /guest/morbinit
     schedule:

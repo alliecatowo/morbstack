@@ -85,6 +85,11 @@ pub const O_DIRECTORY: c_int = 0o200_000;
 /// A receiver never writes file contents, so an ordinary read-only descriptor
 /// is enough for metadata + fchmod operations.
 pub const O_RDONLY: c_int = 0;
+/// Close-on-exec for `openat(2)`. Supervised children (dockerd, containerd, k3s)
+/// must never inherit a guest-side descriptor.
+pub const O_CLOEXEC: c_int = 0o2_000_000;
+/// `socket(2)`/`accept4(2)` close-on-exec flag (same value as `O_CLOEXEC`).
+pub const SOCK_CLOEXEC: c_int = 0o2_000_000;
 
 // ---- shutdown(2) "how" values, from sys/socket.h ---------------------------
 
@@ -184,7 +189,7 @@ mod raw {
         pub fn bind(sockfd: c_int, addr: *const c_void, addrlen: u32) -> c_int;
         pub fn connect(sockfd: c_int, addr: *const c_void, addrlen: u32) -> c_int;
         pub fn listen(sockfd: c_int, backlog: c_int) -> c_int;
-        pub fn accept(sockfd: c_int, addr: *mut c_void, addrlen: *mut u32) -> c_int;
+        pub fn accept4(sockfd: c_int, addr: *mut c_void, addrlen: *mut u32, flags: c_int) -> c_int;
         pub fn close(fd: c_int) -> c_int;
         pub fn shutdown(sockfd: c_int, how: c_int) -> c_int;
         pub fn poll(fds: *mut PollFd, nfds: c_ulong, timeout: c_int) -> c_int;
@@ -202,7 +207,7 @@ pub fn openat_readonly_no_follow(
     require_directory: bool,
 ) -> io::Result<std::fs::File> {
     let path = CString::new(path).map_err(invalid_input)?;
-    let mut flags = O_RDONLY | O_NOFOLLOW | O_NONBLOCK;
+    let mut flags = O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC;
     if require_directory {
         flags |= O_DIRECTORY;
     }
@@ -568,7 +573,7 @@ impl VsockListener {
     /// the host hypervisor can dial into this guest's vsock address space
     /// at all, so we don't need to filter by CID ourselves.
     pub fn bind(port: u32) -> io::Result<Self> {
-        let fd = unsafe { raw::socket(AF_VSOCK, SOCK_STREAM, 0) };
+        let fd = unsafe { raw::socket(AF_VSOCK, SOCK_STREAM | SOCK_CLOEXEC, 0) };
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -602,7 +607,14 @@ impl VsockListener {
 
     /// Block until a host connection arrives.
     pub fn accept(&self) -> io::Result<std::fs::File> {
-        let ret = unsafe { raw::accept(self.fd, std::ptr::null_mut(), std::ptr::null_mut()) };
+        let ret = unsafe {
+            raw::accept4(
+                self.fd,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                SOCK_CLOEXEC,
+            )
+        };
         if ret < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -618,5 +630,27 @@ impl VsockListener {
 impl Drop for VsockListener {
     fn drop(&mut self) {
         unsafe { raw::close(self.fd) };
+    }
+}
+
+#[cfg(test)]
+mod cloexec_tests {
+    use super::*;
+
+    fn is_cloexec(fd: RawFd) -> bool {
+        // /proc/self/fdinfo/<fd> reports the open flags in octal; O_CLOEXEC is 02000000.
+        let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{fd}")).unwrap();
+        let flags = info
+            .lines()
+            .find_map(|l| l.strip_prefix("flags:"))
+            .map(|v| i64::from_str_radix(v.trim(), 8).unwrap())
+            .unwrap();
+        flags & i64::from(O_CLOEXEC) != 0
+    }
+
+    #[test]
+    fn openat_descriptors_are_close_on_exec() {
+        let file = openat_readonly_no_follow(AT_FDCWD, "/", true).unwrap();
+        assert!(is_cloexec(file.as_raw_fd()));
     }
 }
