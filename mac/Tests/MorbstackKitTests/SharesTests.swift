@@ -215,6 +215,14 @@ final class SharesTests: XCTestCase {
         }
     }
 
+    func testGuestCriticalDirectoriesAreRefused() {
+        for reserved in ["/usr/local", "/opt", "/usr/local/bin", "/usr/local/bin/x", "/var/lib/docker", "/lib/modules", "/run/foo"] {
+            XCTAssertThrowsError(
+                try MorbShares.plan(paths: [reserved]) { _ in .ok },
+                "sharing \(reserved) must be refused")
+        }
+    }
+
     func testASubdirectoryOfAReservedRootIsFine() throws {
         // Only the root itself is dangerous; /usr/local/share-me shadows nothing the
         // guest needs.

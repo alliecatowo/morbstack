@@ -80,6 +80,11 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(parsed, original)
     }
 
+    func testLANPortPublishingIsOffByDefault() throws {
+        XCTAssertFalse(MorbConfig().allowLANPortPublishing)
+        XCTAssertFalse(try MorbConfig.parse("").allowLANPortPublishing)
+    }
+
     func testLANPortPublishingPreferenceRoundTrips() throws {
         let original = MorbConfig(allowLANPortPublishing: false)
         let parsed = try MorbConfig.parse(original.toTOML())

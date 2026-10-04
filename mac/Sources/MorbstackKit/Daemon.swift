@@ -182,6 +182,15 @@ public final class Daemon {
         // because a `docker` client hung up in the middle of a response.
         signal(SIGPIPE, SIG_IGN)
         try MorbPaths.ensureDirectories()
+        // Take the single-instance lock before any side effect (runtime payload
+        // install/replace, log open). A second daemon started during a slow first
+        // launch must lose here, not run the same install concurrently.
+        let lock = FileLock(path: MorbPaths.lockFile.path)
+        guard try lock.acquire() else {
+            throw MorbError.io(
+                "another morbstackd is running (it holds \(lock.path)); "
+                    + "stop it before starting a second one")
+        }
         let logger = log ?? MorbLog()
         self.log = logger
         self.config = try MorbConfig.load()
@@ -213,7 +222,7 @@ public final class Daemon {
         self.liveShareTransport = MorbLiveShareTransport(vm: vm, config: config, log: logger)
         self.k8s = K8sManager(vm: vm, log: logger)
         self.controlServer = UnixSocketServer(path: MorbPaths.controlSocket.path, queue: controlQueue)
-        self.instanceLock = FileLock(path: MorbPaths.lockFile.path)
+        self.instanceLock = lock
 
         controlServer.onConnection = { [weak self] fd in
             self?.serveControlClient(fd)

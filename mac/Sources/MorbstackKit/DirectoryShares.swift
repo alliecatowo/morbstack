@@ -158,7 +158,7 @@ public enum MorbShares {
             let path = canonicalHostPath(raw)
             guard !path.isEmpty else { continue }
 
-            guard !reservedGuestRoots.contains(path) else {
+            guard !isReservedGuestPath(path) else {
                 throw MorbError.config(
                     "shared_paths may not contain \"\(path)\": a share is mounted in the guest "
                         + "at its host path, and the guest's own \(path) is part of the system "
@@ -263,7 +263,24 @@ public enum MorbShares {
     static let reservedGuestRoots: Set<String> = [
         "/bin", "/dev", "/etc", "/lib", "/proc", "/run", "/sbin", "/sys", "/tmp",
         "/usr", "/var",
+        // Guest directories that hold the engine or are guest mount points. Mounting
+        // the Mac's copy over them (an Intel Homebrew `/usr/local`, say) hides
+        // dockerd/containerd or the guest's data.
+        "/usr/local", "/opt", "/mnt", "/root", "/home", "/srv",
     ]
+
+    /// Guest subtrees where even a *descendant* share is refused, because the
+    /// directory is where the guest keeps binaries, modules or engine state.
+    static let reservedGuestSubtrees: [String] = [
+        "/usr/local/bin", "/usr/local/sbin", "/usr/local/lib", "/lib/modules",
+        "/var/lib/docker", "/run", "/proc", "/sys", "/dev",
+    ]
+
+    /// True when `path` is a reserved root, or equal to / inside a reserved subtree.
+    static func isReservedGuestPath(_ path: String) -> Bool {
+        if reservedGuestRoots.contains(path) { return true }
+        return reservedGuestSubtrees.contains { path == $0 || path.hasPrefix($0 + "/") }
+    }
 
     /// Rewrites the three macOS `/private` symlinks to the real directory they point at.
     ///
