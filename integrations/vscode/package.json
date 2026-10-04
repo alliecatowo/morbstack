@@ -39,7 +39,7 @@
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": true,
-      "description": "The extension talks only to the local Morbstack engine socket; it does not read workspace configuration."
+      "description": "The extension talks only to the local Morbstack engine socket; settings that run programs or build engine requests (shell, morbPath, socketPath, logTail) are machine-scoped and are never read from workspace configuration."
     }
   },
   "contributes": {
@@ -395,13 +395,13 @@
           "type": "string",
           "default": "~/.morbstack/run/docker.sock",
           "markdownDescription": "Path to the Morbstack Docker Engine API socket. `~` is expanded to your home directory. This is the same socket a stock `docker` CLI reaches via `DOCKER_HOST=unix://<path>`.",
-          "scope": "machine-overridable"
+          "scope": "machine"
         },
         "morbstack.morbPath": {
           "type": "string",
           "default": "",
           "markdownDescription": "Path to the `morb` CLI. Leave empty to search `PATH`, then `/Applications/Morbstack.app/Contents/MacOS/morb`, then `~/Applications/Morbstack.app/Contents/MacOS/morb`.",
-          "scope": "machine-overridable"
+          "scope": "machine"
         },
         "morbstack.showStoppedContainers": {
           "type": "boolean",
@@ -422,7 +422,8 @@
         "morbstack.shell": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Command to run when opening a shell in a container. Leave empty to try `/bin/bash` and fall back to `/bin/sh`."
+          "markdownDescription": "Command to run when opening a shell in a container. Leave empty to try `/bin/bash` and fall back to `/bin/sh`.",
+          "scope": "machine"
         },
         "morbstack.statusBar": {
           "type": "boolean",
@@ -433,6 +434,8 @@
           "type": "number",
           "default": 500,
           "minimum": 1,
+          "maximum": 100000,
+          "scope": "machine",
           "description": "Number of historical log lines to fetch when opening container logs."
         }
       }
@@ -447,7 +450,7 @@
   },
   "devDependencies": {
     "@types/node": "^26.6.4",
-    "@types/vscode": "^1.138.0",
+    "@types/vscode": "1.85.0",
     "@vscode/vsce": "^4.0.0",
     "typescript": "^7.0.2"
   }
