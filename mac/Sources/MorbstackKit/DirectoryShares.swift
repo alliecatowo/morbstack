@@ -273,7 +273,7 @@ public enum MorbShares {
     /// directory is where the guest keeps binaries, modules or engine state.
     static let reservedGuestSubtrees: [String] = [
         "/usr/local/bin", "/usr/local/sbin", "/usr/local/lib", "/lib/modules",
-        "/var/lib/docker", "/run", "/proc", "/sys", "/dev",
+        "/var/lib/docker", "/private/var/lib/docker", "/run", "/proc", "/sys", "/dev",
     ]
 
     /// True when `path` is a reserved root, or equal to / inside a reserved subtree.
